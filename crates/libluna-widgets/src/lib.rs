@@ -51,6 +51,7 @@
 //!   kontenery GTK4 (`Box` = stos drzewa układu: [`Node::hbox`]/[`Node::vbox`]).
 //! - [`MenuButton`], [`SearchBar`], [`Expander`], [`Statusbar`], [`Calendar`] — kolejne widgety GTK4.
 //! - [`Image`], [`TextView`] — obrazek (ikony wektorowe) i pole wielolinijkowe (GTK4).
+//! - [`Popover`], [`ColumnView`], [`Assistant`] — generyczny popover, tabela i kreator kroków (GTK4).
 //! - Aliasy w duchu GTK4: [`Carousel`] = [`Pager`], [`ScrolledWindow`] = [`ScrollView`],
 //!   [`StackSwitcher`] = [`ViewSwitcher`], [`Notebook`] = [`TabView`], [`ListBox`] = [`NavList`].
 //! - [`Carousel`] (alias [`Pager`]), [`ToolbarView`], [`WindowTitle`], [`Clamp`], [`WrapBox`],
@@ -67,6 +68,7 @@
 //! ```
 
 pub mod action_row;
+pub mod assistant;
 pub mod avatar;
 pub mod banner;
 pub mod bin;
@@ -76,6 +78,7 @@ pub mod buttons;
 pub mod calendar;
 pub mod card;
 pub mod check_button;
+pub mod column_view;
 pub mod containers;
 pub mod ctx;
 pub mod dialogs;
@@ -96,6 +99,7 @@ pub mod nav_list;
 pub mod navigation;
 pub mod pager;
 pub mod path_bar;
+pub mod popover;
 pub mod preferences;
 pub mod radio_group;
 pub mod rows;
@@ -119,6 +123,7 @@ pub mod tooltip;
 pub mod view_switcher;
 
 pub use action_row::ActionRow;
+pub use assistant::Assistant;
 pub use avatar::Avatar;
 pub use banner::{Banner, BannerKind, BannerRects};
 pub use bin::{Bin, BinAlign};
@@ -128,6 +133,7 @@ pub use buttons::{ColorButton, LinkButton, ToggleButton};
 pub use calendar::Calendar;
 pub use card::Card;
 pub use check_button::CheckButton;
+pub use column_view::{Column, ColumnView};
 pub use containers::{ActionBar, CenterBox, Fixed, Grid, Paned, PopoverMenuBar, Stack};
 pub use ctx::PaintCtx;
 pub use dialogs::{
@@ -159,6 +165,7 @@ pub use pager::Pager;
 /// `Carousel` — nazwa [`Pager`] w duchu libadwaita.
 pub use pager::Pager as Carousel;
 pub use path_bar::PathBar;
+pub use popover::{Popover, PopoverPlacement};
 pub use preferences::{PreferencesGroup, PreferencesPage};
 pub use radio_group::RadioGroup;
 pub use rows::{Row, RowRects, RowSuffix};
