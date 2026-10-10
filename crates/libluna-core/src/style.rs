@@ -512,6 +512,35 @@ pub struct BannerMetrics {
     pub button_h: f64,
 }
 
+/// Geometria awatara ([`Avatar`](crate::style)).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AvatarMetrics {
+    /// Domyślna średnica.
+    pub size: f64,
+}
+
+/// Geometria etykiety skrótu ([`ShortcutLabel`](crate::style)).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShortcutMetrics {
+    /// Padding poziomy klawisza.
+    pub pad_x: f64,
+    /// Padding pionowy klawisza.
+    pub pad_y: f64,
+    /// Promień klawisza.
+    pub radius: f64,
+    /// Odstęp między klawiszami (na separator `+`).
+    pub gap: f64,
+}
+
+/// Geometria przycisku dzielonego ([`SplitButton`](crate::style)).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SplitMetrics {
+    /// Szerokość części ze strzałką.
+    pub arrow_w: f64,
+    /// Grubość separatora między częściami.
+    pub divider: f64,
+}
+
 /// Geometria kontrolek („component metrics”) — rozmiary i paddingi w pikselach logicznych.
 ///
 /// Widgety nie mają już własnych stałych rozmiarów: czytają je z motywu, dzięki czemu
@@ -544,6 +573,9 @@ pub struct Metrics {
     pub spinner: SpinnerMetrics,
     pub tooltip: TooltipMetrics,
     pub banner: BannerMetrics,
+    pub avatar: AvatarMetrics,
+    pub shortcut: ShortcutMetrics,
+    pub split: SplitMetrics,
 }
 
 impl Metrics {
@@ -689,6 +721,17 @@ impl Metrics {
                 icon: 20.0,
                 min_height: 56.0,
                 button_h: 30.0,
+            },
+            avatar: AvatarMetrics { size: 40.0 },
+            shortcut: ShortcutMetrics {
+                pad_x: 6.0,
+                pad_y: 3.0,
+                radius: 5.0,
+                gap: 4.0,
+            },
+            split: SplitMetrics {
+                arrow_w: 30.0,
+                divider: 1.0,
             },
         }
     }

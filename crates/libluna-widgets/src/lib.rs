@@ -34,6 +34,11 @@
 //! - [`Spinner`] — wskaźnik zajętości (obracający się łuk).
 //! - [`Tooltip`] — dymek podpowiedzi nad elementem.
 //! - [`Banner`] — pasek komunikatu (info/ostrzeżenie/błąd) z akcjami.
+//! - [`Avatar`] — okrągły awatar z inicjałami.
+//! - [`ShortcutLabel`] — skrót klawiszowy jako klawisze (`Ctrl` `+` `N`).
+//! - [`ToggleGroup`] — grupa przełączników (wielokrotny wybór).
+//! - [`SplitButton`] — przycisk dzielony (akcja + strzałka).
+//! - [`Bin`] — kontener jednego dziecka (wcięcie + wyrównanie).
 //!
 //! Układ (retencyjne drzewo, `measure`/`allocate`): [`layout`] ([`Node`], [`Layout`], [`Constraints`]).
 //!
@@ -46,7 +51,9 @@
 //! ```
 
 pub mod action_row;
+pub mod avatar;
 pub mod banner;
+pub mod bin;
 pub mod bottom_sheet;
 pub mod button;
 pub mod card;
@@ -65,19 +72,24 @@ pub mod path_bar;
 pub mod radio_group;
 pub mod scroll_view;
 pub mod search_entry;
+pub mod shortcut_label;
 pub mod slider;
 pub mod spinner;
+pub mod split_button;
 pub mod status_page;
 pub mod stepper;
 pub mod switch;
 pub mod tab_bar;
 pub mod tab_view;
 pub mod toast;
+pub mod toggle_group;
 pub mod tooltip;
 pub mod view_switcher;
 
 pub use action_row::ActionRow;
+pub use avatar::Avatar;
 pub use banner::{Banner, BannerKind, BannerRects};
+pub use bin::{Bin, BinAlign};
 pub use bottom_sheet::BottomSheet;
 pub use button::{Button, ButtonVariant};
 pub use card::Card;
@@ -95,13 +107,16 @@ pub use path_bar::PathBar;
 pub use radio_group::RadioGroup;
 pub use scroll_view::ScrollView;
 pub use search_entry::SearchEntry;
+pub use shortcut_label::ShortcutLabel;
 pub use slider::Slider;
 pub use spinner::Spinner;
+pub use split_button::{SplitButton, SplitRects};
 pub use status_page::{StatusIcon, StatusPage, StatusRects};
 pub use stepper::{Stepper, StepperSide};
 pub use switch::Switch;
 pub use tab_bar::{ScrollDir, Tab, TabBar};
 pub use tab_view::TabView;
 pub use toast::Toast;
+pub use toggle_group::ToggleGroup;
 pub use tooltip::Tooltip;
 pub use view_switcher::ViewSwitcher;
