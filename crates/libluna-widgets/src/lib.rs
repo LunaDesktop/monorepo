@@ -50,6 +50,9 @@
 //! - [`CenterBox`], [`Grid`], [`Fixed`], [`Paned`], [`Stack`], [`ActionBar`], [`PopoverMenuBar`] —
 //!   kontenery GTK4 (`Box` = stos drzewa układu: [`Node::hbox`]/[`Node::vbox`]).
 //! - [`MenuButton`], [`SearchBar`], [`Expander`], [`Statusbar`], [`Calendar`] — kolejne widgety GTK4.
+//! - [`Image`], [`TextView`] — obrazek (ikony wektorowe) i pole wielolinijkowe (GTK4).
+//! - Aliasy w duchu GTK4: [`Carousel`] = [`Pager`], [`ScrolledWindow`] = [`ScrollView`],
+//!   [`StackSwitcher`] = [`ViewSwitcher`], [`Notebook`] = [`TabView`], [`ListBox`] = [`NavList`].
 //! - [`Carousel`] (alias [`Pager`]), [`ToolbarView`], [`WindowTitle`], [`Clamp`], [`WrapBox`],
 //!   [`BreakpointBin`], [`ButtonContent`] — pomocniki.
 //!
@@ -84,6 +87,7 @@ pub mod expander;
 pub mod header_bar;
 pub mod helpers;
 pub mod icon;
+pub mod image;
 pub mod item_view;
 pub mod layout;
 pub mod menu;
@@ -108,6 +112,7 @@ pub mod stepper;
 pub mod switch;
 pub mod tab_bar;
 pub mod tab_view;
+pub mod text_view;
 pub mod toast;
 pub mod toggle_group;
 pub mod tooltip;
@@ -141,10 +146,13 @@ pub use helpers::{
     BreakpointBin, ButtonContent, Clamp, ToolbarRects, ToolbarView, WindowTitle, WindowTitleRects,
     WrapBox,
 };
+pub use image::{Image, ImageIcon};
 pub use item_view::{Item, ItemKind, ItemView, ViewMode};
 pub use layout::{Constraints, Layout, LayoutCtx, Node};
 pub use menu::{Menu, MenuEntry, MenuRow};
 pub use menu_button::MenuButton;
+/// `ListBox` — nazwa [`NavList`] w duchu GTK4.
+pub use nav_list::NavList as ListBox;
 pub use nav_list::{NavEntry, NavList, NavRow};
 pub use navigation::{NavigationSplitView, NavigationView, OverlaySplitView, Sidebar};
 pub use pager::Pager;
@@ -169,6 +177,9 @@ pub use stepper::{Stepper, StepperSide};
 pub use switch::Switch;
 pub use tab_bar::{ScrollDir, Tab, TabBar};
 pub use tab_view::TabView;
+/// `Notebook` — nazwa [`TabView`] w duchu GTK4.
+pub use tab_view::TabView as Notebook;
+pub use text_view::TextView;
 pub use toast::Toast;
 pub use toggle_group::ToggleGroup;
 pub use tooltip::Tooltip;

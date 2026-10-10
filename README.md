@@ -351,8 +351,9 @@ XDG_CONFIG_HOME="$PWD/examples" cargo run -p luna-demo --bin render -- --lang fr
   `ToggleButton`, `LinkButton`, `ColorButton`; pola specjalne `PasswordEntry` (maskowanie +
   podgląd „oko”) i `EditableLabel`; kontenery `CenterBox`, `Grid`, `Fixed`, `Paned`
   (przeciągany separator), `Stack`, `ActionBar`, `PopoverMenuBar`; oraz `MenuButton`,
-  `SearchBar`, `Expander`, `Statusbar`, `Calendar`; aliasy `ScrolledWindow` = `ScrollView`
-  i `StackSwitcher` = `ViewSwitcher`.
+  `SearchBar`, `Expander`, `Statusbar`, `Calendar`, `Image` (ikony wektorowe),
+  `TextView` (pole wielolinijkowe); aliasy `ScrolledWindow` = `ScrollView`,
+  `StackSwitcher` = `ViewSwitcher`, `Notebook` = `TabView`, `ListBox` = `NavList`.
 - `libluna-widgets::layout`: **dwuprzebiegowy układ** (retencyjne drzewo `measure`/`allocate`) —
   [`Node`] (`VBox`/`HBox`, `Padding`, `Expanded`, `Center`, `Spacer`, `Label`, `Fixed`),
   [`Constraints`](min/max) i [`Layout`](`desired_size`/`fit`). Liście pochłaniają nadmiar
