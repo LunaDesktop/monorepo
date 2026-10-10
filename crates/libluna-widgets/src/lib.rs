@@ -99,8 +99,10 @@ pub mod header_bar;
 pub mod helpers;
 pub mod icon;
 pub mod image;
+pub mod infobar;
 pub mod item_view;
 pub mod layout;
+pub mod media_controls;
 pub mod menu;
 pub mod menu_button;
 pub mod nav_list;
@@ -108,6 +110,7 @@ pub mod navigation;
 pub mod navigation_rail;
 pub mod pager;
 pub mod path_bar;
+pub mod picture;
 pub mod popover;
 pub mod preferences;
 pub mod radio_group;
@@ -170,8 +173,10 @@ pub use helpers::{
     WindowTitleRects, WrapBox,
 };
 pub use image::{Image, ImageIcon};
+pub use infobar::{InfoBar, InfoBarKind, InfoBarRects};
 pub use item_view::{Item, ItemKind, ItemView, ViewMode};
 pub use layout::{Constraints, Layout, LayoutCtx, Node};
+pub use media_controls::{MediaControls, MediaRects};
 pub use menu::{Menu, MenuEntry, MenuRow};
 pub use menu_button::MenuButton;
 /// `ListBox` — nazwa [`NavList`] w duchu GTK4.
@@ -183,6 +188,7 @@ pub use pager::Pager;
 /// `Carousel` — nazwa [`Pager`] w duchu libadwaita.
 pub use pager::Pager as Carousel;
 pub use path_bar::PathBar;
+pub use picture::{ContentFit, Picture};
 pub use popover::{Popover, PopoverPlacement};
 pub use preferences::{PreferencesGroup, PreferencesPage};
 pub use radio_group::RadioGroup;
