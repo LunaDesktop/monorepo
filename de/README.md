@@ -70,12 +70,14 @@ Selene.
 - `de/luna/src/panel.rs` — **panel górny** (menu, tytuł okna, zegar/data, przełączniki,
   przestrzenie robocze, użytkownik) i **launcher** (siatka aplikacji + wyszukiwanie).
 - `luna-panel` (bin) — render headless: `docs/images/luna-shell-{light,dark}.png`.
-- `luna-shell` (bin) — panel na żywo jako **powierzchnia warstwowa** (`wlr-layer-shell`).
+- `luna-shell` (bin) — powierzchnia „chrome” na żywo: pasek + **OSD** + **powiadomienia**
+  (`osd.rs`, `notifications.rs`; animacja, auto-zamknięcie).
 - `libluna-platform` obsługuje teraz oba tryby: okno `xdg-shell` (CSD) i powierzchnię
-  warstwową (`AppConfig::layer(LayerConfig::…)`) — `LayerConfig::top_panel`/`overlay`.
+  warstwową (`AppConfig::layer(LayerConfig::…)`) — `LayerConfig::top_panel`/`overlay`/`top_chrome`
+  oraz przezroczyste tło (`AppConfig::transparent`).
 - Dane (`PanelState`, `App`) są oddzielone od rysowania (`PaintCtx`), więc ten sam kod
   obsługuje podglądy i sesję na żywo.
-- Dalej: OSD, powiadomienia, menu kontekstowe.
+- Dalej: usługa D-Bus `org.freedesktop.Notifications`, centrum powiadomień, menu kontekstowe.
 
 ## Jeszcze nie / Not yet
 

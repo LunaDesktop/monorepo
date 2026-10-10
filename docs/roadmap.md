@@ -166,7 +166,11 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   Dane (`PanelState`, `App`) oddzielone od rysowania (`PaintCtx`) — ten sam kod do podglądów
   i sesji na żywo. ✅ **`luna-shell`** (bin) uruchamia panel jako prawdziwą **powierzchnię
   warstwową** (`wlr-layer-shell` po stronie klienta w `libluna-platform`); bez kompozytora
-  kończy się czytelnym `NoCompositor`. Dalej: OSD, powiadomienia, menu kontekstowe.
+  kończy się czytelnym `NoCompositor`. ✅ **OSD** (`osd.rs`: głośność/jasność, animacja
+  wejścia/wyjścia) i **powiadomienia** (`notifications.rs`: kolejka, wjazd z prawej, pasek
+  czasu, auto-zamknięcie) — pokazywane pod paskiem na powierzchni „chrome”; podglądy
+  w `docs/images/luna-shell-{light,dark}.png`. Dalej: usługa D-Bus
+  `org.freedesktop.Notifications`, menu kontekstowe, centrum powiadomień.
 
 ## Później (poza MVP)
 - Dostępność AT-SPI, IME, schowek, drag & drop, animacje, backend GPU, mini-CSS dla motywów.

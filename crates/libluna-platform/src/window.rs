@@ -12,7 +12,7 @@ use std::error::Error;
 use std::time::{Duration, Instant};
 
 use libluna_core::{
-    Accent, ButtonState, Event, KeyEvent, Modifiers, Point, PointerButton, PointerEvent,
+    Accent, ButtonState, Color, Event, KeyEvent, Modifiers, Point, PointerButton, PointerEvent,
     ScrollEvent, Size, Theme, ThemePreference, ThemeSettings, WindowEvent,
 };
 use libluna_render::{Scene, SoftwareRenderer, TextEngine};
@@ -68,6 +68,8 @@ pub struct AppConfig {
     /// Gdy ustawione — zamiast okna `xdg-shell` tworzymy powierzchnię `wlr-layer-shell`
     /// (panel/dock/tło). To tryb używany przez powłokę Luna.
     pub layer: Option<LayerConfig>,
+    /// Przezroczyste tło powierzchni (dla paneli/OSD warstwowych).
+    pub transparent: bool,
 }
 
 /// Konfiguracja powierzchni warstwowej (`wlr-layer-shell`).
@@ -115,6 +117,20 @@ impl LayerConfig {
             keyboard: false,
         }
     }
+
+    /// Powierzchnia „chrome”: pasek o grubości `bar` plus przezroczysty obszar pod nim
+    /// (na OSD i powiadomienia). Strefa wyłączna obejmuje tylko pasek.
+    pub fn top_chrome(namespace: impl Into<String>, bar: u32, total: u32) -> Self {
+        Self {
+            namespace: namespace.into(),
+            layer: Layer::Top,
+            anchor: Anchor::TOP | Anchor::LEFT | Anchor::RIGHT,
+            size: (0, total),
+            margin: (0, 0, 0, 0),
+            exclusive_zone: bar as i32,
+            keyboard: true,
+        }
+    }
 }
 
 impl AppConfig {
@@ -126,12 +142,19 @@ impl AppConfig {
             settings: ThemeSettings::default(),
             system_dark: false,
             layer: None,
+            transparent: false,
         }
     }
 
     /// Tworzy powierzchnię warstwową zamiast zwykłego okna.
     pub fn layer(mut self, layer: LayerConfig) -> Self {
         self.layer = Some(layer);
+        self
+    }
+
+    /// Przezroczyste tło (panel/OSD warstwowy).
+    pub fn transparent(mut self, transparent: bool) -> Self {
+        self.transparent = transparent;
         self
     }
 
@@ -344,6 +367,7 @@ where
         height: ih,
         scale: 1.0,
         system_dark: config.system_dark,
+        transparent: config.transparent,
         buffer: None,
         target,
         configured: config.layer.is_none(),
@@ -390,6 +414,8 @@ struct App {
     height: u32,
     scale: f64,
     system_dark: bool,
+    /// Czy tło powierzchni ma być przezroczyste (panele/OSD).
+    transparent: bool,
     buffer: Option<Buffer>,
     target: Target,
     /// Powierzchnia warstwowa ma sens dopiero po pierwszej konfiguracji.
@@ -528,8 +554,13 @@ impl App {
             render(&mut frame);
         }
 
-        self.renderer
-            .draw(&self.scene, scale, theme.colors.window_bg);
+        // Panele/OSD warstwowe mają przezroczyste tło (widać pulpit pod spodem).
+        let bg = if self.transparent {
+            Color::rgba(0.0, 0.0, 0.0, 0.0)
+        } else {
+            theme.colors.window_bg
+        };
+        self.renderer.draw(&self.scene, scale, bg);
     }
 
     fn present(&mut self) {
