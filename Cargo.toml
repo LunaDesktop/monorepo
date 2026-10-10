@@ -8,6 +8,7 @@ members = [
     "crates/libluna-platform",
     "crates/libluna-widgets",
     "apps/luna-demo",
+    "de/luna",
     "de/selene",
 ]
 

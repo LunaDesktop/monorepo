@@ -1,0 +1,22 @@
+[package]
+name = "luna"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Luna — powłoka środowiska graficznego (panel, launcher) na libLunie, działająca na kompozytorze Selene."
+
+[lib]
+name = "luna"
+path = "src/lib.rs"
+
+[[bin]]
+name = "luna-panel"
+path = "src/bin/luna-panel.rs"
+
+[dependencies]
+libluna-core.workspace = true
+libluna-widgets.workspace = true
+libluna-render.workspace = true
+libluna-i18n.workspace = true

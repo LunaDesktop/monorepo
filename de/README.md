@@ -16,7 +16,7 @@ gnieździe nasłuchu i deskryptorze backendu. `libLuna` jest zwykłą zależnoś
 | Warstwa / Layer | Nazwa / Name | Opis |
 | --- | --- | --- |
 | Toolkit GUI | **libLuna** | widgety, render, i18n (`crates/libluna-*`) |
-| Środowisko | **Luna** | pulpit (panel, launcher, ustawienia) — `de/luna` (wkrótce) |
+| Środowisko | **Luna** | pulpit (panel, launcher, OSD) — `de/luna` |
 | Kompozytor | **Selene** | serwer Wayland — `de/selene` |
 
 ## Co już działa / What works (M-K5)
@@ -61,6 +61,18 @@ gnieździe nasłuchu i deskryptorze backendu. `libLuna` jest zwykłą zależnoś
   sceny wprost do buforów (podwójne buforowanie). Gdy master trzyma inna sesja — bezpieczny
   fallback do nested (nie odbiera ekranu).
 - Wielojęzyczność (`libluna-i18n`) i optymalizacja (`[profile.release]` LTO, cache `shm`).
+
+## Powłoka Luna / Luna shell (`de/luna`)
+
+Środowisko graficzne Luna (odpowiednik GNOME Shell) na libLunie, działające na kompozytorze
+Selene.
+
+- `de/luna/src/panel.rs` — **panel górny** (menu, tytuł okna, zegar/data, przełączniki,
+  przestrzenie robocze, użytkownik) i **launcher** (siatka aplikacji + wyszukiwanie).
+- `luna-panel` (bin) — render headless: `docs/images/luna-shell-{light,dark}.png`.
+- Dane (`PanelState`, `App`) są oddzielone od rysowania (`PaintCtx`), więc ten sam kod
+  obsługuje podglądy i sesję na żywo.
+- Dalej: panel jako powierzchnia `zwlr-layer-shell` (po stronie klienta), OSD, powiadomienia.
 
 ## Jeszcze nie / Not yet
 

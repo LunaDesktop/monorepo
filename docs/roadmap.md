@@ -160,7 +160,12 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   Uruchomienie: `cargo run -p selene` (szczegóły: `de/README.md`).
 - Dalej: **wejście w trybie DRM** (evdev/`libinput`), GLES/akceleracja, hotplug monitorów
   (`zwlr_output_manager`), selekcja pierwotna, IME (`text-input`).
-- **Luna** (`de/luna`) — powłoka środowiska (panel, launcher, OSD) na `libluna-widgets`.
+- **Luna** (`de/luna`) — powłoka środowiska na `libluna-widgets`. ✅ start: **panel górny**
+  (menu, tytuł okna, zegar/data, przełączniki, przestrzenie, użytkownik) i **launcher**
+  (siatka aplikacji + wyszukiwanie); render headless do `docs/images/luna-shell-{light,dark}.png`.
+  Dane (`PanelState`, `App`) oddzielone od rysowania (`PaintCtx`) — ten sam kod do podglądów
+  i sesji na żywo. Dalej: powierzchnia warstwowa `zwlr-layer-shell` po stronie klienta
+  (panel jako prawdziwy layer surface na Selene), OSD, menu kontekstowe, powiadomienia.
 
 ## Później (poza MVP)
 - Dostępność AT-SPI, IME, schowek, drag & drop, animacje, backend GPU, mini-CSS dla motywów.
