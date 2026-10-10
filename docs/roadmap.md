@@ -156,10 +156,13 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   oraz **realne wyjście DRM/KMS** (`SELENE_BACKEND=drm`, opcjonalne): master, bufor dumb,
   `ADDFB2`, `SETCRTC`, podwójne buforowanie i **page-flip**; bezpieczny fallback do nested,
   gdy master trzyma inna sesja.
+  ✅ M-K8: **wejście evdev** (`SELENE_INPUT=evdev`): własne czytanie `/dev/input/event*`
+  (wskaźnik względny z wirtualnym kursorem, przyciski, kółko, klawiatura) — rodzime wejście
+  dla trybu DRM. Wymaga grupy `input`/root.
   ✅ Optymalizacje: cache `mmap` puli `wl_shm` i zero-copy w rendererze (`PixmapRef::from_bytes`).
   Uruchomienie: `cargo run -p selene` (szczegóły: `de/README.md`).
-- Dalej: **wejście w trybie DRM** (evdev/`libinput`), GLES/akceleracja, hotplug monitorów
-  (`zwlr_output_manager`), selekcja pierwotna, IME (`text-input`).
+- Dalej: GLES/akceleracja, hotplug monitorów (`zwlr_output_manager`), `libinput` (gesty),
+  selekcja pierwotna, IME (`text-input`).
 - **Luna** (`de/luna`) — powłoka środowiska na `libluna-widgets`. ✅ start: **panel górny**
   (menu, tytuł okna, zegar/data, przełączniki, przestrzenie, użytkownik) i **launcher**
   (siatka aplikacji + wyszukiwanie); render headless do `docs/images/luna-shell-{light,dark}.png`.

@@ -9,6 +9,7 @@ mod compositor;
 mod data;
 mod decoration;
 mod drm;
+mod evdev;
 mod input;
 mod layer;
 mod monitors;
@@ -110,6 +111,22 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let listener_fd = socket.as_raw_fd();
 
+    // Wejście evdev (dla trybu DRM, gdzie nie ma nadrzędnego kompozytora).
+    let mut evdev_input = if std::env::var("SELENE_INPUT").as_deref() == Ok("evdev") {
+        match evdev::EvdevInput::open() {
+            Some(input) => {
+                println!("{}", libluna_i18n::tr("evdev input enabled"));
+                Some(input)
+            }
+            None => {
+                eprintln!("{}", libluna_i18n::tr("evdev input unavailable"));
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     loop {
         let backend_fd = display.backend().poll_fd().as_raw_fd();
         let wake_fd = wake_read.as_raw_fd();
@@ -117,12 +134,42 @@ fn main() -> Result<(), Box<dyn Error>> {
         let listener = unsafe { BorrowedFd::borrow_raw(listener_fd) };
         let backend = unsafe { BorrowedFd::borrow_raw(backend_fd) };
         let wake = unsafe { BorrowedFd::borrow_raw(wake_fd) };
-        let mut fds = [
+        let input_raw = evdev_input.as_ref().map(|e| e.fds()).unwrap_or_default();
+        // SAFETY: deskryptory należą do `evdev_input`, który żyje przez całą iterację.
+        let input_fds: Vec<BorrowedFd> = input_raw
+            .iter()
+            .map(|&r| unsafe { BorrowedFd::borrow_raw(r) })
+            .collect();
+        let mut fds = vec![
             rustix::event::PollFd::new(&listener, rustix::event::PollFlags::IN),
             rustix::event::PollFd::new(&backend, rustix::event::PollFlags::IN),
             rustix::event::PollFd::new(&wake, rustix::event::PollFlags::IN),
         ];
+        for fd in &input_fds {
+            fds.push(rustix::event::PollFd::new(fd, rustix::event::PollFlags::IN));
+        }
         rustix::event::poll(&mut fds, -1)?;
+
+        // Wejście evdev → trasowanie (jak z magistrali).
+        if input_fds
+            .iter()
+            .enumerate()
+            .any(|(i, _)| fds[3 + i].revents().contains(rustix::event::PollFlags::IN))
+        {
+            if let Some(input) = evdev_input.as_mut() {
+                let bounds = state
+                    .outputs
+                    .lock()
+                    .unwrap()
+                    .first()
+                    .map(|o| (o.width as f64, o.height as f64))
+                    .unwrap_or((1280.0, 800.0));
+                let batch = input.read_events(bounds);
+                for event in &batch {
+                    seat::handle_input(&mut state, &handle, event);
+                }
+            }
+        }
 
         // Nowy klient.
         if fds[0].revents().contains(rustix::event::PollFlags::IN) {

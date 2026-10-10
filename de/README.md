@@ -60,6 +60,9 @@ gnieździe nasłuchu i deskryptorze backendu. `libLuna` jest zwykłą zależnoś
   „dumb”, framebuffer (`ADDFB2`), `SETCRTC` i **page-flip** na wykrytych monitorach; render
   sceny wprost do buforów (podwójne buforowanie). Gdy master trzyma inna sesja — bezpieczny
   fallback do nested (nie odbiera ekranu).
+- **Wejście evdev** (`SELENE_INPUT=evdev`, opcjonalne): własne czytanie `/dev/input/event*`
+  (wskaźnik względny z wirtualnym kursorem, przyciski, kółko, klawiatura) — rodzime wejście
+  dla trybu DRM, bez nadrzędnego kompozytora. Wymaga dostępu do grupy `input`/root.
 - Wielojęzyczność (`libluna-i18n`) i optymalizacja (`[profile.release]` LTO, cache `shm`).
 
 ## Powłoka Luna / Luna shell (`de/luna`)
@@ -81,8 +84,11 @@ Selene.
 
 ## Jeszcze nie / Not yet
 
-- **Wejście w trybie DRM** (evdev/`libinput`) — skanowanie działa, ale bez rodzimego wejścia
-  okna są tylko wyświetlane; GLES/akceleracja i hotplug (`zwlr_output_manager`) — do zrobienia.
+- **Wejście evdev** (`evdev.rs`): zaimplementowane i sterowane `SELENE_INPUT=evdev`, ale
+  wymaga dostępu do `/dev/input` (grupa `input`/root); bez tego Selene zgłasza
+  `evdev input unavailable`.
+- GLES/akceleracja, hotplug monitorów (`zwlr_output_manager`), `libinput` (gesty touchpada,
+  akceleracja) zamiast surowych zdarzeń.
 - **Selekcja pierwotna** (`primary selection`); IME / `text-input`.
 - `wl_output` dynamiczne (zmiana trybu), fokus klawiatury po kliknięciu poza oknem.
 - Render tylko przy zmianie modelu (częściowe odświeżanie/damage).
@@ -102,6 +108,7 @@ Tryb nested (domyślny) uruchamia okno na nadrzędnym kompozytorze. **Realne wyj
 ```sh
 SELENE_BACKEND=drm XDG_RUNTIME_DIR="$PWD/.selene-runtime" cargo run -p selene
 # diagnostyka bez zmiany trybu:  SELENE_DRM_PROBE=1 cargo run -p selene
+# rodzime wejście (gdy brak nadrzędnego kompozytora):  SELENE_INPUT=evdev cargo run -p selene
 ```
 
 Uwaga: tryb DRM przejmuje ekran (page-flip); gdy master trzyma Twoja sesja, Selene
@@ -125,6 +132,7 @@ de/selene/src/
   monitors.rs    # wl_output (model wielu monitorów, układ, trafienia)
   drm.rs         # wykrywanie + scanout DRM/KMS (ioctl, dumb buffer, page-flip), fallback nested
   seat.rs        # wl_seat: wskaźnik + klawiatura + trasowanie wejścia i operacje okien
+  evdev.rs       # wejście z /dev/input/event* (tryb DRM, wirtualny kursor)
   input.rs       # magistrala wejścia (kolejka + wybudzanie)
   output.rs      # wyjście nested (libluna-platform + libluna-render)
 ```
