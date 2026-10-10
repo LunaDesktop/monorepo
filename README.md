@@ -334,8 +334,10 @@ XDG_CONFIG_HOME="$PWD/examples" cargo run -p luna-demo --bin render -- --lang fr
   liście, z zaznaczaniem i przewijaniem) i `ScrollView` (pionowe przewijanie: rolka + „kciuk”)
   oraz `Stepper`, `CheckButton` i `RadioGroup` (krokowiec, pole wyboru, wybór jednokrotny),
   a także `Card` (karta z nagłówkiem), `ActionRow` (wiersz ustawień), `Toast` (powiadomienie
-  nakładkowe z akcją, np. „Cofnij”) oraz `StatusPage` (ekran stanu: ikona, tytuł, opis, akcja —
-  używany jako „pusty stan” listy) i wspólny `PaintCtx`.
+  nakładkowe z akcją, np. „Cofnij”), `StatusPage` (ekran stanu: ikona, tytuł, opis, akcja —
+  używany jako „pusty stan” listy), `Spinner` (wskaźnik zajętości — obracający się łuk),
+  `Tooltip` (dymek podpowiedzi) i `Banner` (pasek komunikatu info/ostrzeżenie/błąd z akcjami)
+  oraz wspólny `PaintCtx`.
 - `libluna-widgets::layout`: **dwuprzebiegowy układ** (retencyjne drzewo `measure`/`allocate`) —
   [`Node`] (`VBox`/`HBox`, `Padding`, `Expanded`, `Center`, `Spacer`, `Label`, `Fixed`),
   [`Constraints`](min/max) i [`Layout`](`desired_size`/`fit`). Liście pochłaniają nadmiar
@@ -389,6 +391,10 @@ Podgląd kilku motywów (headless, `cargo run -p luna-demo --bin styles`) — te
 interfejs w każdym stylu:
 
 ![Podgląd stylów](docs/images/styles.png)
+
+Nowe widgety — `Banner`, `Spinner`, `Tooltip` (`cargo run -p luna-demo --bin widgets`):
+
+![Banner, Spinner, Tooltip](docs/images/widgets.png)
 
 Przebieg interakcji (headless `simulate`) — m.in. menu `☰`, dolny panel, powiadomienie (`Toast`)
 karta 12 i ekran stanu („Brak wyników”) klatka 14:

@@ -473,6 +473,45 @@ pub struct StatusPageMetrics {
     pub button_h: f64,
 }
 
+/// Geometria wskaźnika zajętości ([`Spinner`](crate::style)).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpinnerMetrics {
+    /// Domyślny bok.
+    pub size: f64,
+    /// Grubość łuku.
+    pub thickness: f64,
+    /// Długość łuku jako ułamek pełnego okręgu (0..1).
+    pub sweep: f64,
+}
+
+/// Geometria dymka podpowiedzi ([`Tooltip`](crate::style)).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TooltipMetrics {
+    /// Padding poziomy.
+    pub pad_x: f64,
+    /// Padding pionowy.
+    pub pad_y: f64,
+    /// Promień zaokrąglenia.
+    pub radius: f64,
+    /// Odstęp od kotwicy (nad kotwicą).
+    pub gap: f64,
+}
+
+/// Geometria banera ([`Banner`](crate::style)).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BannerMetrics {
+    /// Padding wewnętrzny.
+    pub pad: f64,
+    /// Odstęp między elementami.
+    pub gap: f64,
+    /// Bok ikony.
+    pub icon: f64,
+    /// Minimalna wysokość.
+    pub min_height: f64,
+    /// Wysokość przycisku akcji.
+    pub button_h: f64,
+}
+
 /// Geometria kontrolek („component metrics”) — rozmiary i paddingi w pikselach logicznych.
 ///
 /// Widgety nie mają już własnych stałych rozmiarów: czytają je z motywu, dzięki czemu
@@ -502,6 +541,9 @@ pub struct Metrics {
     pub row: ActionRowMetrics,
     pub toast: ToastMetrics,
     pub status: StatusPageMetrics,
+    pub spinner: SpinnerMetrics,
+    pub tooltip: TooltipMetrics,
+    pub banner: BannerMetrics,
 }
 
 impl Metrics {
@@ -629,6 +671,24 @@ impl Metrics {
                 gap: 12.0,
                 button_w: 160.0,
                 button_h: 34.0,
+            },
+            spinner: SpinnerMetrics {
+                size: 24.0,
+                thickness: 2.5,
+                sweep: 0.75,
+            },
+            tooltip: TooltipMetrics {
+                pad_x: 10.0,
+                pad_y: 6.0,
+                radius: 8.0,
+                gap: 8.0,
+            },
+            banner: BannerMetrics {
+                pad: 12.0,
+                gap: 12.0,
+                icon: 20.0,
+                min_height: 56.0,
+                button_h: 30.0,
             },
         }
     }

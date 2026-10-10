@@ -41,8 +41,10 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   `ItemView` (pliki/katalogi: siatka
   lub lista) i `ScrollView` (przewijanie), oraz `Stepper`, `CheckButton` i `RadioGroup`
   (krokowiec, checkbox, wybór jednokrotny); do tego `Card` i `ActionRow` (karty i wiersze
-  ustawień), `Toast` (powiadomienie nakładkowe z akcją) i `StatusPage` (ekran stanu: ikona,
-  tytuł, opis, akcja — np. „pusty stan” listy); wspólny `PaintCtx`; testy hit-testingu bez okna.
+  ustawień), `Toast` (powiadomienie nakładkowe z akcją), `StatusPage` (ekran stanu: ikona,
+  tytuł, opis, akcja — np. „pusty stan” listy), `Spinner` (wskaźnik zajętości), `Tooltip`
+  (dymek podpowiedzi) i `Banner` (pasek komunikatu z akcjami); wspólny `PaintCtx`; testy
+  hit-testingu bez okna.
 - `libluna-platform`: realne akcje okna z `Frame` (`close`/`minimize`/`toggle_maximize`).
 - Demo używa widgetów zamiast ręcznego rysowania (pasek boczny, wybór motywu/widoku, menu `☰`,
   przycisk „Opcje”, przełączniki, suwak, wybór języka, pasek tytułu, zakładki `TabBar`/`TabView`).
@@ -123,6 +125,8 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
 | Button (pill/suggested/flat) | `libluna-widgets` | Settings |
 | Stepper / Check / Radio | `libluna-widgets` | Files (popover) |
 | Toast | `libluna-widgets` | Settings, Files |
+| Banner | `libluna-widgets` | Files, Settings |
+| Spinner / Tooltip | `libluna-widgets` | obie |
 | StatusBar / bottom info | `libluna-widgets` | obie |
 | StatusPage (pusty stan) | `libluna-widgets` | Files |
 

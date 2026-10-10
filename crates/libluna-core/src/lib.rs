@@ -27,10 +27,10 @@ pub use event::{
 pub use geometry::{Insets, Point, Rect, Size};
 pub use scale::Scale;
 pub use style::{
-    ActionRowMetrics, BottomSheetMetrics, ButtonMetrics, CardMetrics, CheckMetrics,
+    ActionRowMetrics, BannerMetrics, BottomSheetMetrics, ButtonMetrics, CardMetrics, CheckMetrics,
     DropDownMetrics, EntryMetrics, HeaderBarMetrics, ItemViewMetrics, MenuMetrics, Metrics,
     NavMetrics, PagerMetrics, PathBarMetrics, RadioMetrics, Radius, ScrollViewMetrics,
-    SegmentedMetrics, SliderMetrics, Spacing, StatusPageMetrics, StepperMetrics, SwitchMetrics,
-    TabsMetrics, Theme, ToastMetrics, Typography,
+    SegmentedMetrics, SliderMetrics, Spacing, SpinnerMetrics, StatusPageMetrics, StepperMetrics,
+    SwitchMetrics, TabsMetrics, Theme, ToastMetrics, TooltipMetrics, Typography,
 };
 pub use theme_file::{available as available_themes, StyledTheme, ThemePatch};
