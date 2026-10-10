@@ -42,6 +42,9 @@
 //! - [`Row`] — wiersz listy (switch/combo/expander/entry/spin…) — rodzina „boxed list”.
 //! - [`PreferencesGroup`] / [`PreferencesPage`] — grupa i strona ustawień.
 //! - [`Dialog`] (+ [`AlertDialog`], [`AboutDialog`], [`ShortcutsDialog`], [`PreferencesDialog`]) — okna modalne.
+//! - [`NavigationView`] / [`NavigationSplitView`] / [`OverlaySplitView`] / [`Sidebar`] — nawigacja.
+//! - [`Carousel`] (alias [`Pager`]), [`ToolbarView`], [`WindowTitle`], [`Clamp`], [`WrapBox`],
+//!   [`BreakpointBin`], [`ButtonContent`] — pomocniki.
 //!
 //! Układ (retencyjne drzewo, `measure`/`allocate`): [`layout`] ([`Node`], [`Layout`], [`Constraints`]).
 //!
@@ -66,11 +69,13 @@ pub mod dialogs;
 pub mod dropdown;
 pub mod entry;
 pub mod header_bar;
+pub mod helpers;
 pub mod icon;
 pub mod item_view;
 pub mod layout;
 pub mod menu;
 pub mod nav_list;
+pub mod navigation;
 pub mod pager;
 pub mod path_bar;
 pub mod preferences;
@@ -107,11 +112,18 @@ pub use dialogs::{
 pub use dropdown::DropDown;
 pub use entry::{Entry, EntryIcon, TextInput};
 pub use header_bar::{ControlsLayout, ControlsSide, HeaderBar, TitleAlign, WindowControl};
+pub use helpers::{
+    BreakpointBin, ButtonContent, Clamp, ToolbarRects, ToolbarView, WindowTitle, WindowTitleRects,
+    WrapBox,
+};
 pub use item_view::{Item, ItemKind, ItemView, ViewMode};
 pub use layout::{Constraints, Layout, LayoutCtx, Node, Stack};
 pub use menu::{Menu, MenuEntry, MenuRow};
 pub use nav_list::{NavEntry, NavList, NavRow};
+pub use navigation::{NavigationSplitView, NavigationView, OverlaySplitView, Sidebar};
 pub use pager::Pager;
+/// `Carousel` — nazwa [`Pager`] w duchu libadwaita.
+pub use pager::Pager as Carousel;
 pub use path_bar::PathBar;
 pub use preferences::{PreferencesGroup, PreferencesPage};
 pub use radio_group::RadioGroup;
