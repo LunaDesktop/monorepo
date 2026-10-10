@@ -48,12 +48,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .with_color(fg),
         );
         scene.text(
-            TextRun::new(
-                Point::new(24.0, 168.0),
-                "Kliknij gdziekolwiek, aby przełączyć",
-                14.0,
-            )
-            .with_color(theme.colors.dim_text),
+            TextRun::new(Point::new(24.0, 168.0), "Click anywhere to toggle", 14.0)
+                .with_color(theme.colors.dim_text),
         );
     })
 }

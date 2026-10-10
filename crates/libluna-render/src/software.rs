@@ -23,7 +23,7 @@ impl SoftwareRenderer {
     /// Tworzy renderer o zadanym rozmiarze **fizycznym** (piksele).
     pub fn new(width: u32, height: u32) -> Self {
         Self {
-            pixmap: Pixmap::new(width.max(1), height.max(1)).expect("alokacja bufora"),
+            pixmap: Pixmap::new(width.max(1), height.max(1)).expect("buffer allocation"),
             text: TextEngine::system(),
         }
     }
@@ -31,7 +31,7 @@ impl SoftwareRenderer {
     /// Zmienia rozmiar bufora (zawartość jest zerowana).
     pub fn resize(&mut self, width: u32, height: u32) {
         if self.pixmap.width() != width.max(1) || self.pixmap.height() != height.max(1) {
-            self.pixmap = Pixmap::new(width.max(1), height.max(1)).expect("realokacja bufora");
+            self.pixmap = Pixmap::new(width.max(1), height.max(1)).expect("buffer reallocation");
         }
     }
 
@@ -272,12 +272,12 @@ mod tests {
 
         // Środek prostokąta jest czerwony.
         let c = pixel(&r, 30, 30);
-        assert!(c[0] > 200 && c[1] < 40 && c[2] < 40, "środek: {c:?}");
+        assert!(c[0] > 200 && c[1] < 40 && c[2] < 40, "center: {c:?}");
         // Narożnik kwadratu (10,10) wypada poza zaokrąglenie → tło.
         let corner = pixel(&r, 10, 10);
         assert!(
             corner[0] > 200 && corner[1] > 200 && corner[2] > 200,
-            "róg: {corner:?}"
+            "corner: {corner:?}"
         );
     }
 

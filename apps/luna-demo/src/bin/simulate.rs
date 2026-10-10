@@ -66,7 +66,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // 1. Start.
     frames.push(render_pixels(&settings, &demo, &text, size));
-    labels.push("1. Start (jasny, PL)".into());
+    labels.push("1. Start (light, PL)".into());
 
     // Pomocniczo: aktualny layout i wysłanie kliknięcia.
     macro_rules! layout {
@@ -94,10 +94,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     assert_eq!(
         settings.preference(),
         ThemePreference::Dark,
-        "motyw nie przeszedł na ciemny"
+        "theme did not switch to Dark"
     );
     frames.push(render_pixels(&settings, &demo, &text, size));
-    labels.push("2. Motyw: Ciemny".into());
+    labels.push("2. Theme: Dark".into());
 
     // 3. Klik kropki akcentu (Purple = indeks 7).
     let c = layout!().accents[7].center();
@@ -105,45 +105,49 @@ fn main() -> Result<(), Box<dyn Error>> {
     assert_eq!(
         settings.accent(),
         Accent::Purple,
-        "akcent nie ustawił się na Purple"
+        "accent did not switch to Purple"
     );
     frames.push(render_pixels(&settings, &demo, &text, size));
-    labels.push("3. Akcent: Purple".into());
+    labels.push("3. Accent: Purple".into());
 
     // 4. Klik pozycji „Sieć" w menu nawigacji (indeks elementu 5).
     let theme = settings.resolve(false);
     let c = make_nav().rows(layout!().sidebar, &theme)[5].rect.center();
     click!(c);
-    assert_eq!(demo.nav_selected, Some(5), "nie zaznaczono pozycji Sieć");
+    assert_eq!(
+        demo.nav_selected,
+        Some(5),
+        "nav item 'Network' not selected"
+    );
     frames.push(render_pixels(&settings, &demo, &text, size));
-    labels.push("4. Nawigacja: Sieć".into());
+    labels.push("4. Navigation: Network".into());
 
     // 5. Klik „Siatka" w przełączniku widoku.
     let c = ViewSwitcher::new(["a", "b"]).segments(layout!().view_switcher)[1].center();
     click!(c);
-    assert_eq!(demo.view_mode, 1, "widok nie przeszedł na Siatkę");
+    assert_eq!(demo.view_mode, 1, "view did not switch to Grid");
     frames.push(render_pixels(&settings, &demo, &text, size));
-    labels.push("5. Widok: Siatka".into());
+    labels.push("5. View: Grid".into());
 
     // 6. Przełączenie zakładki (TabView + TabBar).
     let theme = settings.resolve(false);
     let c = ui::tab_bar(&demo).segments(layout!().tabs, &text, &theme)[2].center();
     click!(c);
-    assert_eq!(demo.tabs.selected(), 2, "zakładka się nie przełączyła");
+    assert_eq!(demo.tabs.selected(), 2, "tab did not switch");
     frames.push(render_pixels(&settings, &demo, &text, size));
-    labels.push("6. Zakładka: O aplikacji".into());
+    labels.push("6. Tab: About".into());
 
     // 7. Klik ikony ◧ w HeaderBarze — zwinięcie paska bocznego.
     let c = layout!().sidebar_button.center();
     click!(c);
-    assert!(!demo.sidebar_visible, "pasek boczny się nie zwinął");
+    assert!(!demo.sidebar_visible, "sidebar did not collapse");
     frames.push(render_pixels(&settings, &demo, &text, size));
-    labels.push("7. Pasek boczny zwinięty ◧".into());
+    labels.push("7. Sidebar collapsed \u{25e7}".into());
 
     // 8. Klik ikony „☰” — otwarcie popoveru (menu nawigacji).
     let c = layout!().burger.center();
     click!(c);
-    assert_eq!(demo.popover, Some(Popover::Menu), "menu się nie otworzyło");
+    assert_eq!(demo.popover, Some(Popover::Menu), "menu did not open");
     // Podświetlenie drugiej pozycji, żeby pokazać hover.
     let theme = settings.resolve(false);
     if let Some((panel, menu)) = ui::popover_menu(size, &theme, &text, &layout!(), &demo) {
@@ -161,43 +165,43 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
     }
     frames.push(render_pixels(&settings, &demo, &text, size));
-    labels.push("8. Menu ☰ otwarte".into());
+    labels.push("8. Menu \u{2630} open".into());
 
     // 9. Klik „O aplikacji” w otwartym menu → dolny panel (BottomSheet + Pager).
     let theme = settings.resolve(false);
     let about = ui::popover_menu(size, &theme, &text, &layout!(), &demo)
         .map(|(panel, menu)| menu.rows(panel, &theme)[4].rect.center())
-        .expect("menu otwarte");
+        .expect("menu is open");
     click!(about);
-    assert!(demo.sheet.is_open(), "panel się nie otworzył");
+    assert!(demo.sheet.is_open(), "bottom sheet did not open");
     frames.push(render_pixels(&settings, &demo, &text, size));
-    labels.push("9. Dolny panel \u{201e}O aplikacji\u{201d}".into());
+    labels.push("9. Bottom sheet \u{201c}About\u{201d}".into());
 
     // 10. Zamknięcie panelu (klik w tło) i rozwinięcie listy języków (DropDown + Menu).
     click!(Point::new(120.0, 300.0));
-    assert!(!demo.sheet.is_open(), "panel się nie zamknął");
+    assert!(!demo.sheet.is_open(), "bottom sheet did not close");
     let c = layout!().language.center();
     click!(c);
     assert_eq!(
         demo.popover,
         Some(Popover::Language),
-        "lista języków się nie rozwinęła"
+        "language list did not open"
     );
     frames.push(render_pixels(&settings, &demo, &text, size));
-    labels.push("10. Wybór języka (DropDown)".into());
+    labels.push("10. Language selection (DropDown)".into());
 
     // 11. Popover „Opcje” (rozmiar ikon / sortowanie / ukryte pliki).
     click!(Point::new(450.0, 300.0)); // zamknij popover języka
-    assert!(demo.popover.is_none(), "popover się nie zamknął");
+    assert!(demo.popover.is_none(), "popover did not close");
     let c = layout!().options_button.center();
     click!(c);
     assert_eq!(
         demo.popover,
         Some(Popover::Options),
-        "popover opcji się nie otworzył"
+        "options popover did not open"
     );
     frames.push(render_pixels(&settings, &demo, &text, size));
-    labels.push("11. Popover \u{201e}Opcje\u{201d}".into());
+    labels.push("11. Options popover".into());
 
     // 12. Klik popovera (zamknięcie) i zmiana akcentu → powiadomienie (Toast) z „Cofnij”.
     click!(Point::new(450.0, 300.0));
@@ -206,33 +210,33 @@ fn main() -> Result<(), Box<dyn Error>> {
     assert_eq!(
         settings.accent(),
         Accent::Teal,
-        "akcent nie ustawił się na Teal"
+        "accent did not switch to Teal"
     );
-    assert!(demo.toast.is_open(), "powiadomienie się nie pokazało");
+    assert!(demo.toast.is_open(), "toast did not appear");
     frames.push(render_pixels(&settings, &demo, &text, size));
-    labels.push("12. Powiadomienie (Toast)".into());
+    labels.push("12. Toast".into());
 
     // 13. Klik „Cofnij” w powiadomieniu → powrót akcentu, powiadomienie znika.
     let theme = settings.resolve(false);
     let undo = demo
         .toast
         .action_rect(size, &theme, &text)
-        .expect("akcja powiadomienia")
+        .expect("toast action")
         .center();
     click!(undo);
     assert_eq!(
         settings.accent(),
         Accent::Purple,
-        "akcent nie wrócił po „Cofnij”"
+        "accent did not revert after Undo"
     );
-    assert!(!demo.toast.is_open(), "powiadomienie nie zniknęło");
+    assert!(!demo.toast.is_open(), "toast did not disappear");
     frames.push(render_pixels(&settings, &demo, &text, size));
-    labels.push("13. Cofnięto akcent".into());
+    labels.push("13. Accent reverted".into());
 
     // 14. Filtr bez wyników → ekran stanu (StatusPage) z akcją „Wyczyść”.
     let c = layout!().search.center();
     click!(c);
-    assert!(demo.search.is_focused(), "pole wyszukiwania bez fokusu");
+    assert!(demo.search.is_focused(), "search field is not focused");
     for ch in ['x', 'y', 'z'] {
         let key = Event::Key(KeyEvent {
             keysym: ch as u32,
@@ -246,30 +250,33 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     assert!(
         ui::empty_state(&demo).is_some(),
-        "brak ekranu stanu dla braku wyników"
+        "status page missing for empty search"
     );
     frames.push(render_pixels(&settings, &demo, &text, size));
-    labels.push("14. Brak wyników (StatusPage)".into());
+    labels.push("14. No results (StatusPage)".into());
 
     // 15. Klik „Wyczyść” w ekranie stanu → lista wraca.
     let theme = settings.resolve(false);
     let clear = ui::empty_state(&demo)
-        .expect("ekran stanu")
+        .expect("status page")
         .rects(layout!().items, &theme)
         .action
-        .expect("akcja ekranu stanu")
+        .expect("status page action")
         .center();
     click!(clear);
-    assert!(demo.search.is_empty(), "filtr nie został wyczyszczony");
-    assert!(ui::empty_state(&demo).is_none(), "ekran stanu nie zniknął");
+    assert!(demo.search.is_empty(), "search filter was not cleared");
+    assert!(
+        ui::empty_state(&demo).is_none(),
+        "status page did not disappear"
+    );
     frames.push(render_pixels(&settings, &demo, &text, size));
-    labels.push("15. Filtr wyczyszczony".into());
+    labels.push("15. Filter cleared".into());
 
     // Zapis klatek.
     for (i, pixels) in frames.iter().enumerate() {
         let path = format!("docs/images/demo-step-{}.png", i + 1);
         save_png(&path, pixels)?;
-        println!("zapisano {path}  — {}", labels[i]);
+        println!("saved {path}  — {}", labels[i]);
     }
 
     // Montaż (siatka `cols` x `rows`) na zmienną liczbę klatek.
@@ -290,11 +297,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         montage.draw_pixmap(cx as i32, cy as i32, src.as_ref(), &paint, scale, None);
     }
     montage.save_png("docs/images/demo-montage.png")?;
-    println!("zapisano docs/images/demo-montage.png");
+    println!("saved docs/images/demo-montage.png");
 
-    println!(
-        "\nWszystkie interakcje przeszły pomyślnie ({} klatek).",
-        frames.len()
-    );
+    println!("\nAll interactions passed ({} frames).", frames.len());
     Ok(())
 }

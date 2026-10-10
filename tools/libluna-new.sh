@@ -10,7 +10,7 @@
 set -eu
 
 if [ "$#" -lt 1 ]; then
-    echo "użycie: libluna-new.sh <katalog-aplikacji> [nazwa-pakietu]" >&2
+    echo "usage: libluna-new.sh <app-dir> [package-name]" >&2
     exit 1
 fi
 
@@ -23,7 +23,7 @@ libluna_path="$root/crates/libluna"
 template="$root/templates/minimal-app"
 
 if [ ! -d "$template" ]; then
-    echo "nie znaleziono szablonu: $template" >&2
+    echo "template not found: $template" >&2
     exit 1
 fi
 
@@ -34,7 +34,7 @@ sed "s#__APP_NAME__#$name#g; s#__LIBLUNA_PATH__#$libluna_path#g" \
 sed "s#__APP_NAME__#$name#g" \
     "$template/src/main.rs" > "$target/src/main.rs"
 
-echo "utworzono aplikację: $target"
-echo "  pakiet: $name"
+echo "created application: $target"
+echo "  package: $name"
 echo "  libluna: $libluna_path"
-echo "uruchom: (cd $target && cargo run)"
+echo "run: (cd $target && cargo run)"

@@ -192,10 +192,10 @@ where
     WaylandSource::new(conn.clone(), event_queue).insert(loop_handle)?;
 
     let compositor = CompositorState::bind(&globals, &qh)
-        .map_err(|e| format!("wl_compositor niedostępny: {e}"))?;
+        .map_err(|e| format!("wl_compositor unavailable: {e}"))?;
     let xdg_shell =
-        XdgShell::bind(&globals, &qh).map_err(|e| format!("xdg-shell niedostępny: {e}"))?;
-    let shm = Shm::bind(&globals, &qh).map_err(|e| format!("wl_shm niedostępny: {e}"))?;
+        XdgShell::bind(&globals, &qh).map_err(|e| format!("xdg-shell unavailable: {e}"))?;
+    let shm = Shm::bind(&globals, &qh).map_err(|e| format!("wl_shm unavailable: {e}"))?;
 
     let surface = compositor.create_surface(&qh);
     // CSD: sami rysujemy HeaderBar (brak dekoracji serwera).
@@ -371,7 +371,7 @@ impl App {
                     stride,
                     wl_shm::Format::Argb8888,
                 )
-                .expect("alokacja bufora shm")
+                .expect("shm buffer allocation")
                 .0
         });
 
@@ -387,7 +387,7 @@ impl App {
                         stride,
                         wl_shm::Format::Argb8888,
                     )
-                    .expect("alokacja drugiego bufora shm");
+                    .expect("second shm buffer allocation");
                 *buffer = second;
                 canvas
             }
@@ -409,7 +409,7 @@ impl App {
 
         let surface = self.window.wl_surface();
         surface.damage_buffer(0, 0, phys_w as i32, phys_h as i32);
-        buffer.attach_to(surface).expect("podłączenie bufora");
+        buffer.attach_to(surface).expect("buffer attach");
         self.window.commit();
     }
 }

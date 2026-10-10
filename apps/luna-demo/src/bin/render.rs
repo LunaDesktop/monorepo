@@ -100,10 +100,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut renderer = SoftwareRenderer::new(w, h);
     renderer.draw(&scene, 1.0, theme.colors.window_bg);
 
-    let png = renderer.encode_png().ok_or("nie udało się zakodować PNG")?;
+    let png = renderer.encode_png().ok_or("failed to encode PNG")?;
     std::fs::write(&out, png)?;
     println!(
-        "zapisano {out} ({w}x{h}, lang={lang}, accent={})",
+        "saved {out} ({w}x{h}, lang={lang}, accent={})",
         accent.name()
     );
     Ok(())

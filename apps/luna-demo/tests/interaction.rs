@@ -148,7 +148,7 @@ fn clicking_path_component_navigates_up() {
         .iter()
         .find(|(pick, _)| *pick == Some(0))
         .map(|(_, r)| r.center())
-        .expect("pierwszy składnik ścieżki widoczny");
+        .expect("first path component is visible");
     click(&mut settings, &mut demo, first);
     assert_eq!(demo.path.len(), 1);
 }
@@ -281,7 +281,7 @@ fn window_controls_are_widget_managed() {
     let mut demo = Demo::default();
     let header = layout(&settings, &demo).header;
 
-    let close = header.close.expect("kontrolki po prawej").center();
+    let close = header.close.expect("window controls on the right").center();
     click(&mut settings, &mut demo, close);
     assert!(demo.pending_close);
 
@@ -327,7 +327,7 @@ fn accent_change_shows_toast_and_undo_reverts() {
     let undo = demo
         .toast
         .action_rect(size(), &theme, &text)
-        .expect("akcja powiadomienia")
+        .expect("toast action")
         .center();
     click(&mut settings, &mut demo, undo);
     assert_eq!(settings.accent(), Accent::default());
@@ -342,10 +342,10 @@ fn search_without_results_shows_empty_state_that_clears() {
 
     let theme = settings.resolve(false);
     let action = ui::empty_state(&demo)
-        .expect("ekran stanu dla braku wyników")
+        .expect("status page for empty search")
         .rects(layout(&settings, &demo).items, &theme)
         .action
-        .expect("przycisk akcji")
+        .expect("action button")
         .center();
     click(&mut settings, &mut demo, action);
     assert!(demo.search.is_empty());
@@ -362,7 +362,7 @@ fn search_filters_items_and_selection_maps_to_full_list() {
     assert_eq!(
         visible.len(),
         1,
-        "filtr powinien zawęzić listę do jednego elementu"
+        "filter should narrow the list to one item"
     );
     let view = ui::item_view(&demo);
     assert_eq!(view.len(), 1);
