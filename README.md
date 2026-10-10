@@ -320,8 +320,9 @@ XDG_CONFIG_HOME="$PWD/examples" cargo run -p luna-demo --bin render -- --lang fr
 - `libluna-i18n`: `Locale` (z `LANG`/`LC_*`), `Catalog`, `Translations`, globalne `tr`/`set_locale`,
   makro `t!` z podstawianiem argumentów, **języki z osobnych plików** `i18n/<kod>.lang`
   (wbudowane) oraz **doładowywane w runtime** z katalogów; `languages()` i `language_name()`.
-- `libluna-render`: graf sceny (prostokąty, zaokrąglenia, obramowania, linie, clip, tekst)
-  i rasteryzator CPU z antyaliasingiem; tekst przez `fontdue` (font Adwaita Sans).
+- `libluna-render`: graf sceny (prostokąty, zaokrąglenia, obramowania, linie, clip, tekst,
+  **obrazy** `Scene::image`/`ImageData`) i rasteryzator CPU z antyaliasingiem; tekst przez
+  `fontdue` (font Adwaita Sans).
 - `libluna-platform`: okno `xdg-shell` z CSD, bufor `wl_shm`, pętla `calloop`, **zdarzenia
   wejścia** (wskaźnik, klawiatura, scroll) w `Frame`, odświeżanie na żądanie, zarządzanie
   motywem przez `Frame::set_preference` / `set_accent` (zapis + natychmiastowe przerysowanie).

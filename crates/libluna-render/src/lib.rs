@@ -17,6 +17,6 @@ pub mod scene;
 pub mod software;
 pub mod text;
 
-pub use scene::{DrawCommand, Scene, TextRun};
+pub use scene::{DrawCommand, ImageData, Scene, TextRun};
 pub use software::SoftwareRenderer;
 pub use text::TextEngine;

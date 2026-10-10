@@ -15,7 +15,8 @@ path = "src/main.rs"
 libluna-core.workspace = true
 libluna-render.workspace = true
 libluna-i18n.workspace = true
+libluna-platform.workspace = true
 
 wayland-server = "0.31"
 wayland-protocols = { version = "0.32", features = ["server"] }
-rustix = { version = "0.38", features = ["event", "fs", "time"] }
+rustix = { version = "0.38", features = ["event", "fs", "time", "mm"] }

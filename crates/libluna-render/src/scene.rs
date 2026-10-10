@@ -5,6 +5,35 @@
 
 use libluna_core::style::weight;
 use libluna_core::{Color, Point, Rect};
+use std::sync::Arc;
+
+/// Gotowy obraz (premultiplied RGBA8) — np. skomponowany bufor okna z `wl_shm`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImageData {
+    pub width: u32,
+    pub height: u32,
+    /// Piksele premultiplied RGBA8, dokładnie `width * height * 4` bajtów.
+    pub rgba: Vec<u8>,
+}
+
+impl ImageData {
+    pub fn new(width: u32, height: u32, rgba: Vec<u8>) -> Self {
+        Self {
+            width,
+            height,
+            rgba,
+        }
+    }
+
+    /// Pusty (przezroczysty) obraz o zadanym rozmiarze.
+    pub fn empty(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            rgba: vec![0; width as usize * height as usize * 4],
+        }
+    }
+}
 
 /// Pojedynczy fragment tekstu do narysowania.
 #[derive(Debug, Clone, PartialEq)]
@@ -72,6 +101,8 @@ pub enum DrawCommand {
     PopClip,
     /// Tekst.
     Text(TextRun),
+    /// Obraz (np. bufor okna) wpisany w prostokąt docelowy.
+    Image { rect: Rect, data: Arc<ImageData> },
 }
 
 /// Uporządkowana lista poleceń rysowania.
@@ -156,6 +187,12 @@ impl Scene {
 
     pub fn text(&mut self, run: TextRun) -> &mut Self {
         self.commands.push(DrawCommand::Text(run));
+        self
+    }
+
+    /// Rysuje obraz wpisany w `rect` (skalowany, jeśli rozmiary się różnią).
+    pub fn image(&mut self, rect: Rect, data: Arc<ImageData>) -> &mut Self {
+        self.commands.push(DrawCommand::Image { rect, data });
         self
     }
 }

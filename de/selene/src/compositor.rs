@@ -2,21 +2,27 @@
 
 use std::sync::Mutex;
 
+use libluna_render::ImageData;
 use wayland_protocols::xdg::shell::server::{xdg_surface, xdg_toplevel};
 use wayland_server::{
-    protocol::{wl_callback, wl_compositor, wl_region, wl_surface},
+    protocol::{wl_buffer, wl_callback, wl_compositor, wl_region, wl_surface},
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
 };
 
 use crate::shell::XdgSurfaceData;
-use crate::state::State;
+use crate::shm::BufferData;
+use crate::state::{State, Window};
 
 /// Dane powierzchni (`wl_surface`).
 pub struct SurfaceData {
     /// Oczekujące `frame`-callbacki do wywołania przy następnym `commit`.
     pub frames: Mutex<Vec<wl_callback::WlCallback>>,
-    /// Powiązana powierzchnia `xdg_surface` (jeśli klient ją utworzył).
+    /// Powiązana powierzchnia `xdg_surface` (jeśli klient ją utworzyła).
     pub xdg_surface: Mutex<Option<xdg_surface::XdgSurface>>,
+    /// Ostatnio przypięty bufor (`wl_surface.attach`).
+    pub buffer: Mutex<Option<wl_buffer::WlBuffer>>,
+    /// Slot okna w modelu (przydzielany przy pierwszym commicie).
+    pub slot: Mutex<Option<usize>>,
 }
 
 impl SurfaceData {
@@ -24,6 +30,8 @@ impl SurfaceData {
         Self {
             frames: Mutex::new(Vec::new()),
             xdg_surface: Mutex::new(None),
+            buffer: Mutex::new(None),
+            slot: Mutex::new(None),
         }
     }
 }
@@ -111,6 +119,9 @@ impl Dispatch<wl_surface::WlSurface, SurfaceData> for State {
                 let cb = data_init.init(callback, ());
                 data.frames.lock().unwrap().push(cb);
             }
+            wl_surface::Request::Attach { buffer, .. } => {
+                *data.buffer.lock().unwrap() = buffer;
+            }
             wl_surface::Request::Commit => {
                 // Wywołaj oczekujące frame-callbacki.
                 let now = state.time_ms();
@@ -119,10 +130,64 @@ impl Dispatch<wl_surface::WlSurface, SurfaceData> for State {
                 }
                 // Pierwszy commit powierzchni z `xdg_surface` → wyślij konfigurację.
                 maybe_configure_xdg(state, data);
+                // Skomponuj okno (jeśli to toplevel z buforem).
+                composite(state, data);
             }
             _ => {}
         }
     }
+}
+
+/// Skomponuj powierzchnię do modelu okien, jeśli jest to toplevel z buforem `wl_shm`.
+fn composite(state: &mut State, data: &SurfaceData) {
+    let Some(xdg_surface) = data.xdg_surface.lock().unwrap().clone() else {
+        return;
+    };
+    let is_toplevel = xdg_surface
+        .data::<XdgSurfaceData>()
+        .map(|d| d.toplevel.lock().unwrap().is_some())
+        .unwrap_or(false);
+    if !is_toplevel {
+        return;
+    }
+    let Some(buffer) = data.buffer.lock().unwrap().clone() else {
+        return;
+    };
+    let Some(buf_data) = buffer.data::<BufferData>() else {
+        return;
+    };
+    let (w, h) = (buf_data.width, buf_data.height);
+    let Some(rgba) = buf_data.to_rgba() else {
+        return;
+    };
+    let image = std::sync::Arc::new(ImageData::new(w as u32, h as u32, rgba));
+
+    let mut slot = data.slot.lock().unwrap();
+    let mut windows = state.windows.lock().unwrap();
+    let idx = match *slot {
+        Some(i) => i,
+        None => {
+            let i = windows.len();
+            windows.push(Window {
+                x: 60.0 + i as f64 * 36.0,
+                y: 60.0 + i as f64 * 36.0,
+                width: w,
+                height: h,
+                data: image.clone(),
+            });
+            *slot = Some(i);
+            i
+        }
+    };
+    if let Some(window) = windows.get_mut(idx) {
+        window.width = w;
+        window.height = h;
+        window.data = image;
+    }
+    drop(windows);
+    drop(slot);
+    // Pozwól klientowi ponownie użyć bufora.
+    let _ = buffer.send_event(wl_buffer::Event::Release);
 }
 
 /// Jeśli powierzchnia ma `xdg_surface` jeszcze nie skonfigurowany, wyślij configure.

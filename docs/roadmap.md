@@ -131,12 +131,14 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
 ## M8 — Kompozytor Selene + środowisko Luna (`de/`)
 - **Selene** (`de/selene`) — kompozytor Wayland w czystym Rust, **bez smithay**: własna warstwa
   na `wayland-server` (rdzeń + xdg-shell) i bezpośrednia pętla `poll` po gnieździe i backendzie.
-  ✅ Start (M-K0): globale `wl_compositor`, `wl_shm`, `xdg_wm_base`, `wl_seat`; cykl życia
-  powierzchni + frame-callbacki, `xdg_surface.configure`, i18n (`libluna-i18n`), profil release
-  z LTO. Uruchomienie: `cargo run -p selene` (szczegóły: `de/README.md`).
-- Dalej: backend wyświetlania (nested Wayland → potem DRM/KMS), komponowanie przez
-  `libluna-render`, wejście (`libinput`/`evdev` + `wl_pointer`/`wl_keyboard`), `wl_output`,
-  `xdg_popup`, `layer-shell`, schowek (`wl_data_device`), zarządzanie oknami/fokusem.
+  ✅ M-K0: globale `wl_compositor`, `wl_shm`, `xdg_wm_base`, `wl_seat`; cykl życia powierzchni
+  + frame-callbacki, `xdg_surface.configure`, i18n, profil release z LTO.
+  ✅ M-K1: **wyjście nested** (`libluna-platform`) + kompozycja okien klientów (`wl_shm` →
+  piksele → `libluna-render`); nowy prymityw `Scene::image`/`ImageData` w rendererze.
+  Uruchomienie: `cargo run -p selene` (szczegóły: `de/README.md`).
+- Dalej: **wejście** (`libinput`/`evdev` + `wl_pointer`/`wl_keyboard`), zarządzanie oknami/fokusem,
+  `wl_output`, `xdg_popup`, `layer-shell`, schowek (`wl_data_device`), backend DRM/KMS + GLES,
+  oraz optymalizacje (cache mapy shm, render przy zmianie modelu).
 - **Luna** (`de/luna`) — powłoka środowiska (panel, launcher, OSD) na `libluna-widgets`.
 
 ## Później (poza MVP)

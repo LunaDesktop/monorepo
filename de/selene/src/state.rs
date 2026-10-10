@@ -1,6 +1,22 @@
 //! Globalny stan kompozytora Selene.
 
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
+
+use libluna_render::ImageData;
+
+/// Okno (toplevel) w modelu kompozycji: pozycja, rozmiar i gotowe piksele.
+pub struct Window {
+    pub x: f64,
+    pub y: f64,
+    pub width: i32,
+    pub height: i32,
+    /// Piksele (premultiplied RGBA8) ostatnio zacommitowanego bufora.
+    pub data: Arc<ImageData>,
+}
+
+/// Współdzielony model okien (pisany przez wątek protokołu, czytany przez wyjście).
+pub type WindowModel = Arc<Mutex<Vec<Window>>>;
 
 /// Stan współdzielony przez wszystkie handlery protokołu.
 pub struct State {
@@ -12,6 +28,8 @@ pub struct State {
     pub clients: u32,
     pub surfaces: u32,
     pub toplevels: u32,
+    /// Model okien współdzielony z wątkiem wyjścia.
+    pub windows: WindowModel,
 }
 
 impl Default for State {
@@ -22,6 +40,7 @@ impl Default for State {
             clients: 0,
             surfaces: 0,
             toplevels: 0,
+            windows: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }

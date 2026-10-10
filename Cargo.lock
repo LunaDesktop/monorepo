@@ -450,6 +450,7 @@ version = "0.0.1"
 dependencies = [
  "libluna-core",
  "libluna-i18n",
+ "libluna-platform",
  "libluna-render",
  "rustix 0.38.44",
  "wayland-protocols",

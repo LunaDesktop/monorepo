@@ -5,6 +5,7 @@
 //! i deskryptorze backendu. Renderowanie docelowo przez `libluna-render`.
 
 mod compositor;
+mod output;
 mod seat;
 mod shell;
 mod shm;
@@ -47,6 +48,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
 
     let mut state = State::default();
+
+    // Wyjście nested: okno na nadrzędnym kompozytorze, budowane w osobnym wątku.
+    output::spawn(std::sync::Arc::clone(&state.windows), 1280, 800);
+
     let listener_fd = socket.as_raw_fd();
 
     loop {

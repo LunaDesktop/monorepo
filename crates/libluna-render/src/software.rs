@@ -7,7 +7,8 @@
 
 use libluna_core::{Color, Point, Rect, Scale, Size};
 use tiny_skia::{
-    FillRule, LineCap, LineJoin, Mask, Paint, Path, PathBuilder, Pixmap, Shader, Stroke, Transform,
+    FillRule, IntSize, LineCap, LineJoin, Mask, Paint, Path, PathBuilder, Pixmap, PixmapPaint,
+    Shader, Stroke, Transform,
 };
 
 use crate::scene::{DrawCommand, Scene};
@@ -151,6 +152,30 @@ impl SoftwareRenderer {
                         run.weight,
                         run.color,
                         scale.factor(),
+                    );
+                }
+                DrawCommand::Image { rect, data } => {
+                    if rect.width() <= 0.0 || rect.height() <= 0.0 {
+                        continue;
+                    }
+                    let Some(size) = IntSize::from_wh(data.width, data.height) else {
+                        continue;
+                    };
+                    let Some(src) = Pixmap::from_vec(data.rgba.clone(), size) else {
+                        continue;
+                    };
+                    let k = scale.factor() as f32;
+                    let sx = (rect.width() as f32 / data.width as f32) * k;
+                    let sy = (rect.height() as f32 / data.height as f32) * k;
+                    let t = Transform::from_scale(sx, sy)
+                        .post_translate(rect.x() as f32 * k, rect.y() as f32 * k);
+                    pixmap.draw_pixmap(
+                        0,
+                        0,
+                        src.as_ref(),
+                        &PixmapPaint::default(),
+                        t,
+                        mask.as_ref(),
                     );
                 }
             }
@@ -324,5 +349,25 @@ mod tests {
         assert!(s.width > 0.0);
         // Punkt nieużywany wprost — upewnia się, że typ jest w zasięgu.
         let _ = Point::ZERO;
+    }
+
+    #[test]
+    fn draws_image_into_rect() {
+        use crate::scene::ImageData;
+        use std::sync::Arc;
+        let mut r = SoftwareRenderer::new(20, 20);
+        // Czerwony obraz 2×2 wpisany w prostokąt 10×10 w (5,5).
+        let data = ImageData::new(
+            2,
+            2,
+            vec![
+                255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+            ],
+        );
+        let mut scene = Scene::new();
+        scene.image(Rect::from_xywh(5.0, 5.0, 10.0, 10.0), Arc::new(data));
+        r.draw(&scene, 1.0, Color::WHITE);
+        assert_eq!(pixel(&r, 10, 10), [255, 0, 0, 255]);
+        assert_eq!(pixel(&r, 1, 1), [255, 255, 255, 255]);
     }
 }
