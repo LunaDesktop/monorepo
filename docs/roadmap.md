@@ -164,8 +164,9 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   (menu, tytuł okna, zegar/data, przełączniki, przestrzenie, użytkownik) i **launcher**
   (siatka aplikacji + wyszukiwanie); render headless do `docs/images/luna-shell-{light,dark}.png`.
   Dane (`PanelState`, `App`) oddzielone od rysowania (`PaintCtx`) — ten sam kod do podglądów
-  i sesji na żywo. Dalej: powierzchnia warstwowa `zwlr-layer-shell` po stronie klienta
-  (panel jako prawdziwy layer surface na Selene), OSD, menu kontekstowe, powiadomienia.
+  i sesji na żywo. ✅ **`luna-shell`** (bin) uruchamia panel jako prawdziwą **powierzchnię
+  warstwową** (`wlr-layer-shell` po stronie klienta w `libluna-platform`); bez kompozytora
+  kończy się czytelnym `NoCompositor`. Dalej: OSD, powiadomienia, menu kontekstowe.
 
 ## Później (poza MVP)
 - Dostępność AT-SPI, IME, schowek, drag & drop, animacje, backend GPU, mini-CSS dla motywów.

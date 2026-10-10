@@ -7,8 +7,12 @@
 //! wejścia (`seat`, `xkbcommon`) oraz pętlę zdarzeń.
 //!
 //! Punkt wejścia to [`run`] z [`AppConfig`]: otwiera okno i wywołuje domknięcie
-//! rysujące przy każdym odświeżeniu.
+//! rysujące przy każdym odświeżeniu. Gdy [`AppConfig::layer`] jest ustawione, zamiast
+//! okna powstaje **powierzchnia warstwowa** (`wlr-layer-shell`) — tak działa panel Luny.
 
 pub mod window;
 
-pub use window::{run, AppConfig, Frame};
+pub use window::{run, AppConfig, Frame, LayerConfig};
+
+/// Warstwy powierzchni (`wlr-layer-shell`) — reeksport dla wygody odbiorców.
+pub use smithay_client_toolkit::shell::wlr_layer::{Anchor, Layer};

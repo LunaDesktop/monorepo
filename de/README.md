@@ -70,9 +70,12 @@ Selene.
 - `de/luna/src/panel.rs` — **panel górny** (menu, tytuł okna, zegar/data, przełączniki,
   przestrzenie robocze, użytkownik) i **launcher** (siatka aplikacji + wyszukiwanie).
 - `luna-panel` (bin) — render headless: `docs/images/luna-shell-{light,dark}.png`.
+- `luna-shell` (bin) — panel na żywo jako **powierzchnia warstwowa** (`wlr-layer-shell`).
+- `libluna-platform` obsługuje teraz oba tryby: okno `xdg-shell` (CSD) i powierzchnię
+  warstwową (`AppConfig::layer(LayerConfig::…)`) — `LayerConfig::top_panel`/`overlay`.
 - Dane (`PanelState`, `App`) są oddzielone od rysowania (`PaintCtx`), więc ten sam kod
   obsługuje podglądy i sesję na żywo.
-- Dalej: panel jako powierzchnia `zwlr-layer-shell` (po stronie klienta), OSD, powiadomienia.
+- Dalej: OSD, powiadomienia, menu kontekstowe.
 
 ## Jeszcze nie / Not yet
 
