@@ -71,6 +71,8 @@ pub struct XdgToplevelData {
     pub app_id: Mutex<String>,
     /// Powiązana powierzchnia (do aktualizacji modelu okien).
     pub surface: WlSurface,
+    /// Powiązany obiekt `zxdg_toplevel_decoration_v1` (jeśli klient go utworzył).
+    pub decoration: Mutex<Option<crate::decoration::ToplevelDecoration>>,
 }
 
 impl XdgToplevelData {
@@ -79,6 +81,7 @@ impl XdgToplevelData {
             title: Mutex::new(String::new()),
             app_id: Mutex::new(String::new()),
             surface,
+            decoration: Mutex::new(None),
         }
     }
 }

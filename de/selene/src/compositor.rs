@@ -308,6 +308,10 @@ fn upsert_window(
                 popup,
                 layer,
                 mapped: true,
+                minimized: false,
+                maximized: false,
+                fullscreen: false,
+                saved: None,
                 data: image,
             });
             *slot = Some(i);
@@ -406,7 +410,7 @@ fn maybe_configure_xdg(state: &mut State, data: &SurfaceData) {
         let _ = toplevel.send_event(xdg_toplevel::Event::Configure {
             width: 1024,
             height: 720,
-            states: vec![3], // ACTIVATED
+            states: vec![4], // ACTIVATED
         });
         let _ = toplevel.send_event(xdg_toplevel::Event::WmCapabilities {
             capabilities: vec![],

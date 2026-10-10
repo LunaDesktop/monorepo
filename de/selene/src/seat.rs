@@ -17,7 +17,7 @@ use wayland_server::{
 
 use crate::compositor::SurfaceData;
 use crate::shell::XdgSurfaceData;
-use crate::state::{DragState, ResizeState, State, TITLEBAR};
+use crate::state::{DragState, ResizeState, SavedGeom, State, TITLEBAR};
 
 /// Kompaktowa mapa klawiszy (standardowe reguły XKB z systemowych danych).
 const KEYMAP: &str = r#"xkb_keymap {
@@ -29,6 +29,11 @@ const KEYMAP: &str = r#"xkb_keymap {
 };
 "#;
 
+/// Maski krawędzi zmiany rozmiaru.
+const EDGE_TOP: u8 = 1;
+const EDGE_BOTTOM: u8 = 2;
+const EDGE_LEFT: u8 = 4;
+const EDGE_RIGHT: u8 = 8;
 /// Minimalny rozmiar treści okna przy przeskalowaniu.
 const MIN_W: f64 = 120.0;
 const MIN_H: f64 = 80.0;
@@ -121,9 +126,12 @@ fn make_keymap() -> Option<(OwnedFd, u32)> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Part {
     Close,
-    Grip,
+    Maximize,
+    Minimize,
     Title,
     Content,
+    /// Zmiana rozmiaru za krawędź/narożnik (bitmaska: 1=góra,2=dół,4=lewo,8=prawo).
+    Resize(u8),
 }
 
 /// Trasuje jedno zdarzenie wejścia do klientów/okien.
@@ -143,7 +151,7 @@ fn hit(state: &State, pos: Point) -> Option<(usize, Part)> {
     let windows = state.windows.lock().unwrap();
     let mut best: Option<(usize, i32)> = None;
     for (i, w) in windows.iter().enumerate() {
-        if w.mapped && w.outer().contains(pos) {
+        if w.mapped && !w.minimized && w.outer().contains(pos) {
             match best {
                 Some((_, z)) if z >= w.z => {}
                 _ => best = Some((i, w.z)),
@@ -154,12 +162,19 @@ fn hit(state: &State, pos: Point) -> Option<(usize, Part)> {
     let w = &windows[i];
     let part = if w.close_rect().contains(pos) {
         Part::Close
-    } else if w.grip_rect().contains(pos) {
-        Part::Grip
-    } else if w.titlebar().contains(pos) {
-        Part::Title
+    } else if w.maximize_rect().contains(pos) {
+        Part::Maximize
+    } else if w.minimize_rect().contains(pos) {
+        Part::Minimize
     } else {
-        Part::Content
+        let edges = w.resize_edges(pos);
+        if edges != 0 {
+            Part::Resize(edges)
+        } else if w.titlebar().contains(pos) {
+            Part::Title
+        } else {
+            Part::Content
+        }
     };
     Some((i, part))
 }
@@ -169,7 +184,7 @@ fn content_window(state: &State, pos: Point) -> Option<usize> {
     let windows = state.windows.lock().unwrap();
     let mut best: Option<(usize, i32)> = None;
     for (i, w) in windows.iter().enumerate() {
-        if w.mapped && w.content().contains(pos) {
+        if w.mapped && !w.minimized && w.content().contains(pos) {
             match best {
                 Some((_, z)) if z >= w.z => {}
                 _ => best = Some((i, w.z)),
@@ -283,17 +298,14 @@ fn pointer_button(state: &mut State, pos: Point, button: PointerButton, st: Butt
                     send_close(state, slot);
                     return;
                 }
-                Part::Grip => {
+                Part::Minimize => {
                     pointer_leave(state);
-                    if let Some((_, _, w, h)) = window_geometry(state, slot) {
-                        state.resize = Some(ResizeState {
-                            slot,
-                            start_w: w,
-                            start_h: h,
-                            start_px: pos.x,
-                            start_py: pos.y,
-                        });
-                    }
+                    toggle_minimize(state, slot);
+                    return;
+                }
+                Part::Maximize => {
+                    pointer_leave(state);
+                    toggle_maximize(state, slot);
                     return;
                 }
                 Part::Title => {
@@ -303,6 +315,22 @@ fn pointer_button(state: &mut State, pos: Point, button: PointerButton, st: Butt
                             slot,
                             off_x: pos.x - ox,
                             off_y: pos.y - oy,
+                        });
+                    }
+                    return;
+                }
+                Part::Resize(edges) => {
+                    pointer_leave(state);
+                    if let Some((x, y, w, h)) = window_geometry(state, slot) {
+                        state.resize = Some(ResizeState {
+                            slot,
+                            edges,
+                            start_x: x,
+                            start_y: y,
+                            start_w: w,
+                            start_h: h,
+                            start_px: pos.x,
+                            start_py: pos.y,
                         });
                     }
                     return;
@@ -399,24 +427,42 @@ fn update_pointer_focus(state: &mut State, pos: Point) {
     }
 }
 
-/// Przeskalowanie okna w trakcie przeciągania uchwytu; wysyła `xdg_toplevel.configure`.
+/// Przeskalowanie okna w trakcie przeciągania krawędzi/narożnika; wysyła `xdg_toplevel.configure`.
 fn do_resize(state: &mut State, pos: Point) {
     let Some(rs) = state.resize else {
         return;
     };
-    let nw = (rs.start_w + (pos.x - rs.start_px)).max(MIN_W);
-    let nh = (rs.start_h + (pos.y - rs.start_py)).max(MIN_H);
+    let dx = pos.x - rs.start_px;
+    let dy = pos.y - rs.start_py;
+    let mut x = rs.start_x;
+    let mut y = rs.start_y;
+    let mut w = rs.start_w;
+    let mut h = rs.start_h;
+    if rs.edges & EDGE_LEFT != 0 {
+        w = (rs.start_w - dx).max(MIN_W);
+        x = rs.start_x + (rs.start_w - w);
+    } else if rs.edges & EDGE_RIGHT != 0 {
+        w = (rs.start_w + dx).max(MIN_W);
+    }
+    if rs.edges & EDGE_TOP != 0 {
+        h = (rs.start_h - dy).max(MIN_H);
+        y = rs.start_y + (rs.start_h - h);
+    } else if rs.edges & EDGE_BOTTOM != 0 {
+        h = (rs.start_h + dy).max(MIN_H);
+    }
     {
         let mut windows = state.windows.lock().unwrap();
-        if let Some(w) = windows.get_mut(rs.slot) {
-            w.width = nw as i32;
-            w.height = nh as i32;
+        if let Some(w2) = windows.get_mut(rs.slot) {
+            w2.x = x;
+            w2.y = y;
+            w2.width = w as i32;
+            w2.height = h as i32;
         }
     }
-    send_configure(state, rs.slot, nw, nh);
+    send_configure(state, rs.slot, w, h);
 }
 
-/// Wysyła konfigurację rozmiaru (`xdg_surface.configure` + `xdg_toplevel.configure`).
+/// Wysyła konfigurację rozmiaru i stanów (`xdg_surface.configure` + `xdg_toplevel.configure`).
 fn send_configure(state: &mut State, slot: usize, w: f64, h: f64) {
     let Some(surface) = state.slots.get(slot).cloned() else {
         return;
@@ -427,6 +473,7 @@ fn send_configure(state: &mut State, slot: usize, w: f64, h: f64) {
     let Some(xs) = sd.xdg_surface.lock().unwrap().clone() else {
         return;
     };
+    let states = window_states(state, slot);
     let serial = state.next_serial();
     let _ = xs.send_event(xdg_surface::Event::Configure { serial });
     if let Some(xd) = xs.data::<XdgSurfaceData>() {
@@ -434,9 +481,152 @@ fn send_configure(state: &mut State, slot: usize, w: f64, h: f64) {
             let _ = tl.send_event(xdg_toplevel::Event::Configure {
                 width: w as i32,
                 height: h as i32,
-                states: vec![3],
+                states,
             });
         }
+    }
+}
+
+/// Stany `xdg_toplevel` dla okna (ACTIVATED + ewentualnie MAXIMIZED/FULLSCREEN).
+fn window_states(state: &State, slot: usize) -> Vec<u8> {
+    let mut states = vec![4u8]; // ACTIVATED
+    if let Some(w) = state.windows.lock().unwrap().get(slot) {
+        if w.maximized {
+            states.push(1); // MAXIMIZED
+        }
+        if w.fullscreen {
+            states.push(2); // FULLSCREEN
+        }
+    }
+    states
+}
+
+/// Rozmiar monitora (na razie pierwszego).
+fn output_size(state: &State) -> (f64, f64) {
+    state
+        .outputs
+        .lock()
+        .unwrap()
+        .first()
+        .map(|o| (o.width as f64, o.height as f64))
+        .unwrap_or((1280.0, 800.0))
+}
+
+/// Przełącza minimalizację (ukrycie przez kompozytor).
+fn toggle_minimize(state: &mut State, slot: usize) {
+    let minimized = {
+        let mut windows = state.windows.lock().unwrap();
+        match windows.get_mut(slot) {
+            Some(w) if !w.popup && !w.layer => {
+                w.minimized = !w.minimized;
+                w.minimized
+            }
+            _ => return,
+        }
+    };
+    if minimized {
+        clear_focus_if(state, slot);
+    }
+}
+
+/// Przełącza maksymalizację (zapamiętuje/odtwarza geometrię).
+fn toggle_maximize(state: &mut State, slot: usize) {
+    let (ow, oh) = output_size(state);
+    {
+        let mut windows = state.windows.lock().unwrap();
+        let Some(w) = windows.get_mut(slot) else {
+            return;
+        };
+        if w.popup || w.layer {
+            return;
+        }
+        if w.maximized {
+            if let Some(sv) = w.saved.take() {
+                w.x = sv.x;
+                w.y = sv.y;
+                w.width = sv.width;
+                w.height = sv.height;
+            }
+            w.maximized = false;
+        } else {
+            if !w.fullscreen {
+                w.saved = Some(SavedGeom {
+                    x: w.x,
+                    y: w.y,
+                    width: w.width,
+                    height: w.height,
+                });
+            }
+            w.maximized = true;
+            w.fullscreen = false;
+            w.minimized = false;
+            w.x = 0.0;
+            w.y = 0.0;
+            w.width = ow as i32;
+            w.height = (oh - TITLEBAR).max(MIN_H) as i32;
+        }
+    }
+    let (nw, nh) = window_geometry(state, slot)
+        .map(|(_, _, w, h)| (w, h))
+        .unwrap_or((ow, oh));
+    send_configure(state, slot, nw, nh);
+}
+
+/// Przełącza pełny ekran (ukrywa dekorację).
+fn toggle_fullscreen(state: &mut State, slot: usize) {
+    let (ow, oh) = output_size(state);
+    {
+        let mut windows = state.windows.lock().unwrap();
+        let Some(w) = windows.get_mut(slot) else {
+            return;
+        };
+        if w.popup || w.layer {
+            return;
+        }
+        if w.fullscreen {
+            if let Some(sv) = w.saved.take() {
+                w.x = sv.x;
+                w.y = sv.y;
+                w.width = sv.width;
+                w.height = sv.height;
+            }
+            w.fullscreen = false;
+        } else {
+            if !w.maximized {
+                w.saved = Some(SavedGeom {
+                    x: w.x,
+                    y: w.y,
+                    width: w.width,
+                    height: w.height,
+                });
+            }
+            w.fullscreen = true;
+            w.maximized = false;
+            w.minimized = false;
+            w.x = 0.0;
+            w.y = 0.0;
+            w.width = ow as i32;
+            w.height = oh as i32;
+        }
+    }
+    let (nw, nh) = window_geometry(state, slot)
+        .map(|(_, _, w, h)| (w, h))
+        .unwrap_or((ow, oh));
+    send_configure(state, slot, nw, nh);
+}
+
+/// Zdejmuje fokus klawiatury/wskaźnika z okna (np. po minimalizacji).
+fn clear_focus_if(state: &mut State, slot: usize) {
+    if state.keyboard_focus.as_ref().map(|(s, _)| *s) == Some(slot) {
+        let kb = state.keyboard.clone();
+        if let (Some((_, surface)), Some(kb)) = (state.keyboard_focus.clone(), kb) {
+            let serial = state.next_serial();
+            let _ = kb.send_event(wl_keyboard::Event::Leave { serial, surface });
+        }
+        state.keyboard_focus = None;
+    }
+    if state.pointer_focus.as_ref().map(|(s, _)| *s) == Some(slot) {
+        pointer_leave(state);
     }
 }
 
@@ -496,13 +686,17 @@ fn set_keyboard_focus(state: &mut State, slot: usize) {
 }
 
 fn keyboard_key(state: &mut State, keysym: u32, st: ButtonState) {
-    if state.keyboard_focus.is_none() {
-        return;
-    }
     let kb = state.keyboard.clone();
     let Some(kb) = kb else { return };
     sync_modifiers(state, &kb, keysym, st);
     if is_modifier_keysym(keysym) {
+        return;
+    }
+    // Skróty menedżera okien (Super + …) przechwytujemy przed klientem.
+    if state.sent_mods.logo && window_shortcut(state, keysym, st) {
+        return;
+    }
+    if state.keyboard_focus.is_none() {
         return;
     }
     if let Some(key) = keysym_to_keycode(keysym) {
@@ -519,6 +713,94 @@ fn keyboard_key(state: &mut State, keysym: u32, st: ButtonState) {
             state: wl_state,
         });
     }
+}
+
+/// Skróty menedżera okien z modyfikatorem Super. Zwraca `true`, gdy obsłużono.
+fn window_shortcut(state: &mut State, keysym: u32, st: ButtonState) -> bool {
+    if st != ButtonState::Pressed {
+        // Zjedz także zwolnienia naszych klawiszy, by nie trafiły do klienta.
+        return matches!(keysym, 0x006d | 0x0066 | 0xff52 | 0xff54 | 0xff09);
+    }
+    let focused = state.keyboard_focus.as_ref().map(|(s, _)| *s);
+    match keysym {
+        0x006d => {
+            // Super+M — minimalizuj/przywróć.
+            if let Some(s) = focused {
+                toggle_minimize(state, s);
+            }
+            true
+        }
+        0x0066 => {
+            // Super+F — pełny ekran.
+            if let Some(s) = focused {
+                toggle_fullscreen(state, s);
+            }
+            true
+        }
+        0xff52 => {
+            // Super+Up — maksymalizuj/przywróć.
+            if let Some(s) = focused {
+                toggle_maximize(state, s);
+            }
+            true
+        }
+        0xff54 => {
+            // Super+Down — przywróć z maksymalizacji/fullscreenu.
+            if let Some(s) = focused {
+                restore_window(state, s);
+            }
+            true
+        }
+        0xff09 => {
+            // Super+Tab — przełącz okna (przywraca zminimalizowane).
+            cycle_windows(state);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Przywraca okno z minimalizacji/maksymalizacji/fullscreenu.
+fn restore_window(state: &mut State, slot: usize) {
+    let (min, max, full) = {
+        let windows = state.windows.lock().unwrap();
+        match windows.get(slot) {
+            Some(w) => (w.minimized, w.maximized, w.fullscreen),
+            None => return,
+        }
+    };
+    if min {
+        toggle_minimize(state, slot);
+    } else if full {
+        toggle_fullscreen(state, slot);
+    } else if max {
+        toggle_maximize(state, slot);
+    }
+}
+
+/// Przełącza fokus na kolejne okno (przywracając je, jeśli było zminimalizowane).
+fn cycle_windows(state: &mut State) {
+    let slots: Vec<usize> = {
+        let windows = state.windows.lock().unwrap();
+        windows
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| w.mapped && !w.popup && !w.layer)
+            .map(|(i, _)| i)
+            .collect()
+    };
+    if slots.is_empty() {
+        return;
+    }
+    let cur = state.keyboard_focus.as_ref().map(|(s, _)| *s);
+    let next = match cur.and_then(|c| slots.iter().position(|&s| s == c)) {
+        Some(p) => slots[(p + 1) % slots.len()],
+        None => slots[0],
+    };
+    if let Some(w) = state.windows.lock().unwrap().get_mut(next) {
+        w.minimized = false;
+    }
+    raise_and_focus(state, next);
 }
 
 /// Wysyła wciśnięcia/zwolnienia klawiszy modyfikujących wynikające z bieżącego stanu.
@@ -707,23 +989,53 @@ mod tests {
             popup: false,
             layer: false,
             mapped: true,
+            minimized: false,
+            maximized: false,
+            fullscreen: false,
+            saved: None,
             data: Arc::new(ImageData::empty(200, 120)),
         }
     }
 
     #[test]
-    fn decoration_parts_are_laid_out() {
+    fn window_controls_are_laid_out() {
         let w = sample_window();
         // Pasek tytułu na górze, treść pod nim.
         assert_eq!(w.titlebar().bottom(), w.y + TITLEBAR);
         assert_eq!(w.content().y(), w.y + TITLEBAR);
-        // Przycisk zamknięcia w prawym górnym narożniku.
+        // Zamknij w prawym górnym narożniku.
         let c = w.close_rect();
         assert!(c.contains(Point::new(w.x + 200.0 - 1.0, w.y + 1.0)));
-        assert!(!c.contains(Point::new(w.x + 10.0, w.y + 5.0)));
-        // Uchwyt przeskalowania w prawym-dolnym narożniku treści.
-        let g = w.grip_rect();
-        let c = w.content();
-        assert!(g.contains(Point::new(c.right() - 1.0, c.bottom() - 1.0)));
+        // Maksymalizuj po lewej od zamknij, minimalizuj po lewej od maksymalizuj.
+        let m = w.maximize_rect();
+        let n = w.minimize_rect();
+        assert!(m.right() <= c.x() + 0.01);
+        assert!(n.right() <= m.x() + 0.01);
+    }
+
+    #[test]
+    fn resize_edges_detect_corners() {
+        let w = sample_window();
+        let o = w.outer();
+        // Lewy-górny narożnik → góra + lewo.
+        assert_eq!(
+            w.resize_edges(Point::new(o.x() + 1.0, o.y() + 1.0)),
+            EDGE_TOP | EDGE_LEFT
+        );
+        // Prawy-dolny narożnik → dół + prawo.
+        assert_eq!(
+            w.resize_edges(Point::new(o.right() - 1.0, o.bottom() - 1.0)),
+            EDGE_BOTTOM | EDGE_RIGHT
+        );
+        // Środek → brak krawędzi.
+        assert_eq!(w.resize_edges(o.center()), 0);
+    }
+
+    #[test]
+    fn fullscreen_hides_titlebar() {
+        let mut w = sample_window();
+        w.fullscreen = true;
+        assert_eq!(w.titlebar().bottom(), w.y);
+        assert_eq!(w.content().y(), w.y);
     }
 }

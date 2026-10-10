@@ -78,9 +78,9 @@ fn draw(frame: &mut Frame, model: &WindowModel) {
                     TextRun::new(Point::new(w.x + 10.0, w.y + 20.0), &w.title, 13.0)
                         .with_color(Color::from_rgba8(0xee, 0xee, 0xee, 0xff)),
                 );
-                // Przycisk zamknięcia (krzyżyk).
-                let c = w.close_rect().center();
                 let glyph = Color::from_rgba8(0xd0, 0xd0, 0xd0, 0xff);
+                // Zamknięcie — krzyżyk.
+                let c = w.close_rect().center();
                 frame.scene.stroke_line(
                     Point::new(c.x - 4.0, c.y - 4.0),
                     Point::new(c.x + 4.0, c.y + 4.0),
@@ -93,16 +93,22 @@ fn draw(frame: &mut Frame, model: &WindowModel) {
                     1.6,
                     glyph,
                 );
-                // Uchwyt przeskalowania (3 kropki w narożniku).
-                let g = w.grip_rect();
-                for i in 0..3 {
-                    let x = g.right() - 3.0 - i as f64 * 4.0;
-                    let y = g.bottom() - 3.0 - i as f64 * 4.0;
-                    frame.scene.fill_rect(
-                        Rect::from_xywh(x, y, 2.0, 2.0),
-                        Color::from_rgba8(0x9a, 0x9e, 0xa8, 0xff),
-                    );
-                }
+                // Maksymalizacja — kwadrat.
+                let m = w.maximize_rect().center();
+                frame.scene.stroke_rounded_rect(
+                    Rect::from_xywh(m.x - 4.0, m.y - 4.0, 8.0, 8.0),
+                    0.0,
+                    1.4,
+                    glyph,
+                );
+                // Minimalizacja — kreska.
+                let n = w.minimize_rect().center();
+                frame.scene.stroke_line(
+                    Point::new(n.x - 4.0, n.y + 3.0),
+                    Point::new(n.x + 4.0, n.y + 3.0),
+                    1.6,
+                    glyph,
+                );
             }
             // Obramowanie całego okna (tylko zwykłe okna).
             if !w.layer {

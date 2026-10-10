@@ -18,6 +18,6 @@ libluna-i18n.workspace = true
 libluna-platform.workspace = true
 
 wayland-server = "0.31"
-wayland-protocols = { version = "0.32", features = ["server"] }
+wayland-protocols = { version = "0.32", features = ["server", "unstable"] }
 wayland-protocols-wlr = { version = "0.3", features = ["server"] }
 rustix = { version = "0.38", features = ["event", "fs", "time", "mm"] }
