@@ -541,6 +541,17 @@ pub struct SplitMetrics {
     pub divider: f64,
 }
 
+/// Geometria grupy preferencji ([`PreferencesGroup`](crate::style)).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GroupMetrics {
+    /// Wysokość nagłówka grupy (tytuł nad ramką).
+    pub header: f64,
+    /// Odstęp między grupami.
+    pub gap: f64,
+    /// Wcięcie poziome zawartości grupy.
+    pub pad_x: f64,
+}
+
 /// Geometria kontrolek („component metrics”) — rozmiary i paddingi w pikselach logicznych.
 ///
 /// Widgety nie mają już własnych stałych rozmiarów: czytają je z motywu, dzięki czemu
@@ -576,6 +587,7 @@ pub struct Metrics {
     pub avatar: AvatarMetrics,
     pub shortcut: ShortcutMetrics,
     pub split: SplitMetrics,
+    pub group: GroupMetrics,
 }
 
 impl Metrics {
@@ -732,6 +744,11 @@ impl Metrics {
             split: SplitMetrics {
                 arrow_w: 30.0,
                 divider: 1.0,
+            },
+            group: GroupMetrics {
+                header: 30.0,
+                gap: 18.0,
+                pad_x: 12.0,
             },
         }
     }

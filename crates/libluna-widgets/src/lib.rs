@@ -39,6 +39,9 @@
 //! - [`ToggleGroup`] — grupa przełączników (wielokrotny wybór).
 //! - [`SplitButton`] — przycisk dzielony (akcja + strzałka).
 //! - [`Bin`] — kontener jednego dziecka (wcięcie + wyrównanie).
+//! - [`Row`] — wiersz listy (switch/combo/expander/entry/spin…) — rodzina „boxed list”.
+//! - [`PreferencesGroup`] / [`PreferencesPage`] — grupa i strona ustawień.
+//! - [`Dialog`] (+ [`AlertDialog`], [`AboutDialog`], [`ShortcutsDialog`], [`PreferencesDialog`]) — okna modalne.
 //!
 //! Układ (retencyjne drzewo, `measure`/`allocate`): [`layout`] ([`Node`], [`Layout`], [`Constraints`]).
 //!
@@ -59,6 +62,7 @@ pub mod button;
 pub mod card;
 pub mod check_button;
 pub mod ctx;
+pub mod dialogs;
 pub mod dropdown;
 pub mod entry;
 pub mod header_bar;
@@ -69,7 +73,9 @@ pub mod menu;
 pub mod nav_list;
 pub mod pager;
 pub mod path_bar;
+pub mod preferences;
 pub mod radio_group;
+pub mod rows;
 pub mod scroll_view;
 pub mod search_entry;
 pub mod shortcut_label;
@@ -95,6 +101,9 @@ pub use button::{Button, ButtonVariant};
 pub use card::Card;
 pub use check_button::CheckButton;
 pub use ctx::PaintCtx;
+pub use dialogs::{
+    AboutDialog, AlertDialog, AlertRects, Dialog, DialogRects, PreferencesDialog, ShortcutsDialog,
+};
 pub use dropdown::DropDown;
 pub use entry::{Entry, EntryIcon, TextInput};
 pub use header_bar::{ControlsLayout, ControlsSide, HeaderBar, TitleAlign, WindowControl};
@@ -104,7 +113,9 @@ pub use menu::{Menu, MenuEntry, MenuRow};
 pub use nav_list::{NavEntry, NavList, NavRow};
 pub use pager::Pager;
 pub use path_bar::PathBar;
+pub use preferences::{PreferencesGroup, PreferencesPage};
 pub use radio_group::RadioGroup;
+pub use rows::{Row, RowRects, RowSuffix};
 pub use scroll_view::ScrollView;
 pub use search_entry::SearchEntry;
 pub use shortcut_label::ShortcutLabel;

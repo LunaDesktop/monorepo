@@ -28,10 +28,10 @@ pub use geometry::{Insets, Point, Rect, Size};
 pub use scale::Scale;
 pub use style::{
     ActionRowMetrics, AvatarMetrics, BannerMetrics, BottomSheetMetrics, ButtonMetrics, CardMetrics,
-    CheckMetrics, DropDownMetrics, EntryMetrics, HeaderBarMetrics, ItemViewMetrics, MenuMetrics,
-    Metrics, NavMetrics, PagerMetrics, PathBarMetrics, RadioMetrics, Radius, ScrollViewMetrics,
-    SegmentedMetrics, ShortcutMetrics, SliderMetrics, Spacing, SpinnerMetrics, SplitMetrics,
-    StatusPageMetrics, StepperMetrics, SwitchMetrics, TabsMetrics, Theme, ToastMetrics,
-    TooltipMetrics, Typography,
+    CheckMetrics, DropDownMetrics, EntryMetrics, GroupMetrics, HeaderBarMetrics, ItemViewMetrics,
+    MenuMetrics, Metrics, NavMetrics, PagerMetrics, PathBarMetrics, RadioMetrics, Radius,
+    ScrollViewMetrics, SegmentedMetrics, ShortcutMetrics, SliderMetrics, Spacing, SpinnerMetrics,
+    SplitMetrics, StatusPageMetrics, StepperMetrics, SwitchMetrics, TabsMetrics, Theme,
+    ToastMetrics, TooltipMetrics, Typography,
 };
 pub use theme_file::{available as available_themes, StyledTheme, ThemePatch};
