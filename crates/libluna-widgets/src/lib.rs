@@ -23,6 +23,9 @@
 //! - [`SearchEntry`] — pole tekstowe wyszukiwania (lupka, kursor, czyszczenie).
 //! - [`ItemView`] — widok elementów (pliki/katalogi) w siatce lub liście.
 //! - [`ScrollView`] — przewijanie pionowe (rolka + „kciuk”).
+//! - [`Stepper`] — krokowiec (`−` wartość `+`).
+//! - [`CheckButton`] — pole wyboru (checkbox) z etykietą.
+//! - [`RadioGroup`] — lista opcji z pojedynczym wyborem.
 //!
 //! ```no_run
 //! use libluna_widgets::{PaintCtx, ViewSwitcher};
@@ -34,6 +37,7 @@
 
 pub mod bottom_sheet;
 pub mod button;
+pub mod check_button;
 pub mod ctx;
 pub mod dropdown;
 pub mod header_bar;
@@ -43,9 +47,11 @@ pub mod menu;
 pub mod nav_list;
 pub mod pager;
 pub mod path_bar;
+pub mod radio_group;
 pub mod scroll_view;
 pub mod search_entry;
 pub mod slider;
+pub mod stepper;
 pub mod switch;
 pub mod tab_bar;
 pub mod tab_view;
@@ -53,6 +59,7 @@ pub mod view_switcher;
 
 pub use bottom_sheet::BottomSheet;
 pub use button::{Button, ButtonVariant};
+pub use check_button::CheckButton;
 pub use ctx::PaintCtx;
 pub use dropdown::DropDown;
 pub use header_bar::{ControlsLayout, ControlsSide, HeaderBar, TitleAlign, WindowControl};
@@ -61,9 +68,11 @@ pub use menu::{Menu, MenuEntry, MenuRow};
 pub use nav_list::{NavEntry, NavList, NavRow};
 pub use pager::Pager;
 pub use path_bar::PathBar;
+pub use radio_group::RadioGroup;
 pub use scroll_view::ScrollView;
 pub use search_entry::SearchEntry;
 pub use slider::Slider;
+pub use stepper::{Stepper, StepperSide};
 pub use switch::Switch;
 pub use tab_bar::{Tab, TabBar};
 pub use tab_view::TabView;

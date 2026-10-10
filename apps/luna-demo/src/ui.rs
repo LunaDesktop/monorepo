@@ -11,9 +11,10 @@ use libluna_core::{
 use libluna_i18n::{tr, Locale};
 use libluna_render::TextEngine;
 use libluna_widgets::{
-    BottomSheet, Button, ControlsLayout, ControlsSide, DropDown, HeaderBar, Item, ItemView, Menu,
-    MenuEntry, NavEntry, NavList, Pager, PaintCtx, PathBar, ScrollView, SearchEntry, Slider,
-    Switch, Tab, TabBar, TabView, ViewMode, ViewSwitcher, WindowControl,
+    BottomSheet, Button, CheckButton, ControlsLayout, ControlsSide, DropDown, HeaderBar, Item,
+    ItemView, Menu, MenuEntry, NavEntry, NavList, Pager, PaintCtx, PathBar, RadioGroup, ScrollView,
+    SearchEntry, Slider, Stepper, StepperSide, Switch, Tab, TabBar, TabView, ViewMode,
+    ViewSwitcher, WindowControl,
 };
 
 const STATUS_H: f64 = 28.0;
@@ -36,6 +37,8 @@ pub enum Popover {
     Menu,
     /// Lista wyboru języka pod kontrolką języka.
     Language,
+    /// Popover opcji widoku pod przyciskiem „Opcje ▾”.
+    Options,
 }
 
 /// Stan aplikacji demo, który nie należy do warstwy platformy ani do widgetów.
@@ -81,6 +84,13 @@ pub struct Demo {
     /// Przewijanie listy plików i stan przeciągania paska.
     pub files_scroll: ScrollView,
     pub scroll_dragging: bool,
+    /// Stan popovera „Opcje” (rozmiar ikon, sortowanie, ukryte pliki) i podświetlenia.
+    pub icon_size: i64,
+    pub sort: usize,
+    pub show_hidden: bool,
+    pub options_stepper_hover: Option<StepperSide>,
+    pub options_radio_hover: Option<usize>,
+    pub options_check_hover: bool,
 }
 
 impl Default for Demo {
@@ -136,6 +146,12 @@ impl Default for Demo {
             items_hover: None,
             files_scroll: ScrollView::new(),
             scroll_dragging: false,
+            icon_size: 32,
+            sort: 0,
+            show_hidden: false,
+            options_stepper_hover: None,
+            options_radio_hover: None,
+            options_check_hover: false,
         }
     }
 }
@@ -301,6 +317,8 @@ pub fn popover_menu(
             let w = menu.width(text, theme);
             Some((menu.place(lay.language, w, viewport, theme), menu))
         }
+        // Popover „Opcje” rysowany osobno (własny układ).
+        Popover::Options => None,
     }
 }
 
@@ -567,6 +585,27 @@ pub fn handle_events(
                             continue;
                         }
 
+                        // Popover „Opcje” obsługuje własne kontrolki.
+                        if demo.popover == Some(Popover::Options) {
+                            let ol = options_layout(size, theme, &lay);
+                            let mut stepper =
+                                Stepper::new(demo.icon_size, ICON_MIN, ICON_MAX).step(8);
+                            let mut radios = sort_options();
+                            radios.set_selected(demo.sort);
+                            let mut check = CheckButton::new(tr("Show hidden files"));
+                            check.set_checked(demo.show_hidden);
+                            if stepper.click_at(ol.stepper, theme, p) {
+                                demo.icon_size = stepper.value();
+                            } else if radios.click_at(ol.radios, p, theme) {
+                                demo.sort = radios.selected();
+                            } else if check.click_at(ol.check, p) {
+                                demo.show_hidden = check.checked();
+                            } else if !ol.panel.contains(p) {
+                                demo.popover = None;
+                            }
+                            continue;
+                        }
+
                         // Gdy popover otwarty, klik wybiera pozycję albo zamyka.
                         if demo.popover.is_some() {
                             if let (Some((panel, menu)), Some(kind)) = (&popover, demo.popover) {
@@ -600,6 +639,8 @@ pub fn handle_events(
                             }
                         } else if lay.burger.contains(p) {
                             demo.popover = Some(Popover::Menu);
+                        } else if lay.options_button.contains(p) {
+                            demo.popover = Some(Popover::Options);
                         } else if lay.language.contains(p) {
                             demo.popover = Some(Popover::Language);
                         } else if lay.sidebar_handle.contains(p) {
@@ -676,6 +717,14 @@ pub fn handle_events(
                         let area = demo.sheet.content_rect(size, theme);
                         demo.pager.update_drag(position.x, area);
                     }
+                    continue;
+                }
+                if demo.popover == Some(Popover::Options) {
+                    let ol = options_layout(size, theme, &lay);
+                    demo.options_stepper_hover = Stepper::new(demo.icon_size, ICON_MIN, ICON_MAX)
+                        .side_at(ol.stepper, theme, position);
+                    demo.options_radio_hover = sort_options().index_at(ol.radios, position, theme);
+                    demo.options_check_hover = CheckButton::new("").hit(ol.check, position);
                     continue;
                 }
                 if demo.dragging_sidebar && demo.sidebar_visible {
@@ -850,6 +899,11 @@ pub fn build_scene(
     if let Some((panel, mut menu)) = popover_menu(size, theme, text, &lay, demo) {
         menu.set_hovered(demo.popover_hover);
         menu.paint(&mut paint, panel);
+    }
+
+    // Popover „Opcje” (rozmiar ikon / sortowanie / ukryte pliki).
+    if demo.popover == Some(Popover::Options) {
+        draw_options(&mut paint, size, &lay, demo);
     }
 
     // Dolny panel (modalny) rysowany na samym wierzchu.
@@ -1240,4 +1294,149 @@ fn draw_sidebar_icon(paint: &mut PaintCtx, color: Color, box_: Rect, filled: boo
         let inner = Rect::from_xywh(outer.x() + 2.0, outer.y() + 2.0, w * 0.36, h - 4.0);
         paint.scene.fill_rounded_rect(inner, 2.0, color);
     }
+}
+
+// --- Popover „Opcje” (rozmiar ikon, sortowanie, ukryte pliki) ---
+
+const ICON_MIN: i64 = 16;
+const ICON_MAX: i64 = 64;
+const OPTIONS_W: f64 = 260.0;
+
+/// Rozkład popovera opcji.
+pub struct OptionsLayout {
+    pub panel: Rect,
+    pub stepper: Rect,
+    pub radios: Rect,
+    pub check: Rect,
+    pub icon_label_cy: f64,
+    pub sort_label_cy: f64,
+    pub sep1_y: f64,
+    pub sep2_y: f64,
+}
+
+fn sort_options() -> RadioGroup {
+    RadioGroup::new([tr("Name"), tr("Date modified"), tr("Size")])
+}
+
+/// Liczy rozkład popovera opcji (pod przyciskiem „Opcje ▾”).
+pub fn options_layout(size: Size, theme: &Theme, lay: &Layout) -> OptionsLayout {
+    let md = theme.spacing.md;
+    let stepper_h = theme.metrics.stepper.height;
+    let stepper_w = theme.metrics.stepper.width;
+    let radio_h = 3.0 * theme.metrics.radio.row_h;
+    let check_h = theme.metrics.check.size.max(24.0);
+    let row = stepper_h;
+    let cap = 20.0;
+    let sep = 1.0;
+
+    let h = md + row + md + sep + md + cap + radio_h + md + sep + md + check_h + md;
+    let anchor = lay.options_button;
+    let mut x = anchor.x();
+    if x + OPTIONS_W > size.width - 6.0 {
+        x = size.width - 6.0 - OPTIONS_W;
+    }
+    x = x.max(6.0);
+    let mut y = anchor.bottom() + 6.0;
+    if y + h > size.height - 6.0 {
+        y = anchor.y() - h - 6.0;
+    }
+    y = y.max(6.0);
+    let panel = Rect::from_xywh(x, y, OPTIONS_W, h);
+
+    let icon_label_cy = panel.y() + md + row / 2.0;
+    let stepper = Rect::from_xywh(
+        panel.right() - md - stepper_w,
+        panel.y() + md + (row - stepper_h) / 2.0,
+        stepper_w,
+        stepper_h,
+    );
+    let sep1_y = panel.y() + md + row + md;
+    let sort_label_cy = sep1_y + md + cap / 2.0;
+    let radios = Rect::from_xywh(
+        panel.x() + md,
+        sep1_y + md + cap,
+        panel.width() - 2.0 * md,
+        radio_h,
+    );
+    let sep2_y = sep1_y + md + cap + radio_h + md;
+    let check = Rect::from_xywh(
+        panel.x() + md,
+        sep2_y + md,
+        panel.width() - 2.0 * md,
+        check_h,
+    );
+    OptionsLayout {
+        panel,
+        stepper,
+        radios,
+        check,
+        icon_label_cy,
+        sort_label_cy,
+        sep1_y,
+        sep2_y,
+    }
+}
+
+fn draw_options(paint: &mut PaintCtx, size: Size, lay: &Layout, demo: &Demo) {
+    let theme = *paint.theme;
+    let md = theme.spacing.md;
+    let body = theme.typography.body.size;
+    let ol = options_layout(size, &theme, lay);
+
+    paint
+        .scene
+        .fill_rounded_rect(ol.panel, theme.radius.medium, theme.colors.card_bg);
+    paint
+        .scene
+        .stroke_rounded_rect(ol.panel, theme.radius.medium, 1.0, theme.colors.border);
+
+    paint.label_left(
+        ol.panel.x() + md,
+        ol.icon_label_cy,
+        &tr("Icon size"),
+        body,
+        weight::NORMAL,
+        theme.colors.text,
+    );
+    let mut stepper = Stepper::new(demo.icon_size, ICON_MIN, ICON_MAX).step(8);
+    stepper.set_hovered(demo.options_stepper_hover);
+    stepper.paint(paint, ol.stepper);
+
+    paint.scene.fill_rect(
+        Rect::from_xywh(
+            ol.panel.x() + md,
+            ol.sep1_y,
+            (ol.panel.width() - 2.0 * md).max(0.0),
+            1.0,
+        ),
+        theme.colors.border,
+    );
+
+    paint.label_left(
+        ol.panel.x() + md,
+        ol.sort_label_cy,
+        &tr("Sort by"),
+        body,
+        weight::NORMAL,
+        theme.colors.text,
+    );
+    let mut radios = sort_options();
+    radios.set_selected(demo.sort);
+    radios.set_hovered(demo.options_radio_hover);
+    radios.paint(paint, ol.radios);
+
+    paint.scene.fill_rect(
+        Rect::from_xywh(
+            ol.panel.x() + md,
+            ol.sep2_y,
+            (ol.panel.width() - 2.0 * md).max(0.0),
+            1.0,
+        ),
+        theme.colors.border,
+    );
+
+    let mut check = CheckButton::new(tr("Show hidden files"));
+    check.set_checked(demo.show_hidden);
+    check.set_hovered(demo.options_check_hover);
+    check.paint(paint, ol.check);
 }

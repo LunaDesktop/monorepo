@@ -38,7 +38,8 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   (rozwijany przez `Menu`), `HeaderBar` (pasek tytułu z kontrolkami okna), `TabBar`/`TabView`
   (zakładki: pasek + model stron), `BottomSheet` (dolny panel modalny), `Pager` (karuzela stron),
   `PathBar` (okruszki), `SearchEntry` (pole wyszukiwania), `ItemView` (pliki/katalogi: siatka
-  lub lista) i `ScrollView` (przewijanie), oraz wspólny `PaintCtx`; testy hit-testingu bez okna.
+  lub lista) i `ScrollView` (przewijanie), oraz `Stepper`, `CheckButton` i `RadioGroup`
+  (krokowiec, checkbox, wybór jednokrotny); wspólny `PaintCtx`; testy hit-testingu bez okna.
 - `libluna-platform`: realne akcje okna z `Frame` (`close`/`minimize`/`toggle_maximize`).
 - Demo używa widgetów zamiast ręcznego rysowania (pasek boczny, wybór motywu/widoku, menu `☰`,
   przycisk „Opcje”, przełączniki, suwak, wybór języka, pasek tytułu, zakładki `TabBar`/`TabView`).

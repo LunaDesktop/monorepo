@@ -398,6 +398,37 @@ pub struct ScrollViewMetrics {
     pub margin: f64,
 }
 
+/// Geometria krokowca ([`Stepper`](crate::style)).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StepperMetrics {
+    /// Wysokość kontrolki.
+    pub height: f64,
+    /// Domyślna szerokość.
+    pub width: f64,
+    /// Bok przycisku `−`/`+`.
+    pub button: f64,
+}
+
+/// Geometria pola wyboru ([`CheckButton`](crate::style)).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CheckMetrics {
+    /// Bok kwadratu (checkbox).
+    pub size: f64,
+    /// Odstęp kwadratu od etykiety.
+    pub gap: f64,
+}
+
+/// Geometria grupy opcji ([`RadioGroup`](crate::style)).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RadioMetrics {
+    /// Średnica kółka.
+    pub dot: f64,
+    /// Odstęp kółka od etykiety.
+    pub gap: f64,
+    /// Wysokość wiersza opcji.
+    pub row_h: f64,
+}
+
 /// Geometria kontrolek („component metrics”) — rozmiary i paddingi w pikselach logicznych.
 ///
 /// Widgety nie mają już własnych stałych rozmiarów: czytają je z motywu, dzięki czemu
@@ -420,6 +451,9 @@ pub struct Metrics {
     pub entry: EntryMetrics,
     pub itemview: ItemViewMetrics,
     pub scrollview: ScrollViewMetrics,
+    pub stepper: StepperMetrics,
+    pub check: CheckMetrics,
+    pub radio: RadioMetrics,
 }
 
 impl Metrics {
@@ -513,6 +547,20 @@ impl Metrics {
                 thickness: 6.0,
                 min_thumb: 24.0,
                 margin: 2.0,
+            },
+            stepper: StepperMetrics {
+                height: 34.0,
+                width: 120.0,
+                button: 34.0,
+            },
+            check: CheckMetrics {
+                size: 20.0,
+                gap: 10.0,
+            },
+            radio: RadioMetrics {
+                dot: 20.0,
+                gap: 10.0,
+                row_h: 30.0,
             },
         }
     }

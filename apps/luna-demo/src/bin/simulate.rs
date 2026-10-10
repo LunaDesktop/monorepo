@@ -186,6 +186,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     frames.push(render_pixels(&settings, &demo, &text, size));
     labels.push("10. Wybór języka (DropDown)".into());
 
+    // 11. Popover „Opcje” (rozmiar ikon / sortowanie / ukryte pliki).
+    click!(Point::new(450.0, 300.0)); // zamknij popover języka
+    assert!(demo.popover.is_none(), "popover się nie zamknął");
+    let c = layout!().options_button.center();
+    click!(c);
+    assert_eq!(
+        demo.popover,
+        Some(Popover::Options),
+        "popover opcji się nie otworzył"
+    );
+    frames.push(render_pixels(&settings, &demo, &text, size));
+    labels.push("11. Popover \u{201e}Opcje\u{201d}".into());
+
     // Zapis klatek.
     for (i, pixels) in frames.iter().enumerate() {
         let path = format!("docs/images/demo-step-{}.png", i + 1);

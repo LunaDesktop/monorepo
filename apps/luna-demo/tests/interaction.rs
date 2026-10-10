@@ -6,7 +6,7 @@ use libluna_core::{
     ScrollEvent, Size, ThemePreference, ThemeSettings,
 };
 use libluna_render::TextEngine;
-use libluna_widgets::ViewSwitcher;
+use libluna_widgets::{RadioGroup, ViewSwitcher};
 use luna_demo::ui::{self, make_nav, Demo, Popover};
 
 fn size() -> Size {
@@ -179,6 +179,28 @@ fn scrolling_files_moves_offset() {
     });
     ui::handle_events(&mut settings, &[scroll], size(), &theme, &text, &mut demo);
     assert!(demo.items.scroll() > 0.0);
+}
+
+#[test]
+fn options_popover_selects_sort() {
+    let mut settings = ThemeSettings::default();
+    let mut demo = Demo::default();
+
+    // Otwórz popover „Opcje”.
+    let btn = layout(&settings, &demo).options_button.center();
+    click(&mut settings, &mut demo, btn);
+    assert_eq!(demo.popover, Some(Popover::Options));
+
+    // Klik w 3. opcję sortowania (Rozmiar).
+    let theme = settings.resolve(false);
+    let ol = ui::options_layout(size(), &theme, &layout(&settings, &demo));
+    let row = RadioGroup::new(["a", "b", "c"])
+        .row_rect(ol.radios, 2, &theme)
+        .center();
+    click(&mut settings, &mut demo, row);
+    assert_eq!(demo.sort, 2);
+    // Popover zostaje otwarty po kliknięciu wewnątrz.
+    assert_eq!(demo.popover, Some(Popover::Options));
 }
 
 #[test]
