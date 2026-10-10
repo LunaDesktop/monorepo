@@ -32,6 +32,8 @@
 //! - [`Toast`] — krótkie powiadomienie (nakładka) z opcjonalną akcją.
 //! - [`StatusPage`] — ekran stanu (pusty/powitalny): ikona, tytuł, opis, akcja.
 //!
+//! Układ (retencyjne drzewo, `measure`/`allocate`): [`layout`] ([`Node`], [`Layout`], [`Constraints`]).
+//!
 //! ```no_run
 //! use libluna_widgets::{PaintCtx, ViewSwitcher};
 //! # fn demo(ctx: &mut PaintCtx, rect: libluna_core::Rect) {
@@ -51,6 +53,7 @@ pub mod entry;
 pub mod header_bar;
 pub mod icon;
 pub mod item_view;
+pub mod layout;
 pub mod menu;
 pub mod nav_list;
 pub mod pager;
@@ -77,6 +80,7 @@ pub use dropdown::DropDown;
 pub use entry::{Entry, EntryIcon, TextInput};
 pub use header_bar::{ControlsLayout, ControlsSide, HeaderBar, TitleAlign, WindowControl};
 pub use item_view::{Item, ItemKind, ItemView, ViewMode};
+pub use layout::{Constraints, Layout, LayoutCtx, Node, Stack};
 pub use menu::{Menu, MenuEntry, MenuRow};
 pub use nav_list::{NavEntry, NavList, NavRow};
 pub use pager::Pager;

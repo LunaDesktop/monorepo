@@ -309,6 +309,10 @@ XDG_CONFIG_HOME="$PWD/examples" cargo run -p luna-demo --bin render -- --lang fr
   a także `Card` (karta z nagłówkiem), `ActionRow` (wiersz ustawień), `Toast` (powiadomienie
   nakładkowe z akcją, np. „Cofnij”) oraz `StatusPage` (ekran stanu: ikona, tytuł, opis, akcja —
   używany jako „pusty stan” listy) i wspólny `PaintCtx`.
+- `libluna-widgets::layout`: **dwuprzebiegowy układ** (retencyjne drzewo `measure`/`allocate`) —
+  [`Node`] (`VBox`/`HBox`, `Padding`, `Expanded`, `Center`, `Spacer`, `Label`, `Fixed`),
+  [`Constraints`](min/max) i [`Layout`](`desired_size`/`fit`). Liście pochłaniają nadmiar
+  (`Expanded`/`Spacer`), `Label` mierzy się realną czcionką.
 - `luna-demo`: `HeaderBar` jako widget (tytuł + `[—][□][✕]` po prawej + treść: `◧`, `+`,
   „Opcje ▾”, `☰`); karty i wiersze ustawień rysowane widgetami (`Card`, `ActionRow`);
   **popover `☰`**, chowany i rozciągany (drag) panel boczny (`NavList`),
@@ -321,6 +325,23 @@ XDG_CONFIG_HOME="$PWD/examples" cargo run -p luna-demo --bin render -- --lang fr
 - Rozmiary i paddingi kontrolek są **tokenami** (`Theme::metrics`), więc geometria jest tak samo
   „stylowalna” jak kolory — nie ma już stałych typów w widgetach (`HeaderBar::HEIGHT`,
   `Switch::WIDTH`, `Button::HEIGHT`…).
+
+## Układ (measure/allocate)
+
+Prostokąty można nadal liczyć ręcznie (jak karta „Pliki” w demo), ale `libluna-widgets::layout`
+daje **retencyjne drzewo**: aplikacja składa [`Node`], silnik robi **pomiar** (`measure`, względem
+`Constraints` min/max) i **rozmieszczenie** (`allocate`) — dwuprzebiegowo, jak w klasycznych
+toolkitach. Kontenery: `VBox`/`HBox` (odstęp `gap`), `Padding`, `Expanded`/`Spacer` (pochłaniają
+nadmiar wzdłuż osi), `Center` (naturalny rozmiar wyśrodkowany). Liściami są `Fixed`, `Label`
+(mierzy się czcionką) i `Spacer`; `Node::visit` pozwala obejść drzewo z prostokątami, a
+`Layout::fit` zwraca prostokąty liści w kolejności DFS.
+
+Minimalny przykład (`apps/luna-demo/src/bin/layout.rs`) buduje kartę ustawień **wyłącznie**
+z drzewa i renderuje ją headless:
+
+```sh
+cargo run -p luna-demo --bin layout     # → docs/images/layout.png
+```
 
 ## Zrzuty ekranu
 
@@ -336,6 +357,10 @@ Przebieg interakcji (headless `simulate`) — m.in. menu `☰`, dolny panel, pow
 karta 12 i ekran stanu („Brak wyników”) klatka 14:
 
 ![Interakcje demo](docs/images/demo-montage.png)
+
+Karta ustawień złożona z drzewa układu (`measure`/`allocate`):
+
+![Układ z drzewa](docs/images/layout.png)
 
 ## Motywacja i kontekst
 

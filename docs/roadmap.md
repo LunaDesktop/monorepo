@@ -49,11 +49,15 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
 - Motywy: wariant (light/dark/auto) + akcent, z trwałością. **Component metrics**: rozmiary
   i paddingi kontrolek wyniesione z widgetów do tokenów (`Theme::metrics`), więc styl steruje
   też geometrią (README, „Własny wygląd”).
+- Układ: **retencyjne drzewo `measure`/`allocate`** (`libluna-widgets::layout`) — `Node`
+  (`VBox`/`HBox`, `Padding`, `Expanded`, `Center`, `Spacer`, `Label`, `Fixed`), `Constraints`,
+  `Layout::fit`; przykład karty złożonej z drzewa (`bin/layout.rs` → `docs/images/layout.png`).
 - Dalej: **style instalowane jako pliki** (jak w GNOME/KDE) z **oknem podglądu** przy wyborze,
-  a potem scroll/overflow w `TabBar`, retencyjne drzewo `measure`/`allocate`.
+  a potem scroll/overflow w `TabBar`, migracja `luna-demo` na drzewo układu.
 
 ## M2 — Układ + widgety bazowe
-- Dwuprzebiegowy silnik measure/allocate.
+- Dwuprzebiegowy silnik measure/allocate — ✅ **częściowo** (silnik + kontenery `VBox`/`HBox`,
+  `Padding`, `Expanded`, `Center`, `Spacer`, `Label`; do zrobienia: migracja demo i zaokrąglenia API).
 - `Box` (h/v), `Label`, `Icon`, `Button`, `Separator`, `Spacer`.
 - Stany: hover/pressed/disabled/focus + pierścień fokusu klawiatury.
 
