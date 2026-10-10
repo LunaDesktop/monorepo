@@ -94,6 +94,8 @@ impl LayerState {
 pub struct LayerData {
     /// Powiązana powierzchnia `wl_surface`.
     pub surface: WlSurface,
+    /// Monitor, na którym kotwiczymy (indeks w [`crate::monitors::Outputs`]); `None` = pierwszy.
+    pub output: Option<usize>,
     /// Właściwości (aktualizowane przez `set_*`).
     pub state: Mutex<LayerState>,
     /// Czy wysłano już `configure`.
@@ -101,9 +103,10 @@ pub struct LayerData {
 }
 
 impl LayerData {
-    pub fn new(surface: WlSurface, layer: u32) -> Self {
+    pub fn new(surface: WlSurface, layer: u32, output: Option<usize>) -> Self {
         Self {
             surface,
+            output,
             state: Mutex::new(LayerState {
                 layer,
                 ..LayerState::default()
@@ -154,14 +157,20 @@ impl Dispatch<layer_shell::ZwlrLayerShellV1, ()> for State {
         data_init: &mut DataInit<'_, Self>,
     ) {
         if let layer_shell::Request::GetLayerSurface {
-            id, surface, layer, ..
+            id,
+            surface,
+            output,
+            layer,
+            ..
         } = request
         {
             let layer = match layer {
                 WEnum::Value(v) => v as u32,
                 WEnum::Unknown(v) => v,
             };
-            let ls = data_init.init(id, LayerData::new(surface.clone(), layer));
+            // Indeks monitora niesiony przez zasób `wl_output`.
+            let output = output.and_then(|o| o.data::<usize>().copied());
+            let ls = data_init.init(id, LayerData::new(surface.clone(), layer, output));
             // Zapamiętaj powiązanie po stronie `wl_surface` (potrzebne przy `commit`).
             if let Some(sd) = surface.data::<SurfaceData>() {
                 *sd.layer.lock().unwrap() = Some(ls);

@@ -218,7 +218,8 @@ fn composite_layer(
     let Some(ld) = ls.data::<LayerData>() else {
         return;
     };
-    let (out_w, out_h) = output_size(state);
+    let out_idx = ld.output.unwrap_or(0);
+    let (ox, oy, out_w, out_h) = output_rect(state, out_idx);
     let buffer = data.buffer.lock().unwrap().clone();
     // Pierwszy `commit` (zwykle bez bufora) → wyślij `configure` z rozmiarem.
     if !*ld.configured.lock().unwrap() {
@@ -247,10 +248,22 @@ fn composite_layer(
     };
     let image = std::sync::Arc::new(ImageData::new(w as u32, h as u32, rgba));
     let st = *ld.state.lock().unwrap();
-    let (x, y) = st.position(out_w, out_h, w as f64, h as f64);
+    let (rx, ry) = st.position(out_w, out_h, w as f64, h as f64);
     let z = crate::layer::layer_z(st.layer);
     upsert_window(
-        state, surface, data, x, y, w, h, z, "", false, true, true, image,
+        state,
+        surface,
+        data,
+        ox + rx,
+        oy + ry,
+        w,
+        h,
+        z,
+        "",
+        false,
+        true,
+        true,
+        image,
     );
     let _ = buffer.send_event(wl_buffer::Event::Release);
 }
@@ -328,15 +341,14 @@ fn upsert_window(
     (idx, created)
 }
 
-/// Rozmiar monitora (na razie pierwszego; model gotowy na wiele).
-fn output_size(state: &State) -> (f64, f64) {
-    state
-        .outputs
-        .lock()
-        .unwrap()
-        .first()
-        .map(|o| (o.width as f64, o.height as f64))
-        .unwrap_or((1280.0, 800.0))
+/// Geometria monitora `idx` (x, y, szerokość, wysokość); `idx` poza zakresem → pierwszy.
+fn output_rect(state: &State, idx: usize) -> (f64, f64, f64, f64) {
+    let outs = state.outputs.lock().unwrap();
+    let o = outs.get(idx).or_else(|| outs.first());
+    match o {
+        Some(o) => (o.x as f64, o.y as f64, o.width as f64, o.height as f64),
+        None => (0.0, 0.0, 1280.0, 800.0),
+    }
 }
 
 /// Pozycja popupu względem treści rodzica (prostokąt kotwicy + offset).

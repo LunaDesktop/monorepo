@@ -138,12 +138,21 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   ✅ M-K2: **wejście** — `wl_output`, `wl_seat` z wskaźnikiem i klawiaturą (`wl_pointer`,
   `wl_keyboard` z mapą XKB i syntezą modyfikatorów), magistrala wejścia z wybudzaniem,
   oraz **pływające okna** (fokus, podnoszenie, przeciąganie).
-  ✅ M-K3: **dekoracje po stronie serwera** (pasek tytułu, przycisk zamknięcia, uchwyt
-  przeskalowania) + operacje okna (przeciąganie, `xdg_toplevel.configure`/`close`).
+  ✅ M-K3: **dekoracje po stronie serwera** (pasek tytułu, przyciski minimalizacji/maksymalizacji/
+  zamknięcia, uchwyt przeskalowania) + operacje okna (przeciąganie, `xdg_toplevel.configure`/
+  `close`, **zmiana rozmiaru za wszystkie krawędzie i narożniki**, **maksymalizacja**, **pełny
+  ekran**, `xdg-decoration` z trybem `server_side`; skróty `Super+M`/`Super+F`/`Super+↑`/
+  `Super+↓`/`Super+Tab`).
+  ✅ M-K4: **`xdg_popup`** (menu/kontekstowe z kotwiczeniem do pozycjonera i zamykaniem poza)
+  oraz **`wlr-layer-shell`** (panele/docki: kotwice, marginesy, strefa wyłączna, warstwy,
+  wybór monitora) — fundament pulpitu Luna.
+  ✅ M-K5: **wiele monitorów** — model `OutputInfo` z pozycją, global `wl_output` per monitor,
+  przenośne **wykrywanie DRM/KMS** (`de/selene/src/drm.rs`, ioctl `GETRESOURCES`/`GETCONNECTOR`)
+  z fallbackiem na wyjście nested; okna maksymalizują się na swoim monitorze.
+  ✅ Optymalizacje: cache `mmap` puli `wl_shm` i zero-copy w rendererze (`PixmapRef::from_bytes`).
   Uruchomienie: `cargo run -p selene` (szczegóły: `de/README.md`).
-- Dalej: **wiele monitorów** (DRM/KMS), dekory/zachowanie okien (`xdg-decoration`, resize,
-  pełny ekran, `xdg_popup`, `layer-shell`), schowek (`wl_data_device`), układy klawiatury/IME,
-  backend DRM/KMS + GLES, optymalizacje (cache mapy shm, render przy zmianie modelu).
+- Dalej: schowek (`wl_data_device`), układy klawiatury/IME, realny backend DRM/KMS + GLES
+  (skanowanie, page-flip, bufory), hotplug monitorów (`wl_output.done`/`zwlr_output_manager`).
 - **Luna** (`de/luna`) — powłoka środowiska (panel, launcher, OSD) na `libluna-widgets`.
 
 ## Później (poza MVP)

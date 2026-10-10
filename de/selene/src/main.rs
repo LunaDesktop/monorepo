@@ -7,6 +7,7 @@
 
 mod compositor;
 mod decoration;
+mod drm;
 mod input;
 mod layer;
 mod monitors;
@@ -37,10 +38,31 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut display: Display<State> = Display::new()?;
     let mut handle = display.handle();
 
+    let mut state = State::default();
+
+    // Wykrywanie monitorów: DRM/KMS, a gdy niedostępne — pojedyncze wyjście nested.
+    if let Some(outs) = drm::discover() {
+        if !outs.is_empty() {
+            println!(
+                "{}: {}",
+                libluna_i18n::tr("Detected outputs"),
+                outs.iter()
+                    .map(|o| format!("{} {}x{}", o.name, o.width, o.height))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            *state.outputs.lock().unwrap() = outs;
+        }
+    }
+    let output_count = state.outputs.lock().unwrap().len();
+
     // Globalne interfejsy protokołu.
     handle.create_global::<State, wl_compositor::WlCompositor, ()>(4, ());
     handle.create_global::<State, wl_shm::WlShm, ()>(1, ());
-    handle.create_global::<State, wl_output::WlOutput, ()>(4, ());
+    // Jeden global `wl_output` na monitor.
+    for index in 0..output_count {
+        handle.create_global::<State, wl_output::WlOutput, usize>(4, index);
+    }
     handle.create_global::<State, xdg_wm_base::XdgWmBase, ()>(1, ());
     handle.create_global::<State, zxdg_decoration_manager_v1::ZxdgDecorationManagerV1, ()>(1, ());
     handle.create_global::<State, zwlr_layer_shell_v1::ZwlrLayerShellV1, ()>(4, ());
@@ -57,8 +79,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default()
     );
-
-    let mut state = State::default();
 
     // Magistrala wejścia (wątek wyjścia → wątek protokołu) z parą gniazd do wybudzania.
     let (events, mut wake_read, wake_write) = input::channel();

@@ -501,15 +501,24 @@ fn window_states(state: &State, slot: usize) -> Vec<u8> {
     states
 }
 
-/// Rozmiar monitora (na razie pierwszego).
-fn output_size(state: &State) -> (f64, f64) {
-    state
-        .outputs
+/// Prostokąt monitora, na którym leży okno (x, y, szerokość, wysokość).
+fn window_output_rect(state: &State, slot: usize) -> (f64, f64, f64, f64) {
+    let (cx, cy) = state
+        .windows
         .lock()
         .unwrap()
-        .first()
-        .map(|o| (o.width as f64, o.height as f64))
-        .unwrap_or((1280.0, 800.0))
+        .get(slot)
+        .map(|w| {
+            let c = w.content().center();
+            (c.x, c.y)
+        })
+        .unwrap_or((0.0, 0.0));
+    let outs = state.outputs.lock().unwrap();
+    let idx = crate::monitors::output_at(&outs, cx, cy);
+    match outs.get(idx).or_else(|| outs.first()) {
+        Some(o) => (o.x as f64, o.y as f64, o.width as f64, o.height as f64),
+        None => (0.0, 0.0, 1280.0, 800.0),
+    }
 }
 
 /// Przełącza minimalizację (ukrycie przez kompozytor).
@@ -531,7 +540,7 @@ fn toggle_minimize(state: &mut State, slot: usize) {
 
 /// Przełącza maksymalizację (zapamiętuje/odtwarza geometrię).
 fn toggle_maximize(state: &mut State, slot: usize) {
-    let (ow, oh) = output_size(state);
+    let (ox, oy, ow, oh) = window_output_rect(state, slot);
     {
         let mut windows = state.windows.lock().unwrap();
         let Some(w) = windows.get_mut(slot) else {
@@ -560,8 +569,8 @@ fn toggle_maximize(state: &mut State, slot: usize) {
             w.maximized = true;
             w.fullscreen = false;
             w.minimized = false;
-            w.x = 0.0;
-            w.y = 0.0;
+            w.x = ox;
+            w.y = oy;
             w.width = ow as i32;
             w.height = (oh - TITLEBAR).max(MIN_H) as i32;
         }
@@ -574,7 +583,7 @@ fn toggle_maximize(state: &mut State, slot: usize) {
 
 /// Przełącza pełny ekran (ukrywa dekorację).
 fn toggle_fullscreen(state: &mut State, slot: usize) {
-    let (ow, oh) = output_size(state);
+    let (ox, oy, ow, oh) = window_output_rect(state, slot);
     {
         let mut windows = state.windows.lock().unwrap();
         let Some(w) = windows.get_mut(slot) else {
@@ -603,8 +612,8 @@ fn toggle_fullscreen(state: &mut State, slot: usize) {
             w.fullscreen = true;
             w.maximized = false;
             w.minimized = false;
-            w.x = 0.0;
-            w.y = 0.0;
+            w.x = ox;
+            w.y = oy;
             w.width = ow as i32;
             w.height = oh as i32;
         }
