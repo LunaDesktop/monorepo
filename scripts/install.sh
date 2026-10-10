@@ -26,7 +26,23 @@ destdir=""
 do_build=1
 dry_run=0
 uninstall=0
-cargo="${CARGO:-cargo}"
+
+# Znajduje cargo: $CARGO → PATH → typowe lokalizacje rustup/systemowe.
+find_cargo() {
+    if [ -n "${CARGO:-}" ]; then
+        if command -v "$CARGO" >/dev/null 2>&1 || [ -x "$CARGO" ]; then
+            printf '%s' "$CARGO"; return 0
+        fi
+    fi
+    if command -v cargo >/dev/null 2>&1; then
+        printf 'cargo'; return 0
+    fi
+    local c
+    for c in "$HOME/.cargo/bin/cargo" /usr/local/bin/cargo /usr/bin/cargo; do
+        if [ -x "$c" ]; then printf '%s' "$c"; return 0; fi
+    done
+    return 1
+}
 
 usage() {
     cat <<EOF
@@ -100,7 +116,17 @@ fi
 
 if [ "$do_build" = 1 ]; then
     step "Budowanie (release, --locked)"
-    command -v "$cargo" >/dev/null 2>&1 || { echo "brak cargo ($cargo) na PATH" >&2; exit 1; }
+    if ! cargo="$(find_cargo)"; then
+        cat >&2 <<'EOF'
+Nie znaleziono cargo. Zainstaluj toolchain Rust i spróbuj ponownie:
+  • PaganOS:          sudo pag install rustc      # pakiet 'rustc' dostarcza cargo
+  • inne dystrybucje: sudo pacman/apt/dnf install rustc   (lub 'rust')
+  • rustup:           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+  • własna ścieżka:   CARGO=/ścieżka/do/cargo ./scripts/install.sh ...
+EOF
+        exit 1
+    fi
+    say "używam: $cargo"
     ( cd "$root" && do_cmd "$cargo" build --release --locked -p selene -p luna -p luna-demo )
 fi
 
