@@ -561,6 +561,17 @@ pub struct BarMetrics {
     pub radius: f64,
 }
 
+/// Geometria kontenerów (Box, Grid, Paned, CenterBox…).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ContainerMetrics {
+    /// Domyślny odstęp między dziećmi (Box, Grid).
+    pub gap: f64,
+    /// Grubość separatora paneli (Paned).
+    pub separator: f64,
+    /// Dodatkowa strefa trafienia wokół separatora (po każdej stronie).
+    pub hit_pad: f64,
+}
+
 /// Geometria kontrolek („component metrics”) — rozmiary i paddingi w pikselach logicznych.
 ///
 /// Widgety nie mają już własnych stałych rozmiarów: czytają je z motywu, dzięki czemu
@@ -598,6 +609,7 @@ pub struct Metrics {
     pub split: SplitMetrics,
     pub group: GroupMetrics,
     pub bar: BarMetrics,
+    pub container: ContainerMetrics,
 }
 
 impl Metrics {
@@ -763,6 +775,11 @@ impl Metrics {
             bar: BarMetrics {
                 thickness: 8.0,
                 radius: 4.0,
+            },
+            container: ContainerMetrics {
+                gap: 8.0,
+                separator: 1.0,
+                hit_pad: 4.0,
             },
         }
     }

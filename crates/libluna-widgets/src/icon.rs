@@ -149,3 +149,41 @@ pub fn maximize(paint: &mut PaintCtx, color: Color, box_: Rect, half: f64) {
         color,
     );
 }
+
+/// Oko (podgląd hasła); środek w `center`, półszerokość `size`.
+pub fn eye(paint: &mut PaintCtx, color: Color, center: Point, size: f64) {
+    use std::f64::consts::PI;
+    let w = size;
+    let h = size * 0.62;
+    let n = 12;
+    let mut prev = Point::new(center.x - w, center.y);
+    for i in 1..=n {
+        let t = i as f64 / n as f64;
+        let p = Point::new(center.x - w + 2.0 * w * t, center.y - h * (PI * t).sin());
+        paint.scene.stroke_line(prev, p, 1.6, color);
+        prev = p;
+    }
+    for i in 1..=n {
+        let t = i as f64 / n as f64;
+        let p = Point::new(center.x - w + 2.0 * w * t, center.y + h * (PI * t).sin());
+        paint.scene.stroke_line(prev, p, 1.6, color);
+        prev = p;
+    }
+    let r = size * 0.22;
+    paint.scene.fill_rounded_rect(
+        Rect::from_xywh(center.x - r, center.y - r, r * 2.0, r * 2.0),
+        r,
+        color,
+    );
+}
+
+/// Oko przekreślone (hasło ukryte).
+pub fn eye_off(paint: &mut PaintCtx, color: Color, center: Point, size: f64) {
+    eye(paint, color, center, size);
+    paint.scene.stroke_line(
+        Point::new(center.x - size * 0.9, center.y + size * 0.9),
+        Point::new(center.x + size * 0.9, center.y - size * 0.9),
+        1.6,
+        color,
+    );
+}

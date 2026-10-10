@@ -30,6 +30,12 @@ pub struct Entry {
     clearable: bool,
     focused: bool,
     hover_clear: bool,
+    /// Znak maskujący (np. `•`); `None` gdy tekst widoczny.
+    mask: Option<char>,
+    /// Podgląd hasła („oko”): pokazuje jawny tekst mimo maski.
+    peek: bool,
+    /// Miejsce zarezerwowane po prawej (np. na ikonę „oka”).
+    trailing: f64,
 }
 
 impl Entry {
@@ -50,6 +56,38 @@ impl Entry {
     pub fn clearable(mut self, clearable: bool) -> Self {
         self.clearable = clearable;
         self
+    }
+
+    /// Maskuje tekst znakiem `mask` (np. `•`) — pola haseł.
+    pub fn masked(mut self, mask: char) -> Self {
+        self.mask = Some(mask);
+        self
+    }
+
+    pub fn set_masked(&mut self, mask: Option<char>) {
+        self.mask = mask;
+    }
+
+    pub fn is_masked(&self) -> bool {
+        self.mask.is_some()
+    }
+
+    /// Pokazuje jawny tekst mimo maski (podgląd hasła).
+    pub fn set_peek(&mut self, peek: bool) {
+        self.peek = peek;
+    }
+
+    pub fn is_peek(&self) -> bool {
+        self.peek
+    }
+
+    /// Rezerwuje miejsce po prawej stronie (np. na ikonę „oka”).
+    pub fn set_trailing_space(&mut self, space: f64) {
+        self.trailing = space.max(0.0);
+    }
+
+    pub fn trailing_space(&self) -> f64 {
+        self.trailing
     }
 
     pub fn text(&self) -> &str {
@@ -146,7 +184,7 @@ impl Entry {
     pub fn clear_rect(&self, rect: Rect, theme: &Theme) -> Rect {
         let m = theme.metrics.entry;
         Rect::from_xywh(
-            rect.right() - m.pad_x - m.icon,
+            rect.right() - m.pad_x - m.icon - self.trailing,
             rect.center().y - m.icon / 2.0,
             m.icon,
             m.icon,
@@ -156,6 +194,23 @@ impl Entry {
     /// Czy punkt trafia w przycisk czyszczenia (tylko gdy pole czyszczalne i niepuste).
     pub fn clear_at(&self, rect: Rect, theme: &Theme, p: Point) -> bool {
         self.clearable && !self.text.is_empty() && self.clear_rect(rect, theme).contains(p)
+    }
+
+    /// Tekst do wyświetlenia (z uwzględnieniem maski hasła i podglądu).
+    fn display_text(&self) -> String {
+        match (self.mask, self.peek) {
+            (Some(ch), false) => ch.to_string().repeat(self.text.chars().count()),
+            _ => self.text.clone(),
+        }
+    }
+
+    /// Prefiks tekstu do kursora w wersji wyświetlanej (do wyliczenia pozycji kursora).
+    fn display_prefix(&self) -> String {
+        let upto = &self.text[..self.cursor];
+        match (self.mask, self.peek) {
+            (Some(ch), false) => ch.to_string().repeat(upto.chars().count()),
+            _ => upto.to_string(),
+        }
     }
 
     /// Pozycja (x), od której zaczyna się tekst (za ikoną wiodącą, jeśli jest).
@@ -205,28 +260,25 @@ impl Entry {
             );
         } else {
             let clear_space = if self.clearable { m.icon + 8.0 } else { 0.0 };
-            let text_right = rect.right() - m.pad_x - clear_space;
+            let text_right = rect.right() - m.pad_x - clear_space - self.trailing;
             ctx.scene.push_clip(Rect::from_xywh(
                 text_x,
                 rect.y(),
                 (text_right - text_x).max(0.0),
                 rect.height(),
             ));
+            let display = self.display_text();
             ctx.label_left(
                 text_x,
                 cy,
-                &self.text,
+                &display,
                 theme.typography.body.size,
                 weight::NORMAL,
                 colors.text,
             );
             if self.focused {
-                let cx = text_x
-                    + ctx.measure(
-                        &self.text[..self.cursor],
-                        theme.typography.body.size,
-                        weight::NORMAL,
-                    );
+                let prefix = self.display_prefix();
+                let cx = text_x + ctx.measure(&prefix, theme.typography.body.size, weight::NORMAL);
                 ctx.scene.fill_rect(
                     Rect::from_xywh(cx, rect.y() + 6.0, 1.5, (rect.height() - 12.0).max(0.0)),
                     colors.text,

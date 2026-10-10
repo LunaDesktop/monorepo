@@ -45,6 +45,10 @@
 //! - [`NavigationView`] / [`NavigationSplitView`] / [`OverlaySplitView`] / [`Sidebar`] — nawigacja.
 //! - [`Label`], [`Separator`], [`ProgressBar`], [`LevelBar`], [`Frame`], [`Revealer`], [`Overlay`],
 //!   [`AspectFrame`] — widgety prezentacji (GTK4 Display).
+//! - [`ToggleButton`], [`LinkButton`], [`ColorButton`] — pozostałe przyciski (GTK4).
+//! - [`PasswordEntry`], [`EditableLabel`] — pola specjalne (GTK4).
+//! - [`CenterBox`], [`Grid`], [`Paned`], [`Stack`], [`ActionBar`], [`PopoverMenuBar`] — kontenery GTK4
+//!   (`Box` = stos drzewa układu: [`Node::hbox`]/[`Node::vbox`]).
 //! - [`Carousel`] (alias [`Pager`]), [`ToolbarView`], [`WindowTitle`], [`Clamp`], [`WrapBox`],
 //!   [`BreakpointBin`], [`ButtonContent`] — pomocniki.
 //!
@@ -64,12 +68,15 @@ pub mod banner;
 pub mod bin;
 pub mod bottom_sheet;
 pub mod button;
+pub mod buttons;
 pub mod card;
 pub mod check_button;
+pub mod containers;
 pub mod ctx;
 pub mod dialogs;
 pub mod display;
 pub mod dropdown;
+pub mod entries;
 pub mod entry;
 pub mod header_bar;
 pub mod helpers;
@@ -106,8 +113,10 @@ pub use banner::{Banner, BannerKind, BannerRects};
 pub use bin::{Bin, BinAlign};
 pub use bottom_sheet::BottomSheet;
 pub use button::{Button, ButtonVariant};
+pub use buttons::{ColorButton, LinkButton, ToggleButton};
 pub use card::Card;
 pub use check_button::CheckButton;
+pub use containers::{ActionBar, CenterBox, Grid, Paned, PopoverMenuBar, Stack};
 pub use ctx::PaintCtx;
 pub use dialogs::{
     AboutDialog, AlertDialog, AlertRects, Dialog, DialogRects, PreferencesDialog, ShortcutsDialog,
@@ -117,6 +126,7 @@ pub use display::{
     Separator,
 };
 pub use dropdown::DropDown;
+pub use entries::{EditableLabel, PasswordEntry};
 pub use entry::{Entry, EntryIcon, TextInput};
 pub use header_bar::{ControlsLayout, ControlsSide, HeaderBar, TitleAlign, WindowControl};
 pub use helpers::{
@@ -124,7 +134,7 @@ pub use helpers::{
     WrapBox,
 };
 pub use item_view::{Item, ItemKind, ItemView, ViewMode};
-pub use layout::{Constraints, Layout, LayoutCtx, Node, Stack};
+pub use layout::{Constraints, Layout, LayoutCtx, Node};
 pub use menu::{Menu, MenuEntry, MenuRow};
 pub use nav_list::{NavEntry, NavList, NavRow};
 pub use navigation::{NavigationSplitView, NavigationView, OverlaySplitView, Sidebar};
@@ -136,6 +146,8 @@ pub use preferences::{PreferencesGroup, PreferencesPage};
 pub use radio_group::RadioGroup;
 pub use rows::{Row, RowRects, RowSuffix};
 pub use scroll_view::ScrollView;
+/// `ScrolledWindow` — nazwa [`ScrollView`] w duchu GTK4.
+pub use scroll_view::ScrollView as ScrolledWindow;
 pub use search_entry::SearchEntry;
 pub use shortcut_label::ShortcutLabel;
 pub use slider::Slider;
@@ -149,4 +161,6 @@ pub use tab_view::TabView;
 pub use toast::Toast;
 pub use toggle_group::ToggleGroup;
 pub use tooltip::Tooltip;
+/// `StackSwitcher` — nazwa [`ViewSwitcher`] jako przełącznik stron stosu (GTK4).
+pub use view_switcher::ViewSwitcher as StackSwitcher;
 pub use view_switcher::ViewSwitcher;
