@@ -326,7 +326,8 @@ XDG_CONFIG_HOME="$PWD/examples" cargo run -p luna-demo --bin render -- --lang fr
   (segmentowy), `NavList` (menu nawigacji z sekcjami), `Menu` (popover `☰`), `Button`
   (z wariantami i chevronem), `Switch`, `Slider`, `DropDown` (z rozwinięciem przez `Menu`),
   `HeaderBar` (pasek tytułu: tytuł, kontrolki okna, obszar na treść), `TabBar`/`TabView`
-  (pasek zakładek i model stron: wybór, dodawanie, zamykanie), `BottomSheet` (dolny panel
+  (pasek zakładek i model stron: wybór, dodawanie, zamykanie; przy przepełnieniu przewijany
+  z przyciskami na krawędziach), `BottomSheet` (dolny panel
   modalny z „grabberem”, przeciąganiem i zamykaniem), `Pager` (karuzela stron z kropkami),
   `PathBar` (okruszki z separatorem `›`, wskaźnikiem `▾` i zwijaniem do `…`), `Entry`
   (pole tekstowe: kursor, edycja, opcjonalna ikona wiodąca i czyszczenie) — z `SearchEntry`
@@ -357,13 +358,14 @@ XDG_CONFIG_HOME="$PWD/examples" cargo run -p luna-demo --bin render -- --lang fr
 
 ## Układ (measure/allocate)
 
-Prostokąty można nadal liczyć ręcznie (jak karta „Pliki” w demo), ale `libluna-widgets::layout`
+Prostokąty można liczyć ręcznie, ale `libluna-widgets::layout`
 daje **retencyjne drzewo**: aplikacja składa [`Node`], silnik robi **pomiar** (`measure`, względem
 `Constraints` min/max) i **rozmieszczenie** (`allocate`) — dwuprzebiegowo, jak w klasycznych
 toolkitach. Kontenery: `VBox`/`HBox` (odstęp `gap`), `Padding`, `Expanded`/`Spacer` (pochłaniają
 nadmiar wzdłuż osi), `Center` (naturalny rozmiar wyśrodkowany). Liściami są `Fixed`, `Label`
 (mierzy się czcionką) i `Spacer`; `Node::visit` pozwala obejść drzewo z prostokątami, a
-`Layout::fit` zwraca prostokąty liści w kolejności DFS.
+`Layout::fit` zwraca prostokąty liści w kolejności DFS. **Demo Ustawień** używa już tego silnika
+(karty i ich wiersze w `ui::layout`).
 
 Minimalny przykład (`apps/luna-demo/src/bin/layout.rs`) buduje kartę ustawień **wyłącznie**
 z drzewa i renderuje ją headless:

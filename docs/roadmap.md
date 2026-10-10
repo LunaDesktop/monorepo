@@ -61,8 +61,11 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   stosowany na żywo i zapisywany w `theme.conf`; `LUNA_THEMES_DIR` dla dev/testów.
 - Podgląd motywów (headless): `bin/styles` renderuje realny interfejs w kilku stylach i składa
   montaż (`docs/images/styles.png`) — odpowiednik „okna podglądu”.
-- Dalej: **okno podglądu na żywo w aplikacji**, scroll/overflow w `TabBar`,
-  migracja `luna-demo` na drzewo układu.
+- `TabBar`: przewijanie przy przepełnieniu (scroll + przyciski chevron na krawędziach, wybór
+  zawsze widoczny).
+- `luna-demo` używa drzewa układu: karty i ich wiersze liczy `measure`/`allocate`.
+- Dalej: **okno podglądu na żywo w aplikacji**, stany (disabled/focus/pierścień fokusu),
+  `Separator`/`Spacer` jako widżety, kolejne kamienie (M1 render, M3 listy).
 
 ## M2 — Układ + widgety bazowe
 - Dwuprzebiegowy silnik measure/allocate — ✅ **częściowo** (silnik + kontenery `VBox`/`HBox`,
