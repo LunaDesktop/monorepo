@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+# Instalator środowiska Luna (libLuna + Selene + powłoka Luna) na zwykłym PC.
+#
+# Buduje binarki w trybie release i instaluje je do prefiksu (domyślnie /usr/local):
+#   bin/selene, bin/luna-shell, bin/luna-demo, bin/luna-session
+#   share/wayland-sessions/selene.desktop   (sesja „Luna” w menedżerze logowania)
+#   share/luna/i18n/*.lang, share/luna/themes/*.theme
+#   share/licenses/luna/LICENSE
+#
+# Przykłady:
+#   ./scripts/install.sh                      # instalacja do /usr/local (wymaga uprawnień)
+#   sudo ./scripts/install.sh --prefix /usr
+#   ./scripts/install.sh --destdir /tmp/test --prefix /usr   # instalacja „do paczki”/testowa
+#   ./scripts/install.sh --dry-run            # tylko pokaż, co zostanie zrobione
+#   sudo ./scripts/install.sh --uninstall     # usuń zainstalowane pliki
+#
+# Test bez psucia systemu:  ./scripts/install.sh --destdir /tmp/luna-test --prefix /usr --no-build
+
+set -euo pipefail
+
+prog="$(basename "$0")"
+root="$(cd "$(dirname "$0")/.." && pwd)"
+
+prefix="/usr/local"
+destdir=""
+do_build=1
+dry_run=0
+uninstall=0
+cargo="${CARGO:-cargo}"
+
+usage() {
+    cat <<EOF
+$prog — instalator środowiska Luna
+
+Użycie: $prog [opcje]
+
+  --prefix DIR     prefiks instalacji (domyślnie /usr/local)
+  --destdir DIR    katalog pośredni (DESTDIR) — instalacja „do paczki”/testowa
+  --no-build       nie buduj binarek (użyj istniejących z target/release)
+  --dry-run        pokaż planowane operacje, nic nie zmieniaj
+  --uninstall      usuń zainstalowane pliki
+  -h, --help       ta pomoc
+
+Zmienne: CARGO (domyślnie: cargo), PREFIX, DESTDIR
+EOF
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --prefix) prefix="$2"; shift 2 ;;
+        --prefix=*) prefix="${1#*=}"; shift ;;
+        --destdir) destdir="$2"; shift 2 ;;
+        --destdir=*) destdir="${1#*=}"; shift ;;
+        --no-build) do_build=0; shift ;;
+        --dry-run) dry_run=1; shift ;;
+        --uninstall) uninstall=1; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "nieznana opcja: $1" >&2; usage; exit 2 ;;
+    esac
+done
+
+dest="${destdir}${prefix}"
+lib="$root/target/release"
+
+say() { printf '%s\n' "$*"; }
+step() { printf '\n\033[1m%s\033[0m\n' "$*"; }
+do_cmd() { if [ "$dry_run" = 1 ]; then say "  [dry-run] $*"; else "$@"; fi; }
+
+# ── Pliki: źródło | cel | prawa ───────────────────────────────────────────────
+files() {
+    printf '%s|%s|%s\n' "$lib/selene"          "$dest/bin/selene"          "755"
+    printf '%s|%s|%s\n' "$lib/luna-shell"      "$dest/bin/luna-shell"      "755"
+    printf '%s|%s|%s\n' "$lib/luna-demo"       "$dest/bin/luna-demo"       "755"
+    printf '%s|%s|%s\n' "$lib/gallery"         "$dest/bin/luna-gallery"    "755"
+    printf '%s|%s|%s\n' "$root/de/session/luna-session"  "$dest/bin/luna-session" "755"
+    printf '%s|%s|%s\n' "$root/de/session/selene.desktop" "$dest/share/wayland-sessions/selene.desktop" "644"
+    printf '%s|%s|%s\n' "$root/LICENSE"        "$dest/share/licenses/luna/LICENSE" "644"
+    local f
+    for f in "$root"/crates/libluna-i18n/i18n/*.lang; do
+        printf '%s|%s|%s\n' "$f" "$dest/share/luna/i18n/$(basename "$f")" "644"
+    done
+    for f in "$root"/examples/luna/themes/*.theme; do
+        printf '%s|%s|%s\n' "$f" "$dest/share/luna/themes/$(basename "$f")" "644"
+    done
+}
+
+if [ "$uninstall" = 1 ]; then
+    step "Odinstalowywanie Luna z $dest"
+    while IFS='|' read -r _ dst _; do
+        do_cmd rm -f "$dst"
+    done < <(files)
+    # Puste katalogi po naszych plikach.
+    for d in "$dest/share/luna/i18n" "$dest/share/luna/themes" "$dest/share/luna" \
+             "$dest/share/wayland-sessions" "$dest/share/licenses/luna"; do
+        do_cmd rmdir "$d" 2>/dev/null || true
+    done
+    say "Gotowe."
+    exit 0
+fi
+
+if [ "$do_build" = 1 ]; then
+    step "Budowanie (release, --locked)"
+    command -v "$cargo" >/dev/null 2>&1 || { echo "brak cargo ($cargo) na PATH" >&2; exit 1; }
+    ( cd "$root" && do_cmd "$cargo" build --release --locked -p selene -p luna -p luna-demo )
+fi
+
+# Brak binarek przy --no-build to błąd.
+if [ "$dry_run" = 0 ] && [ "$do_build" = 0 ]; then
+    [ -x "$lib/selene" ] || { echo "brak $lib/selene — zbuduj lub usuń --no-build" >&2; exit 1; }
+fi
+
+step "Instalacja do $dest"
+while IFS='|' read -r src dst mode; do
+    if [ "$dry_run" = 0 ] && [ ! -f "$src" ]; then
+        echo "brak pliku źródłowego: $src" >&2
+        exit 1
+    fi
+    do_cmd install -D -m "$mode" "$src" "$dst"
+done < <(files)
+
+step "Gotowe"
+say "Zainstalowano w: $dest"
+say ""
+say "Uruchomienie sesji Luna na PC:"
+say "  1) wyloguj się z bieżącego pulpitu (Selene musi przejąć master DRM),"
+say "  2) wybierz sesję „Luna” w menedżerze logowania, albo z konsoli (TTY):"
+say "       SELENE_BACKEND=drm luna-session"
+say "  3) testowo, obok działającej sesji (bez przejmowania ekranu):"
+say "       SELENE_BACKEND=nested selene &   # okno Selene na obecnym pulpicie"
+say "       WAYLAND_DISPLAY=wayland-0 luna-shell"
+say ""
+say "Uwaga: na DRM/KMS potrzebny jest wolny master i dostęp do /dev/input (grupa 'input')."

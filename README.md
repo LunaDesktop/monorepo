@@ -146,6 +146,32 @@ cargo test -p luna-demo --test interaction       # te same interakcje jako aserc
 
 ![Sekwencja interakcji](docs/images/demo-montage.png)
 
+## Instalacja środowiska na PC (testowo / na stałe)
+
+`scripts/install.sh` buduje binarki w trybie release i instaluje **środowisko Luna**
+(kompozytor `selene`, powłoka `luna-shell`, sesja `luna-session`, demo, tłumaczenia, motywy,
+wpis sesji Wayland):
+
+```bash
+# instalacja testowa do katalogu (bez ruszania systemu) — nic nie wymaga uprawnień
+./scripts/install.sh --destdir /tmp/luna-test --prefix /usr
+
+# podgląd planu bez zmian
+./scripts/install.sh --dry-run
+
+# instalacja systemowa
+sudo ./scripts/install.sh --prefix /usr
+
+# usunięcie
+sudo ./scripts/install.sh --prefix /usr --uninstall
+```
+
+Po instalacji sesja „Luna” pojawia się w menedżerze logowania (`share/wayland-sessions/selene.desktop`).
+Na sprzęcie Selene przejmuje ekran przez DRM/KMS — trzeba **wylogować bieżący pulpit** (wolny
+master DRM) i mieć dostęp do `/dev/input` (grupa `input`) dla wejścia. Testowo, obok działającej
+sesji, można uruchomić `SELENE_BACKEND=nested selene` (okno na obecnym pulpicie) i podłączyć
+`luna-shell`. Szczegóły: `de/README.md`.
+
 ## Budowanie własnej aplikacji na libLunie
 
 Najszybsza droga to **fasada `libluna`** — jedna zależność zamiast czterech. Trzy sposoby:

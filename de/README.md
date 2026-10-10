@@ -114,6 +114,16 @@ SELENE_BACKEND=drm XDG_RUNTIME_DIR="$PWD/.selene-runtime" cargo run -p selene
 Uwaga: tryb DRM przejmuje ekran (page-flip); gdy master trzyma Twoja sesja, Selene
 zgłasza to i **nie** rusza wyświetlaczy.
 
+Instalator środowiska (binarki + sesja „Luna” + tłumaczenia + motywy) — `scripts/install.sh`:
+
+```sh
+./scripts/install.sh --destdir /tmp/luna-test --prefix /usr   # test bez zmian w systemie
+sudo ./scripts/install.sh --prefix /usr                        # instalacja systemowa
+```
+
+Pliki sesji: `de/session/luna-session` (launcher) i `de/session/selene.desktop`
+(`share/wayland-sessions`).
+
 Klienta podłączysz ustawiając `WAYLAND_DISPLAY=wayland-0` i `XDG_RUNTIME_DIR` na ten sam
 katalog (renderowanie pojawi się, gdy wejdzie backend wyświetlania).
 
