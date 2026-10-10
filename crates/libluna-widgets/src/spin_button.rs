@@ -211,6 +211,24 @@ impl TextInput for SpinButton {
     fn end(&mut self) {
         self.entry.end();
     }
+    fn move_left_selecting(&mut self, shift: bool) {
+        self.entry.move_left_selecting(shift);
+    }
+    fn move_right_selecting(&mut self, shift: bool) {
+        self.entry.move_right_selecting(shift);
+    }
+    fn home_selecting(&mut self, shift: bool) {
+        self.entry.home_selecting(shift);
+    }
+    fn end_selecting(&mut self, shift: bool) {
+        self.entry.end_selecting(shift);
+    }
+    fn select_all(&mut self) {
+        self.entry.select_all();
+    }
+    fn clear_selection(&mut self) {
+        self.entry.clear_selection();
+    }
 }
 
 fn format_number(value: f64, digits: usize) -> String {

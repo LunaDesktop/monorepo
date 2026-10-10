@@ -461,3 +461,57 @@ fn choosing_style_from_menu_sets_style() {
     assert_eq!(settings.style(), Some("nord"));
     assert!(demo.popover.is_none());
 }
+
+fn key(keysym: u32, text: Option<String>, modifiers: Modifiers) -> Event {
+    Event::Key(KeyEvent {
+        keysym,
+        text,
+        state: ButtonState::Pressed,
+        modifiers,
+        repeat: false,
+    })
+}
+
+#[test]
+fn ctrl_a_selects_all_and_typing_replaces() {
+    let mut settings = ThemeSettings::default();
+    let mut demo = Demo::default();
+    let theme = settings.resolve(false);
+    let text = TextEngine::system();
+
+    // Klik w pole wyszukiwania → fokus.
+    let search_rect = layout(&settings, &demo).search;
+    ui::handle_events(
+        &mut settings,
+        &[press(search_rect.center())],
+        size(),
+        &theme,
+        &text,
+        &mut demo,
+    );
+    assert!(demo.search.is_focused());
+
+    // Wpisanie „abc”.
+    for c in ['a', 'b', 'c'] {
+        let e = key(c as u32, Some(c.to_string()), Modifiers::NONE);
+        ui::handle_events(&mut settings, &[e], size(), &theme, &text, &mut demo);
+    }
+    assert_eq!(demo.search.text(), "abc");
+
+    // Ctrl+A zaznacza wszystko…
+    let ctrl_a = key(
+        0x61,
+        None,
+        Modifiers {
+            ctrl: true,
+            ..Modifiers::NONE
+        },
+    );
+    ui::handle_events(&mut settings, &[ctrl_a], size(), &theme, &text, &mut demo);
+    assert_eq!(demo.search.selected_text(), Some("abc"));
+
+    // …a wpisanie znaku zastępuje zaznaczenie.
+    let x = key(0x58, Some("X".to_owned()), Modifiers::NONE);
+    ui::handle_events(&mut settings, &[x], size(), &theme, &text, &mut demo);
+    assert_eq!(demo.search.text(), "X");
+}

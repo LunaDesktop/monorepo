@@ -107,6 +107,62 @@ impl SearchEntry {
         self.entry.clear_at(rect, theme, p)
     }
 
+    /// Zakres zaznaczenia `(start, end)` w bajtach (albo `None`).
+    pub fn selection(&self) -> Option<(usize, usize)> {
+        self.entry.selection()
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.entry.has_selection()
+    }
+
+    pub fn selected_text(&self) -> Option<&str> {
+        self.entry.selected_text()
+    }
+
+    pub fn set_selection(&mut self, start: usize, end: usize) {
+        self.entry.set_selection(start, end);
+    }
+
+    pub fn select_all(&mut self) {
+        self.entry.select_all();
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.entry.clear_selection();
+    }
+
+    /// Zwraca zaznaczenie do schowka aplikacji.
+    pub fn copy(&self) -> Option<String> {
+        self.entry.copy()
+    }
+
+    /// Wycina zaznaczenie.
+    pub fn cut(&mut self) -> Option<String> {
+        self.entry.cut()
+    }
+
+    /// Wkleja tekst (zastępuje zaznaczenie).
+    pub fn paste(&mut self, s: &str) {
+        self.entry.paste(s);
+    }
+
+    pub fn move_left_selecting(&mut self, shift: bool) {
+        self.entry.move_left_selecting(shift);
+    }
+
+    pub fn move_right_selecting(&mut self, shift: bool) {
+        self.entry.move_right_selecting(shift);
+    }
+
+    pub fn home_selecting(&mut self, shift: bool) {
+        self.entry.home_selecting(shift);
+    }
+
+    pub fn end_selecting(&mut self, shift: bool) {
+        self.entry.end_selecting(shift);
+    }
+
     pub fn paint(&self, ctx: &mut PaintCtx, rect: Rect) {
         self.entry.paint(ctx, rect);
     }
@@ -136,6 +192,24 @@ impl crate::entry::TextInput for SearchEntry {
     }
     fn end(&mut self) {
         SearchEntry::end(self);
+    }
+    fn move_left_selecting(&mut self, shift: bool) {
+        SearchEntry::move_left_selecting(self, shift);
+    }
+    fn move_right_selecting(&mut self, shift: bool) {
+        SearchEntry::move_right_selecting(self, shift);
+    }
+    fn home_selecting(&mut self, shift: bool) {
+        SearchEntry::home_selecting(self, shift);
+    }
+    fn end_selecting(&mut self, shift: bool) {
+        SearchEntry::end_selecting(self, shift);
+    }
+    fn select_all(&mut self) {
+        SearchEntry::select_all(self);
+    }
+    fn clear_selection(&mut self) {
+        SearchEntry::clear_selection(self);
     }
 }
 

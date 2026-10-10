@@ -36,6 +36,8 @@ pub struct Entry {
     peek: bool,
     /// Miejsce zarezerwowane po prawej (np. na ikonę „oka”).
     trailing: f64,
+    /// Kotwica zaznaczenia (bajt); `None` = brak zaznaczenia.
+    anchor: Option<usize>,
 }
 
 impl Entry {
@@ -109,6 +111,7 @@ impl Entry {
     pub fn set_text(&mut self, text: impl Into<String>) {
         self.text = text.into();
         self.cursor = self.text.len();
+        self.anchor = None;
     }
 
     pub fn set_focused(&mut self, focused: bool) {
@@ -126,10 +129,82 @@ impl Entry {
     pub fn clear(&mut self) {
         self.text.clear();
         self.cursor = 0;
+        self.anchor = None;
     }
 
-    /// Wstawia tekst w miejscu kursora.
+    /// Zakres zaznaczenia `(start, end)` w bajtach (albo `None`).
+    pub fn selection(&self) -> Option<(usize, usize)> {
+        let a = self.anchor?;
+        if a == self.cursor {
+            None
+        } else {
+            Some((a.min(self.cursor), a.max(self.cursor)))
+        }
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.selection().is_some()
+    }
+
+    /// Zaznaczony tekst (albo `None`).
+    pub fn selected_text(&self) -> Option<&str> {
+        self.selection().map(|(a, b)| &self.text[a..b])
+    }
+
+    /// Ustawia zaznaczenie `start..end` (przycinane do granic znaku); kursor na `end`.
+    pub fn set_selection(&mut self, start: usize, end: usize) {
+        self.anchor = Some(clamp_boundary(&self.text, start));
+        self.cursor = clamp_boundary(&self.text, end);
+    }
+
+    /// Zaznacza cały tekst.
+    pub fn select_all(&mut self) {
+        self.anchor = Some(0);
+        self.cursor = self.text.len();
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.anchor = None;
+    }
+
+    /// Zwraca zaznaczenie do schowka aplikacji.
+    pub fn copy(&self) -> Option<String> {
+        self.selected_text().map(str::to_owned)
+    }
+
+    /// Wycina zaznaczenie (usuwa je i zwraca).
+    pub fn cut(&mut self) -> Option<String> {
+        let s = self.copy()?;
+        self.delete_selection();
+        Some(s)
+    }
+
+    /// Wkleja tekst (zastępuje zaznaczenie).
+    pub fn paste(&mut self, s: &str) {
+        self.insert_str(s);
+    }
+
+    fn delete_selection(&mut self) {
+        if let Some((a, b)) = self.selection() {
+            self.text.replace_range(a..b, "");
+            self.cursor = a;
+        }
+        self.anchor = None;
+    }
+
+    fn begin_or_clear(&mut self, shift: bool) {
+        if shift {
+            if self.anchor.is_none() {
+                self.anchor = Some(self.cursor);
+            }
+        } else {
+            self.anchor = None;
+        }
+    }
+
+    /// Wstawia tekst w miejscu kursora (zastępuje zaznaczenie).
     pub fn insert_str(&mut self, s: &str) {
+        self.delete_selection();
         self.text.insert_str(self.cursor, s);
         self.cursor += s.len();
     }
@@ -139,8 +214,12 @@ impl Entry {
         self.insert_str(c.encode_utf8(&mut buf));
     }
 
-    /// Usuwa znak przed kursorem.
+    /// Usuwa znak przed kursorem (albo zaznaczenie).
     pub fn backspace(&mut self) {
+        if self.has_selection() {
+            self.delete_selection();
+            return;
+        }
         if self.cursor > 0 {
             let prev = prev_boundary(&self.text, self.cursor);
             self.text.replace_range(prev..self.cursor, "");
@@ -148,8 +227,12 @@ impl Entry {
         }
     }
 
-    /// Usuwa znak za kursorem.
+    /// Usuwa znak za kursorem (albo zaznaczenie).
     pub fn delete_forward(&mut self) {
+        if self.has_selection() {
+            self.delete_selection();
+            return;
+        }
         if self.cursor < self.text.len() {
             let next = next_boundary(&self.text, self.cursor);
             self.text.replace_range(self.cursor..next, "");
@@ -157,18 +240,40 @@ impl Entry {
     }
 
     pub fn move_left(&mut self) {
-        self.cursor = prev_boundary(&self.text, self.cursor);
+        self.move_left_selecting(false);
     }
 
     pub fn move_right(&mut self) {
+        self.move_right_selecting(false);
+    }
+
+    /// Ruch kursora w lewo; z `shift` rozciąga zaznaczenie.
+    pub fn move_left_selecting(&mut self, shift: bool) {
+        self.begin_or_clear(shift);
+        self.cursor = prev_boundary(&self.text, self.cursor);
+    }
+
+    /// Ruch kursora w prawo; z `shift` rozciąga zaznaczenie.
+    pub fn move_right_selecting(&mut self, shift: bool) {
+        self.begin_or_clear(shift);
         self.cursor = next_boundary(&self.text, self.cursor);
     }
 
     pub fn home(&mut self) {
-        self.cursor = 0;
+        self.home_selecting(false);
     }
 
     pub fn end(&mut self) {
+        self.end_selecting(false);
+    }
+
+    pub fn home_selecting(&mut self, shift: bool) {
+        self.begin_or_clear(shift);
+        self.cursor = 0;
+    }
+
+    pub fn end_selecting(&mut self, shift: bool) {
+        self.begin_or_clear(shift);
         self.cursor = self.text.len();
     }
 
@@ -204,13 +309,18 @@ impl Entry {
         }
     }
 
-    /// Prefiks tekstu do kursora w wersji wyświetlanej (do wyliczenia pozycji kursora).
-    fn display_prefix(&self) -> String {
-        let upto = &self.text[..self.cursor];
+    /// Prefiks tekstu (w wersji wyświetlanej) do granicy `index` — z uwzględnieniem maski.
+    fn display_prefix_at(&self, index: usize) -> String {
+        let upto = &self.text[..index];
         match (self.mask, self.peek) {
             (Some(ch), false) => ch.to_string().repeat(upto.chars().count()),
             _ => upto.to_string(),
         }
+    }
+
+    /// Prefiks tekstu do kursora w wersji wyświetlanej (do wyliczenia pozycji kursora).
+    fn display_prefix(&self) -> String {
+        self.display_prefix_at(self.cursor)
     }
 
     /// Pozycja (x), od której zaczyna się tekst (za ikoną wiodącą, jeśli jest).
@@ -267,6 +377,21 @@ impl Entry {
                 (text_right - text_x).max(0.0),
                 rect.height(),
             ));
+            // Podświetlenie zaznaczenia (pod tekstem).
+            if let Some((a, b)) = self.selection() {
+                let size = theme.typography.body.size;
+                let x1 = text_x + ctx.measure(&self.display_prefix_at(a), size, weight::NORMAL);
+                let x2 = text_x + ctx.measure(&self.display_prefix_at(b), size, weight::NORMAL);
+                ctx.scene.fill_rect(
+                    Rect::from_xywh(
+                        x1,
+                        rect.y() + 5.0,
+                        (x2 - x1).max(0.0),
+                        (rect.height() - 10.0).max(0.0),
+                    ),
+                    colors.accent.scale_alpha(0.30),
+                );
+            }
             let display = self.display_text();
             ctx.label_left(
                 text_x,
@@ -311,6 +436,16 @@ pub trait TextInput {
     fn move_right(&mut self);
     fn home(&mut self);
     fn end(&mut self);
+    /// Ruch w lewo; z `shift` rozciąga zaznaczenie.
+    fn move_left_selecting(&mut self, shift: bool);
+    /// Ruch w prawo; z `shift` rozciąga zaznaczenie.
+    fn move_right_selecting(&mut self, shift: bool);
+    fn home_selecting(&mut self, shift: bool);
+    fn end_selecting(&mut self, shift: bool);
+    /// Zaznacza cały tekst.
+    fn select_all(&mut self);
+    /// Usuwa zaznaczenie (bez zmiany tekstu).
+    fn clear_selection(&mut self);
 }
 
 impl TextInput for Entry {
@@ -338,6 +473,24 @@ impl TextInput for Entry {
     fn end(&mut self) {
         Entry::end(self);
     }
+    fn move_left_selecting(&mut self, shift: bool) {
+        Entry::move_left_selecting(self, shift);
+    }
+    fn move_right_selecting(&mut self, shift: bool) {
+        Entry::move_right_selecting(self, shift);
+    }
+    fn home_selecting(&mut self, shift: bool) {
+        Entry::home_selecting(self, shift);
+    }
+    fn end_selecting(&mut self, shift: bool) {
+        Entry::end_selecting(self, shift);
+    }
+    fn select_all(&mut self) {
+        Entry::select_all(self);
+    }
+    fn clear_selection(&mut self) {
+        Entry::clear_selection(self);
+    }
 }
 
 fn prev_boundary(s: &str, i: usize) -> usize {
@@ -350,6 +503,15 @@ fn prev_boundary(s: &str, i: usize) -> usize {
 
 fn next_boundary(s: &str, i: usize) -> usize {
     s[i..].chars().next().map(|c| i + c.len_utf8()).unwrap_or(i)
+}
+
+/// Przybliża indeks do najbliższej granicy znaku (w dół) i do długości napisu.
+fn clamp_boundary(s: &str, i: usize) -> usize {
+    let mut b = i.min(s.len());
+    while b > 0 && !s.is_char_boundary(b) {
+        b -= 1;
+    }
+    b
 }
 
 #[cfg(test)]
@@ -415,5 +577,57 @@ mod tests {
     fn height_from_metrics() {
         let theme = Theme::light();
         assert_eq!(Entry::new("").height(&theme), theme.metrics.entry.height);
+    }
+
+    #[test]
+    fn selection_copy_cut_paste() {
+        let mut e = Entry::new("");
+        e.set_text("hello world");
+        e.set_selection(0, 5);
+        assert_eq!(e.selected_text(), Some("hello"));
+        assert_eq!(e.copy(), Some("hello".to_owned()));
+        // Wklejenie zastępuje zaznaczenie.
+        e.paste("HELLO");
+        assert_eq!(e.text(), "HELLO world");
+        assert!(!e.has_selection());
+        // Wycinanie.
+        e.set_selection(0, 6);
+        assert_eq!(e.cut(), Some("HELLO ".to_owned()));
+        assert_eq!(e.text(), "world");
+        assert_eq!(e.cursor(), 0);
+    }
+
+    #[test]
+    fn shift_extends_selection_and_typing_replaces() {
+        let mut e = Entry::new("");
+        e.set_text("abc");
+        e.home();
+        e.move_right_selecting(true);
+        e.move_right_selecting(true);
+        assert_eq!(e.selected_text(), Some("ab"));
+        e.insert_char('X');
+        assert_eq!(e.text(), "Xc");
+    }
+
+    #[test]
+    fn backspace_deletes_selection() {
+        let mut e = Entry::new("");
+        e.set_text("abcdef");
+        e.set_selection(1, 4);
+        e.backspace();
+        assert_eq!(e.text(), "aef");
+        assert_eq!(e.cursor(), 1);
+    }
+
+    #[test]
+    fn select_all_clamps_to_char_boundary() {
+        let mut e = Entry::new("");
+        e.set_text("jąbko");
+        e.select_all();
+        assert_eq!(e.selected_text(), Some("jąbko"));
+        e.set_selection(2, 2); // środek znaku → przycięte
+        assert!(!e.has_selection());
+        e.clear_selection();
+        assert_eq!(e.selection(), None);
     }
 }

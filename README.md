@@ -333,7 +333,9 @@ XDG_CONFIG_HOME="$PWD/examples" cargo run -p luna-demo --bin render -- --lang fr
   z przyciskami na krawędziach), `BottomSheet` (dolny panel
   modalny z „grabberem”, przeciąganiem i zamykaniem), `Pager` (karuzela stron z kropkami),
   `PathBar` (okruszki z separatorem `›`, wskaźnikiem `▾` i zwijaniem do `…`), `Entry`
-  (pole tekstowe: kursor, edycja, opcjonalna ikona wiodąca i czyszczenie) — z `SearchEntry`
+  (pole tekstowe: kursor, edycja, **zaznaczanie** i schowek — `select_all`/`copy`/`cut`/`paste`,
+  Shift+strzałki/Ctrl+A, opcjonalna ikona wiodąca i czyszczenie; to samo w `TextView`)
+  — z `SearchEntry`
   jako jego wyszukiwarkową nakładką (lupka + czyszczenie), `ItemView` (pliki/katalogi w siatce lub
   liście, z zaznaczaniem i przewijaniem) i `ScrollView` (pionowe przewijanie: rolka + „kciuk”)
   oraz `Stepper`, `CheckButton` i `RadioGroup` (krokowiec, pole wyboru, wybór jednokrotny),

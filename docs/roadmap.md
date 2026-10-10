@@ -62,6 +62,9 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   Tokeny metryk kontenerów: `Theme::metrics.container`. Animacje: `libluna-core` `motion`
   (`Easing`, `lerp`, `Animation`), użyte w `Stack` (przejścia `StackTransition`), `Revealer`,
   `Toast`, `BottomSheet` i `Pager` (sterowane `advance(dt, …)`).
+- **Edycja tekstu**: `Entry`/`SearchEntry`/`PasswordEntry`/`TextView` mają **zaznaczanie**
+  (`set_selection`, `select_all`, zakres, Shift+strzałki/Ctrl+A) oraz operacje schowka
+  (`copy`/`cut`/`paste`); `TextInput` rozszerzono o metody zaznaczania.
 - `libluna-platform`: realne akcje okna z `Frame` (`close`/`minimize`/`toggle_maximize`).
   **Klatki animacji**: `Frame::delta_time()` + `Frame::request_frame()` (płynne ~60 Hz, gdy trwa
   animacja; bez tego okno odświeża się tylko na zdarzenia).

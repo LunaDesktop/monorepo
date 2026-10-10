@@ -105,6 +105,42 @@ impl PasswordEntry {
         self.entry.end();
     }
 
+    pub fn selection(&self) -> Option<(usize, usize)> {
+        self.entry.selection()
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.entry.has_selection()
+    }
+
+    pub fn selected_text(&self) -> Option<&str> {
+        self.entry.selected_text()
+    }
+
+    pub fn set_selection(&mut self, start: usize, end: usize) {
+        self.entry.set_selection(start, end);
+    }
+
+    pub fn select_all(&mut self) {
+        self.entry.select_all();
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.entry.clear_selection();
+    }
+
+    pub fn copy(&self) -> Option<String> {
+        self.entry.copy()
+    }
+
+    pub fn cut(&mut self) -> Option<String> {
+        self.entry.cut()
+    }
+
+    pub fn paste(&mut self, s: &str) {
+        self.entry.paste(s);
+    }
+
     pub fn height(&self, theme: &Theme) -> f64 {
         self.entry.height(theme)
     }
@@ -195,6 +231,24 @@ impl TextInput for PasswordEntry {
     }
     fn end(&mut self) {
         PasswordEntry::end(self);
+    }
+    fn move_left_selecting(&mut self, shift: bool) {
+        self.entry.move_left_selecting(shift);
+    }
+    fn move_right_selecting(&mut self, shift: bool) {
+        self.entry.move_right_selecting(shift);
+    }
+    fn home_selecting(&mut self, shift: bool) {
+        self.entry.home_selecting(shift);
+    }
+    fn end_selecting(&mut self, shift: bool) {
+        self.entry.end_selecting(shift);
+    }
+    fn select_all(&mut self) {
+        self.entry.select_all();
+    }
+    fn clear_selection(&mut self) {
+        self.entry.clear_selection();
     }
 }
 

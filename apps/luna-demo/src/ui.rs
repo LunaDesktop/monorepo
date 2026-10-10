@@ -1007,21 +1007,56 @@ fn cycle_language() {
 ///
 /// Zwraca `true`, jeśli klawisz został zużyty (wtedy skróty demo są pomijane).
 fn handle_text_key<T: TextInput>(entry: &mut T, ke: &KeyEvent) -> bool {
+    let shift = ke.modifiers.shift;
+    let ctrl = ke.modifiers.ctrl;
+
+    // Ctrl+A — zaznacz cały tekst.
+    if ctrl && ke.keysym == 0x61 {
+        entry.select_all();
+        return true;
+    }
+
     // Tekst złożony przez platformę (obsługuje też znaki spoza ASCII).
-    if let Some(t) = &ke.text {
-        if !t.is_empty() && !t.chars().all(char::is_control) {
-            entry.insert_str(t);
-            return true;
+    if !ctrl {
+        if let Some(t) = &ke.text {
+            if !t.is_empty() && !t.chars().all(char::is_control) {
+                entry.insert_str(t);
+                return true;
+            }
         }
     }
     match ke.keysym {
         0xff08 => entry.backspace(),      // BackSpace
         0xffff => entry.delete_forward(), // Delete
-        0xff51 => entry.move_left(),      // Left
-        0xff53 => entry.move_right(),     // Right
-        0xff50 => entry.home(),           // Home
-        0xff57 => entry.end(),            // End
-        0x20..=0x7e => {
+        0xff51 => {
+            if shift {
+                entry.move_left_selecting(true)
+            } else {
+                entry.move_left()
+            }
+        }
+        0xff53 => {
+            if shift {
+                entry.move_right_selecting(true)
+            } else {
+                entry.move_right()
+            }
+        }
+        0xff50 => {
+            if shift {
+                entry.home_selecting(true)
+            } else {
+                entry.home()
+            }
+        }
+        0xff57 => {
+            if shift {
+                entry.end_selecting(true)
+            } else {
+                entry.end()
+            }
+        }
+        0x20..=0x7e if !ctrl => {
             if let Some(c) = char::from_u32(ke.keysym) {
                 entry.insert_char(c);
             }
