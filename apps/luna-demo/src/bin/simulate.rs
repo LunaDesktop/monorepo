@@ -31,6 +31,10 @@ fn press(p: Point) -> Event {
 }
 
 fn render_pixels(settings: &ThemeSettings, demo: &Demo, text: &TextEngine, size: Size) -> Vec<u8> {
+    // Headless: domknij trwające animacje, by klatka pokazywała stan ustalony.
+    let mut demo = demo.clone();
+    demo.tab_stack.advance(1.0, 1.0);
+    demo.toast.advance(1.0, 1.0);
     let theme = settings.resolve_themed(false);
     let mut scene = Scene::new();
     ui::build_scene(
@@ -38,7 +42,7 @@ fn render_pixels(settings: &ThemeSettings, demo: &Demo, text: &TextEngine, size:
         &theme,
         text,
         size,
-        demo,
+        &demo,
         settings.preference(),
         settings.accent(),
     );

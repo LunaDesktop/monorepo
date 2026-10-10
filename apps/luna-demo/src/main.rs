@@ -72,6 +72,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             frame.request_frame();
         }
 
+        // Animacja przejścia zakładek (`Stack` slide).
+        if demo.tab_stack.is_animating() {
+            demo.tab_stack.advance(frame.delta_time(), 0.25);
+            frame.request_frame();
+        }
+
         // Motyw po zmianach (np. wybór stylu) — klatka od razu poprawna.
         let theme = settings.resolve_themed(frame.system_dark());
         ui::build_scene(

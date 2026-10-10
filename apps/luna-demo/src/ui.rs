@@ -5,7 +5,7 @@
 use libluna_core::event::ButtonState;
 use libluna_core::style::{weight, Appearance};
 use libluna_core::{
-    Accent, Color, Event, Insets, KeyEvent, Point, PointerButton, Rect, Size, Theme,
+    Accent, Color, Easing, Event, Insets, KeyEvent, Point, PointerButton, Rect, Size, Theme,
     ThemePreference, ThemeSettings,
 };
 use libluna_i18n::{tr, Locale};
@@ -14,8 +14,9 @@ use libluna_widgets::layout::{Layout as Tree, LayoutCtx, Node};
 use libluna_widgets::{
     ActionRow, BottomSheet, Button, Card, CheckButton, ControlsLayout, ControlsSide, DropDown,
     Entry, HeaderBar, Item, ItemView, Menu, MenuEntry, NavEntry, NavList, Pager, PaintCtx, PathBar,
-    RadioGroup, ScrollView, SearchEntry, Slider, StatusPage, Stepper, StepperSide, Switch, Tab,
-    TabBar, TabView, TextInput, Toast, ViewMode, ViewSwitcher, WindowControl,
+    RadioGroup, ScrollView, SearchEntry, Slider, Stack, StackTransition, StatusPage, Stepper,
+    StepperSide, Switch, Tab, TabBar, TabView, TextInput, Toast, ViewMode, ViewSwitcher,
+    WindowControl,
 };
 
 const STATUS_H: f64 = 28.0;
@@ -49,6 +50,7 @@ pub enum Popover {
 }
 
 /// Stan aplikacji demo, który nie należy do warstwy platformy ani do widgetów.
+#[derive(Clone)]
 pub struct Demo {
     pub option_a: bool,
     pub volume: f64,
@@ -77,6 +79,10 @@ pub struct Demo {
     /// Strony zakładek (tytuły to klucze i18n) oraz podświetlona zakładka.
     pub tabs: TabView,
     pub tabs_hover: Option<usize>,
+    /// Animowane przejście aktywnej strony zakładek (`Stack`: slide w poziomie).
+    pub tab_stack: Stack,
+    /// Tytuł strony wychodzącej w trakcie animacji przejścia.
+    pub tab_prev_title: Option<String>,
     /// Dolny panel (modalny) i karuzela stron w jego zawartości.
     pub sheet: BottomSheet,
     pub pager: Pager,
@@ -137,6 +143,13 @@ impl Default for Demo {
                 tabs
             },
             tabs_hover: None,
+            tab_stack: {
+                let mut s = Stack::with_count(3);
+                s.set_transition(StackTransition::SlideHorizontal);
+                s.set_transition_easing(Easing::EaseOut);
+                s
+            },
+            tab_prev_title: None,
             sheet: BottomSheet::new(),
             pager: Pager::new(3),
             pager_dragging: false,
@@ -784,6 +797,11 @@ pub fn handle_events(
                                 .set_content_height(view.content_height(lay.items, theme));
                             demo.files_scroll.set_offset(view.scroll(), lay.items);
                         } else if let Some(i) = tabs_bar.index_at(lay.tabs, text, theme, p) {
+                            if i != demo.tabs.selected() {
+                                demo.tab_prev_title =
+                                    demo.tabs.selected_title().map(|s| s.to_owned());
+                                demo.tab_stack.set_visible_index(i);
+                            }
                             demo.tabs.select(i);
                         } else if demo.search.contains(lay.search, p) {
                             if demo.search.clear_at(lay.search, theme, p) {
@@ -1212,6 +1230,29 @@ fn draw_sidebar(paint: &mut PaintCtx, lay: &Layout, demo: &Demo) {
     nav.paint(paint, sb);
 }
 
+/// Pojedyncza „strona” zakładki rysowana jako kapsuła (z kryciem dla animacji przejścia).
+fn draw_tab_page(paint: &mut PaintCtx, rect: Rect, title: &str, alpha: f64) {
+    let theme = *paint.theme;
+    let a = alpha.clamp(0.0, 1.0) as f32;
+    paint
+        .scene
+        .fill_rounded_rect(rect, theme.radius.small, theme.colors.shade.scale_alpha(a));
+    paint.scene.stroke_rounded_rect(
+        rect,
+        theme.radius.small,
+        1.0,
+        theme.colors.accent.scale_alpha(a),
+    );
+    paint.label_center(
+        rect.center().x,
+        rect.center().y,
+        title,
+        theme.typography.body.size,
+        weight::MEDIUM,
+        theme.colors.text.scale_alpha(a),
+    );
+}
+
 fn draw_content(
     paint: &mut PaintCtx,
     area: Rect,
@@ -1277,7 +1318,7 @@ fn draw_content(
     // Wiersz 0: pasek zakładek (widget TabBar).
     tab_bar(demo).paint(paint, lay.tabs);
 
-    // Wiersz 1: aktywna strona (model TabView).
+    // Wiersz 1: aktywna strona (model TabView) z animowanym przejściem (`Stack`).
     paint.label_left(
         card3.x() + md,
         lay.tabs_value.center().y,
@@ -1286,15 +1327,23 @@ fn draw_content(
         weight::NORMAL,
         theme.colors.text,
     );
-    let active = demo.tabs.selected_title().map(tr).unwrap_or_default();
-    paint.label_right(
-        lay.tabs_value.right() - md,
-        lay.tabs_value.center().y,
-        &active,
-        body,
-        weight::MEDIUM,
-        theme.colors.text,
+    let cur_title = demo.tabs.selected_title().map(tr).unwrap_or_default();
+    let pill = Rect::from_xywh(
+        lay.tabs_value.right() - md - 150.0,
+        lay.tabs_value.y() + 2.0,
+        150.0,
+        (lay.tabs_value.height() - 4.0).max(0.0),
     );
+    if demo.tab_stack.previous_index().is_some() {
+        let (out, inc) = demo.tab_stack.frames(pill);
+        let prev_title = demo.tab_prev_title.as_deref().map(tr).unwrap_or_default();
+        paint.scene.push_clip(lay.tabs_value);
+        draw_tab_page(paint, out.rect, &prev_title, out.alpha);
+        draw_tab_page(paint, inc.rect, &cur_title, inc.alpha);
+        paint.scene.pop_clip();
+    } else {
+        draw_tab_page(paint, pill, &cur_title, 1.0);
+    }
 
     // --- Karta 4: Pliki (PathBar + SearchEntry + ItemView) ---
     let card4 = lay.card4;

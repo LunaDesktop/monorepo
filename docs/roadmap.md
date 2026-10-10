@@ -67,7 +67,8 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   animacja; bez tego okno odświeża się tylko na zdarzenia).
 - Demo używa widgetów zamiast ręcznego rysowania (pasek boczny, wybór motywu/widoku, menu `☰`,
   przycisk „Opcje”, przełączniki, suwak, wybór języka, pasek tytułu, zakładki `TabBar`/`TabView`).
-  Powiadomienie (`Toast`) w demo animuje się (wjazd + fade).
+  Powiadomienie (`Toast`) w demo animuje się (wjazd + fade), a zmiana zakładki
+  to animowane przejście (`Stack` slide w poziomie).
 - **Galeria widgetów** headless: `cargo run -p luna-demo --bin gallery` → `docs/images/gallery.png`
   (kontenery, tabela, kalendarz, chooser’y, kreator kroków, pasek stanu z cz. 5–12).
 - Motywy: wariant (light/dark/auto) + akcent, z trwałością. **Component metrics**: rozmiary
