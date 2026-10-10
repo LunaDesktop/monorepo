@@ -20,6 +20,22 @@ pub fn chevron_down(paint: &mut PaintCtx, color: Color, center: Point, size: f64
     );
 }
 
+/// Strzałka w górę (chevron); środek w `center`, rozpiętość `size`, grubość `width`.
+pub fn chevron_up(paint: &mut PaintCtx, color: Color, center: Point, size: f64, width: f64) {
+    paint.scene.stroke_line(
+        Point::new(center.x - size, center.y + size * 0.5),
+        Point::new(center.x, center.y - size * 0.5),
+        width,
+        color,
+    );
+    paint.scene.stroke_line(
+        Point::new(center.x, center.y - size * 0.5),
+        Point::new(center.x + size, center.y + size * 0.5),
+        width,
+        color,
+    );
+}
+
 /// Strzałka w prawo (chevron); środek w `center`, rozpiętość `size`, grubość `width`.
 pub fn chevron_right(paint: &mut PaintCtx, color: Color, center: Point, size: f64, width: f64) {
     paint.scene.stroke_line(

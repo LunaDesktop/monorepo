@@ -56,7 +56,8 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   „oko”) i `EditableLabel`; kontenery `CenterBox`, `Grid`, `Fixed`, `Paned`, `Stack`,
   `ActionBar`, `PopoverMenuBar`; dalej `MenuButton`, `SearchBar`, `Expander`, `Statusbar`,
   `Calendar`, `Image`, `TextView`, `Popover`, `ColumnView`, `Assistant`, `Scrollbar`/
-  `Adjustment`, `ColorChooser`; aliasy GTK4 `ScrolledWindow` = `ScrollView`,
+  `Adjustment`, `ColorChooser`, `FlowBox`, `SpinButton`, `EmojiChooser`, `NavigationRail`;
+  aliasy GTK4 `ScrolledWindow` = `ScrollView`,
   `StackSwitcher` = `ViewSwitcher`, `Notebook` = `TabView`, `ListBox` = `NavList`.
   Tokeny metryk kontenerów: `Theme::metrics.container`. Animacje: `libluna-core` `motion`
   (`Easing`, `lerp`, `Animation`), użyte w `Stack` (przejścia `StackTransition`), `Revealer`

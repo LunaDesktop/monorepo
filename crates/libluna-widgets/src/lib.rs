@@ -55,6 +55,7 @@
 //! - [`Scrollbar`]/[`Adjustment`], [`ColorChooser`] — przewijanie (obie osie) i paleta kolorów.
 //! - Animacje (`libluna-core::motion`): `Easing`/`lerp`/`Animation`; użyte w [`Revealer`],
 //!   [`Toast`] i przejściach [`Stack`] ([`StackTransition`]).
+//! - [`FlowBox`], [`SpinButton`], [`EmojiChooser`], [`NavigationRail`] — kolejne widgety libLuny.
 //! - Aliasy w duchu GTK4: [`Carousel`] = [`Pager`], [`ScrolledWindow`] = [`ScrollView`],
 //!   [`StackSwitcher`] = [`ViewSwitcher`], [`Notebook`] = [`TabView`], [`ListBox`] = [`NavList`].
 //! - [`Carousel`] (alias [`Pager`]), [`ToolbarView`], [`WindowTitle`], [`Clamp`], [`WrapBox`],
@@ -88,9 +89,11 @@ pub mod ctx;
 pub mod dialogs;
 pub mod display;
 pub mod dropdown;
+pub mod emoji_chooser;
 pub mod entries;
 pub mod entry;
 pub mod expander;
+pub mod flow_box;
 pub mod header_bar;
 pub mod helpers;
 pub mod icon;
@@ -101,6 +104,7 @@ pub mod menu;
 pub mod menu_button;
 pub mod nav_list;
 pub mod navigation;
+pub mod navigation_rail;
 pub mod pager;
 pub mod path_bar;
 pub mod popover;
@@ -113,6 +117,7 @@ pub mod search_bar;
 pub mod search_entry;
 pub mod shortcut_label;
 pub mod slider;
+pub mod spin_button;
 pub mod spinner;
 pub mod split_button;
 pub mod status_page;
@@ -152,9 +157,11 @@ pub use display::{
     Separator,
 };
 pub use dropdown::DropDown;
+pub use emoji_chooser::EmojiChooser;
 pub use entries::{EditableLabel, PasswordEntry};
 pub use entry::{Entry, EntryIcon, TextInput};
 pub use expander::Expander;
+pub use flow_box::FlowBox;
 pub use header_bar::{ControlsLayout, ControlsSide, HeaderBar, TitleAlign, WindowControl};
 pub use helpers::{
     BreakpointBin, ButtonContent, Clamp, ToolbarRects, ToolbarView, WindowTitle, WindowTitleRects,
@@ -169,6 +176,7 @@ pub use menu_button::MenuButton;
 pub use nav_list::NavList as ListBox;
 pub use nav_list::{NavEntry, NavList, NavRow};
 pub use navigation::{NavigationSplitView, NavigationView, OverlaySplitView, Sidebar};
+pub use navigation_rail::NavigationRail;
 pub use pager::Pager;
 /// `Carousel` — nazwa [`Pager`] w duchu libadwaita.
 pub use pager::Pager as Carousel;
@@ -185,6 +193,7 @@ pub use search_bar::SearchBar;
 pub use search_entry::SearchEntry;
 pub use shortcut_label::ShortcutLabel;
 pub use slider::Slider;
+pub use spin_button::{SpinArrow, SpinButton};
 pub use spinner::Spinner;
 pub use split_button::{SplitButton, SplitRects};
 pub use status_page::{StatusIcon, StatusPage, StatusRects};

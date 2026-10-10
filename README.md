@@ -355,7 +355,9 @@ XDG_CONFIG_HOME="$PWD/examples" cargo run -p luna-demo --bin render -- --lang fr
   `SearchBar`, `Expander`, `Statusbar`, `Calendar`, `Image` (ikony wektorowe),
   `TextView` (pole wielolinijkowe), `Popover` (generyczny), `ColumnView` (tabela),
   `Assistant` (kreator kroków), `Scrollbar`/`Adjustment` (przewijanie w obu osiach),
-  `ColorChooser` (paleta); aliasy `ScrolledWindow` = `ScrollView`,
+  `ColorChooser` (paleta), `FlowBox` (zawijająca siatka z wyborem), `SpinButton` (pole liczbowe),
+  `EmojiChooser` (siatka emoji), `NavigationRail` (kompaktowa szyna nawigacji);
+  aliasy `ScrolledWindow` = `ScrollView`,
   `StackSwitcher` = `ViewSwitcher`, `Notebook` = `TabView`, `ListBox` = `NavList`.
   **Animacje wcielone w widgety**: przejścia `Stack` (slide/fade przez `StackTransition`),
   płynny `Revealer` i `Toast` (wjazd + fade) — sterowane z aplikacji przez `advance(dt, …)`.
