@@ -42,6 +42,15 @@ impl TextEngine {
         Self { regular, bold }
     }
 
+    /// Silnik bez fontów (przybliżone metryki, brak rysowania) — do pomiaru drzew układu,
+    /// które nie zawierają etykiet. Tani w tworzeniu.
+    pub fn none() -> Self {
+        Self {
+            regular: None,
+            bold: None,
+        }
+    }
+
     /// Czy jakikolwiek font został wczytany.
     pub fn has_font(&self) -> bool {
         self.regular.is_some()

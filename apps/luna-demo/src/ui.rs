@@ -10,6 +10,7 @@ use libluna_core::{
 };
 use libluna_i18n::{tr, Locale};
 use libluna_render::TextEngine;
+use libluna_widgets::layout::{Layout as Tree, LayoutCtx, Node};
 use libluna_widgets::{
     ActionRow, BottomSheet, Button, Card, CheckButton, ControlsLayout, ControlsSide, DropDown,
     Entry, HeaderBar, Item, ItemView, Menu, MenuEntry, NavEntry, NavList, Pager, PaintCtx, PathBar,
@@ -175,6 +176,11 @@ pub struct Layout {
     pub sidebar: Rect,
     pub sidebar_handle: Rect,
     pub area: Rect,
+    /// Karty obszaru treści (ułożone silnikiem układu `measure`/`allocate`).
+    pub card: Rect,
+    pub card2: Rect,
+    pub card3: Rect,
+    pub card4: Rect,
     pub sidebar_button: Rect,
     pub sidebar_visible: bool,
     pub options_button: Rect,
@@ -440,27 +446,43 @@ pub fn layout(size: Size, theme: &Theme, demo: &Demo) -> Layout {
         control,
     );
 
-    // Karta 1: Wygląd (3 wiersze).
-    let card = Rect::from_xywh(
-        area.x() + lg,
-        area.y() + lg,
-        (area.width() - 2.0 * lg).max(0.0),
-        208.0,
-    );
+    // Karty i wiersze układane przez silnik `measure`/`allocate` (retencyjne drzewo).
+    let ctx_text = TextEngine::none();
+    let ctx = LayoutCtx {
+        theme,
+        text: &ctx_text,
+    };
+    let cards = Tree::new(Node::padding(
+        Insets::splat(lg),
+        Node::vbox(vec![
+            Node::fixed(0.0, 208.0),
+            Node::fixed(0.0, 320.0),
+            Node::fixed(0.0, 152.0),
+            Node::fixed(0.0, 196.0),
+        ])
+        .gap(lg),
+    ))
+    .fit(area, &ctx);
+    let (card, card2, card3, card4) = (cards[0], cards[1], cards[2], cards[3]);
+
     let header_h = theme.metrics.card.header;
     let row_h = ROW_H;
-    let row = |i: usize| {
-        Rect::from_xywh(
+    // Wiersze karty: pionowy stos `count` pozycji (silnik).
+    let row_rects = |card: Rect, count: usize| -> Vec<Rect> {
+        let inner = Rect::from_xywh(
             card.x(),
-            card.y() + header_h + i as f64 * row_h,
+            card.y() + header_h,
             card.width(),
-            row_h,
-        )
+            (card.height() - header_h).max(0.0),
+        );
+        let tree = Node::vbox((0..count).map(|_| Node::fixed(0.0, row_h)).collect());
+        Tree::new(tree).fit(inner, &ctx)
     };
+    let rows1 = row_rects(card, 3);
 
     // Wiersz 0: tryb (jasny/ciemny/auto).
     let seg_total = 240.0;
-    let r0 = row(0);
+    let r0 = rows1[0];
     let theme_switcher = Rect::from_xywh(
         r0.right() - md - seg_total,
         r0.center().y - 16.0,
@@ -472,7 +494,7 @@ pub fn layout(size: Size, theme: &Theme, demo: &Demo) -> Layout {
     let dot = 22.0;
     let gap = 10.0;
     let dots_w = Accent::ALL.len() as f64 * dot + (Accent::ALL.len() - 1) as f64 * gap;
-    let r1 = row(1);
+    let r1 = rows1[1];
     let dots_x = r1.right() - md - dots_w;
     let accents = std::array::from_fn(|i| {
         Rect::from_xywh(
@@ -484,7 +506,7 @@ pub fn layout(size: Size, theme: &Theme, demo: &Demo) -> Layout {
     });
 
     // Wiersz 2: język.
-    let r2 = row(2);
+    let r2 = rows1[2];
     let dd_h = theme.metrics.dropdown.height;
     let language = Rect::from_xywh(
         r2.right() - md - 170.0,
@@ -494,15 +516,7 @@ pub fn layout(size: Size, theme: &Theme, demo: &Demo) -> Layout {
     );
 
     // Karta 2: Ustawienia (5 wierszy).
-    let card2 = Rect::from_xywh(area.x() + lg, card.bottom() + lg, card.width(), 320.0);
-    let row2 = |i: usize| {
-        Rect::from_xywh(
-            card2.x(),
-            card2.y() + header_h + i as f64 * row_h,
-            card2.width(),
-            row_h,
-        )
-    };
+    let rows2 = row_rects(card2, 5);
     let switch = |r: Rect| {
         Rect::from_xywh(
             r.right() - md - switch_m.width,
@@ -511,8 +525,8 @@ pub fn layout(size: Size, theme: &Theme, demo: &Demo) -> Layout {
             switch_m.height,
         )
     };
-    let option_a = switch(row2(0));
-    let srow = row2(1);
+    let option_a = switch(rows2[0]);
+    let srow = rows2[1];
     let track_h = theme.metrics.slider.track_height;
     let volume_track = Rect::from_xywh(
         srow.right() - md - 200.0,
@@ -520,40 +534,31 @@ pub fn layout(size: Size, theme: &Theme, demo: &Demo) -> Layout {
         200.0,
         track_h,
     );
-    let vrow = row2(2);
+    let vrow = rows2[2];
     let view_switcher = Rect::from_xywh(
         vrow.right() - md - 160.0,
         vrow.center().y - 16.0,
         160.0,
         32.0,
     );
-    let bottom_bar = switch(row2(3));
-    let sidebar_toggle = switch(row2(4));
+    let bottom_bar = switch(rows2[3]);
+    let sidebar_toggle = switch(rows2[4]);
 
     // Karta 3: Zakładki (pasek + wiersz z aktywną stroną).
-    let card3 = Rect::from_xywh(area.x() + lg, card2.bottom() + lg, card.width(), 152.0);
-    let row3 = |i: usize| {
-        Rect::from_xywh(
-            card3.x(),
-            card3.y() + header_h + i as f64 * row_h,
-            card3.width(),
-            row_h,
-        )
-    };
+    let rows3 = row_rects(card3, 2);
     let tabs_h = theme.metrics.tabs.height;
     let tabs_w = 420.0;
-    let trow = row3(0);
+    let trow = rows3[0];
     let tabs = Rect::from_xywh(
         trow.right() - md - tabs_w,
         trow.center().y - tabs_h / 2.0,
         tabs_w,
         tabs_h,
     );
-    let tabs_value = row3(1);
+    let tabs_value = rows3[1];
 
     // Karta 4: Pliki (PathBar + SearchEntry + ItemView).
-    let card4 = Rect::from_xywh(area.x() + lg, card3.bottom() + lg, card.width(), 196.0);
-    let row4 = Rect::from_xywh(card4.x(), card4.y() + header_h, card4.width(), row_h);
+    let row4 = row_rects(card4, 1)[0];
     let path_h = theme.metrics.pathbar.height;
     let path = Rect::from_xywh(
         card4.x() + md,
@@ -579,6 +584,10 @@ pub fn layout(size: Size, theme: &Theme, demo: &Demo) -> Layout {
         sidebar,
         sidebar_handle,
         area,
+        card,
+        card2,
+        card3,
+        card4,
         sidebar_button,
         sidebar_visible: demo.sidebar_visible,
         options_button,
@@ -1214,17 +1223,12 @@ fn draw_content(
     let theme = *paint.theme;
     paint.scene.fill_rect(area, theme.colors.view_bg);
 
-    let lg = theme.spacing.lg;
     let md = theme.spacing.md;
     let body = theme.typography.body.size;
 
     // --- Karta 1: Wygląd (3 wiersze) ---
-    let card = Rect::from_xywh(
-        area.x() + lg,
-        area.y() + lg,
-        (area.width() - 2.0 * lg).max(0.0),
-        208.0,
-    );
+    // Karty pochodzą z silnika układu (`lay`).
+    let card = lay.card;
     Card::new(tr("Appearance")).paint(paint, card);
 
     draw_row_label(paint, card, lay.theme_switcher, &tr("Theme"));
@@ -1238,7 +1242,7 @@ fn draw_content(
     language_dropdown(&codes).paint(paint, lay.language);
 
     // --- Karta 2: Ustawienia ---
-    let card2 = Rect::from_xywh(card.x(), card.bottom() + lg, card.width(), 320.0);
+    let card2 = lay.card2;
     Card::new(tr("Settings")).paint(paint, card2);
 
     draw_row_label(paint, card2, lay.option_a, &tr("Option A"));
@@ -1267,7 +1271,7 @@ fn draw_content(
     Switch::new(demo.sidebar_visible).paint(paint, lay.sidebar_toggle);
 
     // --- Karta 3: Zakładki ---
-    let card3 = Rect::from_xywh(card.x(), card2.bottom() + lg, card.width(), 152.0);
+    let card3 = lay.card3;
     Card::new(tr("Tabs")).paint(paint, card3);
 
     // Wiersz 0: pasek zakładek (widget TabBar).
@@ -1293,7 +1297,7 @@ fn draw_content(
     );
 
     // --- Karta 4: Pliki (PathBar + SearchEntry + ItemView) ---
-    let card4 = Rect::from_xywh(card.x(), card3.bottom() + lg, card.width(), 196.0);
+    let card4 = lay.card4;
     Card::new(tr("Files")).paint(paint, card4);
     path_bar(demo).paint(paint, lay.path);
 
