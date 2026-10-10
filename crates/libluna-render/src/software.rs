@@ -7,7 +7,7 @@
 
 use libluna_core::{Color, Point, Rect, Scale, Size};
 use tiny_skia::{
-    FillRule, IntSize, LineCap, LineJoin, Mask, Paint, Path, PathBuilder, Pixmap, PixmapPaint,
+    FillRule, LineCap, LineJoin, Mask, Paint, Path, PathBuilder, Pixmap, PixmapPaint, PixmapRef,
     Shader, Stroke, Transform,
 };
 
@@ -158,10 +158,9 @@ impl SoftwareRenderer {
                     if rect.width() <= 0.0 || rect.height() <= 0.0 {
                         continue;
                     }
-                    let Some(size) = IntSize::from_wh(data.width, data.height) else {
-                        continue;
-                    };
-                    let Some(src) = Pixmap::from_vec(data.rgba.clone(), size) else {
+                    // Bez kopiowania: widok na piksele sceny.
+                    let Some(src) = PixmapRef::from_bytes(&data.rgba, data.width, data.height)
+                    else {
                         continue;
                     };
                     let k = scale.factor() as f32;
@@ -169,14 +168,7 @@ impl SoftwareRenderer {
                     let sy = (rect.height() as f32 / data.height as f32) * k;
                     let t = Transform::from_scale(sx, sy)
                         .post_translate(rect.x() as f32 * k, rect.y() as f32 * k);
-                    pixmap.draw_pixmap(
-                        0,
-                        0,
-                        src.as_ref(),
-                        &PixmapPaint::default(),
-                        t,
-                        mask.as_ref(),
-                    );
+                    pixmap.draw_pixmap(0, 0, src, &PixmapPaint::default(), t, mask.as_ref());
                 }
             }
         }

@@ -3,7 +3,7 @@
 use std::sync::Mutex;
 
 use libluna_render::ImageData;
-use wayland_protocols::xdg::shell::server::{xdg_surface, xdg_toplevel};
+use wayland_protocols::xdg::shell::server::{xdg_popup, xdg_surface, xdg_toplevel};
 use wayland_server::{
     protocol::{wl_buffer, wl_callback, wl_compositor, wl_region, wl_surface},
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
@@ -138,16 +138,19 @@ impl Dispatch<wl_surface::WlSurface, SurfaceData> for State {
     }
 }
 
-/// Skomponuj powierzchnię do modelu okien, jeśli jest to toplevel z buforem `wl_shm`.
+/// Skomponuj powierzchnię do modelu okien (toplevel lub popup z buforem `wl_shm`).
 fn composite(state: &mut State, surface: &wl_surface::WlSurface, data: &SurfaceData) {
     let Some(xdg_surface) = data.xdg_surface.lock().unwrap().clone() else {
         return;
     };
-    let is_toplevel = xdg_surface
-        .data::<XdgSurfaceData>()
-        .map(|d| d.toplevel.lock().unwrap().is_some())
-        .unwrap_or(false);
-    if !is_toplevel {
+    let (is_toplevel, is_popup) = match xdg_surface.data::<XdgSurfaceData>() {
+        Some(d) => (
+            d.toplevel.lock().unwrap().is_some(),
+            *d.is_popup.lock().unwrap(),
+        ),
+        None => (false, false),
+    };
+    if !is_toplevel && !is_popup {
         return;
     }
     let Some(buffer) = data.buffer.lock().unwrap().clone() else {
@@ -161,16 +164,26 @@ fn composite(state: &mut State, surface: &wl_surface::WlSurface, data: &SurfaceD
         return;
     };
     let image = std::sync::Arc::new(ImageData::new(w as u32, h as u32, rgba));
+    // Położenie popupu liczymy przed zablokowaniem modelu (odczyt rodzica).
+    let popup_xy = if is_popup {
+        Some(popup_position(state, &xdg_surface))
+    } else {
+        None
+    };
     let z = state.next_z();
-    let title = xdg_surface
-        .data::<XdgSurfaceData>()
-        .and_then(|d| {
-            d.toplevel.lock().unwrap().as_ref().and_then(|tl| {
-                tl.data::<XdgToplevelData>()
-                    .map(|td| td.title.lock().unwrap().clone())
+    let title = if is_toplevel {
+        xdg_surface
+            .data::<XdgSurfaceData>()
+            .and_then(|d| {
+                d.toplevel.lock().unwrap().as_ref().and_then(|tl| {
+                    tl.data::<XdgToplevelData>()
+                        .map(|td| td.title.lock().unwrap().clone())
+                })
             })
-        })
-        .unwrap_or_default();
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
 
     let mut slot = data.slot.lock().unwrap();
     let mut windows = state.windows.lock().unwrap();
@@ -179,13 +192,16 @@ fn composite(state: &mut State, surface: &wl_surface::WlSurface, data: &SurfaceD
         Some(i) => i,
         None => {
             let i = windows.len();
+            let (px, py) = popup_xy.unwrap_or((60.0 + i as f64 * 36.0, 60.0 + i as f64 * 36.0));
             windows.push(Window {
-                x: 60.0 + i as f64 * 36.0,
-                y: 60.0 + i as f64 * 36.0,
+                x: px,
+                y: py,
                 width: w,
                 height: h,
                 z,
                 title: title.clone(),
+                popup: is_popup,
+                mapped: true,
                 data: image.clone(),
             });
             *slot = Some(i);
@@ -196,6 +212,7 @@ fn composite(state: &mut State, surface: &wl_surface::WlSurface, data: &SurfaceD
     if let Some(window) = windows.get_mut(idx) {
         window.width = w;
         window.height = h;
+        window.mapped = true;
         if !title.is_empty() {
             window.title = title;
         }
@@ -207,11 +224,66 @@ fn composite(state: &mut State, surface: &wl_surface::WlSurface, data: &SurfaceD
     if created && state.slots.len() == idx {
         state.slots.push(surface.clone());
     }
+    // Popup: wyślij konfigurację (rozmiar + pozycja).
+    if is_popup && created {
+        send_popup_configure(state, &xdg_surface, popup_xy.unwrap_or((0.0, 0.0)), w, h);
+    }
     // Pozwól klientowi ponownie użyć bufora.
     let _ = buffer.send_event(wl_buffer::Event::Release);
 }
 
-/// Jeśli powierzchnia ma `xdg_surface` jeszcze nie skonfigurowany, wyślij configure.
+/// Pozycja popupu względem treści rodzica (prostokąt kotwicy + offset).
+fn popup_position(state: &State, xdg_surface: &xdg_surface::XdgSurface) -> (f64, f64) {
+    let Some(d) = xdg_surface.data::<XdgSurfaceData>() else {
+        return (0.0, 0.0);
+    };
+    let geom = *d.geom.lock().unwrap();
+    let parent_origin = d
+        .parent
+        .lock()
+        .unwrap()
+        .clone()
+        .and_then(|ps| ps.data::<SurfaceData>().map(|sd| *sd.slot.lock().unwrap()))
+        .flatten()
+        .and_then(|slot| {
+            state.windows.lock().unwrap().get(slot).map(|w| {
+                let c = w.content();
+                (c.x(), c.y())
+            })
+        })
+        .unwrap_or((0.0, 0.0));
+    (
+        parent_origin.0 + geom.anchor_x + geom.offset_x,
+        parent_origin.1 + geom.anchor_y + geom.anchor_h + geom.offset_y,
+    )
+}
+
+/// Wysyła `xdg_popup.configure` + `xdg_surface.configure` (raz).
+fn send_popup_configure(
+    state: &mut State,
+    xdg_surface: &xdg_surface::XdgSurface,
+    (x, y): (f64, f64),
+    w: i32,
+    h: i32,
+) {
+    let serial = state.next_serial();
+    if let Some(d) = xdg_surface.data::<XdgSurfaceData>() {
+        if let Some(popup) = d.popup.lock().unwrap().as_ref() {
+            let _ = popup.send_event(xdg_popup::Event::Configure {
+                x: x as i32,
+                y: y as i32,
+                width: w,
+                height: h,
+            });
+        }
+        if !*d.configured.lock().unwrap() {
+            let _ = xdg_surface.send_event(xdg_surface::Event::Configure { serial });
+            *d.configured.lock().unwrap() = true;
+        }
+    }
+}
+
+/// Jeśli toplevel nie ma jeszcze konfiguracji, wyślij `configure` (popupy mają własną).
 fn maybe_configure_xdg(state: &mut State, data: &SurfaceData) {
     let Some(xdg_surface) = data.xdg_surface.lock().unwrap().clone() else {
         return;
@@ -219,6 +291,9 @@ fn maybe_configure_xdg(state: &mut State, data: &SurfaceData) {
     let Some(xdg_data) = xdg_surface.data::<XdgSurfaceData>() else {
         return;
     };
+    if *xdg_data.is_popup.lock().unwrap() {
+        return;
+    }
     if *xdg_data.configured.lock().unwrap() {
         return;
     }

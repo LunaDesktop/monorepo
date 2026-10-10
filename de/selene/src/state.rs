@@ -16,7 +16,7 @@ pub const TITLEBAR: f64 = 30.0;
 /// Bok uchwytu przeskalowania w prawym-dolnym narożniku.
 pub const GRIP: f64 = 16.0;
 
-/// Okno (toplevel) w modelu kompozycji: pozycja, rozmiar, kolejność i gotowe piksele.
+/// Okno (toplevel/popup) w modelu kompozycji: pozycja, rozmiar, kolejność i piksele.
 pub struct Window {
     pub x: f64,
     pub y: f64,
@@ -27,38 +27,54 @@ pub struct Window {
     pub z: i32,
     /// Tytuł okna (z `xdg_toplevel.set_title`).
     pub title: String,
+    /// Czy to `xdg_popup` (bez dekoracji, zamykany kliknięciem poza).
+    pub popup: bool,
+    /// Czy powierzchnia jest widoczna (popup znika po `popup_done`).
+    pub mapped: bool,
     /// Piksele (premultiplied RGBA8) ostatnio zacommitowanego bufora.
     pub data: Arc<ImageData>,
 }
 
 impl Window {
+    /// Wysokość dekoracji (zero dla popupów).
+    fn bar(&self) -> f64 {
+        if self.popup {
+            0.0
+        } else {
+            TITLEBAR
+        }
+    }
+
     /// Prostokąt całego okna (dekoracja + treść).
     pub fn outer(&self) -> Rect {
         Rect::from_xywh(
             self.x,
             self.y,
             self.width as f64,
-            TITLEBAR + self.height as f64,
+            self.bar() + self.height as f64,
         )
     }
 
-    /// Pasek tytułu (górna część dekoracji).
+    /// Pasek tytułu (zerowy dla popupów).
     pub fn titlebar(&self) -> Rect {
-        Rect::from_xywh(self.x, self.y, self.width as f64, TITLEBAR)
+        Rect::from_xywh(self.x, self.y, self.width as f64, self.bar())
     }
 
     /// Obszar treści (klienta).
     pub fn content(&self) -> Rect {
         Rect::from_xywh(
             self.x,
-            self.y + TITLEBAR,
+            self.y + self.bar(),
             self.width as f64,
             self.height as f64,
         )
     }
 
-    /// Kwadratowy przycisk zamknięcia w prawym górnym narożniku.
+    /// Kwadratowy przycisk zamknięcia (tylko dla topleveli).
     pub fn close_rect(&self) -> Rect {
+        if self.popup {
+            return Rect::ZERO;
+        }
         Rect::from_xywh(
             self.x + self.width as f64 - TITLEBAR,
             self.y,
@@ -67,8 +83,11 @@ impl Window {
         )
     }
 
-    /// Uchwyt przeskalowania (prawy-dolny narożnik treści).
+    /// Uchwyt przeskalowania (prawy-dolny narożnik treści; tylko dla topleveli).
     pub fn grip_rect(&self) -> Rect {
+        if self.popup {
+            return Rect::ZERO;
+        }
         let c = self.content();
         Rect::from_xywh(c.right() - GRIP, c.bottom() - GRIP, GRIP, GRIP)
     }

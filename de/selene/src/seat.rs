@@ -9,7 +9,7 @@ use std::io::{Seek, Write};
 use std::os::fd::{AsFd, OwnedFd};
 
 use libluna_core::{ButtonState, Event, Modifiers, Point, PointerButton};
-use wayland_protocols::xdg::shell::server::{xdg_surface, xdg_toplevel};
+use wayland_protocols::xdg::shell::server::{xdg_popup, xdg_surface, xdg_toplevel};
 use wayland_server::protocol::{wl_keyboard, wl_pointer, wl_seat, wl_touch};
 use wayland_server::{
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource, WEnum,
@@ -143,7 +143,7 @@ fn hit(state: &State, pos: Point) -> Option<(usize, Part)> {
     let windows = state.windows.lock().unwrap();
     let mut best: Option<(usize, i32)> = None;
     for (i, w) in windows.iter().enumerate() {
-        if w.outer().contains(pos) {
+        if w.mapped && w.outer().contains(pos) {
             match best {
                 Some((_, z)) if z >= w.z => {}
                 _ => best = Some((i, w.z)),
@@ -169,7 +169,7 @@ fn content_window(state: &State, pos: Point) -> Option<usize> {
     let windows = state.windows.lock().unwrap();
     let mut best: Option<(usize, i32)> = None;
     for (i, w) in windows.iter().enumerate() {
-        if w.content().contains(pos) {
+        if w.mapped && w.content().contains(pos) {
             match best {
                 Some((_, z)) if z >= w.z => {}
                 _ => best = Some((i, w.z)),
@@ -177,6 +177,50 @@ fn content_window(state: &State, pos: Point) -> Option<usize> {
         }
     }
     best.map(|(i, _)| i)
+}
+
+/// Zamyka popupy, poza którymi kliknięto (wysyła `xdg_popup.popup_done`, zdejmuje z widoku).
+fn dismiss_popups(state: &mut State, pos: Point) {
+    loop {
+        let top = {
+            let windows = state.windows.lock().unwrap();
+            let mut best: Option<(usize, i32)> = None;
+            for (i, w) in windows.iter().enumerate() {
+                if w.popup && w.mapped {
+                    match best {
+                        Some((_, z)) if z >= w.z => {}
+                        _ => best = Some((i, w.z)),
+                    }
+                }
+            }
+            best.map(|(i, _)| i)
+        };
+        let Some(slot) = top else { break };
+        let inside = state
+            .windows
+            .lock()
+            .unwrap()
+            .get(slot)
+            .map(|w| w.outer().contains(pos))
+            .unwrap_or(false);
+        if inside {
+            break;
+        }
+        if let Some(surface) = state.slots.get(slot).cloned() {
+            if let Some(sd) = surface.data::<SurfaceData>() {
+                if let Some(xs) = sd.xdg_surface.lock().unwrap().clone() {
+                    if let Some(d) = xs.data::<XdgSurfaceData>() {
+                        if let Some(popup) = d.popup.lock().unwrap().as_ref() {
+                            let _ = popup.send_event(xdg_popup::Event::PopupDone);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(w) = state.windows.lock().unwrap().get_mut(slot) {
+            w.mapped = false;
+        }
+    }
 }
 
 fn window_geometry(state: &State, slot: usize) -> Option<(f64, f64, f64, f64)> {
@@ -224,6 +268,9 @@ fn pointer_button(state: &mut State, pos: Point, button: PointerButton, st: Butt
     if st == ButtonState::Released {
         state.drag = None;
         state.resize = None;
+    } else {
+        // Klik poza popupem zamyka popup (przed trafieniem w okno).
+        dismiss_popups(state, pos);
     }
 
     // Obsłuż dekorację/okno pod kursorem.
@@ -654,6 +701,8 @@ mod tests {
             height: 120,
             z: 1,
             title: "Test".to_owned(),
+            popup: false,
+            mapped: true,
             data: Arc::new(ImageData::empty(200, 120)),
         }
     }

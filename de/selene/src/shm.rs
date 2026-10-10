@@ -11,10 +11,63 @@ use wayland_server::{
 
 use crate::state::State;
 
-/// Dane puli pamięci (`wl_shm_pool`): deskryptor + rozmiar. Współdzielone przez bufory.
+/// Dane puli pamięci (`wl_shm_pool`): deskryptor, rozmiar i **zbuforowana mapa**.
+///
+/// Mapę tworzymy raz (przy `create_pool`) i zwalniamy przy zniszczeniu puli — zamiast
+/// mapować/odmapowywać przy każdym commicie.
 pub struct ShmPoolData {
+    #[allow(dead_code)]
     pub fd: OwnedFd,
     pub size: usize,
+    map: *mut c_void,
+}
+
+// Mapa jest tylko do odczytu i współdzielona — bezpieczna do wysyłania między wątkami.
+unsafe impl Send for ShmPoolData {}
+unsafe impl Sync for ShmPoolData {}
+
+impl ShmPoolData {
+    /// Mapuje pulę (tylko odczyt). Przy niepowodzeniu zostaje pusta (bez paniki).
+    pub fn new(fd: OwnedFd, size: usize) -> Self {
+        let map = if size == 0 {
+            std::ptr::null_mut()
+        } else {
+            // SAFETY: `fd` żyje w strukturze, mapujemy tylko do odczytu.
+            unsafe {
+                rustix::mm::mmap(
+                    std::ptr::null_mut::<c_void>(),
+                    size,
+                    rustix::mm::ProtFlags::READ,
+                    rustix::mm::MapFlags::PRIVATE,
+                    &fd,
+                    0,
+                )
+            }
+            .unwrap_or(std::ptr::null_mut())
+        };
+        Self { fd, size, map }
+    }
+
+    /// Bajty puli (widok tylko do odczytu; pusty, gdy mapowanie się nie powiodło).
+    pub fn bytes(&self) -> &[u8] {
+        if self.map.is_null() {
+            return &[];
+        }
+        // SAFETY: `map` wskazuje `size` bajtów zamapowanej pamięci.
+        unsafe { std::slice::from_raw_parts(self.map as *const u8, self.size) }
+    }
+}
+
+impl Drop for ShmPoolData {
+    fn drop(&mut self) {
+        if self.map.is_null() {
+            return;
+        }
+        // SAFETY: odmapowujemy ten sam zakres, który zmapowaliśmy.
+        unsafe {
+            let _ = rustix::mm::munmap(self.map, self.size);
+        }
+    }
 }
 
 /// Dane bufora (`wl_buffer`): odniesienie do puli + geometria.
@@ -29,37 +82,22 @@ pub struct BufferData {
 
 impl BufferData {
     /// Odczytuje piksele bufora jako premultiplied RGBA8 (swizzle BGRA→RGBA).
-    ///
-    /// Mapujemy pulę `wl_shm` tylko na czas odczytu (MVP; docelowo mapa cache'owana).
     pub fn to_rgba(&self) -> Option<Vec<u8>> {
         if self.width <= 0 || self.height <= 0 || self.stride <= 0 {
             return None;
         }
-        let len = self.pool.size;
-        // SAFETY: mapujemy tylko do odczytu, na czas wywołania; `fd` żyje w puli.
-        let map = unsafe {
-            rustix::mm::mmap(
-                std::ptr::null_mut::<c_void>(),
-                len,
-                rustix::mm::ProtFlags::READ,
-                rustix::mm::MapFlags::PRIVATE,
-                &self.pool.fd,
-                0,
-            )
-        }
-        .ok()?;
-        let bytes = unsafe { std::slice::from_raw_parts(map as *const u8, len) };
-
         let (w, h) = (self.width as usize, self.height as usize);
         let stride = self.stride as usize;
+        // Zakres musi mieścić się w puli.
+        if self.offset + stride * h > self.pool.size {
+            return None;
+        }
+        let bytes = self.pool.bytes();
         let mut out = vec![0u8; w * h * 4];
         for y in 0..h {
             let row = self.offset + y * stride;
             for x in 0..w {
                 let i = row + x * 4;
-                if i + 4 > bytes.len() {
-                    break;
-                }
                 let o = (y * w + x) * 4;
                 // ARGB8888 (pamięć: B,G,R,A) → RGBA8; XRGB8888 → alfa wymuszona na 1.
                 out[o] = bytes[i + 2];
@@ -71,10 +109,6 @@ impl BufferData {
                     bytes[i + 3]
                 };
             }
-        }
-        // SAFETY: odmapowujemy dokładnie ten sam zakres.
-        unsafe {
-            let _ = rustix::mm::munmap(map, len);
         }
         Some(out)
     }
@@ -108,13 +142,7 @@ impl Dispatch<wl_shm::WlShm, ()> for State {
         data_init: &mut DataInit<'_, Self>,
     ) {
         if let wl_shm::Request::CreatePool { id, fd, size } = request {
-            data_init.init(
-                id,
-                Arc::new(ShmPoolData {
-                    fd,
-                    size: size.max(0) as usize,
-                }),
-            );
+            data_init.init(id, Arc::new(ShmPoolData::new(fd, size.max(0) as usize)));
         }
     }
 }
