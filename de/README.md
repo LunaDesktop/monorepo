@@ -50,13 +50,18 @@ gnieździe nasłuchu i deskryptorze backendu. `libLuna` jest zwykłą zależnoś
 - **Monitory**: model `Vec<OutputInfo>` z pozycją i układem, global `wl_output` per monitor,
   **przenośne wykrywanie DRM/KMS** (`drm.rs`: ioctl `GETRESOURCES`/`GETCONNECTOR`, tryb natywny),
   z fallbackiem na pojedyncze wyjście nested, gdy DRM niedostępne.
+- **Schowek** (`wl_data_device_manager`): kopiuj/wklej między klientami — `wl_data_source`,
+  `data_offer`/`offer`/`selection` rozsyłane do pozostałych urządzeń, `wl_data_offer.receive`
+  przekazywane do źródła (`.send`).
+- **Klawiatura**: układ i wariant z otoczenia (`LUNA_KEYBOARD_LAYOUT`, `LUNA_KEYBOARD_VARIANT`,
+  sanityzowane), `wl_keyboard.repeat_info`.
 - Wielojęzyczność (`libluna-i18n`) i optymalizacja (`[profile.release]` LTO, cache `shm`).
 
 ## Jeszcze nie / Not yet
 
 - **Backend DRM/KMS**: samo **wykrywanie** monitorów działa; skanowanie (bufory, page-flip,
   master) i GLES oraz hotplug (`zwlr_output_manager`) — do zrobienia.
-- **Schowek** (`wl_data_device`), układy klawiatury inne niż `us`, IME i `repeat_info`.
+- **Drag & drop** i **selekcja pierwotna** (poza kopiuj/wklej); IME / `text-input`.
 - `wl_output` dynamiczne (zmiana trybu), fokus klawiatury po kliknięciu poza oknem.
 - Render tylko przy zmianie modelu (częściowe odświeżanie/damage).
 
@@ -83,6 +88,7 @@ de/selene/src/
   shell.rs       # xdg_wm_base / xdg_surface / xdg_toplevel / xdg_popup / xdg_positioner
   decoration.rs  # zxdg_decoration_manager_v1 (SSD: odpowiedź server_side)
   layer.rs       # zwlr_layer_shell_v1 (panele/docki: kotwice, warstwy, wybór monitora)
+  data.rs        # wl_data_device_manager (schowek: selekcja, data_offer/source)
   monitors.rs    # wl_output (model wielu monitorów, układ, trafienia)
   drm.rs         # wykrywanie monitorów DRM/KMS (ioctl) z fallbackiem nested
   seat.rs        # wl_seat: wskaźnik + klawiatura + trasowanie wejścia i operacje okien

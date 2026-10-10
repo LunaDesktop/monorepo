@@ -5,6 +5,8 @@ use std::time::Instant;
 
 use libluna_core::{Modifiers, Point, Rect};
 use libluna_render::ImageData;
+use wayland_server::protocol::wl_data_device::WlDataDevice;
+use wayland_server::protocol::wl_data_source::WlDataSource;
 use wayland_server::protocol::wl_keyboard::WlKeyboard;
 use wayland_server::protocol::wl_pointer::WlPointer;
 use wayland_server::protocol::wl_surface::WlSurface;
@@ -198,6 +200,10 @@ pub struct State {
     pub keyboard_focus: Option<(usize, WlSurface)>,
     /// Modyfikatory, o których już powiadomiliśmy klienta klawiatury.
     pub sent_mods: Modifiers,
+    /// Bieżąca selekcja (schowek): źródło danych.
+    pub selection: Option<WlDataSource>,
+    /// Urządzenia schowka zarejestrowane przez klientów (do rozsyłania selekcji).
+    pub data_devices: Vec<WlDataDevice>,
     /// Trwające przeciąganie okna.
     pub drag: Option<DragState>,
     /// Trwające przeskalowanie okna.
@@ -221,6 +227,8 @@ impl Default for State {
             pointer_focus: None,
             keyboard_focus: None,
             sent_mods: Modifiers::NONE,
+            selection: None,
+            data_devices: Vec::new(),
             drag: None,
             resize: None,
         }

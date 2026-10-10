@@ -149,10 +149,13 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   ✅ M-K5: **wiele monitorów** — model `OutputInfo` z pozycją, global `wl_output` per monitor,
   przenośne **wykrywanie DRM/KMS** (`de/selene/src/drm.rs`, ioctl `GETRESOURCES`/`GETCONNECTOR`)
   z fallbackiem na wyjście nested; okna maksymalizują się na swoim monitorze.
+  ✅ M-K6: **schowek** (`wl_data_device_manager`: `data_source`/`data_offer`/`selection`,
+  kopiuj/wklej między klientami) oraz **układy klawiatury** z otoczenia
+  (`LUNA_KEYBOARD_LAYOUT`/`LUNA_KEYBOARD_VARIANT`) i `wl_keyboard.repeat_info`.
   ✅ Optymalizacje: cache `mmap` puli `wl_shm` i zero-copy w rendererze (`PixmapRef::from_bytes`).
   Uruchomienie: `cargo run -p selene` (szczegóły: `de/README.md`).
-- Dalej: schowek (`wl_data_device`), układy klawiatury/IME, realny backend DRM/KMS + GLES
-  (skanowanie, page-flip, bufory), hotplug monitorów (`wl_output.done`/`zwlr_output_manager`).
+- Dalej: realny backend DRM/KMS + GLES (skanowanie, page-flip, bufory), drag & drop
+  i selekcja pierwotna, IME (`text-input`), hotplug monitorów (`zwlr_output_manager`).
 - **Luna** (`de/luna`) — powłoka środowiska (panel, launcher, OSD) na `libluna-widgets`.
 
 ## Później (poza MVP)

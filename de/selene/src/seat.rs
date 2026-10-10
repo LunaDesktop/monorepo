@@ -19,15 +19,40 @@ use crate::compositor::SurfaceData;
 use crate::shell::XdgSurfaceData;
 use crate::state::{DragState, ResizeState, SavedGeom, State, TITLEBAR};
 
-/// Kompaktowa mapa klawiszy (standardowe reguły XKB z systemowych danych).
-const KEYMAP: &str = r#"xkb_keymap {
-    xkb_keycodes { include "evdev+aliases(qwerty)" };
-    xkb_types { include "complete" };
-    xkb_compat { include "complete" };
-    xkb_symbols { include "pc+us+inet(evdev)" };
-    xkb_geometry { include "pc(pc105)" };
-};
-"#;
+/// Buduje tekst mapy klawiszy XKB dla danego układu (i opcjonalnego wariantu).
+///
+/// Nazwy są sanityzowane, aby nie można było wstrzyknąć treści spoza zestawu
+/// znaków używanego przez XKB.
+fn keymap_text_for(layout: &str, variant: Option<&str>) -> String {
+    let layout = sanitize_xkb(layout);
+    let layout = if layout.is_empty() {
+        "us".to_owned()
+    } else {
+        layout
+    };
+    let variant = variant.map(sanitize_xkb).filter(|v| !v.is_empty());
+    let symbols = match variant {
+        Some(v) => format!("pc+{layout}({v})+inet(evdev)"),
+        None => format!("pc+{layout}+inet(evdev)"),
+    };
+    format!(
+        "xkb_keymap {{\n    xkb_keycodes {{ include \"evdev+aliases(qwerty)\" }};\n    xkb_types {{ include \"complete\" }};\n    xkb_compat {{ include \"complete\" }};\n    xkb_symbols {{ include \"{symbols}\" }};\n    xkb_geometry {{ include \"pc(pc105)\" }};\n}};\n"
+    )
+}
+
+/// Bieżący układ z otoczenia (`LUNA_KEYBOARD_LAYOUT` / `LUNA_KEYBOARD_VARIANT`).
+fn keymap_text() -> String {
+    let layout = std::env::var("LUNA_KEYBOARD_LAYOUT").unwrap_or_else(|_| "us".to_owned());
+    let variant = std::env::var("LUNA_KEYBOARD_VARIANT").ok();
+    keymap_text_for(&layout, variant.as_deref())
+}
+
+/// Dopuszcza tylko znaki legalne w nazwie układu XKB.
+fn sanitize_xkb(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect()
+}
 
 /// Maski krawędzi zmiany rozmiaru.
 const EDGE_TOP: u8 = 1;
@@ -78,6 +103,11 @@ impl Dispatch<wl_seat::WlSeat, ()> for State {
                         size,
                     });
                 }
+                // Powtarzanie klawiszy: 25/s po 600 ms.
+                let _ = kb.send_event(wl_keyboard::Event::RepeatInfo {
+                    rate: 25,
+                    delay: 600,
+                });
                 state.keyboard = Some(kb);
             }
             wl_seat::Request::GetTouch { id } => {
@@ -113,7 +143,7 @@ empty_dispatch!(wl_touch::WlTouch);
 fn make_keymap() -> Option<(OwnedFd, u32)> {
     let fd = rustix::fs::memfd_create("selene-keymap", rustix::fs::MemfdFlags::CLOEXEC).ok()?;
     let mut file = std::fs::File::from(fd);
-    let mut bytes = KEYMAP.as_bytes().to_vec();
+    let mut bytes = keymap_text().into_bytes();
     bytes.push(0);
     file.write_all(&bytes).ok()?;
     file.rewind().ok()?;
@@ -1046,5 +1076,24 @@ mod tests {
         w.fullscreen = true;
         assert_eq!(w.titlebar().bottom(), w.y);
         assert_eq!(w.content().y(), w.y);
+    }
+
+    #[test]
+    fn keymap_defaults_to_us_layout() {
+        let km = keymap_text_for("us", None);
+        assert!(km.contains("xkb_keymap"));
+        assert!(km.contains("pc+us+inet(evdev)"));
+    }
+
+    #[test]
+    fn keymap_supports_variants_and_sanitizes_input() {
+        assert!(keymap_text_for("pl", Some("legacy")).contains("pc+pl(legacy)+inet(evdev)"));
+        // Znaki spoza zestawu XKB są odfiltrowane (bezpieczeństwo).
+        assert!(keymap_text_for("u; rm -rf", None).contains("pc+urm-rf+inet(evdev)"));
+    }
+
+    #[test]
+    fn empty_layout_falls_back_to_us() {
+        assert!(keymap_text_for("!!!", None).contains("pc+us+inet(evdev)"));
     }
 }
