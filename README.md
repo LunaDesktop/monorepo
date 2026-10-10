@@ -339,6 +339,13 @@ XDG_CONFIG_HOME="$PWD/examples" cargo run -p luna-demo --bin render -- --lang fr
   używany jako „pusty stan” listy), `Spinner` (wskaźnik zajętości — obracający się łuk),
   `Tooltip` (dymek podpowiedzi) i `Banner` (pasek komunikatu info/ostrzeżenie/błąd z akcjami)
   oraz wspólny `PaintCtx`.
+- `libluna-widgets` — **galeria w duchu libadwaita** (dalszy zestaw): `Avatar`, `ShortcutLabel`,
+  `ToggleGroup`, `SplitButton`, `Bin`; rodzina wierszy `Row` (`switch`/`combo`/`expander`/`entry`/
+  `password`/`spin`/`slider`/`button`/`nav`) oraz `PreferencesGroup`/`PreferencesPage`;
+  `Dialog`, `AlertDialog`, `AboutDialog`, `ShortcutsDialog`, `PreferencesDialog`; nawigacja
+  `NavigationView`, `NavigationSplitView`, `OverlaySplitView`, `Sidebar` (`Carousel` = alias
+  `Pager`); pomocniki `ToolbarView`, `WindowTitle`, `Clamp`, `WrapBox`, `BreakpointBin`,
+  `ButtonContent`.
 - `libluna-widgets::layout`: **dwuprzebiegowy układ** (retencyjne drzewo `measure`/`allocate`) —
   [`Node`] (`VBox`/`HBox`, `Padding`, `Expanded`, `Center`, `Spacer`, `Label`, `Fixed`),
   [`Constraints`](min/max) i [`Layout`](`desired_size`/`fit`). Liście pochłaniają nadmiar

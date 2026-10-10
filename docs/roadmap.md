@@ -45,6 +45,11 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   tytuł, opis, akcja — np. „pusty stan” listy), `Spinner` (wskaźnik zajętości), `Tooltip`
   (dymek podpowiedzi) i `Banner` (pasek komunikatu z akcjami); wspólny `PaintCtx`; testy
   hit-testingu bez okna.
+- **Galeria libadwaita pokryta**: `Avatar`, `ShortcutLabel`, `ToggleGroup`, `SplitButton`, `Bin`;
+  `Row` (switch/combo/expander/entry/password/spin/slider/button/nav) + `PreferencesGroup`/
+  `PreferencesPage`; `Dialog` + `AlertDialog`/`AboutDialog`/`ShortcutsDialog`/`PreferencesDialog`;
+  `NavigationView`/`NavigationSplitView`/`OverlaySplitView`/`Sidebar` (`Carousel` = `Pager`);
+  `ToolbarView`, `WindowTitle`, `Clamp`, `WrapBox`, `BreakpointBin`, `ButtonContent`.
 - `libluna-platform`: realne akcje okna z `Frame` (`close`/`minimize`/`toggle_maximize`).
 - Demo używa widgetów zamiast ręcznego rysowania (pasek boczny, wybór motywu/widoku, menu `☰`,
   przycisk „Opcje”, przełączniki, suwak, wybór języka, pasek tytułu, zakładki `TabBar`/`TabView`).
@@ -128,6 +133,13 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
 | Button (pill/suggested/flat) | `libluna-widgets` | Settings |
 | Stepper / Check / Radio | `libluna-widgets` | Files (popover) |
 | Toast | `libluna-widgets` | Settings, Files |
+| Avatar / ShortcutLabel | `libluna-widgets` | Settings |
+| ToggleGroup / SplitButton | `libluna-widgets` | Settings, Files |
+| Row (switch/combo/expander/entry/spin/button) | `libluna-widgets` | Settings, Files |
+| PreferencesGroup / PreferencesPage | `libluna-widgets` | Settings |
+| Dialog / AlertDialog / AboutDialog / ShortcutsDialog / PreferencesDialog | `libluna-widgets` | obie |
+| NavigationView / NavigationSplitView / OverlaySplitView / Sidebar | `libluna-widgets` | Files |
+| ToolbarView / WindowTitle / Clamp / WrapBox / BreakpointBin / Bin | `libluna-widgets` | obie |
 | Banner | `libluna-widgets` | Files, Settings |
 | Spinner / Tooltip | `libluna-widgets` | obie |
 | StatusBar / bottom info | `libluna-widgets` | obie |
