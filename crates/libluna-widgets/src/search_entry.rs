@@ -1,229 +1,142 @@
-//! `SearchEntry` — pole tekstowe wyszukiwania (lupka, tekst, kursor, „×” czyszczenia).
+//! `SearchEntry` — pole wyszukiwania (lupka, tekst, kursor, „×” czyszczenia).
 //!
-//! Widget immediate: trzyma treść i pozycję kursora. Aplikacja dostarcza zdarzenia klawiatury
-//! jako wywołania metod ([`SearchEntry::insert_str`], [`SearchEntry::backspace`],
-//! [`SearchEntry::move_left`]…), a sama decyduje o fokusie ([`SearchEntry::set_focused`]).
+//! Cienka nakładka na [`Entry`]: pole tekstowe z ikoną lupy i przyciskiem czyszczenia.
+//! Cała logika edycji żyje w [`Entry`]; tutaj delegujemy, zachowując dawny interfejs.
 
-use libluna_core::style::weight;
 use libluna_core::{Point, Rect, Theme};
 
 use crate::ctx::PaintCtx;
-use crate::icon;
+use crate::entry::{Entry, EntryIcon};
 
 /// Pole wyszukiwania.
 #[derive(Debug, Clone, Default)]
 pub struct SearchEntry {
-    text: String,
-    /// Pozycja kursora jako indeks bajtowy (zawsze na granicy znaku).
-    cursor: usize,
-    placeholder: String,
-    focused: bool,
-    hover_clear: bool,
+    entry: Entry,
 }
 
 impl SearchEntry {
     pub fn new(placeholder: impl Into<String>) -> Self {
         Self {
-            placeholder: placeholder.into(),
-            ..Self::default()
+            entry: Entry::new(placeholder)
+                .leading(EntryIcon::Search)
+                .clearable(true),
         }
     }
 
     pub fn text(&self) -> &str {
-        &self.text
+        self.entry.text()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.text.is_empty()
+        self.entry.is_empty()
     }
 
     pub fn cursor(&self) -> usize {
-        self.cursor
+        self.entry.cursor()
     }
 
     pub fn is_focused(&self) -> bool {
-        self.focused
+        self.entry.is_focused()
     }
 
     pub fn set_text(&mut self, text: impl Into<String>) {
-        self.text = text.into();
-        self.cursor = self.text.len();
+        self.entry.set_text(text);
     }
 
     pub fn set_focused(&mut self, focused: bool) {
-        self.focused = focused;
+        self.entry.set_focused(focused);
     }
 
     pub fn set_placeholder(&mut self, placeholder: impl Into<String>) {
-        self.placeholder = placeholder.into();
+        self.entry.set_placeholder(placeholder);
     }
 
     pub fn set_hover_clear(&mut self, hovered: bool) {
-        self.hover_clear = hovered;
+        self.entry.set_hover_clear(hovered);
     }
 
     pub fn clear(&mut self) {
-        self.text.clear();
-        self.cursor = 0;
+        self.entry.clear();
     }
 
-    /// Wstawia tekst w miejscu kursora.
     pub fn insert_str(&mut self, s: &str) {
-        self.text.insert_str(self.cursor, s);
-        self.cursor += s.len();
+        self.entry.insert_str(s);
     }
 
     pub fn insert_char(&mut self, c: char) {
-        let mut buf = [0u8; 4];
-        self.insert_str(c.encode_utf8(&mut buf));
+        self.entry.insert_char(c);
     }
 
-    /// Usuwa znak przed kursorem.
     pub fn backspace(&mut self) {
-        if self.cursor > 0 {
-            let prev = prev_boundary(&self.text, self.cursor);
-            self.text.replace_range(prev..self.cursor, "");
-            self.cursor = prev;
-        }
+        self.entry.backspace();
     }
 
-    /// Usuwa znak za kursorem.
     pub fn delete_forward(&mut self) {
-        if self.cursor < self.text.len() {
-            let next = next_boundary(&self.text, self.cursor);
-            self.text.replace_range(self.cursor..next, "");
-        }
+        self.entry.delete_forward();
     }
 
     pub fn move_left(&mut self) {
-        self.cursor = prev_boundary(&self.text, self.cursor);
+        self.entry.move_left();
     }
 
     pub fn move_right(&mut self) {
-        self.cursor = next_boundary(&self.text, self.cursor);
+        self.entry.move_right();
     }
 
     pub fn home(&mut self) {
-        self.cursor = 0;
+        self.entry.home();
     }
 
     pub fn end(&mut self) {
-        self.cursor = self.text.len();
+        self.entry.end();
     }
 
     pub fn height(&self, theme: &Theme) -> f64 {
-        theme.metrics.entry.height
+        self.entry.height(theme)
     }
 
     pub fn contains(&self, rect: Rect, p: Point) -> bool {
-        rect.contains(p)
+        self.entry.contains(rect, p)
     }
 
-    /// Prostokąt przycisku czyszczenia („×”).
     pub fn clear_rect(&self, rect: Rect, theme: &Theme) -> Rect {
-        let m = theme.metrics.entry;
-        Rect::from_xywh(
-            rect.right() - m.pad_x - m.icon,
-            rect.center().y - m.icon / 2.0,
-            m.icon,
-            m.icon,
-        )
+        self.entry.clear_rect(rect, theme)
     }
 
-    /// Czy punkt trafia w przycisk czyszczenia (tylko gdy pole niepuste).
     pub fn clear_at(&self, rect: Rect, theme: &Theme, p: Point) -> bool {
-        !self.text.is_empty() && self.clear_rect(rect, theme).contains(p)
+        self.entry.clear_at(rect, theme, p)
     }
 
     pub fn paint(&self, ctx: &mut PaintCtx, rect: Rect) {
-        let theme = *ctx.theme;
-        let m = theme.metrics.entry;
-        let colors = theme.colors;
-        let radius = theme.radius.medium;
-
-        ctx.scene.fill_rounded_rect(rect, radius, colors.shade);
-        let (border, width) = if self.focused {
-            (colors.accent, 2.0)
-        } else {
-            (colors.border, 1.0)
-        };
-        ctx.scene.stroke_rounded_rect(rect, radius, width, border);
-
-        let cy = rect.center().y;
-        icon::search(
-            ctx,
-            colors.dim_text,
-            Point::new(rect.x() + m.pad_x + m.icon / 2.0, cy),
-            m.icon,
-        );
-        let text_x = rect.x() + m.pad_x + m.icon + 8.0;
-
-        if self.text.is_empty() {
-            ctx.label_left(
-                text_x,
-                cy,
-                &self.placeholder,
-                theme.typography.body.size,
-                weight::NORMAL,
-                colors.dim_text,
-            );
-        } else {
-            let clear_space = if self.text.is_empty() {
-                0.0
-            } else {
-                m.icon + 8.0
-            };
-            let text_right = rect.right() - m.pad_x - clear_space;
-            ctx.scene.push_clip(Rect::from_xywh(
-                text_x,
-                rect.y(),
-                (text_right - text_x).max(0.0),
-                rect.height(),
-            ));
-            ctx.label_left(
-                text_x,
-                cy,
-                &self.text,
-                theme.typography.body.size,
-                weight::NORMAL,
-                colors.text,
-            );
-            if self.focused {
-                let cx = text_x
-                    + ctx.measure(
-                        &self.text[..self.cursor],
-                        theme.typography.body.size,
-                        weight::NORMAL,
-                    );
-                ctx.scene.fill_rect(
-                    Rect::from_xywh(cx, rect.y() + 6.0, 1.5, (rect.height() - 12.0).max(0.0)),
-                    colors.text,
-                );
-            }
-            ctx.scene.pop_clip();
-        }
-
-        if !self.text.is_empty() {
-            let cb = self.clear_rect(rect, &theme);
-            if self.hover_clear {
-                ctx.scene
-                    .fill_rounded_rect(cb, cb.width() / 2.0, colors.shade.scale_alpha(1.8));
-            }
-            icon::close(ctx, colors.dim_text, cb, 4.0);
-        }
+        self.entry.paint(ctx, rect);
     }
 }
 
-fn prev_boundary(s: &str, i: usize) -> usize {
-    s[..i]
-        .char_indices()
-        .next_back()
-        .map(|(j, _)| j)
-        .unwrap_or(0)
-}
-
-fn next_boundary(s: &str, i: usize) -> usize {
-    s[i..].chars().next().map(|c| i + c.len_utf8()).unwrap_or(i)
+impl crate::entry::TextInput for SearchEntry {
+    fn insert_str(&mut self, s: &str) {
+        SearchEntry::insert_str(self, s);
+    }
+    fn insert_char(&mut self, c: char) {
+        SearchEntry::insert_char(self, c);
+    }
+    fn backspace(&mut self) {
+        SearchEntry::backspace(self);
+    }
+    fn delete_forward(&mut self) {
+        SearchEntry::delete_forward(self);
+    }
+    fn move_left(&mut self) {
+        SearchEntry::move_left(self);
+    }
+    fn move_right(&mut self) {
+        SearchEntry::move_right(self);
+    }
+    fn home(&mut self) {
+        SearchEntry::home(self);
+    }
+    fn end(&mut self) {
+        SearchEntry::end(self);
+    }
 }
 
 #[cfg(test)]

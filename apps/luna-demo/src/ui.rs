@@ -12,9 +12,9 @@ use libluna_i18n::{tr, Locale};
 use libluna_render::TextEngine;
 use libluna_widgets::{
     ActionRow, BottomSheet, Button, Card, CheckButton, ControlsLayout, ControlsSide, DropDown,
-    HeaderBar, Item, ItemView, Menu, MenuEntry, NavEntry, NavList, Pager, PaintCtx, PathBar,
+    Entry, HeaderBar, Item, ItemView, Menu, MenuEntry, NavEntry, NavList, Pager, PaintCtx, PathBar,
     RadioGroup, ScrollView, SearchEntry, Slider, StatusPage, Stepper, StepperSide, Switch, Tab,
-    TabBar, TabView, Toast, ViewMode, ViewSwitcher, WindowControl,
+    TabBar, TabView, TextInput, Toast, ViewMode, ViewSwitcher, WindowControl,
 };
 
 const STATUS_H: f64 = 28.0;
@@ -76,6 +76,8 @@ pub struct Demo {
     pub sheet: BottomSheet,
     pub pager: Pager,
     pub pager_dragging: bool,
+    /// Pole tekstowe w dolny panelu (demonstracja `Entry`).
+    pub sheet_entry: Entry,
     /// Pasek ścieżki (składniki to klucze i18n) i pole wyszukiwania.
     pub path: PathBar,
     pub path_hover: Option<usize>,
@@ -133,6 +135,7 @@ impl Default for Demo {
             sheet: BottomSheet::new(),
             pager: Pager::new(3),
             pager_dragging: false,
+            sheet_entry: Entry::new(""),
             path: PathBar::new(["Home", "Documents", "Projects"]),
             path_hover: None,
             search: SearchEntry::new("Search"),
@@ -618,24 +621,42 @@ pub fn handle_events(
                             let area = demo.sheet.content_rect(size, theme);
                             if demo.sheet.close_at(size, theme, p) {
                                 demo.sheet.set_open(false);
+                                demo.sheet_entry.set_focused(false);
                             } else if demo.sheet.drag_zone_at(size, theme, p) {
                                 demo.sheet.begin_drag(p.y);
                             } else if demo.sheet.scrim_at(size, theme, p) {
                                 demo.sheet.set_open(false);
-                            } else if area.contains(p)
-                                && !demo.pager.click_indicator(area, theme, p)
-                            {
-                                demo.pager_dragging = true;
-                                demo.pager.begin_drag(p.x);
+                                demo.sheet_entry.set_focused(false);
+                            } else if area.contains(p) {
+                                if sheet_entry_rect(size, theme).contains(p) {
+                                    demo.sheet_entry.set_focused(true);
+                                } else if demo.pager.click_indicator(
+                                    sheet_pages_rect(size, theme),
+                                    theme,
+                                    p,
+                                ) {
+                                    demo.sheet_entry.set_focused(false);
+                                } else {
+                                    demo.sheet_entry.set_focused(false);
+                                    demo.pager_dragging = true;
+                                    demo.pager.begin_drag(p.x);
+                                }
                             }
                             continue;
                         }
 
-                        // Akcja powiadomienia (nakładka) ma pierwszeństwo nad treścią.
-                        if demo.toast.is_open() && demo.toast.action_at(size, theme, text, p) {
-                            settings.set_accent(demo.prev_accent);
-                            demo.toast.set_open(false);
-                            continue;
+                        // Powiadomienie (nakładka) ma pierwszeństwo nad treścią.
+                        if demo.toast.is_open() {
+                            if demo.toast.action_at(size, theme, text, p) {
+                                settings.set_accent(demo.prev_accent);
+                                demo.toast.set_open(false);
+                                continue;
+                            }
+                            // Klik w treść powiadomienia je zamyka (akcent zostaje).
+                            if demo.toast.dismiss_at(size, theme, text, p) {
+                                demo.toast.set_open(false);
+                                continue;
+                            }
                         }
 
                         // Popover „Opcje” obsługuje własne kontrolki.
@@ -845,7 +866,14 @@ pub fn handle_events(
             }
             Event::Key(ke) if ke.state == ButtonState::Pressed => {
                 // Gdy pole wyszukiwania ma fokus, klawisze idą do niego.
-                if demo.search.is_focused() && handle_search_key(&mut demo.search, ke) {
+                if demo.search.is_focused() && handle_text_key(&mut demo.search, ke) {
+                    continue;
+                }
+                // Pole `Entry` w dolnym panelu ma własny fokus.
+                if demo.sheet.is_open()
+                    && demo.sheet_entry.is_focused()
+                    && handle_text_key(&mut demo.sheet_entry, ke)
+                {
                     continue;
                 }
                 match ke.keysym {
@@ -906,10 +934,10 @@ fn cycle_language() {
     libluna_i18n::set_locale(Locale::new(&next));
 }
 
-/// Kieruje pojedyncze zdarzenie klawiatury do pola wyszukiwania.
+/// Kieruje pojedyncze zdarzenie klawiatury do pola tekstowego.
 ///
 /// Zwraca `true`, jeśli klawisz został zużyty (wtedy skróty demo są pomijane).
-fn handle_search_key(entry: &mut SearchEntry, ke: &KeyEvent) -> bool {
+fn handle_text_key<T: TextInput>(entry: &mut T, ke: &KeyEvent) -> bool {
     // Tekst złożony przez platformę (obsługuje też znaki spoza ASCII).
     if let Some(t) = &ke.text {
         if !t.is_empty() && !t.chars().all(char::is_control) {
@@ -992,28 +1020,61 @@ pub fn build_scene(
     }
 }
 
-/// Zawartość dolnego panelu: karuzela stron (`Pager`) z kropkami-wskaźnikami.
+/// Obszar zawartości dolnego panelu (poniżej jego nagłówka).
+fn sheet_content_rect(size: Size, theme: &Theme) -> Rect {
+    let m = theme.metrics.sheet;
+    Rect::from_xywh(
+        0.0,
+        size.height - m.height + m.header,
+        size.width,
+        (m.height - m.header).max(0.0),
+    )
+}
+
+/// Prostokąt pola tekstowego w dolnym panelu (demonstracja `Entry`).
+pub fn sheet_entry_rect(size: Size, theme: &Theme) -> Rect {
+    let content = sheet_content_rect(size, theme);
+    let pad = theme.spacing.md;
+    Rect::from_xywh(
+        content.x() + pad,
+        content.y() + pad,
+        (content.width() - 2.0 * pad).max(0.0),
+        theme.metrics.entry.height,
+    )
+}
+
+/// Obszar stron karuzeli w dolnym panelu (poniżej pola tekstowego).
+fn sheet_pages_rect(size: Size, theme: &Theme) -> Rect {
+    let content = sheet_content_rect(size, theme);
+    let pad = theme.spacing.md;
+    let top = content.y() + pad + theme.metrics.entry.height + pad;
+    Rect::from_xywh(
+        content.x(),
+        top,
+        content.width(),
+        (content.bottom() - top).max(0.0),
+    )
+}
+
+/// Zawartość dolnego panelu: pole `Entry` (demonstracja) + karuzela stron (`Pager`).
 fn draw_sheet_content(paint: &mut PaintCtx, demo: &Demo, size: Size) {
     let theme = *paint.theme;
-    let content = demo.sheet.content_rect(size, &theme);
+
+    // Pole tekstowe (`Entry`) na górze panelu.
+    let mut entry = demo.sheet_entry.clone();
+    entry.set_placeholder(tr("Your name"));
+    entry.paint(paint, sheet_entry_rect(size, &theme));
+
+    // Strony karuzeli poniżej.
+    let pages = sheet_pages_rect(size, &theme);
     let pager = &demo.pager;
-
-    // Obszar stron (nad kropkami).
-    let dots_h = theme.metrics.pager.dot + theme.metrics.pager.pad;
-    let pages = Rect::from_xywh(
-        content.x(),
-        content.y(),
-        content.width(),
-        (content.height() - dots_h).max(0.0),
-    );
-
     paint.scene.push_clip(pages);
     for i in 0..pager.count() {
         draw_about_page(paint, pager.page_rect(pages, i), i);
     }
     paint.scene.pop_clip();
 
-    pager.paint(paint, content);
+    pager.paint(paint, pages);
 }
 
 /// Pojedyncza strona karuzeli w panelu „O aplikacji”.

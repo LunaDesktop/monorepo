@@ -37,7 +37,8 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   `Menu` (popover `☰`), `Button` (warianty + chevron), `Switch`, `Slider`, `DropDown`
   (rozwijany przez `Menu`), `HeaderBar` (pasek tytułu z kontrolkami okna), `TabBar`/`TabView`
   (zakładki: pasek + model stron), `BottomSheet` (dolny panel modalny), `Pager` (karuzela stron),
-  `PathBar` (okruszki), `SearchEntry` (pole wyszukiwania), `ItemView` (pliki/katalogi: siatka
+  `PathBar` (okruszki), `Entry` (pole tekstowe) i `SearchEntry` (wyszukiwanie na jego bazie),
+  `ItemView` (pliki/katalogi: siatka
   lub lista) i `ScrollView` (przewijanie), oraz `Stepper`, `CheckButton` i `RadioGroup`
   (krokowiec, checkbox, wybór jednokrotny); do tego `Card` i `ActionRow` (karty i wiersze
   ustawień), `Toast` (powiadomienie nakładkowe z akcją) i `StatusPage` (ekran stanu: ikona,
@@ -100,6 +101,7 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
 | Pager (karuzela stron) | `libluna-widgets` | (przeglądarka, onboarding) |
 | Sidebar (sekcje, wiersze) | `libluna-adwaita` | obie |
 | PathBar (okruszki) | `libluna-widgets` | Files |
+| Entry (pole tekstowe) | `libluna-widgets` | Settings, Files |
 | SearchEntry / SearchBar | `libluna-widgets` | Files |
 | GridView / ListView | `libluna-widgets` (`ItemView`) | Files |
 | ScrollView | `libluna-widgets` | obie |

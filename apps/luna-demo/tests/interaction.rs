@@ -375,3 +375,58 @@ fn search_filters_items_and_selection_maps_to_full_list() {
     click(&mut settings, &mut demo, slot);
     assert_eq!(demo.items.selected(), Some(visible[0]));
 }
+
+#[test]
+fn sheet_entry_focus_and_typing() {
+    let mut settings = ThemeSettings::default();
+    let mut demo = Demo::default();
+
+    // Otwórz dolny panel: menu ☰ → „O aplikacji”.
+    let burger = layout(&settings, &demo).burger.center();
+    click(&mut settings, &mut demo, burger);
+    let theme = settings.resolve(false);
+    let text = TextEngine::system();
+    let about = ui::popover_menu(size(), &theme, &text, &layout(&settings, &demo), &demo)
+        .map(|(panel, menu)| menu.rows(panel, &theme)[4].rect.center())
+        .expect("about entry");
+    click(&mut settings, &mut demo, about);
+    assert!(demo.sheet.is_open());
+
+    // Klik pola nadaje fokus; wpisany znak trafia do `Entry`.
+    let entry = ui::sheet_entry_rect(size(), &theme).center();
+    click(&mut settings, &mut demo, entry);
+    assert!(demo.sheet_entry.is_focused());
+
+    let key = Event::Key(KeyEvent {
+        keysym: 0x41,
+        text: Some("A".to_owned()),
+        state: ButtonState::Pressed,
+        modifiers: Modifiers::NONE,
+        repeat: false,
+    });
+    ui::handle_events(&mut settings, &[key], size(), &theme, &text, &mut demo);
+    assert_eq!(demo.sheet_entry.text(), "A");
+}
+
+#[test]
+fn clicking_toast_body_dismisses_without_reverting() {
+    let mut settings = ThemeSettings::default();
+    let mut demo = Demo::default();
+
+    let dot = layout(&settings, &demo).accents[1].center();
+    click(&mut settings, &mut demo, dot);
+    assert!(demo.toast.is_open());
+    let accent_after = settings.accent();
+
+    // Klik w treść powiadomienia zamyka je, ale nie cofa akcentu.
+    let theme = settings.resolve(false);
+    let text = TextEngine::system();
+    let r = demo.toast.rect(size(), &theme, &text);
+    click(
+        &mut settings,
+        &mut demo,
+        Point::new(r.x() + 6.0, r.center().y),
+    );
+    assert!(!demo.toast.is_open());
+    assert_eq!(settings.accent(), accent_after);
+}

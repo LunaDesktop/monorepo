@@ -20,6 +20,7 @@
 //! - [`BottomSheet`] — dolny panel (modalny) z „grabberem” i zamykaniem.
 //! - [`Pager`] — karuzela stron (przewijanie w poziomie + kropki-wskaźniki).
 //! - [`PathBar`] — pasek ścieżki (okruszki) z separatorami i zwijaniem w wielokropek.
+//! - [`Entry`] — pole tekstowe (kursor, edycja, opcjonalna ikona i czyszczenie).
 //! - [`SearchEntry`] — pole tekstowe wyszukiwania (lupka, kursor, czyszczenie).
 //! - [`ItemView`] — widok elementów (pliki/katalogi) w siatce lub liście.
 //! - [`ScrollView`] — przewijanie pionowe (rolka + „kciuk”).
@@ -46,6 +47,7 @@ pub mod card;
 pub mod check_button;
 pub mod ctx;
 pub mod dropdown;
+pub mod entry;
 pub mod header_bar;
 pub mod icon;
 pub mod item_view;
@@ -72,6 +74,7 @@ pub use card::Card;
 pub use check_button::CheckButton;
 pub use ctx::PaintCtx;
 pub use dropdown::DropDown;
+pub use entry::{Entry, EntryIcon, TextInput};
 pub use header_bar::{ControlsLayout, ControlsSide, HeaderBar, TitleAlign, WindowControl};
 pub use item_view::{Item, ItemKind, ItemView, ViewMode};
 pub use menu::{Menu, MenuEntry, MenuRow};

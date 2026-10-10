@@ -195,13 +195,14 @@ cargo run -p libluna --example minimal
   lub kontrolkę **języka** (`DropDown`). Przycisk **„Opcje ▾”** otwiera **popover opcji**
   (`Stepper` rozmiaru ikon, `RadioGroup` sortowania, `CheckButton` ukrytych plików).
   Z menu **`☰` → „O aplikacji”** otwiera się **dolny panel**
-  (`BottomSheet` z karuzelą stron `Pager`), zamykany klikiem w tło, przyciskiem `✕` lub
+  (`BottomSheet` z karuzelą stron `Pager` i polem tekstowym `Entry` — klik = fokus, wpisywanie),
+  zamykany klikiem w tło, przyciskiem `✕` lub
   przeciągnięciem w dół. W karcie **Pliki** kliknij element **okruszków** (nawigacja „w górę”),
   **pole wyszukiwania** (fokus) lub **plik/katalog** (zaznaczenie); przełącznik `Lista | Siatka`
   zmienia tryb `ItemView`, a **rolka/przeciąganie paska** przewija listę. Wpisany tekst w polu
   **wyszukiwania filtruje** elementy; gdy nic nie pasuje, pojawia się ekran stanu (`StatusPage`)
   z przyciskiem **„Wyczyść”**. Zmiana **koloru akcentu** pokazuje `Toast` z akcją **„Cofnij”**,
-  która przywraca poprzedni akcent. Klikaj segmenty `Jasny | Ciemny | Auto`, kropki
+  która przywraca poprzedni akcent (klik w treść powiadomienia zamyka je bez cofania). Klikaj segmenty `Jasny | Ciemny | Auto`, kropki
   **koloru akcentu**, przełączniki OPCJA A / **Pasek dolny** / **Pasek boczny** i **przeciągaj**
   suwak głośności oraz krawędź paska bocznego (150–460 px). Kontrolki okna `[—][□][✕]` działają
   (minimalizacja/maksymalizacja/zamknięcie przez warstwę platformy).
@@ -300,8 +301,9 @@ XDG_CONFIG_HOME="$PWD/examples" cargo run -p luna-demo --bin render -- --lang fr
   `HeaderBar` (pasek tytułu: tytuł, kontrolki okna, obszar na treść), `TabBar`/`TabView`
   (pasek zakładek i model stron: wybór, dodawanie, zamykanie), `BottomSheet` (dolny panel
   modalny z „grabberem”, przeciąganiem i zamykaniem), `Pager` (karuzela stron z kropkami),
-  `PathBar` (okruszki z separatorem `›`, wskaźnikiem `▾` i zwijaniem do `…`), `SearchEntry`
-  (pole wyszukiwania: lupka, kursor, czyszczenie), `ItemView` (pliki/katalogi w siatce lub
+  `PathBar` (okruszki z separatorem `›`, wskaźnikiem `▾` i zwijaniem do `…`), `Entry`
+  (pole tekstowe: kursor, edycja, opcjonalna ikona wiodąca i czyszczenie) — z `SearchEntry`
+  jako jego wyszukiwarkową nakładką (lupka + czyszczenie), `ItemView` (pliki/katalogi w siatce lub
   liście, z zaznaczaniem i przewijaniem) i `ScrollView` (pionowe przewijanie: rolka + „kciuk”)
   oraz `Stepper`, `CheckButton` i `RadioGroup` (krokowiec, pole wyboru, wybór jednokrotny),
   a także `Card` (karta z nagłówkiem), `ActionRow` (wiersz ustawień), `Toast` (powiadomienie

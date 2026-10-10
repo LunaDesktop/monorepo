@@ -106,6 +106,15 @@ impl Toast {
                 .is_some_and(|r| r.contains(p))
     }
 
+    /// Czy punkt trafia w powiadomienie poza jego akcją (klik zamykający).
+    pub fn dismiss_at(&self, size: Size, theme: &Theme, text: &TextEngine, p: Point) -> bool {
+        self.open
+            && self.rect(size, theme, text).contains(p)
+            && !self
+                .action_rect(size, theme, text)
+                .is_some_and(|r| r.contains(p))
+    }
+
     /// Rysuje powiadomienie (na wierzchu sceny).
     pub fn paint(&self, ctx: &mut PaintCtx, size: Size) {
         if !self.open {
@@ -174,6 +183,22 @@ mod tests {
         let ar = toast.action_rect(size(), &theme, &text).unwrap();
         assert!(toast.action_at(size(), &theme, &text, ar.center()));
         assert!(!toast.action_at(size(), &theme, &text, Point::new(5.0, 5.0)));
+    }
+
+    #[test]
+    fn body_dismisses_but_action_does_not() {
+        let theme = Theme::light();
+        let text = TextEngine::system();
+        let mut toast = Toast::new("Saved").action("Undo");
+        toast.show();
+        let r = toast.rect(size(), &theme, &text);
+        // Klik w lewy skraj treści zamyka.
+        assert!(toast.dismiss_at(size(), &theme, &text, Point::new(r.x() + 6.0, r.center().y)));
+        // Klik w akcję nie zamyka (obsługiwany osobno).
+        let ar = toast.action_rect(size(), &theme, &text).unwrap();
+        assert!(!toast.dismiss_at(size(), &theme, &text, ar.center()));
+        // Klik poza powiadomieniem nie zamyka.
+        assert!(!toast.dismiss_at(size(), &theme, &text, Point::new(5.0, 5.0)));
     }
 
     #[test]

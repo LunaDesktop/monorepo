@@ -110,6 +110,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     frames.push(render_pixels(&settings, &demo, &text, size));
     labels.push("3. Accent: Purple".into());
 
+    // Zamknięcie powiadomienia klikiem w jego treść (akcent zostaje).
+    let theme = settings.resolve(false);
+    let toast = demo.toast.rect(size, &theme, &text);
+    click!(Point::new(toast.x() + 8.0, toast.center().y));
+    assert!(!demo.toast.is_open(), "toast did not dismiss");
+
     // 4. Klik pozycji „Sieć" w menu nawigacji (indeks elementu 5).
     let theme = settings.resolve(false);
     let c = make_nav().rows(layout!().sidebar, &theme)[5].rect.center();
@@ -174,8 +180,26 @@ fn main() -> Result<(), Box<dyn Error>> {
         .expect("menu is open");
     click!(about);
     assert!(demo.sheet.is_open(), "bottom sheet did not open");
+
+    // Pole `Entry` w panelu: fokus i wpisanie tekstu.
+    let entry = ui::sheet_entry_rect(size, &settings.resolve(false));
+    click!(entry.center());
+    assert!(demo.sheet_entry.is_focused(), "entry not focused");
+    for ch in ['A', 'd', 'a'] {
+        let key = Event::Key(KeyEvent {
+            keysym: ch as u32,
+            text: Some(ch.to_string()),
+            state: ButtonState::Pressed,
+            modifiers: Modifiers::NONE,
+            repeat: false,
+        });
+        let theme = settings.resolve(false);
+        ui::handle_events(&mut settings, &[key], size, &theme, &text, &mut demo);
+    }
+    assert_eq!(demo.sheet_entry.text(), "Ada", "entry text mismatch");
+
     frames.push(render_pixels(&settings, &demo, &text, size));
-    labels.push("9. Bottom sheet \u{201c}About\u{201d}".into());
+    labels.push("9. Bottom sheet \u{201c}About\u{201d} + Entry".into());
 
     // 10. Zamknięcie panelu (klik w tło) i rozwinięcie listy języków (DropDown + Menu).
     click!(Point::new(120.0, 300.0));
@@ -289,12 +313,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         quality: FilterQuality::Bilinear,
         ..Default::default()
     };
-    let scale = Transform::from_scale(cell_w as f32 / W as f32, cell_h as f32 / H as f32);
     for (i, pixels) in frames.iter().enumerate() {
         let src = Pixmap::from_vec(pixels.clone(), IntSize::from_wh(W, H).unwrap()).unwrap();
         let cx = (i % cols) as u32 * cell_w;
         let cy = (i / cols) as u32 * cell_h;
-        montage.draw_pixmap(cx as i32, cy as i32, src.as_ref(), &paint, scale, None);
+        // Skalowanie i przesunięcie w jednej transformacji (inaczej komórki lądują w rogu).
+        let t = Transform::from_scale(cell_w as f32 / W as f32, cell_h as f32 / H as f32)
+            .post_translate(cx as f32, cy as f32);
+        montage.draw_pixmap(0, 0, src.as_ref(), &paint, t, None);
     }
     montage.save_png("docs/images/demo-montage.png")?;
     println!("saved docs/images/demo-montage.png");

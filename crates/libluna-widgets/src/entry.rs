@@ -1,0 +1,367 @@
+//! `Entry` — pole tekstowe (jednowierszowe) z kursorem, opcjonalną ikoną wiodącą i czyszczeniem.
+//!
+//! Widget immediate: trzyma treść i pozycję kursora (indeks bajtowy, zawsze na granicy znaku).
+//! Aplikacja dostarcza zdarzenia klawiatury jako wywołania metod ([`Entry::insert_str`],
+//! [`Entry::backspace`], [`Entry::move_left`]…) i sama decyduje o fokusie ([`Entry::set_focused`]).
+//!
+//! [`SearchEntry`](crate::SearchEntry) to cienka nakładka: `Entry` z ikoną lupy i czyszczeniem.
+
+use libluna_core::style::weight;
+use libluna_core::{Point, Rect, Theme};
+
+use crate::ctx::PaintCtx;
+use crate::icon;
+
+/// Ikona wiodąca pola (przed tekstem).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryIcon {
+    /// Lupka (pola wyszukiwania).
+    Search,
+}
+
+/// Pole tekstowe.
+#[derive(Debug, Clone, Default)]
+pub struct Entry {
+    text: String,
+    /// Pozycja kursora jako indeks bajtowy (zawsze na granicy znaku).
+    cursor: usize,
+    placeholder: String,
+    leading: Option<EntryIcon>,
+    clearable: bool,
+    focused: bool,
+    hover_clear: bool,
+}
+
+impl Entry {
+    pub fn new(placeholder: impl Into<String>) -> Self {
+        Self {
+            placeholder: placeholder.into(),
+            ..Self::default()
+        }
+    }
+
+    /// Dodaje ikonę wiodącą (np. lupkę).
+    pub fn leading(mut self, icon: EntryIcon) -> Self {
+        self.leading = Some(icon);
+        self
+    }
+
+    /// Włącza przycisk czyszczenia („×”) widoczny, gdy pole niepuste.
+    pub fn clearable(mut self, clearable: bool) -> Self {
+        self.clearable = clearable;
+        self
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    pub fn is_focused(&self) -> bool {
+        self.focused
+    }
+
+    pub fn set_text(&mut self, text: impl Into<String>) {
+        self.text = text.into();
+        self.cursor = self.text.len();
+    }
+
+    pub fn set_focused(&mut self, focused: bool) {
+        self.focused = focused;
+    }
+
+    pub fn set_placeholder(&mut self, placeholder: impl Into<String>) {
+        self.placeholder = placeholder.into();
+    }
+
+    pub fn set_hover_clear(&mut self, hovered: bool) {
+        self.hover_clear = hovered;
+    }
+
+    pub fn clear(&mut self) {
+        self.text.clear();
+        self.cursor = 0;
+    }
+
+    /// Wstawia tekst w miejscu kursora.
+    pub fn insert_str(&mut self, s: &str) {
+        self.text.insert_str(self.cursor, s);
+        self.cursor += s.len();
+    }
+
+    pub fn insert_char(&mut self, c: char) {
+        let mut buf = [0u8; 4];
+        self.insert_str(c.encode_utf8(&mut buf));
+    }
+
+    /// Usuwa znak przed kursorem.
+    pub fn backspace(&mut self) {
+        if self.cursor > 0 {
+            let prev = prev_boundary(&self.text, self.cursor);
+            self.text.replace_range(prev..self.cursor, "");
+            self.cursor = prev;
+        }
+    }
+
+    /// Usuwa znak za kursorem.
+    pub fn delete_forward(&mut self) {
+        if self.cursor < self.text.len() {
+            let next = next_boundary(&self.text, self.cursor);
+            self.text.replace_range(self.cursor..next, "");
+        }
+    }
+
+    pub fn move_left(&mut self) {
+        self.cursor = prev_boundary(&self.text, self.cursor);
+    }
+
+    pub fn move_right(&mut self) {
+        self.cursor = next_boundary(&self.text, self.cursor);
+    }
+
+    pub fn home(&mut self) {
+        self.cursor = 0;
+    }
+
+    pub fn end(&mut self) {
+        self.cursor = self.text.len();
+    }
+
+    pub fn height(&self, theme: &Theme) -> f64 {
+        theme.metrics.entry.height
+    }
+
+    pub fn contains(&self, rect: Rect, p: Point) -> bool {
+        rect.contains(p)
+    }
+
+    /// Prostokąt przycisku czyszczenia („×”).
+    pub fn clear_rect(&self, rect: Rect, theme: &Theme) -> Rect {
+        let m = theme.metrics.entry;
+        Rect::from_xywh(
+            rect.right() - m.pad_x - m.icon,
+            rect.center().y - m.icon / 2.0,
+            m.icon,
+            m.icon,
+        )
+    }
+
+    /// Czy punkt trafia w przycisk czyszczenia (tylko gdy pole czyszczalne i niepuste).
+    pub fn clear_at(&self, rect: Rect, theme: &Theme, p: Point) -> bool {
+        self.clearable && !self.text.is_empty() && self.clear_rect(rect, theme).contains(p)
+    }
+
+    /// Pozycja (x), od której zaczyna się tekst (za ikoną wiodącą, jeśli jest).
+    fn text_x(&self, rect: Rect, theme: &Theme) -> f64 {
+        let m = theme.metrics.entry;
+        match self.leading {
+            Some(_) => rect.x() + m.pad_x + m.icon + 8.0,
+            None => rect.x() + m.pad_x,
+        }
+    }
+
+    pub fn paint(&self, ctx: &mut PaintCtx, rect: Rect) {
+        let theme = *ctx.theme;
+        let m = theme.metrics.entry;
+        let colors = theme.colors;
+        let radius = theme.radius.medium;
+
+        ctx.scene.fill_rounded_rect(rect, radius, colors.shade);
+        let (border, width) = if self.focused {
+            (colors.accent, 2.0)
+        } else {
+            (colors.border, 1.0)
+        };
+        ctx.scene.stroke_rounded_rect(rect, radius, width, border);
+
+        let cy = rect.center().y;
+        if let Some(icon_kind) = self.leading {
+            match icon_kind {
+                EntryIcon::Search => icon::search(
+                    ctx,
+                    colors.dim_text,
+                    Point::new(rect.x() + m.pad_x + m.icon / 2.0, cy),
+                    m.icon,
+                ),
+            }
+        }
+        let text_x = self.text_x(rect, &theme);
+
+        if self.text.is_empty() {
+            ctx.label_left(
+                text_x,
+                cy,
+                &self.placeholder,
+                theme.typography.body.size,
+                weight::NORMAL,
+                colors.dim_text,
+            );
+        } else {
+            let clear_space = if self.clearable { m.icon + 8.0 } else { 0.0 };
+            let text_right = rect.right() - m.pad_x - clear_space;
+            ctx.scene.push_clip(Rect::from_xywh(
+                text_x,
+                rect.y(),
+                (text_right - text_x).max(0.0),
+                rect.height(),
+            ));
+            ctx.label_left(
+                text_x,
+                cy,
+                &self.text,
+                theme.typography.body.size,
+                weight::NORMAL,
+                colors.text,
+            );
+            if self.focused {
+                let cx = text_x
+                    + ctx.measure(
+                        &self.text[..self.cursor],
+                        theme.typography.body.size,
+                        weight::NORMAL,
+                    );
+                ctx.scene.fill_rect(
+                    Rect::from_xywh(cx, rect.y() + 6.0, 1.5, (rect.height() - 12.0).max(0.0)),
+                    colors.text,
+                );
+            }
+            ctx.scene.pop_clip();
+        }
+
+        if self.clearable && !self.text.is_empty() {
+            let cb = self.clear_rect(rect, &theme);
+            if self.hover_clear {
+                ctx.scene
+                    .fill_rounded_rect(cb, cb.width() / 2.0, colors.shade.scale_alpha(1.8));
+            }
+            icon::close(ctx, colors.dim_text, cb, 4.0);
+        }
+    }
+}
+
+/// Wspólny interfejs edycji tekstu dla pól ([`Entry`], [`SearchEntry`](crate::SearchEntry)).
+///
+/// Pozwala aplikacji obsłużyć zdarzenia klawiatury jedną funkcją, niezależnie od tego,
+/// czy pole jest „gołym” `Entry`, czy wyspecjalizowanym wariantem.
+pub trait TextInput {
+    fn insert_str(&mut self, s: &str);
+    fn insert_char(&mut self, c: char);
+    fn backspace(&mut self);
+    fn delete_forward(&mut self);
+    fn move_left(&mut self);
+    fn move_right(&mut self);
+    fn home(&mut self);
+    fn end(&mut self);
+}
+
+impl TextInput for Entry {
+    fn insert_str(&mut self, s: &str) {
+        Entry::insert_str(self, s);
+    }
+    fn insert_char(&mut self, c: char) {
+        Entry::insert_char(self, c);
+    }
+    fn backspace(&mut self) {
+        Entry::backspace(self);
+    }
+    fn delete_forward(&mut self) {
+        Entry::delete_forward(self);
+    }
+    fn move_left(&mut self) {
+        Entry::move_left(self);
+    }
+    fn move_right(&mut self) {
+        Entry::move_right(self);
+    }
+    fn home(&mut self) {
+        Entry::home(self);
+    }
+    fn end(&mut self) {
+        Entry::end(self);
+    }
+}
+
+fn prev_boundary(s: &str, i: usize) -> usize {
+    s[..i]
+        .char_indices()
+        .next_back()
+        .map(|(j, _)| j)
+        .unwrap_or(0)
+}
+
+fn next_boundary(s: &str, i: usize) -> usize {
+    s[i..].chars().next().map(|c| i + c.len_utf8()).unwrap_or(i)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typing_and_cursor() {
+        let mut e = Entry::new("Nazwa");
+        e.insert_str("abc");
+        assert_eq!(e.text(), "abc");
+        assert_eq!(e.cursor(), 3);
+        e.move_left();
+        e.insert_char('X');
+        assert_eq!(e.text(), "abXc");
+        e.backspace();
+        assert_eq!(e.text(), "abc");
+        assert_eq!(e.cursor(), 2);
+        e.delete_forward();
+        assert_eq!(e.text(), "ab");
+        e.home();
+        e.delete_forward();
+        assert_eq!(e.text(), "b");
+    }
+
+    #[test]
+    fn multibyte_is_char_aware() {
+        let mut e = Entry::new("");
+        e.insert_str("ząb");
+        e.backspace();
+        assert_eq!(e.text(), "zą");
+        e.move_left();
+        e.backspace();
+        assert_eq!(e.text(), "ą");
+    }
+
+    #[test]
+    fn clear_resets_state() {
+        let mut e = Entry::new("");
+        e.insert_str("x");
+        e.clear();
+        assert!(e.is_empty());
+        assert_eq!(e.cursor(), 0);
+    }
+
+    #[test]
+    fn clear_hit_requires_clearable_and_text() {
+        let theme = Theme::light();
+        let rect = Rect::from_xywh(0.0, 0.0, 200.0, 34.0);
+        let mut plain = Entry::new("");
+        plain.insert_str("abc");
+        let c = plain.clear_rect(rect, &theme).center();
+        // Pole nieczyszczalne: brak trafienia nawet z tekstem.
+        assert!(!plain.clear_at(rect, &theme, c));
+
+        let mut e = Entry::new("").clearable(true);
+        assert!(!e.clear_at(rect, &theme, c));
+        e.insert_str("abc");
+        assert!(e.clear_at(rect, &theme, c));
+    }
+
+    #[test]
+    fn height_from_metrics() {
+        let theme = Theme::light();
+        assert_eq!(Entry::new("").height(&theme), theme.metrics.entry.height);
+    }
+}
