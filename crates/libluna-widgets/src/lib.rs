@@ -47,8 +47,9 @@
 //!   [`AspectFrame`] — widgety prezentacji (GTK4 Display).
 //! - [`ToggleButton`], [`LinkButton`], [`ColorButton`] — pozostałe przyciski (GTK4).
 //! - [`PasswordEntry`], [`EditableLabel`] — pola specjalne (GTK4).
-//! - [`CenterBox`], [`Grid`], [`Paned`], [`Stack`], [`ActionBar`], [`PopoverMenuBar`] — kontenery GTK4
-//!   (`Box` = stos drzewa układu: [`Node::hbox`]/[`Node::vbox`]).
+//! - [`CenterBox`], [`Grid`], [`Fixed`], [`Paned`], [`Stack`], [`ActionBar`], [`PopoverMenuBar`] —
+//!   kontenery GTK4 (`Box` = stos drzewa układu: [`Node::hbox`]/[`Node::vbox`]).
+//! - [`MenuButton`], [`SearchBar`], [`Expander`], [`Statusbar`], [`Calendar`] — kolejne widgety GTK4.
 //! - [`Carousel`] (alias [`Pager`]), [`ToolbarView`], [`WindowTitle`], [`Clamp`], [`WrapBox`],
 //!   [`BreakpointBin`], [`ButtonContent`] — pomocniki.
 //!
@@ -69,6 +70,7 @@ pub mod bin;
 pub mod bottom_sheet;
 pub mod button;
 pub mod buttons;
+pub mod calendar;
 pub mod card;
 pub mod check_button;
 pub mod containers;
@@ -78,12 +80,14 @@ pub mod display;
 pub mod dropdown;
 pub mod entries;
 pub mod entry;
+pub mod expander;
 pub mod header_bar;
 pub mod helpers;
 pub mod icon;
 pub mod item_view;
 pub mod layout;
 pub mod menu;
+pub mod menu_button;
 pub mod nav_list;
 pub mod navigation;
 pub mod pager;
@@ -92,12 +96,14 @@ pub mod preferences;
 pub mod radio_group;
 pub mod rows;
 pub mod scroll_view;
+pub mod search_bar;
 pub mod search_entry;
 pub mod shortcut_label;
 pub mod slider;
 pub mod spinner;
 pub mod split_button;
 pub mod status_page;
+pub mod statusbar;
 pub mod stepper;
 pub mod switch;
 pub mod tab_bar;
@@ -114,9 +120,10 @@ pub use bin::{Bin, BinAlign};
 pub use bottom_sheet::BottomSheet;
 pub use button::{Button, ButtonVariant};
 pub use buttons::{ColorButton, LinkButton, ToggleButton};
+pub use calendar::Calendar;
 pub use card::Card;
 pub use check_button::CheckButton;
-pub use containers::{ActionBar, CenterBox, Grid, Paned, PopoverMenuBar, Stack};
+pub use containers::{ActionBar, CenterBox, Fixed, Grid, Paned, PopoverMenuBar, Stack};
 pub use ctx::PaintCtx;
 pub use dialogs::{
     AboutDialog, AlertDialog, AlertRects, Dialog, DialogRects, PreferencesDialog, ShortcutsDialog,
@@ -128,6 +135,7 @@ pub use display::{
 pub use dropdown::DropDown;
 pub use entries::{EditableLabel, PasswordEntry};
 pub use entry::{Entry, EntryIcon, TextInput};
+pub use expander::Expander;
 pub use header_bar::{ControlsLayout, ControlsSide, HeaderBar, TitleAlign, WindowControl};
 pub use helpers::{
     BreakpointBin, ButtonContent, Clamp, ToolbarRects, ToolbarView, WindowTitle, WindowTitleRects,
@@ -136,6 +144,7 @@ pub use helpers::{
 pub use item_view::{Item, ItemKind, ItemView, ViewMode};
 pub use layout::{Constraints, Layout, LayoutCtx, Node};
 pub use menu::{Menu, MenuEntry, MenuRow};
+pub use menu_button::MenuButton;
 pub use nav_list::{NavEntry, NavList, NavRow};
 pub use navigation::{NavigationSplitView, NavigationView, OverlaySplitView, Sidebar};
 pub use pager::Pager;
@@ -148,12 +157,14 @@ pub use rows::{Row, RowRects, RowSuffix};
 pub use scroll_view::ScrollView;
 /// `ScrolledWindow` — nazwa [`ScrollView`] w duchu GTK4.
 pub use scroll_view::ScrollView as ScrolledWindow;
+pub use search_bar::SearchBar;
 pub use search_entry::SearchEntry;
 pub use shortcut_label::ShortcutLabel;
 pub use slider::Slider;
 pub use spinner::Spinner;
 pub use split_button::{SplitButton, SplitRects};
 pub use status_page::{StatusIcon, StatusPage, StatusRects};
+pub use statusbar::Statusbar;
 pub use stepper::{Stepper, StepperSide};
 pub use switch::Switch;
 pub use tab_bar::{ScrollDir, Tab, TabBar};

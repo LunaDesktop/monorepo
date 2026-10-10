@@ -349,8 +349,9 @@ XDG_CONFIG_HOME="$PWD/examples" cargo run -p luna-demo --bin render -- --lang fr
 - `libluna-widgets` — **galeria GTK4** (kolejny zestaw): prezentacja `Label`, `Separator`,
   `ProgressBar`, `LevelBar`, `Frame`, `Revealer`, `Overlay`, `AspectFrame`; przyciski
   `ToggleButton`, `LinkButton`, `ColorButton`; pola specjalne `PasswordEntry` (maskowanie +
-  podgląd „oko”) i `EditableLabel`; kontenery `CenterBox`, `Grid`, `Paned` (przeciągany
-  separator), `Stack`, `ActionBar`, `PopoverMenuBar`; aliasy `ScrolledWindow` = `ScrollView`
+  podgląd „oko”) i `EditableLabel`; kontenery `CenterBox`, `Grid`, `Fixed`, `Paned`
+  (przeciągany separator), `Stack`, `ActionBar`, `PopoverMenuBar`; oraz `MenuButton`,
+  `SearchBar`, `Expander`, `Statusbar`, `Calendar`; aliasy `ScrolledWindow` = `ScrollView`
   i `StackSwitcher` = `ViewSwitcher`.
 - `libluna-widgets::layout`: **dwuprzebiegowy układ** (retencyjne drzewo `measure`/`allocate`) —
   [`Node`] (`VBox`/`HBox`, `Padding`, `Expanded`, `Center`, `Spacer`, `Label`, `Fixed`),

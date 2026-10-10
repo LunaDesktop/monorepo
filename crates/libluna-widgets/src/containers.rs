@@ -35,6 +35,28 @@ impl CenterBox {
     }
 }
 
+/// Kontener o stałym położeniu dzieci (`GtkFixed`): dziecko umieszczane jest
+/// we współrzędnych względem kontenera, niezależnie od reszty układu.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Fixed;
+
+impl Fixed {
+    /// Prostokąt dziecka o rozmiarze `w × h` w punkcie `(x, y)` względem `rect`.
+    pub fn child(rect: Rect, x: f64, y: f64, w: f64, h: f64) -> Rect {
+        Rect::from_xywh(rect.x() + x, rect.y() + y, w, h)
+    }
+
+    /// Przesuwa gotowy prostokąt dziecka o przesunięcie względne w `rect`.
+    pub fn place(rect: Rect, child: Rect) -> Rect {
+        Rect::from_xywh(
+            rect.x() + child.x(),
+            rect.y() + child.y(),
+            child.width(),
+            child.height(),
+        )
+    }
+}
+
 /// Siatka `rows × cols` z równymi komórkami i odstępem z motywu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Grid {
@@ -502,6 +524,15 @@ mod tests {
 
     fn theme() -> Theme {
         Theme::light()
+    }
+
+    #[test]
+    fn fixed_offsets_children() {
+        let rect = Rect::from_xywh(10.0, 20.0, 100.0, 100.0);
+        let c = Fixed::child(rect, 5.0, 7.0, 30.0, 40.0);
+        assert_eq!(c, Rect::from_xywh(15.0, 27.0, 30.0, 40.0));
+        let p = Fixed::place(rect, Rect::from_xywh(1.0, 2.0, 3.0, 4.0));
+        assert_eq!(p, Rect::from_xywh(11.0, 22.0, 3.0, 4.0));
     }
 
     #[test]

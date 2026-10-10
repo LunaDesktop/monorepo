@@ -187,3 +187,16 @@ pub fn eye_off(paint: &mut PaintCtx, color: Color, center: Point, size: f64) {
         color,
     );
 }
+
+/// Trzy poziome kreski (menu „hamburger”); środek w `center`, szerokość `size`, grubość `width`.
+pub fn burger(paint: &mut PaintCtx, color: Color, center: Point, size: f64, width: f64) {
+    for i in -1..=1 {
+        let y = center.y + i as f64 * size * 0.42;
+        paint.scene.stroke_line(
+            Point::new(center.x - size, y),
+            Point::new(center.x + size, y),
+            width,
+            color,
+        );
+    }
+}

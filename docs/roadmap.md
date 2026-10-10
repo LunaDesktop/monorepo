@@ -50,11 +50,12 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   `PreferencesPage`; `Dialog` + `AlertDialog`/`AboutDialog`/`ShortcutsDialog`/`PreferencesDialog`;
   `NavigationView`/`NavigationSplitView`/`OverlaySplitView`/`Sidebar` (`Carousel` = `Pager`);
   `ToolbarView`, `WindowTitle`, `Clamp`, `WrapBox`, `BreakpointBin`, `ButtonContent`.
-- **Galeria GTK4 pokrywana partiami** (partia 5–6): prezentacja `Label`, `Separator`,
+- **Galeria GTK4 pokrywana partiami** (partia 5–7): prezentacja `Label`, `Separator`,
   `ProgressBar`, `LevelBar`, `Frame`, `Revealer`, `Overlay`, `AspectFrame`; przyciski
   `ToggleButton`, `LinkButton`, `ColorButton`; pola specjalne `PasswordEntry` (maskowanie +
-  „oko”) i `EditableLabel`; kontenery `CenterBox`, `Grid`, `Paned`, `Stack`, `ActionBar`,
-  `PopoverMenuBar`; aliasy GTK4 `ScrolledWindow` = `ScrollView`, `StackSwitcher` = `ViewSwitcher`.
+  „oko”) i `EditableLabel`; kontenery `CenterBox`, `Grid`, `Fixed`, `Paned`, `Stack`,
+  `ActionBar`, `PopoverMenuBar`; dalej `MenuButton`, `SearchBar`, `Expander`, `Statusbar`,
+  `Calendar`; aliasy GTK4 `ScrolledWindow` = `ScrollView`, `StackSwitcher` = `ViewSwitcher`.
   Tokeny metryk kontenerów: `Theme::metrics.container`.
 - `libluna-platform`: realne akcje okna z `Frame` (`close`/`minimize`/`toggle_maximize`).
 - Demo używa widgetów zamiast ręcznego rysowania (pasek boczny, wybór motywu/widoku, menu `☰`,
