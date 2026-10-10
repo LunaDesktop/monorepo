@@ -52,6 +52,7 @@
 //! - [`MenuButton`], [`SearchBar`], [`Expander`], [`Statusbar`], [`Calendar`] — kolejne widgety GTK4.
 //! - [`Image`], [`TextView`] — obrazek (ikony wektorowe) i pole wielolinijkowe (GTK4).
 //! - [`Popover`], [`ColumnView`], [`Assistant`] — generyczny popover, tabela i kreator kroków (GTK4).
+//! - [`Scrollbar`]/[`Adjustment`], [`ColorChooser`] — przewijanie (obie osie) i paleta kolorów.
 //! - Aliasy w duchu GTK4: [`Carousel`] = [`Pager`], [`ScrolledWindow`] = [`ScrollView`],
 //!   [`StackSwitcher`] = [`ViewSwitcher`], [`Notebook`] = [`TabView`], [`ListBox`] = [`NavList`].
 //! - [`Carousel`] (alias [`Pager`]), [`ToolbarView`], [`WindowTitle`], [`Clamp`], [`WrapBox`],
@@ -78,6 +79,7 @@ pub mod buttons;
 pub mod calendar;
 pub mod card;
 pub mod check_button;
+pub mod color_chooser;
 pub mod column_view;
 pub mod containers;
 pub mod ctx;
@@ -104,6 +106,7 @@ pub mod preferences;
 pub mod radio_group;
 pub mod rows;
 pub mod scroll_view;
+pub mod scrollbar;
 pub mod search_bar;
 pub mod search_entry;
 pub mod shortcut_label;
@@ -133,6 +136,7 @@ pub use buttons::{ColorButton, LinkButton, ToggleButton};
 pub use calendar::Calendar;
 pub use card::Card;
 pub use check_button::CheckButton;
+pub use color_chooser::ColorChooser;
 pub use column_view::{Column, ColumnView};
 pub use containers::{ActionBar, CenterBox, Fixed, Grid, Paned, PopoverMenuBar, Stack};
 pub use ctx::PaintCtx;
@@ -172,6 +176,7 @@ pub use rows::{Row, RowRects, RowSuffix};
 pub use scroll_view::ScrollView;
 /// `ScrolledWindow` — nazwa [`ScrollView`] w duchu GTK4.
 pub use scroll_view::ScrollView as ScrolledWindow;
+pub use scrollbar::{Adjustment, Scrollbar};
 pub use search_bar::SearchBar;
 pub use search_entry::SearchEntry;
 pub use shortcut_label::ShortcutLabel;

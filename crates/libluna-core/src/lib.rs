@@ -6,6 +6,7 @@
 //! - [`color`] — [`Color`] w przestrzeni sRGB z kanałem alfa.
 //! - [`scale`] — [`Scale`] do przeliczania pikseli logicznych na fizyczne.
 //! - [`event`] — [`Event`] i towarzyszące typy wejścia.
+//! - [`motion`] — krzywe [`Easing`] i interpolacja [`lerp`] (matematyka ruchu).
 //! - [`style`] — tokeny wyglądu ([`style::Theme`], spacing, radius, typografia).
 //!
 //! Moduł nie zależy od Waylanda ani od konkretnego rasteryzatora — jest wspólnym
@@ -15,6 +16,7 @@ pub mod appearance;
 pub mod color;
 pub mod event;
 pub mod geometry;
+pub mod motion;
 pub mod scale;
 pub mod style;
 pub mod theme_file;
@@ -25,6 +27,7 @@ pub use event::{
     ButtonState, Event, KeyEvent, Modifiers, PointerButton, PointerEvent, ScrollEvent, WindowEvent,
 };
 pub use geometry::{Insets, Point, Rect, Size};
+pub use motion::{lerp, Easing};
 pub use scale::Scale;
 pub use style::{
     ActionRowMetrics, AvatarMetrics, BannerMetrics, BarMetrics, BottomSheetMetrics, ButtonMetrics,

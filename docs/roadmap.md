@@ -50,14 +50,16 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   `PreferencesPage`; `Dialog` + `AlertDialog`/`AboutDialog`/`ShortcutsDialog`/`PreferencesDialog`;
   `NavigationView`/`NavigationSplitView`/`OverlaySplitView`/`Sidebar` (`Carousel` = `Pager`);
   `ToolbarView`, `WindowTitle`, `Clamp`, `WrapBox`, `BreakpointBin`, `ButtonContent`.
-- **Galeria GTK4 pokrywana partiami** (partia 5–9): prezentacja `Label`, `Separator`,
+- **Galeria GTK4 pokrywana partiami** (partia 5–10): prezentacja `Label`, `Separator`,
   `ProgressBar`, `LevelBar`, `Frame`, `Revealer`, `Overlay`, `AspectFrame`; przyciski
   `ToggleButton`, `LinkButton`, `ColorButton`; pola specjalne `PasswordEntry` (maskowanie +
   „oko”) i `EditableLabel`; kontenery `CenterBox`, `Grid`, `Fixed`, `Paned`, `Stack`,
   `ActionBar`, `PopoverMenuBar`; dalej `MenuButton`, `SearchBar`, `Expander`, `Statusbar`,
-  `Calendar`, `Image`, `TextView`, `Popover`, `ColumnView`, `Assistant`; aliasy GTK4
-  `ScrolledWindow` = `ScrollView`, `StackSwitcher` = `ViewSwitcher`, `Notebook` = `TabView`,
-  `ListBox` = `NavList`. Tokeny metryk kontenerów: `Theme::metrics.container`.
+  `Calendar`, `Image`, `TextView`, `Popover`, `ColumnView`, `Assistant`, `Scrollbar`/
+  `Adjustment`, `ColorChooser`; aliasy GTK4 `ScrolledWindow` = `ScrollView`,
+  `StackSwitcher` = `ViewSwitcher`, `Notebook` = `TabView`, `ListBox` = `NavList`.
+  Tokeny metryk kontenerów: `Theme::metrics.container`. Animacje: `libluna-core` `motion`
+  (`Easing`, `lerp`).
 - `libluna-platform`: realne akcje okna z `Frame` (`close`/`minimize`/`toggle_maximize`).
 - Demo używa widgetów zamiast ręcznego rysowania (pasek boczny, wybór motywu/widoku, menu `☰`,
   przycisk „Opcje”, przełączniki, suwak, wybór języka, pasek tytułu, zakładki `TabBar`/`TabView`).

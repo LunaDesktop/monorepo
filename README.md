@@ -312,7 +312,8 @@ XDG_CONFIG_HOME="$PWD/examples" cargo run -p luna-demo --bin render -- --lang fr
   motywu (`Spacing`, `Radius`, `Typography`), **metryki kontrolek** (`Metrics`) oraz
   **ustawienia wyglądu** (`ThemePreference`, `Accent`, `ThemeSettings` z trwałością
   i rozwiązywaniem `light/dark`), a także **style instalowane z plików** (`theme_file`:
-  `ThemePatch`, skanowanie katalogów `available_themes()`).
+  `ThemePatch`, skanowanie katalogów `available_themes()`). Animacje: `motion` (`Easing`,
+  `lerp`) — matematyka ruchu bez stanu.
 - `libluna-i18n`: `Locale` (z `LANG`/`LC_*`), `Catalog`, `Translations`, globalne `tr`/`set_locale`,
   makro `t!` z podstawianiem argumentów, **języki z osobnych plików** `i18n/<kod>.lang`
   (wbudowane) oraz **doładowywane w runtime** z katalogów; `languages()` i `language_name()`.
@@ -353,7 +354,8 @@ XDG_CONFIG_HOME="$PWD/examples" cargo run -p luna-demo --bin render -- --lang fr
   (przeciągany separator), `Stack`, `ActionBar`, `PopoverMenuBar`; oraz `MenuButton`,
   `SearchBar`, `Expander`, `Statusbar`, `Calendar`, `Image` (ikony wektorowe),
   `TextView` (pole wielolinijkowe), `Popover` (generyczny), `ColumnView` (tabela),
-  `Assistant` (kreator kroków); aliasy `ScrolledWindow` = `ScrollView`,
+  `Assistant` (kreator kroków), `Scrollbar`/`Adjustment` (przewijanie w obu osiach),
+  `ColorChooser` (paleta); aliasy `ScrolledWindow` = `ScrollView`,
   `StackSwitcher` = `ViewSwitcher`, `Notebook` = `TabView`, `ListBox` = `NavList`.
 - `libluna-widgets::layout`: **dwuprzebiegowy układ** (retencyjne drzewo `measure`/`allocate`) —
   [`Node`] (`VBox`/`HBox`, `Padding`, `Expanded`, `Center`, `Spacer`, `Label`, `Fixed`),
