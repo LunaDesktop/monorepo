@@ -127,7 +127,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 std::mem::take(&mut *queue)
             };
             for event in &batch {
-                seat::handle_input(&mut state, event);
+                seat::handle_input(&mut state, &handle, event);
             }
         }
 

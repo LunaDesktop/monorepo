@@ -16,6 +16,7 @@ use wayland_server::{
 };
 
 use crate::compositor::SurfaceData;
+use crate::data;
 use crate::shell::XdgSurfaceData;
 use crate::state::{DragState, ResizeState, SavedGeom, State, TITLEBAR};
 
@@ -165,10 +166,10 @@ enum Part {
 }
 
 /// Trasuje jedno zdarzenie wejścia do klientów/okien.
-pub fn handle_input(state: &mut State, event: &Event) {
+pub fn handle_input(state: &mut State, handle: &DisplayHandle, event: &Event) {
     match event {
-        Event::PointerMotion { position, .. } => pointer_motion(state, *position),
-        Event::PointerButton(pe) => pointer_button(state, pe.position, pe.button, pe.state),
+        Event::PointerMotion { position, .. } => pointer_motion(state, handle, *position),
+        Event::PointerButton(pe) => pointer_button(state, handle, pe.position, pe.button, pe.state),
         Event::PointerLeave => pointer_leave(state),
         Event::Scroll(se) => pointer_axis(state, se.dx, se.dy),
         Event::Key(ke) => keyboard_key(state, ke.keysym, ke.state),
@@ -268,6 +269,11 @@ fn dismiss_popups(state: &mut State, pos: Point) {
     }
 }
 
+/// Okno docelowe dla punktu (publiczne dla drag & drop).
+pub(crate) fn window_at(state: &State, pos: (f64, f64)) -> Option<usize> {
+    content_window(state, Point::new(pos.0, pos.1))
+}
+
 fn window_geometry(state: &State, slot: usize) -> Option<(f64, f64, f64, f64)> {
     let windows = state.windows.lock().unwrap();
     windows
@@ -282,7 +288,8 @@ fn content_local(state: &State, slot: usize, pos: Point) -> (f64, f64) {
     }
 }
 
-fn pointer_motion(state: &mut State, pos: Point) {
+fn pointer_motion(state: &mut State, handle: &DisplayHandle, pos: Point) {
+    state.pointer_pos = (pos.x, pos.y);
     if state.resize.is_some() {
         do_resize(state, pos);
         return;
@@ -293,6 +300,10 @@ fn pointer_motion(state: &mut State, pos: Point) {
             w.x = pos.x - drag.off_x;
             w.y = pos.y - drag.off_y;
         }
+    }
+    // Przeciąganie danych (drag & drop) aktualizuje cel.
+    if state.dnd.is_some() {
+        data::dnd_motion(state, handle, (pos.x, pos.y));
     }
     update_pointer_focus(state, pos);
     if let Some((slot, _)) = state.pointer_focus.clone() {
@@ -309,10 +320,20 @@ fn pointer_motion(state: &mut State, pos: Point) {
     }
 }
 
-fn pointer_button(state: &mut State, pos: Point, button: PointerButton, st: ButtonState) {
+fn pointer_button(
+    state: &mut State,
+    handle: &DisplayHandle,
+    pos: Point,
+    button: PointerButton,
+    st: ButtonState,
+) {
     if st == ButtonState::Released {
         state.drag = None;
         state.resize = None;
+        // Zakończ przeciąganie danych, jeśli trwało.
+        if state.dnd.is_some() {
+            data::dnd_drop(state, handle);
+        }
     } else {
         // Klik poza popupem zamyka popup (przed trafieniem w okno).
         dismiss_popups(state, pos);

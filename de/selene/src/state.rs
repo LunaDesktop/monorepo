@@ -11,6 +11,7 @@ use wayland_server::protocol::wl_keyboard::WlKeyboard;
 use wayland_server::protocol::wl_pointer::WlPointer;
 use wayland_server::protocol::wl_surface::WlSurface;
 
+use crate::data::DndState;
 use crate::monitors::{OutputInfo, Outputs};
 
 /// Wysokość paska tytułu dekoracji (SSD), w pikselach logicznych.
@@ -204,6 +205,10 @@ pub struct State {
     pub selection: Option<WlDataSource>,
     /// Urządzenia schowka zarejestrowane przez klientów (do rozsyłania selekcji).
     pub data_devices: Vec<WlDataDevice>,
+    /// Stan trwającego przeciągania (drag & drop).
+    pub dnd: Option<DndState>,
+    /// Ostatnia pozycja wskaźnika (współrzędne globalne).
+    pub pointer_pos: (f64, f64),
     /// Trwające przeciąganie okna.
     pub drag: Option<DragState>,
     /// Trwające przeskalowanie okna.
@@ -229,6 +234,8 @@ impl Default for State {
             sent_mods: Modifiers::NONE,
             selection: None,
             data_devices: Vec::new(),
+            dnd: None,
+            pointer_pos: (0.0, 0.0),
             drag: None,
             resize: None,
         }
