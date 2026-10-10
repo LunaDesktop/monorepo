@@ -135,10 +135,13 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   + frame-callbacki, `xdg_surface.configure`, i18n, profil release z LTO.
   ✅ M-K1: **wyjście nested** (`libluna-platform`) + kompozycja okien klientów (`wl_shm` →
   piksele → `libluna-render`); nowy prymityw `Scene::image`/`ImageData` w rendererze.
+  ✅ M-K2: **wejście** — `wl_output`, `wl_seat` z wskaźnikiem i klawiaturą (`wl_pointer`,
+  `wl_keyboard` z mapą XKB i syntezą modyfikatorów), magistrala wejścia z wybudzaniem,
+  oraz **pływające okna** (fokus, podnoszenie, przeciąganie).
   Uruchomienie: `cargo run -p selene` (szczegóły: `de/README.md`).
-- Dalej: **wejście** (`libinput`/`evdev` + `wl_pointer`/`wl_keyboard`), zarządzanie oknami/fokusem,
-  `wl_output`, `xdg_popup`, `layer-shell`, schowek (`wl_data_device`), backend DRM/KMS + GLES,
-  oraz optymalizacje (cache mapy shm, render przy zmianie modelu).
+- Dalej: **wiele monitorów** (DRM/KMS), dekory/zachowanie okien (`xdg-decoration`, resize,
+  pełny ekran, `xdg_popup`, `layer-shell`), schowek (`wl_data_device`), układy klawiatury/IME,
+  backend DRM/KMS + GLES, optymalizacje (cache mapy shm, render przy zmianie modelu).
 - **Luna** (`de/luna`) — powłoka środowiska (panel, launcher, OSD) na `libluna-widgets`.
 
 ## Później (poza MVP)

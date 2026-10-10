@@ -108,7 +108,7 @@ impl Dispatch<wl_surface::WlSurface, SurfaceData> for State {
     fn request(
         state: &mut Self,
         _client: &Client,
-        _resource: &wl_surface::WlSurface,
+        resource: &wl_surface::WlSurface,
         request: wl_surface::Request,
         data: &SurfaceData,
         _handle: &DisplayHandle,
@@ -131,7 +131,7 @@ impl Dispatch<wl_surface::WlSurface, SurfaceData> for State {
                 // Pierwszy commit powierzchni z `xdg_surface` → wyślij konfigurację.
                 maybe_configure_xdg(state, data);
                 // Skomponuj okno (jeśli to toplevel z buforem).
-                composite(state, data);
+                composite(state, resource, data);
             }
             _ => {}
         }
@@ -139,7 +139,7 @@ impl Dispatch<wl_surface::WlSurface, SurfaceData> for State {
 }
 
 /// Skomponuj powierzchnię do modelu okien, jeśli jest to toplevel z buforem `wl_shm`.
-fn composite(state: &mut State, data: &SurfaceData) {
+fn composite(state: &mut State, surface: &wl_surface::WlSurface, data: &SurfaceData) {
     let Some(xdg_surface) = data.xdg_surface.lock().unwrap().clone() else {
         return;
     };
@@ -161,9 +161,11 @@ fn composite(state: &mut State, data: &SurfaceData) {
         return;
     };
     let image = std::sync::Arc::new(ImageData::new(w as u32, h as u32, rgba));
+    let z = state.next_z();
 
     let mut slot = data.slot.lock().unwrap();
     let mut windows = state.windows.lock().unwrap();
+    let mut created = false;
     let idx = match *slot {
         Some(i) => i,
         None => {
@@ -173,9 +175,11 @@ fn composite(state: &mut State, data: &SurfaceData) {
                 y: 60.0 + i as f64 * 36.0,
                 width: w,
                 height: h,
+                z,
                 data: image.clone(),
             });
             *slot = Some(i);
+            created = true;
             i
         }
     };
@@ -186,6 +190,10 @@ fn composite(state: &mut State, data: &SurfaceData) {
     }
     drop(windows);
     drop(slot);
+    // Zarejestruj powierzchnię okna (indeks = slot) do trasowania wejścia.
+    if created && state.slots.len() == idx {
+        state.slots.push(surface.clone());
+    }
     // Pozwól klientowi ponownie użyć bufora.
     let _ = buffer.send_event(wl_buffer::Event::Release);
 }
