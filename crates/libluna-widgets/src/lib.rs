@@ -100,7 +100,7 @@ pub use spinner::Spinner;
 pub use status_page::{StatusIcon, StatusPage, StatusRects};
 pub use stepper::{Stepper, StepperSide};
 pub use switch::Switch;
-pub use tab_bar::{Tab, TabBar};
+pub use tab_bar::{ScrollDir, Tab, TabBar};
 pub use tab_view::TabView;
 pub use toast::Toast;
 pub use tooltip::Tooltip;

@@ -36,6 +36,22 @@ pub fn chevron_right(paint: &mut PaintCtx, color: Color, center: Point, size: f6
     );
 }
 
+/// Strzałka w lewo (chevron); środek w `center`, rozpiętość `size`, grubość `width`.
+pub fn chevron_left(paint: &mut PaintCtx, color: Color, center: Point, size: f64, width: f64) {
+    paint.scene.stroke_line(
+        Point::new(center.x + size * 0.45, center.y - size),
+        Point::new(center.x - size * 0.45, center.y),
+        width,
+        color,
+    );
+    paint.scene.stroke_line(
+        Point::new(center.x - size * 0.45, center.y),
+        Point::new(center.x + size * 0.45, center.y + size),
+        width,
+        color,
+    );
+}
+
 /// Lupka (wyszukiwanie); środek w `center`, bok `size`.
 pub fn search(paint: &mut PaintCtx, color: Color, center: Point, size: f64) {
     let r = size * 0.34;

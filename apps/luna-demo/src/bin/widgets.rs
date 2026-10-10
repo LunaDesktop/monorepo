@@ -8,10 +8,10 @@ use std::error::Error;
 use libluna_core::style::weight;
 use libluna_core::{Rect, Size, Theme};
 use libluna_render::{Scene, SoftwareRenderer, TextEngine};
-use libluna_widgets::{Banner, BannerKind, Button, PaintCtx, Spinner, Tooltip};
+use libluna_widgets::{Banner, BannerKind, Button, PaintCtx, Spinner, TabBar, Tooltip};
 
 const W: u32 = 520;
-const H: u32 = 300;
+const H: u32 = 364;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let theme = Theme::dark();
@@ -61,6 +61,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         weight::NORMAL,
         theme.colors.dim_text,
     );
+
+    // Pasek zakładek z przewijaniem (overflow) — 6 zakładek w wąskim pasku.
+    let tabs = TabBar::new([
+        "General",
+        "Advanced",
+        "Appearance",
+        "Network",
+        "System",
+        "About",
+    ]);
+    let tabs_rect = Rect::from_xywh(
+        16.0,
+        size.height - 52.0,
+        size.width - 32.0,
+        tabs.height(&theme),
+    );
+    tabs.paint(&mut paint, tabs_rect);
 
     let mut renderer = SoftwareRenderer::new(W, H);
     renderer.draw(&scene, 1.0, theme.colors.window_bg);

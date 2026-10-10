@@ -12,6 +12,16 @@ use libluna_render::TextEngine;
 use crate::ctx::PaintCtx;
 use crate::icon;
 
+/// Szerokość przycisku przewijania (chevron) na krawędzi paska.
+const SCROLL_W: f64 = 22.0;
+
+/// Kierunek przewijania paska zakładek.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrollDir {
+    Left,
+    Right,
+}
+
 /// Pojedyncza zakładka.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tab {
@@ -42,6 +52,8 @@ pub struct TabBar {
     selected: usize,
     hovered: Option<usize>,
     expand: bool,
+    /// Przesunięcie poziome (gdy zakładki się nie mieszczą).
+    scroll: f64,
 }
 
 impl TabBar {
@@ -56,6 +68,7 @@ impl TabBar {
             selected: 0,
             hovered: None,
             expand: true,
+            scroll: 0.0,
         }
     }
 
@@ -66,6 +79,7 @@ impl TabBar {
             selected: 0,
             hovered: None,
             expand: true,
+            scroll: 0.0,
         }
     }
 
@@ -111,17 +125,16 @@ impl TabBar {
         theme.metrics.tabs.height
     }
 
-    /// Prostokąty kolejnych zakładek (wyrównane do środka paska).
-    pub fn segments(&self, rect: Rect, text: &TextEngine, theme: &Theme) -> Vec<Rect> {
+    /// Szerokości zakładek (bez odstępów) dla zadanego prostokąta.
+    fn widths(&self, rect: Rect, text: &TextEngine, theme: &Theme) -> Vec<f64> {
         let m = theme.metrics.tabs;
         let n = self.tabs.len();
-        if n == 0 || rect.width() <= 0.0 {
+        if n == 0 {
             return Vec::new();
         }
-        let gaps = m.gap * (n as f64 - 1.0);
-        let avail = (rect.width() - gaps).max(0.0);
-
-        let widths: Vec<f64> = if self.expand {
+        if self.expand {
+            let gaps = m.gap * (n as f64 - 1.0);
+            let avail = (rect.width() - gaps).max(0.0);
             vec![(avail / n as f64).clamp(m.min_width, m.max_width); n]
         } else {
             self.tabs
@@ -137,10 +150,124 @@ impl TabBar {
                     w.clamp(m.min_width, m.max_width)
                 })
                 .collect()
-        };
+        }
+    }
 
+    /// Łączna szerokość zawartości (zakładki + odstępy).
+    pub fn content_width(&self, rect: Rect, text: &TextEngine, theme: &Theme) -> f64 {
+        let m = theme.metrics.tabs;
+        let n = self.tabs.len();
+        if n == 0 {
+            return 0.0;
+        }
+        self.widths(rect, text, theme).iter().sum::<f64>() + m.gap * (n as f64 - 1.0)
+    }
+
+    /// Maksymalne przewinięcie (0, gdy wszystko się mieści).
+    pub fn max_scroll(&self, rect: Rect, text: &TextEngine, theme: &Theme) -> f64 {
+        let content = self.content_width(rect, text, theme);
+        // Gdy się nie mieści, po bokach są przyciski przewijania — one zawężają widok.
+        let inset = if content > rect.width() {
+            SCROLL_W
+        } else {
+            0.0
+        };
+        let visible = (rect.width() - 2.0 * inset).max(0.0);
+        (content - visible).max(0.0)
+    }
+
+    /// Czy zakładki nie mieszczą się w pasku (trzeba przewijać).
+    pub fn is_overflowing(&self, rect: Rect, text: &TextEngine, theme: &Theme) -> bool {
+        self.max_scroll(rect, text, theme) > 0.5
+    }
+
+    pub fn scroll(&self) -> f64 {
+        self.scroll
+    }
+
+    /// Ustawia przewinięcie (przycięte do zakresu).
+    pub fn set_scroll(&mut self, scroll: f64, rect: Rect, text: &TextEngine, theme: &Theme) {
+        self.scroll = scroll.clamp(0.0, self.max_scroll(rect, text, theme));
+    }
+
+    /// Przewija o `dx`; zwraca `true`, jeśli zawartość da się przewinąć.
+    pub fn on_scroll(&mut self, dx: f64, rect: Rect, text: &TextEngine, theme: &Theme) -> bool {
+        if !self.is_overflowing(rect, text, theme) {
+            return false;
+        }
+        self.set_scroll(self.scroll + dx, rect, text, theme);
+        true
+    }
+
+    /// Przewija tak, aby zakładka `index` była w pełni widoczna.
+    pub fn scroll_into_view(&mut self, index: usize, rect: Rect, text: &TextEngine, theme: &Theme) {
+        let segs = self.segments(rect, text, theme);
+        let Some(seg) = segs.get(index).copied() else {
+            return;
+        };
+        let inset = if self.is_overflowing(rect, text, theme) {
+            SCROLL_W
+        } else {
+            0.0
+        };
+        let left = rect.x() + inset;
+        let right = rect.right() - inset;
+        if seg.x() < left {
+            self.set_scroll(self.scroll - (left - seg.x()), rect, text, theme);
+        } else if seg.right() > right {
+            self.set_scroll(self.scroll + (seg.right() - right), rect, text, theme);
+        }
+    }
+
+    /// Prostokąt przycisku przewijania przy danej krawędzi.
+    fn scroll_button(&self, rect: Rect, dir: ScrollDir) -> Rect {
+        let x = match dir {
+            ScrollDir::Left => rect.x(),
+            ScrollDir::Right => rect.right() - SCROLL_W,
+        };
+        Rect::from_xywh(x, rect.y(), SCROLL_W, rect.height())
+    }
+
+    /// Czy punkt trafia w przycisk przewijania (tylko gdy jest co przewijać w tę stronę).
+    pub fn scroll_dir_at(
+        &self,
+        rect: Rect,
+        text: &TextEngine,
+        theme: &Theme,
+        p: Point,
+    ) -> Option<ScrollDir> {
+        if !self.is_overflowing(rect, text, theme) {
+            return None;
+        }
+        let left = self.scroll_button(rect, ScrollDir::Left);
+        let right = self.scroll_button(rect, ScrollDir::Right);
+        if self.scroll > 0.0 && left.contains(p) {
+            Some(ScrollDir::Left)
+        } else if self.scroll < self.max_scroll(rect, text, theme) - 0.5 && right.contains(p) {
+            Some(ScrollDir::Right)
+        } else {
+            None
+        }
+    }
+
+    /// Prostokąty kolejnych zakładek (z uwzględnieniem przewijania).
+    pub fn segments(&self, rect: Rect, text: &TextEngine, theme: &Theme) -> Vec<Rect> {
+        let m = theme.metrics.tabs;
+        let n = self.tabs.len();
+        if n == 0 || rect.width() <= 0.0 {
+            return Vec::new();
+        }
+        let widths = self.widths(rect, text, theme);
+        let gaps = m.gap * (n as f64 - 1.0);
         let total: f64 = widths.iter().sum::<f64>() + gaps;
-        let mut x = rect.x() + ((rect.width() - total) / 2.0).max(0.0);
+        let overflowing = total > rect.width();
+        let inset = if overflowing { SCROLL_W } else { 0.0 };
+        let avail = (rect.width() - 2.0 * inset).max(0.0);
+        let mut x = if overflowing {
+            rect.x() + inset - self.scroll
+        } else {
+            rect.x() + inset + ((avail - total) / 2.0).max(0.0)
+        };
         let mut out = Vec::with_capacity(n);
         for w in widths {
             out.push(Rect::from_xywh(x, rect.y(), w, rect.height()));
@@ -189,13 +316,14 @@ impl TabBar {
         match self.index_at(rect, text, theme, p) {
             Some(i) if i != self.selected => {
                 self.selected = i;
+                self.scroll_into_view(i, rect, text, theme);
                 true
             }
             _ => false,
         }
     }
 
-    /// Rysuje pasek zakładek w prostokącie `rect`.
+    /// Rysuje pasek zakładek w prostokącie `rect` (z przycinaniem i przewijaniem).
     pub fn paint(&self, ctx: &mut PaintCtx, rect: Rect) {
         let theme = *ctx.theme;
         let colors = theme.colors;
@@ -203,7 +331,9 @@ impl TabBar {
         let size = theme.typography.body.size;
         let m = theme.metrics.tabs;
         let text = ctx.text;
+        let overflow = self.is_overflowing(rect, text, &theme);
 
+        ctx.scene.push_clip(rect);
         for (i, seg) in self.segments(rect, text, &theme).iter().enumerate() {
             let tab = &self.tabs[i];
             let selected = i == self.selected;
@@ -242,6 +372,31 @@ impl TabBar {
                     m.close * 0.28,
                 );
             }
+        }
+        ctx.scene.pop_clip();
+
+        // Przyciski przewijania na krawędziach, gdy zakładki się nie mieszczą.
+        if overflow {
+            let max = self.max_scroll(rect, text, &theme);
+            if self.scroll > 0.0 {
+                self.paint_scroll_button(ctx, rect, ScrollDir::Left);
+            }
+            if self.scroll < max - 0.5 {
+                self.paint_scroll_button(ctx, rect, ScrollDir::Right);
+            }
+        }
+    }
+
+    fn paint_scroll_button(&self, ctx: &mut PaintCtx, rect: Rect, dir: ScrollDir) {
+        let theme = *ctx.theme;
+        let colors = theme.colors;
+        let r = self.scroll_button(rect, dir);
+        // Tło zasłaniające przewinięte zakładki + chevron.
+        ctx.scene.fill_rect(r, colors.card_bg);
+        let center = r.center();
+        match dir {
+            ScrollDir::Left => icon::chevron_left(ctx, colors.dim_text, center, 4.0, 2.0),
+            ScrollDir::Right => icon::chevron_right(ctx, colors.dim_text, center, 4.0, 2.0),
         }
     }
 }
@@ -335,5 +490,60 @@ mod tests {
             assert!(s.width() >= m.min_width - 1e-9);
             assert!(s.width() <= m.max_width + 1e-9);
         }
+    }
+
+    #[test]
+    fn overflow_scrolls_and_clamps() {
+        let text = TextEngine::system();
+        let theme = theme();
+        let rect = Rect::from_xywh(0.0, 0.0, 200.0, 34.0);
+        let mut bar = TabBar::new(["A", "B", "C", "D", "E", "F"]);
+        assert!(bar.is_overflowing(rect, &text, &theme));
+        let max = bar.max_scroll(rect, &text, &theme);
+        assert!(max > 0.0);
+
+        assert!(bar.on_scroll(30.0, rect, &text, &theme));
+        assert!((bar.scroll() - 30.0).abs() < 1e-9);
+        bar.on_scroll(9999.0, rect, &text, &theme);
+        assert!((bar.scroll() - max).abs() < 1e-9);
+        bar.on_scroll(-9999.0, rect, &text, &theme);
+        assert_eq!(bar.scroll(), 0.0);
+    }
+
+    #[test]
+    fn scroll_into_view_reveals_last_tab() {
+        let text = TextEngine::system();
+        let theme = theme();
+        let rect = Rect::from_xywh(0.0, 0.0, 200.0, 34.0);
+        let mut bar = TabBar::new(["A", "B", "C", "D", "E", "F"]);
+        bar.scroll_into_view(5, rect, &text, &theme);
+        let segs = bar.segments(rect, &text, &theme);
+        assert!(segs[5].right() <= rect.right() - SCROLL_W + 1e-6);
+        assert!(segs[5].x() >= rect.x() + SCROLL_W - 1e-6);
+    }
+
+    #[test]
+    fn scroll_buttons_hit_only_when_scrollable() {
+        let text = TextEngine::system();
+        let theme = theme();
+        let narrow = Rect::from_xywh(0.0, 0.0, 200.0, 34.0);
+        let bar = TabBar::new(["A", "B", "C", "D", "E", "F"]);
+        let left = bar.scroll_button(narrow, ScrollDir::Left);
+        let right = bar.scroll_button(narrow, ScrollDir::Right);
+        // Na starcie: lewy nieaktywny, prawy aktywny.
+        assert_eq!(
+            bar.scroll_dir_at(narrow, &text, &theme, left.center()),
+            None
+        );
+        assert_eq!(
+            bar.scroll_dir_at(narrow, &text, &theme, right.center()),
+            Some(ScrollDir::Right)
+        );
+        // Gdy wszystko się mieści — brak przycisków.
+        let fits = TabBar::new(["A"]);
+        assert_eq!(
+            fits.scroll_dir_at(rect(), &text, &theme, rect().center()),
+            None
+        );
     }
 }
