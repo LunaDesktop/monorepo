@@ -1,15 +1,18 @@
-//! Wyjście nested: Selene otwiera okno na nadrzędnym kompozytorze i rysuje scenę okien.
+//! Wyjście: nested (okno na nadrzędnym kompozytorze) oraz **realne DRM/KMS** (scanout).
 //!
-//! Wątek wyjścia pełni dwie role: (1) rysuje skomponowaną scenę przez `libluna-render`
-//! i (2) odbiera wejście od nadrzędnego kompozytora, przekazując je do magistrali
-//! (`crate::input`), skąd wątek protokołu trasuje je do klientów.
+//! Wątek nested pełni dwie role: rysuje scenę przez `libluna-render` i odbiera wejście
+//! od nadrzędnego kompozytora, przekazując je do magistrali (`crate::input`).
+//! Wątek DRM renderuje scenę wprost do buforów „dumb” i skanuje je na monitorach
+//! (page-flip). Wejście w trybie DRM (evdev) jest kolejnym krokiem.
 
 use std::os::unix::net::UnixStream;
+use std::time::Duration;
 
-use libluna_core::{Color, Point, Rect, ThemeSettings};
+use libluna_core::{Color, Point, Rect, Size, ThemeSettings};
 use libluna_platform::{run, AppConfig, Frame};
-use libluna_render::TextRun;
+use libluna_render::{Scene, SoftwareRenderer, TextRun};
 
+use crate::drm::DrmBackend;
 use crate::input::{self, Events};
 use crate::monitors::Outputs;
 use crate::state::{Window, WindowModel};
@@ -41,17 +44,72 @@ pub fn spawn(
             // Przekaż wejście do magistrali.
             input::push(&events, &mut wake, frame.events);
             // Narysuj scenę.
-            draw(frame, &model);
+            let size = frame.size;
+            build_scene(frame.scene, size, 0.0, 0.0, &model);
             // Utrzymuj klatki — model okien zmienia się poza tą pętlą.
             frame.request_frame();
         });
     });
 }
 
-fn draw(frame: &mut Frame, model: &WindowModel) {
-    frame.scene.clear();
-    frame.scene.fill_rect(
-        Rect::from_size(frame.size),
+/// Uruchamia wątek wyjścia DRM/KMS — renderuje scenę do buforów i skanuje na monitorach.
+///
+/// Wymaga bycia DRM masterem; jeśli inną sesję trzyma master, kończy bez efektu
+/// (wywołujący powinien wtedy użyć wyjścia nested).
+pub fn spawn_drm(model: WindowModel) {
+    std::thread::spawn(move || {
+        let Some(mut backend) = DrmBackend::open() else {
+            eprintln!(
+                "{}",
+                libluna_i18n::tr("DRM backend unavailable (no master)")
+            );
+            return;
+        };
+        let infos = backend.outputs();
+        let sizes: Vec<(u32, u32)> = infos.iter().map(|(_, w, h)| (*w, *h)).collect();
+        let origins: Vec<(f64, f64)> = {
+            // Wyjścia ułożone poziomo (spójne z modelem monitorów).
+            let mut x = 0.0;
+            sizes
+                .iter()
+                .map(|(w, _)| {
+                    let o = (x, 0.0);
+                    x += *w as f64;
+                    o
+                })
+                .collect()
+        };
+        for (name, w, h) in &infos {
+            println!("{}: {} {}x{}", libluna_i18n::tr("DRM output"), name, w, h);
+        }
+        let mut renderers: Vec<SoftwareRenderer> = sizes
+            .iter()
+            .map(|(w, h)| SoftwareRenderer::new(*w, *h))
+            .collect();
+        let bg = Color::from_rgba8(0x1e, 0x20, 0x28, 0xff);
+
+        loop {
+            for i in 0..sizes.len() {
+                let (w, h) = sizes[i];
+                let (ox, oy) = origins[i];
+                let mut scene = Scene::new();
+                build_scene(&mut scene, Size::new(w as f64, h as f64), ox, oy, &model);
+                renderers[i].draw(&scene, 1.0, bg);
+                backend.present(i, renderers[i].data());
+                backend.wait_flip();
+            }
+            // Bez wejścia w trybie DRM odświeżamy w stałym rytmie (~60 Hz).
+            std::thread::sleep(Duration::from_millis(16));
+        }
+    });
+}
+
+/// Buduje scenę okien w rozmiarze wyjścia, przesuniętą o `(ox, oy)` (origin monitora).
+fn build_scene(scene: &mut Scene, size: Size, ox: f64, oy: f64, model: &WindowModel) {
+    let sh = |r: Rect| r.offset(-ox, -oy);
+    scene.clear();
+    scene.fill_rect(
+        Rect::from_size(size),
         Color::from_rgba8(0x1e, 0x20, 0x28, 0xff),
     );
 
@@ -60,50 +118,47 @@ fn draw(frame: &mut Frame, model: &WindowModel) {
         let mut order: Vec<&Window> = windows.iter().collect();
         order.sort_by_key(|w| w.z);
         for w in order {
-            if !w.mapped {
+            if !w.mapped || w.minimized {
                 continue;
             }
             // Tło treści (na wypadek przezroczystości bufora klienta).
-            frame
-                .scene
-                .fill_rect(w.content(), Color::from_rgba8(0x00, 0x00, 0x00, 0xff));
+            scene.fill_rect(sh(w.content()), Color::from_rgba8(0x00, 0x00, 0x00, 0xff));
             // Treść okna (bufor klienta).
-            frame.scene.image(w.content(), w.data.clone());
+            scene.image(sh(w.content()), w.data.clone());
             // Dekoracja tylko dla topleveli (popupy i panele jej nie mają).
             if !w.popup && !w.layer {
-                frame
-                    .scene
-                    .fill_rect(w.titlebar(), Color::from_rgba8(0x2c, 0x2f, 0x38, 0xff));
-                frame.scene.text(
-                    TextRun::new(Point::new(w.x + 10.0, w.y + 20.0), &w.title, 13.0)
+                scene.fill_rect(sh(w.titlebar()), Color::from_rgba8(0x2c, 0x2f, 0x38, 0xff));
+                scene.text(
+                    TextRun::new(Point::new(w.x - ox + 10.0, w.y - oy + 20.0), &w.title, 13.0)
                         .with_color(Color::from_rgba8(0xee, 0xee, 0xee, 0xff)),
                 );
                 let glyph = Color::from_rgba8(0xd0, 0xd0, 0xd0, 0xff);
+                let shift = |p: Point| Point::new(p.x - ox, p.y - oy);
                 // Zamknięcie — krzyżyk.
-                let c = w.close_rect().center();
-                frame.scene.stroke_line(
+                let c = shift(w.close_rect().center());
+                scene.stroke_line(
                     Point::new(c.x - 4.0, c.y - 4.0),
                     Point::new(c.x + 4.0, c.y + 4.0),
                     1.6,
                     glyph,
                 );
-                frame.scene.stroke_line(
+                scene.stroke_line(
                     Point::new(c.x + 4.0, c.y - 4.0),
                     Point::new(c.x - 4.0, c.y + 4.0),
                     1.6,
                     glyph,
                 );
                 // Maksymalizacja — kwadrat.
-                let m = w.maximize_rect().center();
-                frame.scene.stroke_rounded_rect(
+                let m = shift(w.maximize_rect().center());
+                scene.stroke_rounded_rect(
                     Rect::from_xywh(m.x - 4.0, m.y - 4.0, 8.0, 8.0),
                     0.0,
                     1.4,
                     glyph,
                 );
                 // Minimalizacja — kreska.
-                let n = w.minimize_rect().center();
-                frame.scene.stroke_line(
+                let n = shift(w.minimize_rect().center());
+                scene.stroke_line(
                     Point::new(n.x - 4.0, n.y + 3.0),
                     Point::new(n.x + 4.0, n.y + 3.0),
                     1.6,
@@ -112,8 +167,8 @@ fn draw(frame: &mut Frame, model: &WindowModel) {
             }
             // Obramowanie całego okna (tylko zwykłe okna).
             if !w.layer {
-                frame.scene.stroke_rounded_rect(
-                    w.outer(),
+                scene.stroke_rounded_rect(
+                    sh(w.outer()),
                     6.0,
                     1.0,
                     Color::from_rgba8(0x50, 0x54, 0x60, 0xff),
@@ -122,7 +177,7 @@ fn draw(frame: &mut Frame, model: &WindowModel) {
         }
     }
 
-    frame.scene.text(
+    scene.text(
         TextRun::new(Point::new(16.0, 28.0), "Selene — kompozytor Luna", 14.0)
             .with_color(Color::from_rgba8(0xdd, 0xdd, 0xdd, 0xff)),
     );

@@ -52,16 +52,21 @@ gnieździe nasłuchu i deskryptorze backendu. `libLuna` jest zwykłą zależnoś
   z fallbackiem na pojedyncze wyjście nested, gdy DRM niedostępne.
 - **Schowek** (`wl_data_device_manager`): kopiuj/wklej między klientami — `wl_data_source`,
   `data_offer`/`offer`/`selection` rozsyłane do pozostałych urządzeń, `wl_data_offer.receive`
-  przekazywane do źródła (`.send`).
+  przekazywane do źródła (`.send`). **Drag & drop**: `start_drag`, `enter`/`motion`/`leave`/
+  `drop` do celu (z ofertą), `dnd_drop_performed`/`dnd_finished`/`cancelled` do źródła.
 - **Klawiatura**: układ i wariant z otoczenia (`LUNA_KEYBOARD_LAYOUT`, `LUNA_KEYBOARD_VARIANT`,
   sanityzowane), `wl_keyboard.repeat_info`.
+- **Realne wyjście DRM/KMS** (`SELENE_BACKEND=drm`, opcjonalne): przejęcie mastera, bufor
+  „dumb”, framebuffer (`ADDFB2`), `SETCRTC` i **page-flip** na wykrytych monitorach; render
+  sceny wprost do buforów (podwójne buforowanie). Gdy master trzyma inna sesja — bezpieczny
+  fallback do nested (nie odbiera ekranu).
 - Wielojęzyczność (`libluna-i18n`) i optymalizacja (`[profile.release]` LTO, cache `shm`).
 
 ## Jeszcze nie / Not yet
 
-- **Backend DRM/KMS**: samo **wykrywanie** monitorów działa; skanowanie (bufory, page-flip,
-  master) i GLES oraz hotplug (`zwlr_output_manager`) — do zrobienia.
-- **Drag & drop** i **selekcja pierwotna** (poza kopiuj/wklej); IME / `text-input`.
+- **Wejście w trybie DRM** (evdev/`libinput`) — skanowanie działa, ale bez rodzimego wejścia
+  okna są tylko wyświetlane; GLES/akceleracja i hotplug (`zwlr_output_manager`) — do zrobienia.
+- **Selekcja pierwotna** (`primary selection`); IME / `text-input`.
 - `wl_output` dynamiczne (zmiana trybu), fokus klawiatury po kliknięciu poza oknem.
 - Render tylko przy zmianie modelu (częściowe odświeżanie/damage).
 
@@ -73,6 +78,17 @@ mkdir -p .selene-runtime && chmod 700 .selene-runtime
 XDG_RUNTIME_DIR="$PWD/.selene-runtime" cargo run -p selene
 # → "Selene compositor started (wayland-0)" + gniazdo wayland-0 w katalogu runtime
 ```
+
+Tryb nested (domyślny) uruchamia okno na nadrzędnym kompozytorze. **Realne wyjście DRM**
+(gdy masz wolnego mastera, np. z osobnej konsoli):
+
+```sh
+SELENE_BACKEND=drm XDG_RUNTIME_DIR="$PWD/.selene-runtime" cargo run -p selene
+# diagnostyka bez zmiany trybu:  SELENE_DRM_PROBE=1 cargo run -p selene
+```
+
+Uwaga: tryb DRM przejmuje ekran (page-flip); gdy master trzyma Twoja sesja, Selene
+zgłasza to i **nie** rusza wyświetlaczy.
 
 Klienta podłączysz ustawiając `WAYLAND_DISPLAY=wayland-0` i `XDG_RUNTIME_DIR` na ten sam
 katalog (renderowanie pojawi się, gdy wejdzie backend wyświetlania).
@@ -88,9 +104,9 @@ de/selene/src/
   shell.rs       # xdg_wm_base / xdg_surface / xdg_toplevel / xdg_popup / xdg_positioner
   decoration.rs  # zxdg_decoration_manager_v1 (SSD: odpowiedź server_side)
   layer.rs       # zwlr_layer_shell_v1 (panele/docki: kotwice, warstwy, wybór monitora)
-  data.rs        # wl_data_device_manager (schowek: selekcja, data_offer/source)
+  data.rs        # wl_data_device_manager (schowek + drag & drop)
   monitors.rs    # wl_output (model wielu monitorów, układ, trafienia)
-  drm.rs         # wykrywanie monitorów DRM/KMS (ioctl) z fallbackiem nested
+  drm.rs         # wykrywanie + scanout DRM/KMS (ioctl, dumb buffer, page-flip), fallback nested
   seat.rs        # wl_seat: wskaźnik + klawiatura + trasowanie wejścia i operacje okien
   input.rs       # magistrala wejścia (kolejka + wybudzanie)
   output.rs      # wyjście nested (libluna-platform + libluna-render)

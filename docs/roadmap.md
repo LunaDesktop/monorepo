@@ -152,10 +152,14 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   ✅ M-K6: **schowek** (`wl_data_device_manager`: `data_source`/`data_offer`/`selection`,
   kopiuj/wklej między klientami) oraz **układy klawiatury** z otoczenia
   (`LUNA_KEYBOARD_LAYOUT`/`LUNA_KEYBOARD_VARIANT`) i `wl_keyboard.repeat_info`.
+  ✅ M-K7: **drag & drop** (`start_drag`, `enter`/`motion`/`leave`/`drop`, `dnd_finished`)
+  oraz **realne wyjście DRM/KMS** (`SELENE_BACKEND=drm`, opcjonalne): master, bufor dumb,
+  `ADDFB2`, `SETCRTC`, podwójne buforowanie i **page-flip**; bezpieczny fallback do nested,
+  gdy master trzyma inna sesja.
   ✅ Optymalizacje: cache `mmap` puli `wl_shm` i zero-copy w rendererze (`PixmapRef::from_bytes`).
   Uruchomienie: `cargo run -p selene` (szczegóły: `de/README.md`).
-- Dalej: realny backend DRM/KMS + GLES (skanowanie, page-flip, bufory), drag & drop
-  i selekcja pierwotna, IME (`text-input`), hotplug monitorów (`zwlr_output_manager`).
+- Dalej: **wejście w trybie DRM** (evdev/`libinput`), GLES/akceleracja, hotplug monitorów
+  (`zwlr_output_manager`), selekcja pierwotna, IME (`text-input`).
 - **Luna** (`de/luna`) — powłoka środowiska (panel, launcher, OSD) na `libluna-widgets`.
 
 ## Później (poza MVP)

@@ -39,6 +39,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut display: Display<State> = Display::new()?;
     let mut handle = display.handle();
 
+    // Diagnostyka DRM: `SELENE_DRM_PROBE=1` sprawdza dostępność mastera bez zmiany trybu.
+    if std::env::var("SELENE_DRM_PROBE").as_deref() == Ok("1") {
+        match drm::check_master() {
+            Some(card) => println!("DRM master available: {}", card.display()),
+            None => println!("DRM master unavailable (held by another session)"),
+        }
+        return Ok(());
+    }
+
     let mut state = State::default();
 
     // Wykrywanie monitorów: DRM/KMS, a gdy niedostępne — pojedyncze wyjście nested.
@@ -85,15 +94,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Magistrala wejścia (wątek wyjścia → wątek protokołu) z parą gniazd do wybudzania.
     let (events, mut wake_read, wake_write) = input::channel();
 
-    // Wyjście nested: okno na nadrzędnym kompozytorze, budowane w osobnym wątku.
-    output::spawn(
-        Arc::clone(&state.windows),
-        Arc::clone(&state.outputs),
-        Arc::clone(&events),
-        wake_write,
-        1280,
-        800,
-    );
+    // Wyjście: realne DRM/KMS (gdy `SELENE_BACKEND=drm`) lub nested na nadrzędnym kompozytorze.
+    if std::env::var("SELENE_BACKEND").as_deref() == Ok("drm") {
+        output::spawn_drm(Arc::clone(&state.windows));
+    } else {
+        output::spawn(
+            Arc::clone(&state.windows),
+            Arc::clone(&state.outputs),
+            Arc::clone(&events),
+            wake_write,
+            1280,
+            800,
+        );
+    }
 
     let listener_fd = socket.as_raw_fd();
 
