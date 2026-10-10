@@ -6,7 +6,7 @@
 //! ([`Pager::indicator_at`]) oraz przeciąganie ([`Pager::begin_drag`] →
 //! [`Pager::update_drag`] → [`Pager::end_drag`], które „przyciąga” do najbliższej strony).
 
-use libluna_core::{Insets, Point, Rect, Theme};
+use libluna_core::{Animation, Easing, Insets, Point, Rect, Theme};
 
 use crate::ctx::PaintCtx;
 
@@ -20,15 +20,15 @@ pub struct Pager {
     drag_from: Option<f64>,
     /// Pozycja karuzeli na początku przeciągania.
     drag_pos: f64,
+    /// Animowane „przyciąganie” do strony (po puszczeniu / skoku z kropek).
+    snap: Animation,
 }
 
 impl Pager {
     pub fn new(count: usize) -> Self {
         Self {
             count,
-            position: 0.0,
-            drag_from: None,
-            drag_pos: 0.0,
+            ..Self::default()
         }
     }
 
@@ -130,6 +130,41 @@ impl Pager {
         active
     }
 
+    /// Kończy przeciąganie z **animowanym** przyciąganiem do najbliższej strony.
+    pub fn end_drag_animated(&mut self) -> usize {
+        self.drag_from = None;
+        let active = self.active();
+        self.snap.jump_to(self.position);
+        self.snap.animate_to(active as f64);
+        active
+    }
+
+    /// Skok do strony z animacją (np. klik w kropkę).
+    pub fn set_active_animated(&mut self, index: usize) {
+        let target = (index as f64).clamp(0.0, self.max_position());
+        self.snap.jump_to(self.position);
+        self.snap.animate_to(target);
+    }
+
+    pub fn is_animating(&self) -> bool {
+        self.snap.is_animating()
+    }
+
+    /// Ustawia krzywą wygładzania przyciągania.
+    pub fn set_snap_easing(&mut self, easing: Easing) {
+        self.snap.set_easing(easing);
+    }
+
+    /// Krok animacji przyciągania; zwraca `true`, gdy trwa dalej.
+    pub fn advance(&mut self, dt: f64, duration: f64) -> bool {
+        if !self.snap.is_animating() {
+            return false;
+        }
+        let animating = self.snap.advance(dt, duration);
+        self.position = self.snap.value().clamp(0.0, self.max_position());
+        animating
+    }
+
     /// Rysuje kropki-wskaźniki.
     pub fn paint(&self, ctx: &mut PaintCtx, rect: Rect) {
         let theme = *ctx.theme;
@@ -201,5 +236,28 @@ mod tests {
         assert!((p.position() - 1.4).abs() < 1e-9);
         assert_eq!(p.end_drag(), 1);
         assert!((p.position() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn animated_snap_settles_on_target() {
+        let mut p = Pager::new(3);
+        p.begin_drag(0.0);
+        p.update_drag(-420.0, rect());
+        assert_eq!(p.end_drag_animated(), 1);
+        assert!(p.is_animating());
+        assert!(p.advance(0.5, 1.0));
+        assert!(!p.advance(0.5, 1.0));
+        assert!((p.position() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn dot_jump_animates() {
+        let mut p = Pager::new(4);
+        p.set_active_animated(3);
+        assert!(p.is_animating());
+        while p.is_animating() {
+            p.advance(0.1, 1.0);
+        }
+        assert_eq!(p.active(), 3);
     }
 }

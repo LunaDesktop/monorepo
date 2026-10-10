@@ -56,6 +56,7 @@
 //! - Animacje (`libluna-core::motion`): `Easing`/`lerp`/`Animation`; użyte w [`Revealer`],
 //!   [`Toast`] i przejściach [`Stack`] ([`StackTransition`]).
 //! - [`FlowBox`], [`SpinButton`], [`EmojiChooser`], [`NavigationRail`] — kolejne widgety libLuny.
+//! - [`Viewport`], [`WindowHandle`] — pomocniki okna/obszaru (GTK4).
 //! - Aliasy w duchu GTK4: [`Carousel`] = [`Pager`], [`ScrolledWindow`] = [`ScrollView`],
 //!   [`StackSwitcher`] = [`ViewSwitcher`], [`Notebook`] = [`TabView`], [`ListBox`] = [`NavList`].
 //! - [`Carousel`] (alias [`Pager`]), [`ToolbarView`], [`WindowTitle`], [`Clamp`], [`WrapBox`],
@@ -147,6 +148,7 @@ pub use color_chooser::ColorChooser;
 pub use column_view::{Column, ColumnView};
 pub use containers::{
     ActionBar, CenterBox, Fixed, Grid, Paned, PopoverMenuBar, Stack, StackFrame, StackTransition,
+    Viewport,
 };
 pub use ctx::PaintCtx;
 pub use dialogs::{
@@ -164,8 +166,8 @@ pub use expander::Expander;
 pub use flow_box::FlowBox;
 pub use header_bar::{ControlsLayout, ControlsSide, HeaderBar, TitleAlign, WindowControl};
 pub use helpers::{
-    BreakpointBin, ButtonContent, Clamp, ToolbarRects, ToolbarView, WindowTitle, WindowTitleRects,
-    WrapBox,
+    BreakpointBin, ButtonContent, Clamp, ToolbarRects, ToolbarView, WindowHandle, WindowTitle,
+    WindowTitleRects, WrapBox,
 };
 pub use image::{Image, ImageIcon};
 pub use item_view::{Item, ItemKind, ItemView, ViewMode};

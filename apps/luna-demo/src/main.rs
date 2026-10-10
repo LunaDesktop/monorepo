@@ -78,6 +78,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             frame.request_frame();
         }
 
+        // Animacja dolnego panelu (wysuwanie) i przyciągania karuzeli.
+        if demo.sheet.is_animating() {
+            demo.sheet.advance(frame.delta_time(), 0.3);
+            frame.request_frame();
+        }
+        if demo.pager.is_animating() {
+            demo.pager.advance(frame.delta_time(), 0.3);
+            frame.request_frame();
+        }
+
         // Motyw po zmianach (np. wybór stylu) — klatka od razu poprawna.
         let theme = settings.resolve_themed(frame.system_dark());
         ui::build_scene(

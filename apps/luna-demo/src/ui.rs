@@ -662,21 +662,21 @@ pub fn handle_events(
                         if demo.sheet.is_open() {
                             let area = demo.sheet.content_rect(size, theme);
                             if demo.sheet.close_at(size, theme, p) {
-                                demo.sheet.set_open(false);
+                                demo.sheet.set_open_animated(false);
                                 demo.sheet_entry.set_focused(false);
                             } else if demo.sheet.drag_zone_at(size, theme, p) {
                                 demo.sheet.begin_drag(p.y);
                             } else if demo.sheet.scrim_at(size, theme, p) {
-                                demo.sheet.set_open(false);
+                                demo.sheet.set_open_animated(false);
                                 demo.sheet_entry.set_focused(false);
                             } else if area.contains(p) {
                                 if sheet_entry_rect(size, theme).contains(p) {
                                     demo.sheet_entry.set_focused(true);
-                                } else if demo.pager.click_indicator(
-                                    sheet_pages_rect(size, theme),
-                                    theme,
-                                    p,
-                                ) {
+                                } else if let Some(i) =
+                                    demo.pager
+                                        .indicator_at(sheet_pages_rect(size, theme), theme, p)
+                                {
+                                    demo.pager.set_active_animated(i);
                                     demo.sheet_entry.set_focused(false);
                                 } else {
                                     demo.sheet_entry.set_focused(false);
@@ -741,7 +741,7 @@ pub fn handle_events(
                                         }
                                         Popover::Menu if entry == ABOUT_ENTRY => {
                                             // „O aplikacji” otwiera dolny panel.
-                                            demo.sheet.set_open(true);
+                                            demo.sheet.set_open_animated(true);
                                         }
                                         Popover::Styles => {
                                             // 0 = „Domyślny”, dalej style z plików.
@@ -842,7 +842,7 @@ pub fn handle_events(
                         demo.dragging_sidebar = false;
                         demo.volume_dragging = false;
                         if demo.pager_dragging {
-                            demo.pager.end_drag();
+                            demo.pager.end_drag_animated();
                             demo.pager_dragging = false;
                         }
                         if demo.scroll_dragging {
@@ -969,7 +969,10 @@ pub fn handle_events(
                     // `v` — przełącz widok (Lista/Siatka)
                     0x76 => demo.view_mode = (demo.view_mode + 1) % 2,
                     // `o` — pokaż/ukryj dolny panel („O aplikacji”)
-                    0x6f => demo.sheet.set_open(!demo.sheet.is_open()),
+                    0x6f => {
+                        let open = !demo.sheet.is_open();
+                        demo.sheet.set_open_animated(open);
+                    }
                     _ => {}
                 }
             }
@@ -1072,8 +1075,8 @@ pub fn build_scene(
         draw_options(&mut paint, size, &lay, demo);
     }
 
-    // Dolny panel (modalny) rysowany na samym wierzchu.
-    if demo.sheet.is_open() {
+    // Dolny panel (modalny) rysowany na samym wierzchu (także w trakcie wygaszania).
+    if demo.sheet.progress() > 0.001 {
         let mut sheet = demo.sheet.clone();
         sheet.set_title(Some(tr("About")));
         sheet.paint(&mut paint, size);

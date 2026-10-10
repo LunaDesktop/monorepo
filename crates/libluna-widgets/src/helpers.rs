@@ -2,7 +2,7 @@
 //! `BreakpointBin`, `ButtonContent`.
 
 use libluna_core::style::weight;
-use libluna_core::{Rect, Size, Theme};
+use libluna_core::{Point, Rect, Size, Theme};
 use libluna_render::TextEngine;
 
 use crate::ctx::PaintCtx;
@@ -282,6 +282,18 @@ impl ButtonContent {
     }
 }
 
+/// Obszar chwytu okna (`GtkWindowHandle`): rozstrzyga, czy punkt w pasku tytułu służy
+/// do **przeciągania okna**, czy trafia w kontrolkę (wtedy nie jest uchwytem).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WindowHandle;
+
+impl WindowHandle {
+    /// Czy `p` leży w `bar` i nie trafia w żadną z kontrolek.
+    pub fn is_drag_region(bar: Rect, controls: &[Rect], p: Point) -> bool {
+        bar.contains(p) && !controls.iter().any(|c| c.contains(p))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,6 +310,27 @@ mod tests {
         assert_eq!(r.bottom.unwrap().height(), 28.0);
         assert_eq!(r.content.y(), 46.0);
         assert_eq!(r.content.height(), 600.0 - 46.0 - 28.0);
+    }
+
+    #[test]
+    fn window_handle_excludes_controls() {
+        let bar = Rect::from_xywh(0.0, 0.0, 800.0, 46.0);
+        let controls = [Rect::from_xywh(700.0, 8.0, 90.0, 30.0)];
+        assert!(WindowHandle::is_drag_region(
+            bar,
+            &controls,
+            Point::new(400.0, 20.0)
+        ));
+        assert!(!WindowHandle::is_drag_region(
+            bar,
+            &controls,
+            Point::new(720.0, 20.0)
+        ));
+        assert!(!WindowHandle::is_drag_region(
+            bar,
+            &controls,
+            Point::new(400.0, 200.0)
+        ));
     }
 
     #[test]

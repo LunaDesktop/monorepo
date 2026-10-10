@@ -7,7 +7,7 @@
 //! Zawartość panelu rysuje aplikacja w [`BottomSheet::content_rect`].
 
 use libluna_core::style::weight;
-use libluna_core::{Color, Point, Rect, Size, Theme};
+use libluna_core::{Animation, Color, Easing, Point, Rect, Size, Theme};
 
 use crate::ctx::PaintCtx;
 use crate::icon;
@@ -28,6 +28,8 @@ pub struct BottomSheet {
     /// Pozycja wskaźnika (y) na początku przeciągania.
     drag_from: Option<f64>,
     hover_close: bool,
+    /// Postęp wysuwania (0 = schowany, 1 = w pełni otwarty).
+    animation: Animation,
 }
 
 impl BottomSheet {
@@ -51,10 +53,37 @@ impl BottomSheet {
 
     pub fn set_open(&mut self, open: bool) {
         self.open = open;
+        self.animation.jump_to(if open { 1.0 } else { 0.0 });
         if !open {
             self.drag = 0.0;
             self.drag_from = None;
         }
+    }
+
+    /// Otwiera/zamyka panel z animacją wysuwania.
+    pub fn set_open_animated(&mut self, open: bool) {
+        self.set_open_animated_eased(open, Easing::EaseOut);
+    }
+
+    /// Jak [`BottomSheet::set_open_animated`], z wyborem krzywej.
+    pub fn set_open_animated_eased(&mut self, open: bool, easing: Easing) {
+        self.open = open;
+        self.animation.set_easing(easing);
+        self.animation.animate_to(if open { 1.0 } else { 0.0 });
+    }
+
+    /// Krok animacji wysuwania; zwraca `true`, gdy trwa dalej.
+    pub fn advance(&mut self, dt: f64, duration: f64) -> bool {
+        self.animation.advance(dt, duration)
+    }
+
+    pub fn is_animating(&self) -> bool {
+        self.animation.is_animating()
+    }
+
+    /// Postęp wysuwania (0..1).
+    pub fn progress(&self) -> f64 {
+        self.animation.value()
     }
 
     pub fn is_open(&self) -> bool {
@@ -70,9 +99,17 @@ impl BottomSheet {
     }
 
     /// Prostokąt panelu (przyklejony do dołu, z uwzględnieniem przeciągania).
+    ///
+    /// To geometria **docelowa** (ustabilizowana) — używana przez trafienia i układ treści.
+    /// Wizualne wysuwanie dodaje [`BottomSheet::slide_offset`] tylko w `paint`.
     pub fn sheet_rect(&self, size: Size, theme: &Theme) -> Rect {
         let h = self.height(theme);
         Rect::from_xywh(0.0, size.height - h + self.drag, size.width, h)
+    }
+
+    /// Dodatkowe przesunięcie w dół podczas wysuwania (0, gdy w pełni otwarty).
+    fn slide_offset(&self, theme: &Theme) -> f64 {
+        (1.0 - self.animation.value().clamp(0.0, 1.0)) * self.height(theme)
     }
 
     /// Pełnoekranowe tło przygaszające.
@@ -86,24 +123,32 @@ impl BottomSheet {
         Rect::from_xywh(s.x(), s.y(), s.width(), theme.metrics.sheet.header)
     }
 
-    /// Prostokąt „grabbera”.
-    pub fn grabber_rect(&self, size: Size, theme: &Theme) -> Rect {
-        let s = self.sheet_rect(size, theme);
+    /// Prostokąt „grabbera” (dla danej geometrii panelu).
+    fn grabber_in(&self, sheet: Rect, theme: &Theme) -> Rect {
         let m = theme.metrics.sheet;
         Rect::from_xywh(
-            s.center().x - m.handle_width / 2.0,
-            s.y() + HANDLE_TOP,
+            sheet.center().x - m.handle_width / 2.0,
+            sheet.y() + HANDLE_TOP,
             m.handle_width,
             m.handle_height,
         )
     }
 
+    /// Prostokąt „grabbera”.
+    pub fn grabber_rect(&self, size: Size, theme: &Theme) -> Rect {
+        self.grabber_in(self.sheet_rect(size, theme), theme)
+    }
+
+    /// Prostokąt przycisku zamknięcia (dla danej geometrii panelu).
+    fn close_in(&self, sheet: Rect, theme: &Theme) -> Rect {
+        let md = theme.spacing.md;
+        let cy = sheet.y() + theme.metrics.sheet.header / 2.0;
+        Rect::from_xywh(sheet.right() - md - CLOSE, cy - CLOSE / 2.0, CLOSE, CLOSE)
+    }
+
     /// Prostokąt przycisku zamknięcia.
     pub fn close_rect(&self, size: Size, theme: &Theme) -> Rect {
-        let s = self.sheet_rect(size, theme);
-        let md = theme.spacing.md;
-        let cy = s.y() + theme.metrics.sheet.header / 2.0;
-        Rect::from_xywh(s.right() - md - CLOSE, cy - CLOSE / 2.0, CLOSE, CLOSE)
+        self.close_in(self.sheet_rect(size, theme), theme)
     }
 
     /// Obszar zawartości (poniżej nagłówka).
@@ -150,6 +195,7 @@ impl BottomSheet {
         let dismissed = self.drag > theme.metrics.sheet.dismiss;
         if dismissed {
             self.open = false;
+            self.animation.jump_to(0.0);
         }
         self.drag = 0.0;
         self.drag_from = None;
@@ -158,7 +204,8 @@ impl BottomSheet {
 
     /// Rysuje przygaszenie i panel (na wierzchu sceny).
     pub fn paint(&self, ctx: &mut PaintCtx, size: Size) {
-        if !self.open {
+        let progress = self.animation.value();
+        if progress <= 0.001 {
             return;
         }
         let theme = *ctx.theme;
@@ -167,10 +214,21 @@ impl BottomSheet {
 
         ctx.scene.fill_rect(
             self.scrim_rect(size),
-            Color::rgba(0.0, 0.0, 0.0, m.scrim as f32),
+            Color::rgba(
+                0.0,
+                0.0,
+                0.0,
+                m.scrim as f32 * progress.clamp(0.0, 1.0) as f32,
+            ),
         );
 
-        let sheet = self.sheet_rect(size, &theme);
+        let settled = self.sheet_rect(size, &theme);
+        let sheet = Rect::from_xywh(
+            settled.x(),
+            settled.y() + self.slide_offset(&theme),
+            settled.width(),
+            settled.height(),
+        );
         // Panel: zaokrąglone górne narożniki, dolne „przycięte” do krawędzi.
         ctx.scene.fill_rounded_rect(sheet, m.radius, colors.card_bg);
         ctx.scene.fill_rect(
@@ -187,7 +245,7 @@ impl BottomSheet {
             colors.border,
         );
 
-        let g = self.grabber_rect(size, &theme);
+        let g = self.grabber_in(sheet, &theme);
         ctx.scene
             .fill_rounded_rect(g, g.height() / 2.0, colors.dim_text.scale_alpha(0.5));
 
@@ -202,7 +260,7 @@ impl BottomSheet {
             );
         }
 
-        let c = self.close_rect(size, &theme);
+        let c = self.close_in(sheet, &theme);
         if self.hover_close {
             ctx.scene
                 .fill_rounded_rect(c, theme.radius.small, colors.shade);
@@ -277,5 +335,21 @@ mod tests {
         s.update_drag(500.0 + 10.0);
         assert!(!s.end_drag(&theme));
         assert!(s.is_open());
+    }
+
+    #[test]
+    fn animated_open_ramps_and_settles() {
+        let theme = Theme::light();
+        let mut s = BottomSheet::new();
+        s.set_open_animated(true);
+        assert!(s.is_animating());
+        assert!(s.progress() < 1.0);
+        // Geometria (trafienia) jest ustabilizowana niezależnie od postępu.
+        assert!((s.sheet_rect(size(), &theme).bottom() - size().height).abs() < 1e-9);
+        while s.is_animating() {
+            s.advance(0.1, 0.3);
+        }
+        assert_eq!(s.progress(), 1.0);
+        assert!((s.sheet_rect(size(), &theme).bottom() - size().height).abs() < 1e-9);
     }
 }

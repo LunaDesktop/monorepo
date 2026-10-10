@@ -6,7 +6,7 @@
 //! te ze stanem (Paned, Stack, PopoverMenuBar) rysują się i obsługują trafienia.
 
 use libluna_core::style::weight;
-use libluna_core::{Animation, Easing, Point, Rect, Theme};
+use libluna_core::{Animation, Easing, Point, Rect, Size, Theme};
 use libluna_render::TextEngine;
 
 use crate::ctx::PaintCtx;
@@ -54,6 +54,27 @@ impl Fixed {
             child.width(),
             child.height(),
         )
+    }
+}
+
+/// Okno na większą treść (`GtkViewport`): mapuje przesuniętą treść na obszar widoku.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Viewport;
+
+impl Viewport {
+    /// Prostokąt treści o rozmiarze `content`, przesunięty o `offset`, we współrzędnych `view`.
+    pub fn content_rect(view: Rect, content: Size, offset: Point) -> Rect {
+        Rect::from_xywh(
+            view.x() - offset.x,
+            view.y() - offset.y,
+            content.width,
+            content.height,
+        )
+    }
+
+    /// Czy treść nie mieści się w widoku (po którejkolwiek osi).
+    pub fn overflows(view: Rect, content: Size) -> bool {
+        content.width > view.width() + 1e-9 || content.height > view.height() + 1e-9
     }
 }
 
@@ -673,6 +694,17 @@ mod tests {
         assert_eq!(c, Rect::from_xywh(15.0, 27.0, 30.0, 40.0));
         let p = Fixed::place(rect, Rect::from_xywh(1.0, 2.0, 3.0, 4.0));
         assert_eq!(p, Rect::from_xywh(11.0, 22.0, 3.0, 4.0));
+    }
+
+    #[test]
+    fn viewport_maps_scrolled_content() {
+        let view = Rect::from_xywh(0.0, 0.0, 100.0, 80.0);
+        let content = Size::new(100.0, 300.0);
+        assert!(Viewport::overflows(view, content));
+        assert!(!Viewport::overflows(view, Size::new(100.0, 80.0)));
+        let r = Viewport::content_rect(view, content, Point::new(0.0, 50.0));
+        assert_eq!(r.y(), -50.0);
+        assert_eq!(r.height(), 300.0);
     }
 
     #[test]

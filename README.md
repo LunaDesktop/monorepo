@@ -358,11 +358,13 @@ XDG_CONFIG_HOME="$PWD/examples" cargo run -p luna-demo --bin render -- --lang fr
   `TextView` (pole wielolinijkowe), `Popover` (generyczny), `ColumnView` (tabela),
   `Assistant` (kreator kroków), `Scrollbar`/`Adjustment` (przewijanie w obu osiach),
   `ColorChooser` (paleta), `FlowBox` (zawijająca siatka z wyborem), `SpinButton` (pole liczbowe),
-  `EmojiChooser` (siatka emoji), `NavigationRail` (kompaktowa szyna nawigacji);
+  `EmojiChooser` (siatka emoji), `NavigationRail` (kompaktowa szyna nawigacji),
+  `Viewport`, `WindowHandle` (obszar chwytu okna);
   aliasy `ScrolledWindow` = `ScrollView`,
   `StackSwitcher` = `ViewSwitcher`, `Notebook` = `TabView`, `ListBox` = `NavList`.
   **Animacje wcielone w widgety**: przejścia `Stack` (slide/fade przez `StackTransition`),
-  płynny `Revealer` i `Toast` (wjazd + fade) — sterowane z aplikacji przez `advance(dt, …)`.
+  płynny `Revealer`, `Toast` (wjazd + fade), `BottomSheet` (wysuwanie), `Pager` (animowane
+  przyciąganie do strony) — sterowane z aplikacji przez `advance(dt, …)`.
 - `libluna-widgets::layout`: **dwuprzebiegowy układ** (retencyjne drzewo `measure`/`allocate`) —
   [`Node`] (`VBox`/`HBox`, `Padding`, `Expanded`, `Center`, `Spacer`, `Label`, `Fixed`),
   [`Constraints`](min/max) i [`Layout`](`desired_size`/`fit`). Liście pochłaniają nadmiar

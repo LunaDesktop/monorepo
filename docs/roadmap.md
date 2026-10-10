@@ -56,19 +56,19 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   „oko”) i `EditableLabel`; kontenery `CenterBox`, `Grid`, `Fixed`, `Paned`, `Stack`,
   `ActionBar`, `PopoverMenuBar`; dalej `MenuButton`, `SearchBar`, `Expander`, `Statusbar`,
   `Calendar`, `Image`, `TextView`, `Popover`, `ColumnView`, `Assistant`, `Scrollbar`/
-  `Adjustment`, `ColorChooser`, `FlowBox`, `SpinButton`, `EmojiChooser`, `NavigationRail`;
-  aliasy GTK4 `ScrolledWindow` = `ScrollView`,
+  `Adjustment`, `ColorChooser`, `FlowBox`, `SpinButton`, `EmojiChooser`, `NavigationRail`,
+  `Viewport`, `WindowHandle`; aliasy GTK4 `ScrolledWindow` = `ScrollView`,
   `StackSwitcher` = `ViewSwitcher`, `Notebook` = `TabView`, `ListBox` = `NavList`.
   Tokeny metryk kontenerów: `Theme::metrics.container`. Animacje: `libluna-core` `motion`
-  (`Easing`, `lerp`, `Animation`), użyte w `Stack` (przejścia `StackTransition`), `Revealer`
-  i `Toast` (sterowane `advance(dt, …)`).
+  (`Easing`, `lerp`, `Animation`), użyte w `Stack` (przejścia `StackTransition`), `Revealer`,
+  `Toast`, `BottomSheet` i `Pager` (sterowane `advance(dt, …)`).
 - `libluna-platform`: realne akcje okna z `Frame` (`close`/`minimize`/`toggle_maximize`).
   **Klatki animacji**: `Frame::delta_time()` + `Frame::request_frame()` (płynne ~60 Hz, gdy trwa
   animacja; bez tego okno odświeża się tylko na zdarzenia).
 - Demo używa widgetów zamiast ręcznego rysowania (pasek boczny, wybór motywu/widoku, menu `☰`,
   przycisk „Opcje”, przełączniki, suwak, wybór języka, pasek tytułu, zakładki `TabBar`/`TabView`).
-  Powiadomienie (`Toast`) w demo animuje się (wjazd + fade), a zmiana zakładki
-  to animowane przejście (`Stack` slide w poziomie).
+  Powiadomienie (`Toast`) w demo animuje się (wjazd + fade), zmiana zakładki
+  to animowane przejście (`Stack` slide), a dolny panel wysuwa się i karuzela „przyciąga”.
 - **Galeria widgetów** headless: `cargo run -p luna-demo --bin gallery` → `docs/images/gallery.png`
   (kontenery, tabela, kalendarz, chooser’y, kreator kroków, pasek stanu z cz. 5–12).
 - Motywy: wariant (light/dark/auto) + akcent, z trwałością. **Component metrics**: rozmiary

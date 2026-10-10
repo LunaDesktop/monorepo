@@ -35,6 +35,8 @@ fn render_pixels(settings: &ThemeSettings, demo: &Demo, text: &TextEngine, size:
     let mut demo = demo.clone();
     demo.tab_stack.advance(1.0, 1.0);
     demo.toast.advance(1.0, 1.0);
+    demo.sheet.advance(1.0, 1.0);
+    demo.pager.advance(1.0, 1.0);
     let theme = settings.resolve_themed(false);
     let mut scene = Scene::new();
     ui::build_scene(
