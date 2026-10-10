@@ -387,6 +387,17 @@ pub struct ItemViewMetrics {
     pub icon: f64,
 }
 
+/// Geometria paska przewijania ([`ScrollView`](crate::style)).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScrollViewMetrics {
+    /// Grubość paska.
+    pub thickness: f64,
+    /// Minimalna długość uchwytu („kciuka”).
+    pub min_thumb: f64,
+    /// Odstęp paska od krawędzi obszaru.
+    pub margin: f64,
+}
+
 /// Geometria kontrolek („component metrics”) — rozmiary i paddingi w pikselach logicznych.
 ///
 /// Widgety nie mają już własnych stałych rozmiarów: czytają je z motywu, dzięki czemu
@@ -408,6 +419,7 @@ pub struct Metrics {
     pub pathbar: PathBarMetrics,
     pub entry: EntryMetrics,
     pub itemview: ItemViewMetrics,
+    pub scrollview: ScrollViewMetrics,
 }
 
 impl Metrics {
@@ -496,6 +508,11 @@ impl Metrics {
                 gap: 12.0,
                 row_h: 44.0,
                 icon: 28.0,
+            },
+            scrollview: ScrollViewMetrics {
+                thickness: 6.0,
+                min_thumb: 24.0,
+                margin: 2.0,
             },
         }
     }

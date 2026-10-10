@@ -2,8 +2,8 @@
 //! przez `ui::handle_events` i sprawdzają zmiany stanu.
 
 use libluna_core::{
-    Accent, ButtonState, Event, KeyEvent, Modifiers, Point, PointerButton, PointerEvent, Size,
-    ThemePreference, ThemeSettings,
+    Accent, ButtonState, Event, KeyEvent, Modifiers, Point, PointerButton, PointerEvent,
+    ScrollEvent, Size, ThemePreference, ThemeSettings,
 };
 use libluna_render::TextEngine;
 use libluna_widgets::ViewSwitcher;
@@ -163,6 +163,22 @@ fn clicking_file_item_selects_it() {
         .center();
     click(&mut settings, &mut demo, slot);
     assert_eq!(demo.items.selected(), Some(1));
+}
+
+#[test]
+fn scrolling_files_moves_offset() {
+    let mut settings = ThemeSettings::default();
+    let mut demo = Demo::default();
+    let theme = settings.resolve(false);
+    let text = TextEngine::system();
+    let items = layout(&settings, &demo).items;
+    let scroll = Event::Scroll(ScrollEvent {
+        position: items.center(),
+        dx: 0.0,
+        dy: 3.0,
+    });
+    ui::handle_events(&mut settings, &[scroll], size(), &theme, &text, &mut demo);
+    assert!(demo.items.scroll() > 0.0);
 }
 
 #[test]

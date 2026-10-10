@@ -28,5 +28,6 @@ pub use scale::Scale;
 pub use style::{
     BottomSheetMetrics, ButtonMetrics, DropDownMetrics, EntryMetrics, HeaderBarMetrics,
     ItemViewMetrics, MenuMetrics, Metrics, NavMetrics, PagerMetrics, PathBarMetrics, Radius,
-    SegmentedMetrics, SliderMetrics, Spacing, SwitchMetrics, TabsMetrics, Theme, Typography,
+    ScrollViewMetrics, SegmentedMetrics, SliderMetrics, Spacing, SwitchMetrics, TabsMetrics, Theme,
+    Typography,
 };

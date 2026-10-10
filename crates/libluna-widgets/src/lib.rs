@@ -22,6 +22,7 @@
 //! - [`PathBar`] — pasek ścieżki (okruszki) z separatorami i zwijaniem w wielokropek.
 //! - [`SearchEntry`] — pole tekstowe wyszukiwania (lupka, kursor, czyszczenie).
 //! - [`ItemView`] — widok elementów (pliki/katalogi) w siatce lub liście.
+//! - [`ScrollView`] — przewijanie pionowe (rolka + „kciuk”).
 //!
 //! ```no_run
 //! use libluna_widgets::{PaintCtx, ViewSwitcher};
@@ -42,6 +43,7 @@ pub mod menu;
 pub mod nav_list;
 pub mod pager;
 pub mod path_bar;
+pub mod scroll_view;
 pub mod search_entry;
 pub mod slider;
 pub mod switch;
@@ -59,6 +61,7 @@ pub use menu::{Menu, MenuEntry, MenuRow};
 pub use nav_list::{NavEntry, NavList, NavRow};
 pub use pager::Pager;
 pub use path_bar::PathBar;
+pub use scroll_view::ScrollView;
 pub use search_entry::SearchEntry;
 pub use slider::Slider;
 pub use switch::Switch;

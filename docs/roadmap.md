@@ -37,8 +37,8 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   `Menu` (popover `☰`), `Button` (warianty + chevron), `Switch`, `Slider`, `DropDown`
   (rozwijany przez `Menu`), `HeaderBar` (pasek tytułu z kontrolkami okna), `TabBar`/`TabView`
   (zakładki: pasek + model stron), `BottomSheet` (dolny panel modalny), `Pager` (karuzela stron),
-  `PathBar` (okruszki), `SearchEntry` (pole wyszukiwania) i `ItemView` (pliki/katalogi: siatka
-  lub lista), oraz wspólny `PaintCtx`; testy hit-testingu bez okna.
+  `PathBar` (okruszki), `SearchEntry` (pole wyszukiwania), `ItemView` (pliki/katalogi: siatka
+  lub lista) i `ScrollView` (przewijanie), oraz wspólny `PaintCtx`; testy hit-testingu bez okna.
 - `libluna-platform`: realne akcje okna z `Frame` (`close`/`minimize`/`toggle_maximize`).
 - Demo używa widgetów zamiast ręcznego rysowania (pasek boczny, wybór motywu/widoku, menu `☰`,
   przycisk „Opcje”, przełączniki, suwak, wybór języka, pasek tytułu, zakładki `TabBar`/`TabView`).
@@ -99,6 +99,7 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
 | PathBar (okruszki) | `libluna-widgets` | Files |
 | SearchEntry / SearchBar | `libluna-widgets` | Files |
 | GridView / ListView | `libluna-widgets` (`ItemView`) | Files |
+| ScrollView | `libluna-widgets` | obie |
 | Card + ActionRow | `libluna-adwaita` | Settings |
 | Switch | `libluna-widgets` | Settings |
 | Slider (+ etykieta %) | `libluna-widgets` | Settings |

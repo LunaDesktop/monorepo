@@ -12,8 +12,8 @@ use libluna_i18n::{tr, Locale};
 use libluna_render::TextEngine;
 use libluna_widgets::{
     BottomSheet, Button, ControlsLayout, ControlsSide, DropDown, HeaderBar, Item, ItemView, Menu,
-    MenuEntry, NavEntry, NavList, Pager, PaintCtx, PathBar, SearchEntry, Slider, Switch, Tab,
-    TabBar, TabView, ViewMode, ViewSwitcher, WindowControl,
+    MenuEntry, NavEntry, NavList, Pager, PaintCtx, PathBar, ScrollView, SearchEntry, Slider,
+    Switch, Tab, TabBar, TabView, ViewMode, ViewSwitcher, WindowControl,
 };
 
 const STATUS_H: f64 = 28.0;
@@ -78,6 +78,9 @@ pub struct Demo {
     /// Widok elementów (pliki/katalogi) i podświetlony element.
     pub items: ItemView,
     pub items_hover: Option<usize>,
+    /// Przewijanie listy plików i stan przeciągania paska.
+    pub files_scroll: ScrollView,
+    pub scroll_dragging: bool,
 }
 
 impl Default for Demo {
@@ -123,8 +126,16 @@ impl Default for Demo {
                 Item::new("Report").detail("PDF"),
                 Item::new("Notes").detail("TXT"),
                 Item::new("Budget").detail("XLSX"),
+                Item::new("IMG_0001.JPG").detail("JPG"),
+                Item::new("IMG_0002.JPG").detail("JPG"),
+                Item::new("screenshot.png").detail("PNG"),
+                Item::new("TODO.txt").detail("TXT"),
+                Item::new("changelog.md").detail("MD"),
+                Item::new("backup.tar").detail("TAR"),
             ]),
             items_hover: None,
+            files_scroll: ScrollView::new(),
+            scroll_dragging: false,
         }
     }
 }
@@ -233,6 +244,7 @@ pub fn item_view(demo: &Demo) -> ItemView {
     view.set_mode(demo.items.mode());
     view.set_selected(demo.items.selected());
     view.set_hovered(demo.items_hover);
+    view.set_scroll(demo.items.scroll());
     view
 }
 
@@ -528,6 +540,9 @@ pub fn handle_events(
     let header_rect = Rect::from_xywh(0.0, 0.0, size.width, theme.metrics.headerbar.height);
     let header = header_bar();
 
+    demo.files_scroll
+        .set_content_height(demo.items.content_height(lay.items, theme));
+
     for event in events {
         match event {
             Event::PointerButton(pe) if pe.button == PointerButton::Left => {
@@ -598,6 +613,10 @@ pub fn handle_events(
                             } else {
                                 ViewMode::List
                             });
+                            demo.files_scroll
+                                .set_content_height(demo.items.content_height(lay.items, theme));
+                            demo.items.clamp_scroll(lay.items, theme);
+                            demo.files_scroll.set_offset(demo.items.scroll(), lay.items);
                         } else if let Some(i) = tabs_bar.index_at(lay.tabs, text, theme, p) {
                             demo.tabs.select(i);
                         } else if demo.search.contains(lay.search, p) {
@@ -607,6 +626,8 @@ pub fn handle_events(
                             demo.search.set_focused(true);
                         } else if let Some(i) = path.index_at(lay.path, text, theme, p) {
                             demo.path.truncate(i + 1);
+                        } else if demo.files_scroll.begin_drag(p, lay.items, theme) {
+                            demo.scroll_dragging = true;
                         } else if let Some(i) = items.index_at(lay.items, p, theme) {
                             demo.items.set_selected(Some(i));
                         } else if let Some(i) = nav.index_at(lay.sidebar, p, theme) {
@@ -634,6 +655,10 @@ pub fn handle_events(
                         if demo.pager_dragging {
                             demo.pager.end_drag();
                             demo.pager_dragging = false;
+                        }
+                        if demo.scroll_dragging {
+                            demo.files_scroll.end_drag();
+                            demo.scroll_dragging = false;
                         }
                         if demo.sheet.is_open() {
                             demo.sheet.end_drag(theme);
@@ -673,6 +698,10 @@ pub fn handle_events(
                     demo.tabs_hover = tabs_bar.index_at(lay.tabs, text, theme, position);
                     demo.path_hover = path.index_at(lay.path, text, theme, position);
                     demo.items_hover = items.index_at(lay.items, position, theme);
+                    if demo.scroll_dragging {
+                        demo.files_scroll.drag_to(position, lay.items, theme);
+                        demo.items.set_scroll(demo.files_scroll.offset());
+                    }
                     demo.search
                         .set_hover_clear(demo.search.clear_at(lay.search, theme, position));
                     demo.controls_hover = header.control_at(header_rect, theme, position);
@@ -690,9 +719,19 @@ pub fn handle_events(
                 demo.tabs_hover = None;
                 demo.path_hover = None;
                 demo.items_hover = None;
+                demo.files_scroll.end_drag();
+                demo.scroll_dragging = false;
                 demo.search.set_hover_clear(false);
                 demo.sheet.set_hover_close(false);
                 demo.controls_hover = None;
+            }
+            Event::Scroll(se) => {
+                if !demo.sheet.is_open() && lay.items.contains(se.position) {
+                    let step = theme.metrics.itemview.row_h;
+                    if demo.files_scroll.on_scroll(se.dy * step, lay.items) {
+                        demo.items.set_scroll(demo.files_scroll.offset());
+                    }
+                }
             }
             Event::Key(ke) if ke.state == ButtonState::Pressed => {
                 // Gdy pole wyszukiwania ma fokus, klawisze idą do niego.
@@ -1088,6 +1127,10 @@ fn draw_content(
     search.paint(paint, lay.search);
 
     item_view(demo).paint(paint, lay.items);
+
+    let mut scrollbar = demo.files_scroll;
+    scrollbar.set_content_height(demo.items.content_height(lay.items, &theme));
+    scrollbar.paint_scrollbar(paint, lay.items);
 }
 
 fn draw_card(paint: &mut PaintCtx, card: Rect, title: &str) {

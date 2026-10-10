@@ -89,7 +89,7 @@ libluna/
     libluna-i18n/      # wielojęzyczność: każdy język w pliku i18n/<kod>.lang + przełączanie w runtime
     libluna-render/    # graf sceny + backend software (tiny-skia + fontdue)
     libluna-platform/  # Wayland: xdg-shell (CSD), wl_shm, wejście, pętla zdarzeń, motyw w Frame
-    libluna-widgets/   # widgety: ViewSwitcher, NavList, Menu, Button, Switch, Slider, DropDown, HeaderBar, TabBar/TabView, BottomSheet, Pager, PathBar, SearchEntry, ItemView
+    libluna-widgets/   # widgety: ViewSwitcher, NavList, Menu, Button, Switch, Slider, DropDown, HeaderBar, TabBar/TabView, BottomSheet, Pager, PathBar, SearchEntry, ItemView, ScrollView
   apps/
     luna-demo/         # demo aplikacji środowiska Luna; też render offline do PNG
   templates/
@@ -196,7 +196,7 @@ cargo run -p libluna --example minimal
   (`BottomSheet` z karuzelą stron `Pager`), zamykany klikiem w tło, przyciskiem `✕` lub
   przeciągnięciem w dół. W karcie **Pliki** kliknij element **okruszków** (nawigacja „w górę”),
   **pole wyszukiwania** (fokus) lub **plik/katalog** (zaznaczenie); przełącznik `Lista | Siatka`
-  zmienia tryb `ItemView`. Klikaj segmenty `Jasny | Ciemny | Auto`, kropki
+  zmienia tryb `ItemView`, a **rolka/przeciąganie paska** przewija listę. Klikaj segmenty `Jasny | Ciemny | Auto`, kropki
   **koloru akcentu**, przełączniki OPCJA A / **Pasek dolny** / **Pasek boczny** i **przeciągaj**
   suwak głośności oraz krawędź paska bocznego (150–460 px). Kontrolki okna `[—][□][✕]` działają
   (minimalizacja/maksymalizacja/zamknięcie przez warstwę platformy).
@@ -224,7 +224,7 @@ w `~/.config/luna/theme.conf`.
 Rozmiary i paddingi kontrolek nie są już stałymi w widgetach, lecz **tokenami**
 (`Theme::metrics`) podzielonymi na sekcje per widget: `headerbar`, `button`, `switch`,
 `slider`, `dropdown`, `menu`, `nav`, `segmented`, `tabs`, `sheet`, `pager`, `pathbar`, `entry`,
-`itemview`. Dzięki temu wygląd steruje **także
+`itemview`, `scrollview`. Dzięki temu wygląd steruje **także
 geometrią**, nie tylko kolorami — np. `theme.metrics.switch.width` albo
 `theme.metrics.headerbar.height`. Widgety czytają te wartości w `paint`/`layout`, więc
 przyszły, instalowany styl może zmienić np. wysokość paska tytułu czy rozmiar przełącznika
@@ -296,8 +296,9 @@ XDG_CONFIG_HOME="$PWD/examples" cargo run -p luna-demo --bin render -- --lang fr
   (pasek zakładek i model stron: wybór, dodawanie, zamykanie), `BottomSheet` (dolny panel
   modalny z „grabberem”, przeciąganiem i zamykaniem), `Pager` (karuzela stron z kropkami),
   `PathBar` (okruszki z separatorem `›`, wskaźnikiem `▾` i zwijaniem do `…`), `SearchEntry`
-  (pole wyszukiwania: lupka, kursor, czyszczenie) i `ItemView` (pliki/katalogi w siatce lub
-  liście, z zaznaczaniem i przewijaniem) oraz wspólny `PaintCtx`.
+  (pole wyszukiwania: lupka, kursor, czyszczenie), `ItemView` (pliki/katalogi w siatce lub
+  liście, z zaznaczaniem i przewijaniem) i `ScrollView` (pionowe przewijanie: rolka + „kciuk”)
+  oraz wspólny `PaintCtx`.
 - `luna-demo`: `HeaderBar` jako widget (tytuł + `[—][□][✕]` po prawej + treść: `◧`, `+`,
   „Opcje ▾”, `☰`); **popover `☰`**, chowany i rozciągany (drag) panel boczny (`NavList`),
   chowany **pasek dolny**, wybór motywu/widoku (`ViewSwitcher`), `Switch`, `Slider`, `DropDown`,
