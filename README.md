@@ -194,7 +194,8 @@ cargo run -p libluna --example minimal
   (ikona zmienia się w `▭`), **`☰`** aby otworzyć menu (zamyka się klikiem poza panelem),
   lub kontrolkę **języka** (`DropDown`). Przycisk **„Opcje ▾”** otwiera **popover opcji**
   (`Stepper` rozmiaru ikon, `RadioGroup` sortowania, `CheckButton` ukrytych plików).
-  Z menu **`☰` → „O aplikacji”** otwiera się **dolny panel**
+  Z menu **`☰` → „Styl”** wybierzesz **styl z pliku** (natychmiast stosowany i zapisywany),
+  a **`☰` → „O aplikacji”** otwiera **dolny panel**
   (`BottomSheet` z karuzelą stron `Pager` i polem tekstowym `Entry` — klik = fokus, wpisywanie),
   zamykany klikiem w tło, przyciskiem `✕` lub
   przeciągnięciem w dół. W karcie **Pliki** kliknij element **okruszków** (nawigacja „w górę”),
@@ -268,9 +269,10 @@ cargo run -p luna-demo --bin render -- --theme examples/luna/themes/nord.theme d
 cargo run -p luna-demo --bin layout -- --theme examples/luna/themes/nord.theme --out docs/images/layout-nord.png
 ```
 
-Do zrobienia pozostaje **interaktywny wybór stylu w Ustawieniach** oraz **okno podglądu**
-na żywo przy wyborze — silnik (skanowanie katalogów: `available_themes()`, wczytywanie,
-nakładanie) jest już gotowy.
+Do zrobienia pozostaje **okno podglądu na żywo** przy wyborze (miniatura). Sam wybór stylu
+działa już w demo: **menu `☰` → „Styl”** otwiera listę („Domyślny” + style z plików),
+a wybór jest natychmiast stosowany i zapisywany w `theme.conf`. W headless demo/testach katalog
+ze stylami wskazuje `LUNA_THEMES_DIR`.
 
 ### Co jeszcze decyduje o „looku GTK4”
 

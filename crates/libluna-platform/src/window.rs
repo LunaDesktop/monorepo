@@ -169,6 +169,17 @@ impl Frame<'_> {
         let _ = self.settings.save();
     }
 
+    /// Nazwa wybranego stylu (instalowanego z pliku), jeśli ustawiona.
+    pub fn style(&self) -> Option<&str> {
+        self.settings.style()
+    }
+
+    /// Ustawia styl (instalowany z pliku); zapisuje i przerysowuje.
+    pub fn set_style(&mut self, style: Option<String>) {
+        self.settings.set_style(style);
+        let _ = self.settings.save();
+    }
+
     /// Czy system zgłasza tryb ciemny.
     pub const fn system_dark(&self) -> bool {
         self.system_dark

@@ -24,13 +24,13 @@ fn press(p: Point) -> Event {
 
 /// Wysyła jedno kliknięcie do logiki demo.
 fn click(settings: &mut ThemeSettings, demo: &mut Demo, p: Point) {
-    let theme = settings.resolve(false);
+    let theme = settings.resolve_themed(false);
     let text = TextEngine::system();
     ui::handle_events(settings, &[press(p)], size(), &theme, &text, demo);
 }
 
 fn layout(settings: &ThemeSettings, demo: &Demo) -> ui::Layout {
-    ui::layout(size(), &settings.resolve(false), demo)
+    ui::layout(size(), &settings.resolve_themed(false), demo)
 }
 
 #[test]
@@ -100,7 +100,7 @@ fn about_menu_opens_bottom_sheet_and_scrim_closes_it() {
     let theme = settings.resolve(false);
     let text = TextEngine::system();
     let about = ui::popover_menu(size(), &theme, &text, &layout(&settings, &demo), &demo)
-        .map(|(panel, menu)| menu.rows(panel, &theme)[4].rect.center())
+        .map(|(panel, menu)| menu.rows(panel, &theme)[5].rect.center())
         .unwrap();
     click(&mut settings, &mut demo, about);
     assert!(demo.sheet.is_open());
@@ -387,7 +387,7 @@ fn sheet_entry_focus_and_typing() {
     let theme = settings.resolve(false);
     let text = TextEngine::system();
     let about = ui::popover_menu(size(), &theme, &text, &layout(&settings, &demo), &demo)
-        .map(|(panel, menu)| menu.rows(panel, &theme)[4].rect.center())
+        .map(|(panel, menu)| menu.rows(panel, &theme)[5].rect.center())
         .expect("about entry");
     click(&mut settings, &mut demo, about);
     assert!(demo.sheet.is_open());
@@ -429,4 +429,35 @@ fn clicking_toast_body_dismisses_without_reverting() {
     );
     assert!(!demo.toast.is_open());
     assert_eq!(settings.accent(), accent_after);
+}
+
+#[test]
+fn choosing_style_from_menu_sets_style() {
+    // Wskaż katalog ze stylami z repozytorium (przykłady).
+    let themes =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/luna/themes");
+    std::env::set_var("LUNA_THEMES_DIR", themes);
+
+    let mut settings = ThemeSettings::default();
+    let mut demo = Demo::default();
+    let theme = settings.resolve_themed(false);
+    let text = TextEngine::system();
+
+    // ☰ → „Styl” otwiera listę stylów.
+    let burger = layout(&settings, &demo).burger.center();
+    click(&mut settings, &mut demo, burger);
+    assert_eq!(demo.popover, Some(Popover::Menu));
+    let style_item = ui::popover_menu(size(), &theme, &text, &layout(&settings, &demo), &demo)
+        .map(|(panel, menu)| menu.rows(panel, &theme)[4].rect.center())
+        .expect("style entry");
+    click(&mut settings, &mut demo, style_item);
+    assert_eq!(demo.popover, Some(Popover::Styles));
+
+    // Wybór pierwszego stylu (Nord) ustawia go i zamyka popover.
+    let nord = ui::popover_menu(size(), &theme, &text, &layout(&settings, &demo), &demo)
+        .map(|(panel, menu)| menu.rows(panel, &theme)[1].rect.center())
+        .expect("style list");
+    click(&mut settings, &mut demo, nord);
+    assert_eq!(settings.style(), Some("nord"));
+    assert!(demo.popover.is_none());
 }

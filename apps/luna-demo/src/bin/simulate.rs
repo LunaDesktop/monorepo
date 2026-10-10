@@ -31,7 +31,7 @@ fn press(p: Point) -> Event {
 }
 
 fn render_pixels(settings: &ThemeSettings, demo: &Demo, text: &TextEngine, size: Size) -> Vec<u8> {
-    let theme = settings.resolve(false);
+    let theme = settings.resolve_themed(false);
     let mut scene = Scene::new();
     ui::build_scene(
         &mut scene,
@@ -55,6 +55,10 @@ fn save_png(path: &str, pixels: &[u8]) -> Result<(), Box<dyn Error>> {
 
 fn main() -> Result<(), Box<dyn Error>> {
     set_locale(Locale::new("pl"));
+    // Katalog ze stylami (przykłady w repozytorium) — dla kroku wyboru stylu.
+    let themes =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/luna/themes");
+    std::env::set_var("LUNA_THEMES_DIR", themes);
 
     let size = Size::new(W as f64, H as f64);
     let text = TextEngine::system();
@@ -71,7 +75,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Pomocniczo: aktualny layout i wysłanie kliknięcia.
     macro_rules! layout {
         () => {
-            ui::layout(size, &settings.resolve(false), &demo)
+            ui::layout(size, &settings.resolve_themed(false), &demo)
         };
     }
     macro_rules! click {
@@ -176,7 +180,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // 9. Klik „O aplikacji” w otwartym menu → dolny panel (BottomSheet + Pager).
     let theme = settings.resolve(false);
     let about = ui::popover_menu(size, &theme, &text, &layout!(), &demo)
-        .map(|(panel, menu)| menu.rows(panel, &theme)[4].rect.center())
+        .map(|(panel, menu)| menu.rows(panel, &theme)[5].rect.center())
         .expect("menu is open");
     click!(about);
     assert!(demo.sheet.is_open(), "bottom sheet did not open");
@@ -295,6 +299,29 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     frames.push(render_pixels(&settings, &demo, &text, size));
     labels.push("15. Filter cleared".into());
+
+    // 16. Wybór stylu: ☰ → Styl → Nord (styl z pliku, steruje kolorem i geometrią).
+    let c = layout!().burger.center();
+    click!(c);
+    assert_eq!(demo.popover, Some(Popover::Menu), "menu did not open");
+    let theme = settings.resolve_themed(false);
+    let style_item = ui::popover_menu(size, &theme, &text, &layout!(), &demo)
+        .map(|(panel, menu)| menu.rows(panel, &theme)[4].rect.center())
+        .expect("style entry");
+    click!(style_item);
+    assert_eq!(
+        demo.popover,
+        Some(Popover::Styles),
+        "styles popover did not open"
+    );
+    let theme = settings.resolve_themed(false);
+    let nord = ui::popover_menu(size, &theme, &text, &layout!(), &demo)
+        .map(|(panel, menu)| menu.rows(panel, &theme)[1].rect.center())
+        .expect("style list");
+    click!(nord);
+    assert_eq!(settings.style(), Some("nord"), "style not applied");
+    frames.push(render_pixels(&settings, &demo, &text, size));
+    labels.push("16. Style: Nord".into());
 
     // Zapis klatek.
     for (i, pixels) in frames.iter().enumerate() {

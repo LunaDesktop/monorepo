@@ -55,8 +55,10 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
 - **Style instalowane z plików**: `libluna-core::theme_file` (`ThemePatch`, klucze kropkowe,
   `available_themes()`, nakładanie na bazę), trwały wybór stylu w `ThemeSettings` (`theme.conf`),
   przykłady `examples/luna/themes/*.theme`, podgląd przez `render/layout --theme`.
-- Dalej: **interaktywny wybór stylu** w Ustawieniach + **okno podglądu** przy wyborze,
-  a potem scroll/overflow w `TabBar`, migracja `luna-demo` na drzewo układu.
+- Wybór stylu w UI: menu `☰` → „Styl” (lista `available_themes()`, „Domyślny” + style z plików),
+  stosowany na żywo i zapisywany w `theme.conf`; `LUNA_THEMES_DIR` dla dev/testów.
+- Dalej: **okno podglądu** przy wyborze (miniatura z realnych widgetów), scroll/overflow
+  w `TabBar`, migracja `luna-demo` na drzewo układu.
 
 ## M2 — Układ + widgety bazowe
 - Dwuprzebiegowy silnik measure/allocate — ✅ **częściowo** (silnik + kontenery `VBox`/`HBox`,

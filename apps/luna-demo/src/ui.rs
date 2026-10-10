@@ -22,7 +22,9 @@ const PAD: f64 = 12.0;
 /// Wysokość wiersza ustawień w demo.
 const ROW_H: f64 = 56.0;
 /// Indeks pozycji „O aplikacji” w menu „☰” (otwiera dolny panel).
-const ABOUT_ENTRY: usize = 4;
+const ABOUT_ENTRY: usize = 5;
+/// Indeks pozycji „Styl” w menu „☰” (otwiera wybór stylu).
+const STYLE_ENTRY: usize = 4;
 
 /// Domyślna szerokość paska bocznego.
 pub const DEFAULT_SIDEBAR_W: f64 = 220.0;
@@ -41,6 +43,8 @@ pub enum Popover {
     Language,
     /// Popover opcji widoku pod przyciskiem „Opcje ▾”.
     Options,
+    /// Lista wyboru stylu (instalowanego z pliku).
+    Styles,
 }
 
 /// Stan aplikacji demo, który nie należy do warstwy platformy ani do widgetów.
@@ -227,8 +231,14 @@ pub fn menu_entries() -> Menu {
         MenuEntry::action(tr("Keyboard Shortcuts")),
         MenuEntry::separator(),
         MenuEntry::action(tr("Settings")),
+        MenuEntry::action(tr("Style")),
         MenuEntry::action(tr("About")),
     ])
+}
+
+/// Lista dostępnych stylów (z plików) do popoveru wyboru.
+pub fn style_list() -> Vec<libluna_core::StyledTheme> {
+    libluna_core::available_themes()
 }
 
 /// Pasek zakładek demo z przetłumaczonymi etykietami (tytuły w `TabView` to klucze).
@@ -367,6 +377,16 @@ pub fn popover_menu(
         }
         // Popover „Opcje” rysowany osobno (własny układ).
         Popover::Options => None,
+        // Wybór stylu: „Domyślny” + style z plików.
+        Popover::Styles => {
+            let mut entries = vec![MenuEntry::action(tr("Default"))];
+            for style in style_list() {
+                entries.push(MenuEntry::action(style.name));
+            }
+            let menu = Menu::new(entries);
+            let w = menu.width(text, theme);
+            Some((menu.place(lay.burger, w, viewport, theme), menu))
+        }
     }
 }
 
@@ -684,14 +704,33 @@ pub fn handle_events(
                         if demo.popover.is_some() {
                             if let (Some((panel, menu)), Some(kind)) = (&popover, demo.popover) {
                                 if let Some(entry) = menu.index_at(*panel, p, theme) {
-                                    if kind == Popover::Language {
-                                        let codes = libluna_i18n::languages();
-                                        if let Some(code) = codes.get(entry) {
-                                            libluna_i18n::set_locale(Locale::new(code));
+                                    match kind {
+                                        Popover::Language => {
+                                            let codes = libluna_i18n::languages();
+                                            if let Some(code) = codes.get(entry) {
+                                                libluna_i18n::set_locale(Locale::new(code));
+                                            }
                                         }
-                                    } else if entry == ABOUT_ENTRY {
-                                        // „O aplikacji” otwiera dolny panel.
-                                        demo.sheet.set_open(true);
+                                        Popover::Menu if entry == STYLE_ENTRY => {
+                                            // „Styl” otwiera wybór stylu.
+                                            demo.popover = Some(Popover::Styles);
+                                            demo.popover_hover = None;
+                                            continue;
+                                        }
+                                        Popover::Menu if entry == ABOUT_ENTRY => {
+                                            // „O aplikacji” otwiera dolny panel.
+                                            demo.sheet.set_open(true);
+                                        }
+                                        Popover::Styles => {
+                                            // 0 = „Domyślny”, dalej style z plików.
+                                            if entry == 0 {
+                                                settings.set_style(None);
+                                            } else if let Some(style) = style_list().get(entry - 1)
+                                            {
+                                                settings.set_style(Some(style.id.clone()));
+                                            }
+                                        }
+                                        _ => {}
                                     }
                                 }
                             }

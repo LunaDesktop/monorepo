@@ -170,8 +170,18 @@ pub struct StyledTheme {
 }
 
 /// Katalogi wyszukiwania stylów (kolejność = priorytet).
+///
+/// Oprócz katalogów standardowych uwzględnia `LUNA_THEMES_DIR` — listę katalogów
+/// rozdzielonych `:` (przydatne w dev/testach, by wskazać katalog ze stylami).
 pub fn search_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
+    if let Some(extra) = std::env::var_os("LUNA_THEMES_DIR") {
+        for part in std::env::split_paths(&extra) {
+            if !part.as_os_str().is_empty() {
+                dirs.push(part);
+            }
+        }
+    }
     if let Some(home) = std::env::var_os("HOME") {
         let home = PathBuf::from(home);
         dirs.push(home.join(".config").join("luna").join("themes"));
