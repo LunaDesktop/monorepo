@@ -69,8 +69,8 @@ fn draw(frame: &mut Frame, model: &WindowModel) {
                 .fill_rect(w.content(), Color::from_rgba8(0x00, 0x00, 0x00, 0xff));
             // Treść okna (bufor klienta).
             frame.scene.image(w.content(), w.data.clone());
-            // Dekoracja tylko dla topleveli (popupy jej nie mają).
-            if !w.popup {
+            // Dekoracja tylko dla topleveli (popupy i panele jej nie mają).
+            if !w.popup && !w.layer {
                 frame
                     .scene
                     .fill_rect(w.titlebar(), Color::from_rgba8(0x2c, 0x2f, 0x38, 0xff));
@@ -104,13 +104,15 @@ fn draw(frame: &mut Frame, model: &WindowModel) {
                     );
                 }
             }
-            // Obramowanie całego okna.
-            frame.scene.stroke_rounded_rect(
-                w.outer(),
-                6.0,
-                1.0,
-                Color::from_rgba8(0x50, 0x54, 0x60, 0xff),
-            );
+            // Obramowanie całego okna (tylko zwykłe okna).
+            if !w.layer {
+                frame.scene.stroke_rounded_rect(
+                    w.outer(),
+                    6.0,
+                    1.0,
+                    Color::from_rgba8(0x50, 0x54, 0x60, 0xff),
+                );
+            }
         }
     }
 

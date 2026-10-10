@@ -7,6 +7,7 @@
 
 mod compositor;
 mod input;
+mod layer;
 mod monitors;
 mod output;
 mod seat;
@@ -20,6 +21,7 @@ use std::sync::Arc;
 
 use libluna_core::Event;
 use wayland_protocols::xdg::shell::server::xdg_wm_base;
+use wayland_protocols_wlr::layer_shell::v1::server::zwlr_layer_shell_v1;
 use wayland_server::protocol::{wl_compositor, wl_output, wl_seat, wl_shm};
 use wayland_server::{Display, ListeningSocket};
 
@@ -38,6 +40,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     handle.create_global::<State, wl_shm::WlShm, ()>(1, ());
     handle.create_global::<State, wl_output::WlOutput, ()>(4, ());
     handle.create_global::<State, xdg_wm_base::XdgWmBase, ()>(1, ());
+    handle.create_global::<State, zwlr_layer_shell_v1::ZwlrLayerShellV1, ()>(4, ());
     handle.create_global::<State, wl_seat::WlSeat, ()>(1, ());
 
     // Gniazdo nasłuchu: `wayland-0`, `wayland-1`, …

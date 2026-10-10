@@ -29,6 +29,8 @@ pub struct Window {
     pub title: String,
     /// Czy to `xdg_popup` (bez dekoracji, zamykany kliknięciem poza).
     pub popup: bool,
+    /// Czy to powierzchnia `wlr-layer-shell` (panel/dock; bez dekoracji, kotwiczona).
+    pub layer: bool,
     /// Czy powierzchnia jest widoczna (popup znika po `popup_done`).
     pub mapped: bool,
     /// Piksele (premultiplied RGBA8) ostatnio zacommitowanego bufora.
@@ -36,9 +38,9 @@ pub struct Window {
 }
 
 impl Window {
-    /// Wysokość dekoracji (zero dla popupów).
+    /// Wysokość dekoracji (zero dla popupów i powierzchni warstwowych).
     fn bar(&self) -> f64 {
-        if self.popup {
+        if self.popup || self.layer {
             0.0
         } else {
             TITLEBAR
@@ -72,7 +74,7 @@ impl Window {
 
     /// Kwadratowy przycisk zamknięcia (tylko dla topleveli).
     pub fn close_rect(&self) -> Rect {
-        if self.popup {
+        if self.popup || self.layer {
             return Rect::ZERO;
         }
         Rect::from_xywh(
@@ -85,7 +87,7 @@ impl Window {
 
     /// Uchwyt przeskalowania (prawy-dolny narożnik treści; tylko dla topleveli).
     pub fn grip_rect(&self) -> Rect {
-        if self.popup {
+        if self.popup || self.layer {
             return Rect::ZERO;
         }
         let c = self.content();

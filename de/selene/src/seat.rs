@@ -463,7 +463,10 @@ fn raise_and_focus(state: &mut State, slot: usize) {
     {
         let mut windows = state.windows.lock().unwrap();
         if let Some(w) = windows.get_mut(slot) {
-            w.z = z;
+            // Powierzchnie warstwowe (panele/docki) trzymają stałą kolejność.
+            if !w.layer {
+                w.z = z;
+            }
         }
     }
     set_keyboard_focus(state, slot);
@@ -702,6 +705,7 @@ mod tests {
             z: 1,
             title: "Test".to_owned(),
             popup: false,
+            layer: false,
             mapped: true,
             data: Arc::new(ImageData::empty(200, 120)),
         }

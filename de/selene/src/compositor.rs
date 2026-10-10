@@ -4,11 +4,13 @@ use std::sync::Mutex;
 
 use libluna_render::ImageData;
 use wayland_protocols::xdg::shell::server::{xdg_popup, xdg_surface, xdg_toplevel};
+use wayland_protocols_wlr::layer_shell::v1::server::zwlr_layer_surface_v1;
 use wayland_server::{
     protocol::{wl_buffer, wl_callback, wl_compositor, wl_region, wl_surface},
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
 };
 
+use crate::layer::LayerData;
 use crate::shell::{XdgSurfaceData, XdgToplevelData};
 use crate::shm::BufferData;
 use crate::state::{State, Window};
@@ -23,6 +25,8 @@ pub struct SurfaceData {
     pub buffer: Mutex<Option<wl_buffer::WlBuffer>>,
     /// Slot okna w modelu (przydzielany przy pierwszym commicie).
     pub slot: Mutex<Option<usize>>,
+    /// Powiązana powierzchnia warstwowa (`wlr-layer-shell`), jeśli klient ją utworzył.
+    pub layer: Mutex<Option<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1>>,
 }
 
 impl SurfaceData {
@@ -32,6 +36,7 @@ impl SurfaceData {
             xdg_surface: Mutex::new(None),
             buffer: Mutex::new(None),
             slot: Mutex::new(None),
+            layer: Mutex::new(None),
         }
     }
 }
@@ -138,8 +143,13 @@ impl Dispatch<wl_surface::WlSurface, SurfaceData> for State {
     }
 }
 
-/// Skomponuj powierzchnię do modelu okien (toplevel lub popup z buforem `wl_shm`).
+/// Skomponuj powierzchnię do modelu okien (toplevel, popup lub powierzchnia warstwowa).
 fn composite(state: &mut State, surface: &wl_surface::WlSurface, data: &SurfaceData) {
+    // Powierzchnia warstwowa (panel/dock) — własna ścieżka (bez xdg_surface).
+    if let Some(ls) = data.layer.lock().unwrap().clone() {
+        composite_layer(state, surface, data, &ls);
+        return;
+    }
     let Some(xdg_surface) = data.xdg_surface.lock().unwrap().clone() else {
         return;
     };
@@ -185,51 +195,144 @@ fn composite(state: &mut State, surface: &wl_surface::WlSurface, data: &SurfaceD
         String::new()
     };
 
-    let mut slot = data.slot.lock().unwrap();
-    let mut windows = state.windows.lock().unwrap();
-    let mut created = false;
-    let idx = match *slot {
-        Some(i) => i,
-        None => {
-            let i = windows.len();
-            let (px, py) = popup_xy.unwrap_or((60.0 + i as f64 * 36.0, 60.0 + i as f64 * 36.0));
-            windows.push(Window {
-                x: px,
-                y: py,
-                width: w,
-                height: h,
-                z,
-                title: title.clone(),
-                popup: is_popup,
-                mapped: true,
-                data: image.clone(),
-            });
-            *slot = Some(i);
-            created = true;
-            i
-        }
-    };
-    if let Some(window) = windows.get_mut(idx) {
-        window.width = w;
-        window.height = h;
-        window.mapped = true;
-        if !title.is_empty() {
-            window.title = title;
-        }
-        window.data = image;
-    }
-    drop(windows);
-    drop(slot);
-    // Zarejestruj powierzchnię okna (indeks = slot) do trasowania wejścia.
-    if created && state.slots.len() == idx {
-        state.slots.push(surface.clone());
-    }
+    let count = state.windows.lock().unwrap().len();
+    let (px, py) = popup_xy.unwrap_or((60.0 + count as f64 * 36.0, 60.0 + count as f64 * 36.0));
+    let (_, created) = upsert_window(
+        state, surface, data, px, py, w, h, z, &title, is_popup, false, false, image,
+    );
     // Popup: wyślij konfigurację (rozmiar + pozycja).
     if is_popup && created {
         send_popup_configure(state, &xdg_surface, popup_xy.unwrap_or((0.0, 0.0)), w, h);
     }
     // Pozwól klientowi ponownie użyć bufora.
     let _ = buffer.send_event(wl_buffer::Event::Release);
+}
+
+/// Skomponuj powierzchnię warstwową (`wlr-layer-shell`): konfiguracja + kotwiczenie.
+fn composite_layer(
+    state: &mut State,
+    surface: &wl_surface::WlSurface,
+    data: &SurfaceData,
+    ls: &zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
+) {
+    let Some(ld) = ls.data::<LayerData>() else {
+        return;
+    };
+    let (out_w, out_h) = output_size(state);
+    let buffer = data.buffer.lock().unwrap().clone();
+    // Pierwszy `commit` (zwykle bez bufora) → wyślij `configure` z rozmiarem.
+    if !*ld.configured.lock().unwrap() {
+        let st = *ld.state.lock().unwrap();
+        let (cw, ch) = st.configure_size(out_w, out_h);
+        let serial = state.next_serial();
+        let _ = ls.send_event(zwlr_layer_surface_v1::Event::Configure {
+            serial,
+            width: cw.max(0) as u32,
+            height: ch.max(0) as u32,
+        });
+        *ld.configured.lock().unwrap() = true;
+        if buffer.is_none() {
+            return;
+        }
+    }
+    let Some(buffer) = buffer else {
+        return;
+    };
+    let Some(buf_data) = buffer.data::<BufferData>() else {
+        return;
+    };
+    let (w, h) = (buf_data.width, buf_data.height);
+    let Some(rgba) = buf_data.to_rgba() else {
+        return;
+    };
+    let image = std::sync::Arc::new(ImageData::new(w as u32, h as u32, rgba));
+    let st = *ld.state.lock().unwrap();
+    let (x, y) = st.position(out_w, out_h, w as f64, h as f64);
+    let z = crate::layer::layer_z(st.layer);
+    upsert_window(
+        state, surface, data, x, y, w, h, z, "", false, true, true, image,
+    );
+    let _ = buffer.send_event(wl_buffer::Event::Release);
+}
+
+/// Dodaje nowe okno lub aktualizuje istniejące (slot trzymany w [`SurfaceData`]).
+#[allow(clippy::too_many_arguments)]
+fn upsert_window(
+    state: &mut State,
+    surface: &wl_surface::WlSurface,
+    data: &SurfaceData,
+    x: f64,
+    y: f64,
+    w: i32,
+    h: i32,
+    z: i32,
+    title: &str,
+    popup: bool,
+    layer: bool,
+    reposition: bool,
+    image: std::sync::Arc<ImageData>,
+) -> (usize, bool) {
+    let mut slot = data.slot.lock().unwrap();
+    let mut windows = state.windows.lock().unwrap();
+    let mut created = false;
+    let idx = match *slot {
+        Some(i) => {
+            if let Some(win) = windows.get_mut(i) {
+                // Pozycję stałą okna zmieniamy tylko dla powierzchni kotwiczonych.
+                if reposition {
+                    win.x = x;
+                    win.y = y;
+                    win.z = z;
+                }
+                win.width = w;
+                win.height = h;
+                win.mapped = true;
+                win.popup = popup;
+                win.layer = layer;
+                if !title.is_empty() {
+                    win.title = title.to_owned();
+                }
+                win.data = image;
+            }
+            i
+        }
+        None => {
+            let i = windows.len();
+            windows.push(Window {
+                x,
+                y,
+                width: w,
+                height: h,
+                z,
+                title: title.to_owned(),
+                popup,
+                layer,
+                mapped: true,
+                data: image,
+            });
+            *slot = Some(i);
+            created = true;
+            i
+        }
+    };
+    drop(windows);
+    drop(slot);
+    // Zarejestruj powierzchnię okna (indeks = slot) do trasowania wejścia.
+    if created && state.slots.len() == idx {
+        state.slots.push(surface.clone());
+    }
+    (idx, created)
+}
+
+/// Rozmiar monitora (na razie pierwszego; model gotowy na wiele).
+fn output_size(state: &State) -> (f64, f64) {
+    state
+        .outputs
+        .lock()
+        .unwrap()
+        .first()
+        .map(|o| (o.width as f64, o.height as f64))
+        .unwrap_or((1280.0, 800.0))
 }
 
 /// Pozycja popupu względem treści rodzica (prostokąt kotwicy + offset).

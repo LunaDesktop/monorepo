@@ -454,6 +454,7 @@ dependencies = [
  "libluna-render",
  "rustix 0.38.44",
  "wayland-protocols",
+ "wayland-protocols-wlr",
  "wayland-server",
 ]
 
@@ -669,6 +670,7 @@ dependencies = [
  "wayland-client",
  "wayland-protocols",
  "wayland-scanner",
+ "wayland-server",
 ]
 
 [[package]]
