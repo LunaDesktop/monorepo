@@ -43,6 +43,8 @@
 //! - [`PreferencesGroup`] / [`PreferencesPage`] — grupa i strona ustawień.
 //! - [`Dialog`] (+ [`AlertDialog`], [`AboutDialog`], [`ShortcutsDialog`], [`PreferencesDialog`]) — okna modalne.
 //! - [`NavigationView`] / [`NavigationSplitView`] / [`OverlaySplitView`] / [`Sidebar`] — nawigacja.
+//! - [`Label`], [`Separator`], [`ProgressBar`], [`LevelBar`], [`Frame`], [`Revealer`], [`Overlay`],
+//!   [`AspectFrame`] — widgety prezentacji (GTK4 Display).
 //! - [`Carousel`] (alias [`Pager`]), [`ToolbarView`], [`WindowTitle`], [`Clamp`], [`WrapBox`],
 //!   [`BreakpointBin`], [`ButtonContent`] — pomocniki.
 //!
@@ -66,6 +68,7 @@ pub mod card;
 pub mod check_button;
 pub mod ctx;
 pub mod dialogs;
+pub mod display;
 pub mod dropdown;
 pub mod entry;
 pub mod header_bar;
@@ -108,6 +111,10 @@ pub use check_button::CheckButton;
 pub use ctx::PaintCtx;
 pub use dialogs::{
     AboutDialog, AlertDialog, AlertRects, Dialog, DialogRects, PreferencesDialog, ShortcutsDialog,
+};
+pub use display::{
+    AspectFrame, Frame, Label, LabelAlign, LevelBar, Orientation, Overlay, ProgressBar, Revealer,
+    Separator,
 };
 pub use dropdown::DropDown;
 pub use entry::{Entry, EntryIcon, TextInput};

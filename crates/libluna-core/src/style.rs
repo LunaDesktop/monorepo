@@ -552,6 +552,15 @@ pub struct GroupMetrics {
     pub pad_x: f64,
 }
 
+/// Geometria pasków (postęp, poziom).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BarMetrics {
+    /// Grubość paska.
+    pub thickness: f64,
+    /// Promień zaokrąglenia.
+    pub radius: f64,
+}
+
 /// Geometria kontrolek („component metrics”) — rozmiary i paddingi w pikselach logicznych.
 ///
 /// Widgety nie mają już własnych stałych rozmiarów: czytają je z motywu, dzięki czemu
@@ -588,6 +597,7 @@ pub struct Metrics {
     pub shortcut: ShortcutMetrics,
     pub split: SplitMetrics,
     pub group: GroupMetrics,
+    pub bar: BarMetrics,
 }
 
 impl Metrics {
@@ -749,6 +759,10 @@ impl Metrics {
                 header: 30.0,
                 gap: 18.0,
                 pad_x: 12.0,
+            },
+            bar: BarMetrics {
+                thickness: 8.0,
+                radius: 4.0,
             },
         }
     }
