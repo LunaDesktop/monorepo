@@ -1,0 +1,44 @@
+# Receptura PaganOS (pagbuild) — libLuna (toolkit GUI).
+# Target w repo receptur: de/libluna/PAGBUILD.yaml
+#
+# Źródło: lokalny tarball całego workspace'u (konwencja „fork-first" — build bez sieci),
+# generowany skryptem packaging/paganos/make-tarball.sh. Katalog w tarballu: luna-${pkgver}/
+
+pkgname: libluna
+pkgver: '0.0.1'
+pkgrel: 1
+pkgdesc: 'libLuna — lekki toolkit GUI w Rust (alternatywa dla GTK4/libadwaita): widgety, render software, i18n; demo + galeria'
+url: 'https://git.paganlinux.eu/luna.git'
+arch: x86_64
+license:
+- MPL-2.0
+depends:
+- libxkbcommon
+- dejavu-ttf
+makedepends:
+- rustc
+source:
+- luna-${pkgver}.tar.gz
+sha256sums:
+- __TARBALL_SHA256__
+build: |
+  cd luna-${pkgver}
+
+  # Build tylko pakietu demo (nie ciągniemy kompozytora Selene).
+  cargo build --release --locked -p luna-demo
+
+  install -Dm755 target/release/luna-demo "${PKGDIR}/usr/bin/luna-demo"
+  install -Dm755 target/release/gallery  "${PKGDIR}/usr/bin/luna-gallery"
+
+  # Katalogi tłumaczeń (doładowywane w runtime z /usr/share/luna/i18n).
+  install -d "${PKGDIR}/usr/share/luna/i18n"
+  install -m644 crates/libluna-i18n/i18n/*.lang "${PKGDIR}/usr/share/luna/i18n/"
+
+  # Przykładowe motywy (nakładki na motyw bazowy).
+  install -d "${PKGDIR}/usr/share/luna/themes"
+  install -m644 examples/luna/themes/*.theme "${PKGDIR}/usr/share/luna/themes/"
+
+  install -Dm644 LICENSE "${PKGDIR}/usr/share/licenses/${pkgname}/LICENSE"
+  install -Dm644 README.md "${PKGDIR}/usr/share/doc/${pkgname}/README.md"
+package: |
+  true

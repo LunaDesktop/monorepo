@@ -1,0 +1,15 @@
+#!/bin/sh
+# Sesja środowiska Luna — uruchamia kompozytor Selene.
+#
+# Domyślnie startujemy na DRM/KMS. Gdy master DRM trzyma inna sesja, Selene sam
+# zgłosi to i spadnie do wyjścia nested — ustaw wtedy SELENE_BACKEND=nested.
+set -eu
+
+export XDG_CURRENT_DESKTOP=Luna
+export XDG_SESSION_TYPE=wayland
+export XDG_SESSION_DESKTOP=Luna
+
+: "${SELENE_BACKEND:=drm}"
+export SELENE_BACKEND
+
+exec selene
