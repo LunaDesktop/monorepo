@@ -26,6 +26,8 @@
 //! - [`Stepper`] — krokowiec (`−` wartość `+`).
 //! - [`CheckButton`] — pole wyboru (checkbox) z etykietą.
 //! - [`RadioGroup`] — lista opcji z pojedynczym wyborem.
+//! - [`Card`] — karta z nagłówkiem i obszarem treści.
+//! - [`ActionRow`] — wiersz ustawień (tytuł/podtytuł + obszar na kontrolkę).
 //!
 //! ```no_run
 //! use libluna_widgets::{PaintCtx, ViewSwitcher};
@@ -35,8 +37,10 @@
 //! # }
 //! ```
 
+pub mod action_row;
 pub mod bottom_sheet;
 pub mod button;
+pub mod card;
 pub mod check_button;
 pub mod ctx;
 pub mod dropdown;
@@ -57,8 +61,10 @@ pub mod tab_bar;
 pub mod tab_view;
 pub mod view_switcher;
 
+pub use action_row::ActionRow;
 pub use bottom_sheet::BottomSheet;
 pub use button::{Button, ButtonVariant};
+pub use card::Card;
 pub use check_button::CheckButton;
 pub use ctx::PaintCtx;
 pub use dropdown::DropDown;

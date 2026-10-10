@@ -26,8 +26,9 @@ pub use event::{
 pub use geometry::{Insets, Point, Rect, Size};
 pub use scale::Scale;
 pub use style::{
-    BottomSheetMetrics, ButtonMetrics, CheckMetrics, DropDownMetrics, EntryMetrics,
-    HeaderBarMetrics, ItemViewMetrics, MenuMetrics, Metrics, NavMetrics, PagerMetrics,
-    PathBarMetrics, RadioMetrics, Radius, ScrollViewMetrics, SegmentedMetrics, SliderMetrics,
-    Spacing, StepperMetrics, SwitchMetrics, TabsMetrics, Theme, Typography,
+    ActionRowMetrics, BottomSheetMetrics, ButtonMetrics, CardMetrics, CheckMetrics,
+    DropDownMetrics, EntryMetrics, HeaderBarMetrics, ItemViewMetrics, MenuMetrics, Metrics,
+    NavMetrics, PagerMetrics, PathBarMetrics, RadioMetrics, Radius, ScrollViewMetrics,
+    SegmentedMetrics, SliderMetrics, Spacing, StepperMetrics, SwitchMetrics, TabsMetrics, Theme,
+    Typography,
 };

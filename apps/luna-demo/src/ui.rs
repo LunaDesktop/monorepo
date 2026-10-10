@@ -11,14 +11,16 @@ use libluna_core::{
 use libluna_i18n::{tr, Locale};
 use libluna_render::TextEngine;
 use libluna_widgets::{
-    BottomSheet, Button, CheckButton, ControlsLayout, ControlsSide, DropDown, HeaderBar, Item,
-    ItemView, Menu, MenuEntry, NavEntry, NavList, Pager, PaintCtx, PathBar, RadioGroup, ScrollView,
-    SearchEntry, Slider, Stepper, StepperSide, Switch, Tab, TabBar, TabView, ViewMode,
-    ViewSwitcher, WindowControl,
+    ActionRow, BottomSheet, Button, Card, CheckButton, ControlsLayout, ControlsSide, DropDown,
+    HeaderBar, Item, ItemView, Menu, MenuEntry, NavEntry, NavList, Pager, PaintCtx, PathBar,
+    RadioGroup, ScrollView, SearchEntry, Slider, Stepper, StepperSide, Switch, Tab, TabBar,
+    TabView, ViewMode, ViewSwitcher, WindowControl,
 };
 
 const STATUS_H: f64 = 28.0;
 const PAD: f64 = 12.0;
+/// Wysokość wiersza ustawień w demo.
+const ROW_H: f64 = 56.0;
 /// Indeks pozycji „O aplikacji” w menu „☰” (otwiera dolny panel).
 const ABOUT_ENTRY: usize = 4;
 
@@ -379,8 +381,8 @@ pub fn layout(size: Size, theme: &Theme, demo: &Demo) -> Layout {
         (area.width() - 2.0 * lg).max(0.0),
         208.0,
     );
-    let header_h = 40.0;
-    let row_h = 56.0;
+    let header_h = theme.metrics.card.header;
+    let row_h = ROW_H;
     let row = |i: usize| {
         Rect::from_xywh(
             card.x(),
@@ -1048,63 +1050,28 @@ fn draw_content(
         (area.width() - 2.0 * lg).max(0.0),
         208.0,
     );
-    draw_card(paint, card, &tr("Appearance"));
+    Card::new(tr("Appearance")).paint(paint, card);
 
-    paint.label_left(
-        card.x() + md,
-        lay.theme_switcher.center().y,
-        &tr("Theme"),
-        body,
-        weight::NORMAL,
-        theme.colors.text,
-    );
+    draw_row_label(paint, card, lay.theme_switcher, &tr("Theme"));
     theme_switcher(preference, demo.theme_hover).paint(paint, lay.theme_switcher);
 
-    paint.label_left(
-        card.x() + md,
-        lay.accents[0].center().y,
-        &tr("Accent color"),
-        body,
-        weight::NORMAL,
-        theme.colors.text,
-    );
+    draw_row_label(paint, card, lay.accents[0], &tr("Accent color"));
     draw_accent_dots(paint, &lay.accents, accent);
 
-    paint.label_left(
-        card.x() + md,
-        lay.language.center().y,
-        &tr("Language"),
-        body,
-        weight::NORMAL,
-        theme.colors.text,
-    );
+    draw_row_label(paint, card, lay.language, &tr("Language"));
     let codes = libluna_i18n::languages();
     language_dropdown(&codes).paint(paint, lay.language);
 
     // --- Karta 2: Ustawienia ---
     let card2 = Rect::from_xywh(card.x(), card.bottom() + lg, card.width(), 320.0);
-    draw_card(paint, card2, &tr("Settings"));
+    Card::new(tr("Settings")).paint(paint, card2);
 
-    paint.label_left(
-        card2.x() + md,
-        lay.option_a.center().y,
-        &tr("Option A"),
-        body,
-        weight::NORMAL,
-        theme.colors.text,
-    );
+    draw_row_label(paint, card2, lay.option_a, &tr("Option A"));
     let mut sw = Switch::new(demo.option_a);
     sw.set_hovered(demo.switch_hover);
     sw.paint(paint, lay.option_a);
 
-    paint.label_left(
-        card2.x() + md,
-        lay.volume_track.center().y,
-        &tr("Volume level"),
-        body,
-        weight::NORMAL,
-        theme.colors.text,
-    );
+    draw_row_label(paint, card2, lay.volume_track, &tr("Volume level"));
     Slider::new(demo.volume).paint(paint, lay.volume_track);
     paint.label_right(
         lay.volume_track.x() - 12.0,
@@ -1115,39 +1082,18 @@ fn draw_content(
         theme.colors.text,
     );
 
-    paint.label_left(
-        card2.x() + md,
-        lay.view_switcher.center().y,
-        &tr("View"),
-        body,
-        weight::NORMAL,
-        theme.colors.text,
-    );
+    draw_row_label(paint, card2, lay.view_switcher, &tr("View"));
     view_switcher(demo.view_mode, demo.view_hover).paint(paint, lay.view_switcher);
 
-    paint.label_left(
-        card2.x() + md,
-        lay.bottom_bar.center().y,
-        &tr("Bottom bar"),
-        body,
-        weight::NORMAL,
-        theme.colors.text,
-    );
+    draw_row_label(paint, card2, lay.bottom_bar, &tr("Bottom bar"));
     Switch::new(demo.show_bottom_bar).paint(paint, lay.bottom_bar);
 
-    paint.label_left(
-        card2.x() + md,
-        lay.sidebar_toggle.center().y,
-        &tr("Sidebar"),
-        body,
-        weight::NORMAL,
-        theme.colors.text,
-    );
+    draw_row_label(paint, card2, lay.sidebar_toggle, &tr("Sidebar"));
     Switch::new(demo.sidebar_visible).paint(paint, lay.sidebar_toggle);
 
     // --- Karta 3: Zakładki ---
     let card3 = Rect::from_xywh(card.x(), card2.bottom() + lg, card.width(), 152.0);
-    draw_card(paint, card3, &tr("Tabs"));
+    Card::new(tr("Tabs")).paint(paint, card3);
 
     // Wiersz 0: pasek zakładek (widget TabBar).
     tab_bar(demo).paint(paint, lay.tabs);
@@ -1173,7 +1119,7 @@ fn draw_content(
 
     // --- Karta 4: Pliki (PathBar + SearchEntry + ItemView) ---
     let card4 = Rect::from_xywh(card.x(), card3.bottom() + lg, card.width(), 196.0);
-    draw_card(paint, card4, &tr("Files"));
+    Card::new(tr("Files")).paint(paint, card4);
     path_bar(demo).paint(paint, lay.path);
 
     let mut search = demo.search.clone();
@@ -1187,27 +1133,18 @@ fn draw_content(
     scrollbar.paint_scrollbar(paint, lay.items);
 }
 
-fn draw_card(paint: &mut PaintCtx, card: Rect, title: &str) {
+/// Rysuje etykietę wiersza ustawień (`ActionRow`) z miejscem na kontrolkę po prawej.
+fn draw_row_label(paint: &mut PaintCtx, container: Rect, control: Rect, title: &str) {
     let theme = *paint.theme;
-    paint
-        .scene
-        .fill_rounded_rect(card, theme.radius.large, theme.colors.card_bg);
-    paint
-        .scene
-        .stroke_rounded_rect(card, theme.radius.large, 1.0, theme.colors.border);
-    let header_h = 40.0;
-    paint.label_left(
-        card.x() + theme.spacing.md,
-        card.y() + header_h / 2.0,
-        title,
-        theme.typography.body.size,
-        weight::BOLD,
-        theme.colors.text,
+    let md = theme.spacing.md;
+    let row = Rect::from_xywh(
+        container.x(),
+        control.center().y - ROW_H / 2.0,
+        container.width(),
+        ROW_H,
     );
-    paint.scene.fill_rect(
-        Rect::from_xywh(card.x(), card.y() + header_h, card.width(), 1.0),
-        theme.colors.border,
-    );
+    let suffix = (container.width() - (control.x() - container.x()) - md).max(0.0);
+    ActionRow::new(title).paint(paint, row, suffix);
 }
 
 fn draw_accent_dots(paint: &mut PaintCtx, dots: &[Rect; 9], accent: Accent) {

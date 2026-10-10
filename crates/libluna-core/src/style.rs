@@ -429,6 +429,24 @@ pub struct RadioMetrics {
     pub row_h: f64,
 }
 
+/// Geometria karty ([`Card`](crate::style)).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CardMetrics {
+    /// Wysokość nagłówka karty.
+    pub header: f64,
+    /// Padding wewnętrzny (nagłówek).
+    pub pad: f64,
+}
+
+/// Geometria wiersza akcji ([`ActionRow`](crate::style)).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ActionRowMetrics {
+    /// Padding poziomy (lewy i prawy).
+    pub pad_x: f64,
+    /// Odstęp między tytułem a podtytułem.
+    pub gap: f64,
+}
+
 /// Geometria kontrolek („component metrics”) — rozmiary i paddingi w pikselach logicznych.
 ///
 /// Widgety nie mają już własnych stałych rozmiarów: czytają je z motywu, dzięki czemu
@@ -454,6 +472,8 @@ pub struct Metrics {
     pub stepper: StepperMetrics,
     pub check: CheckMetrics,
     pub radio: RadioMetrics,
+    pub card: CardMetrics,
+    pub row: ActionRowMetrics,
 }
 
 impl Metrics {
@@ -561,6 +581,14 @@ impl Metrics {
                 dot: 20.0,
                 gap: 10.0,
                 row_h: 30.0,
+            },
+            card: CardMetrics {
+                header: 40.0,
+                pad: 12.0,
+            },
+            row: ActionRowMetrics {
+                pad_x: 12.0,
+                gap: 8.0,
             },
         }
     }
