@@ -92,6 +92,9 @@ libluna/
     libluna-widgets/   # widgety: ViewSwitcher, NavList, Menu, Button, Switch, Slider, DropDown, HeaderBar, TabBar/TabView, BottomSheet, Pager, PathBar, SearchEntry, ItemView, ScrollView, Stepper, CheckButton, RadioGroup, Card, ActionRow
   apps/
     luna-demo/         # demo aplikacji środowiska Luna; też render offline do PNG
+  de/                  # środowisko graficzne Luna
+    README.md          # opis Selene (kompozytor) + nazewnictwo
+    selene/            # kompozytor Wayland (bez smithay: wayland-server + własna pętla)
   templates/
     minimal-app/       # szablon startowy aplikacji
   tools/
@@ -448,4 +451,4 @@ i ujednolicić warstwę UI w czystym Rust. Bazą jest tu **libLuna**; dotychczas
 
 ## Licencja
 
-MPL-2.0 (do potwierdzenia przez właściciela projektu).
+MIT

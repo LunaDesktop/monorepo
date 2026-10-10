@@ -8,6 +8,7 @@ members = [
     "crates/libluna-platform",
     "crates/libluna-widgets",
     "apps/luna-demo",
+    "de/selene",
 ]
 
 [workspace.package]
@@ -27,3 +28,12 @@ libluna-widgets = { path = "crates/libluna-widgets", version = "0.0.1" }
 libluna = { path = "crates/libluna", version = "0.0.1" }
 
 tiny-skia = "0.11"
+
+# Optymalizacja wydania: pełny LTO i jedna jednostka kodegenu (mniejszy, szybszy binarny
+# kompozytor + środowisko). `panic = "unwind"` świadomie zostawione — panika klienta nie
+# powinna zabijać całej sesji.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

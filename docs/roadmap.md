@@ -128,6 +128,17 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
 - Potem `karton-files` (`window.c` ~5100 linii) — etapami.
 - Opcjonalnie ujednolicenie `karton-shell` na libLunę (dziś cairo/pango bezpośrednio).
 
+## M8 — Kompozytor Selene + środowisko Luna (`de/`)
+- **Selene** (`de/selene`) — kompozytor Wayland w czystym Rust, **bez smithay**: własna warstwa
+  na `wayland-server` (rdzeń + xdg-shell) i bezpośrednia pętla `poll` po gnieździe i backendzie.
+  ✅ Start (M-K0): globale `wl_compositor`, `wl_shm`, `xdg_wm_base`, `wl_seat`; cykl życia
+  powierzchni + frame-callbacki, `xdg_surface.configure`, i18n (`libluna-i18n`), profil release
+  z LTO. Uruchomienie: `cargo run -p selene` (szczegóły: `de/README.md`).
+- Dalej: backend wyświetlania (nested Wayland → potem DRM/KMS), komponowanie przez
+  `libluna-render`, wejście (`libinput`/`evdev` + `wl_pointer`/`wl_keyboard`), `wl_output`,
+  `xdg_popup`, `layer-shell`, schowek (`wl_data_device`), zarządzanie oknami/fokusem.
+- **Luna** (`de/luna`) — powłoka środowiska (panel, launcher, OSD) na `libluna-widgets`.
+
 ## Później (poza MVP)
 - Dostępność AT-SPI, IME, schowek, drag & drop, animacje, backend GPU, mini-CSS dla motywów.
 
