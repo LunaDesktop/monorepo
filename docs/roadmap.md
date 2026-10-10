@@ -57,8 +57,10 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   przykłady `examples/luna/themes/*.theme`, podgląd przez `render/layout --theme`.
 - Wybór stylu w UI: menu `☰` → „Styl” (lista `available_themes()`, „Domyślny” + style z plików),
   stosowany na żywo i zapisywany w `theme.conf`; `LUNA_THEMES_DIR` dla dev/testów.
-- Dalej: **okno podglądu** przy wyborze (miniatura z realnych widgetów), scroll/overflow
-  w `TabBar`, migracja `luna-demo` na drzewo układu.
+- Podgląd motywów (headless): `bin/styles` renderuje realny interfejs w kilku stylach i składa
+  montaż (`docs/images/styles.png`) — odpowiednik „okna podglądu”.
+- Dalej: **okno podglądu na żywo w aplikacji**, scroll/overflow w `TabBar`,
+  migracja `luna-demo` na drzewo układu.
 
 ## M2 — Układ + widgety bazowe
 - Dwuprzebiegowy silnik measure/allocate — ✅ **częściowo** (silnik + kontenery `VBox`/`HBox`,

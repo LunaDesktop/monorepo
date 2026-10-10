@@ -269,10 +269,11 @@ cargo run -p luna-demo --bin render -- --theme examples/luna/themes/nord.theme d
 cargo run -p luna-demo --bin layout -- --theme examples/luna/themes/nord.theme --out docs/images/layout-nord.png
 ```
 
-Do zrobienia pozostaje **okno podglądu na żywo** przy wyborze (miniatura). Sam wybór stylu
-działa już w demo: **menu `☰` → „Styl”** otwiera listę („Domyślny” + style z plików),
-a wybór jest natychmiast stosowany i zapisywany w `theme.conf`. W headless demo/testach katalog
-ze stylami wskazuje `LUNA_THEMES_DIR`.
+Do zrobienia pozostaje **okno podglądu na żywo** wewnątrz aplikacji (miniatura aktualizowana przy
+przewijaniu listy). Sam wybór stylu działa już w demo: **menu `☰` → „Styl”** otwiera listę
+(„Domyślny” + style z plików), a wybór jest natychmiast stosowany i zapisywany w `theme.conf`.
+Headlessowy podgląd (montaż motywów) to `cargo run -p luna-demo --bin styles` →
+`docs/images/styles.png`. W headless demo/testach katalog ze stylami wskazuje `LUNA_THEMES_DIR`.
 
 ### Co jeszcze decyduje o „looku GTK4”
 
@@ -383,6 +384,11 @@ Style instalowane z plików (`examples/luna/themes/nord.theme`, `paper.theme`) �
 
 ![Ustawienia — styl Nord](docs/images/settings-nord.png)
 ![Ustawienia — styl Paper](docs/images/settings-paper.png)
+
+Podgląd kilku motywów (headless, `cargo run -p luna-demo --bin styles`) — ten sam realny
+interfejs w każdym stylu:
+
+![Podgląd stylów](docs/images/styles.png)
 
 Przebieg interakcji (headless `simulate`) — m.in. menu `☰`, dolny panel, powiadomienie (`Toast`)
 karta 12 i ekran stanu („Brak wyników”) klatka 14:
