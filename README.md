@@ -323,6 +323,8 @@ XDG_CONFIG_HOME="$PWD/examples" cargo run -p luna-demo --bin render -- --lang fr
   wejścia** (wskaźnik, klawiatura, scroll) w `Frame`, odświeżanie na żądanie, zarządzanie
   motywem przez `Frame::set_preference` / `set_accent` (zapis + natychmiastowe przerysowanie).
   `Frame::close/minimize/toggle_maximize` to **realne akcje okna** (`xdg_toplevel`).
+  **Klatki animacji**: aplikacja czyta `Frame::delta_time()` i woła `Frame::request_frame()`,
+  dopóki trwa animacja — okno odświeża się wtedy płynnie (~60 Hz), a bez tego tylko na zdarzenia.
 - `libluna-widgets`: **widgety wielokrotnego użycia** w modelu immediate — `ViewSwitcher`
   (segmentowy), `NavList` (menu nawigacji z sekcjami), `Menu` (popover `☰`), `Button`
   (z wariantami i chevronem), `Switch`, `Slider`, `DropDown` (z rozwinięciem przez `Menu`),
@@ -419,6 +421,11 @@ interfejs w każdym stylu:
 Nowe widgety — `Banner`, `Spinner`, `Tooltip` (`cargo run -p luna-demo --bin widgets`):
 
 ![Banner, Spinner, Tooltip](docs/images/widgets.png)
+
+Pełna galeria nowych widgetów libLuny (cz. 5–12) — kontenery, tabele, kalendarz, chooser’y,
+kreator kroków, pasek stanu itd. (`cargo run -p luna-demo --bin gallery`):
+
+![Galeria widgetów](docs/images/gallery.png)
 
 Przebieg interakcji (headless `simulate`) — m.in. menu `☰`, dolny panel, powiadomienie (`Toast`)
 karta 12 i ekran stanu („Brak wyników”) klatka 14:

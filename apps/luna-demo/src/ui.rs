@@ -678,12 +678,12 @@ pub fn handle_events(
                         if demo.toast.is_open() {
                             if demo.toast.action_at(size, theme, text, p) {
                                 settings.set_accent(demo.prev_accent);
-                                demo.toast.set_open(false);
+                                demo.toast.set_open_animated(false);
                                 continue;
                             }
                             // Klik w treść powiadomienia je zamyka (akcent zostaje).
                             if demo.toast.dismiss_at(size, theme, text, p) {
-                                demo.toast.set_open(false);
+                                demo.toast.set_open_animated(false);
                                 continue;
                             }
                         }
@@ -968,7 +968,7 @@ fn apply_accent(settings: &mut ThemeSettings, demo: &mut Demo, accent: Accent) {
     demo.prev_accent = settings.accent();
     settings.set_accent(accent);
     demo.toast = Toast::new(tr("Accent changed")).action(tr("Undo"));
-    demo.toast.show();
+    demo.toast.show_animated();
 }
 
 fn cycle_language() {
@@ -1062,8 +1062,8 @@ pub fn build_scene(
         draw_sheet_content(&mut paint, demo, size);
     }
 
-    // Powiadomienie („toast”) nad wszystkim.
-    if demo.toast.is_open() {
+    // Powiadomienie („toast”) nad wszystkim (także w trakcie wygaszania).
+    if demo.toast.progress() > 0.001 {
         demo.toast.paint(&mut paint, size);
     }
 }

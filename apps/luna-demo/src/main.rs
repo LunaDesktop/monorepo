@@ -66,6 +66,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             frame.set_style(settings.style().map(str::to_owned));
         }
 
+        // Animacja powiadomienia: krok i prośba o kolejną klatkę, dopóki trwa.
+        if demo.toast.is_animating() {
+            demo.toast.advance(frame.delta_time(), 0.3);
+            frame.request_frame();
+        }
+
         // Motyw po zmianach (np. wybór stylu) — klatka od razu poprawna.
         let theme = settings.resolve_themed(frame.system_dark());
         ui::build_scene(

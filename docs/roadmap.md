@@ -63,8 +63,13 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   (`Easing`, `lerp`, `Animation`), użyte w `Stack` (przejścia `StackTransition`), `Revealer`
   i `Toast` (sterowane `advance(dt, …)`).
 - `libluna-platform`: realne akcje okna z `Frame` (`close`/`minimize`/`toggle_maximize`).
+  **Klatki animacji**: `Frame::delta_time()` + `Frame::request_frame()` (płynne ~60 Hz, gdy trwa
+  animacja; bez tego okno odświeża się tylko na zdarzenia).
 - Demo używa widgetów zamiast ręcznego rysowania (pasek boczny, wybór motywu/widoku, menu `☰`,
   przycisk „Opcje”, przełączniki, suwak, wybór języka, pasek tytułu, zakładki `TabBar`/`TabView`).
+  Powiadomienie (`Toast`) w demo animuje się (wjazd + fade).
+- **Galeria widgetów** headless: `cargo run -p luna-demo --bin gallery` → `docs/images/gallery.png`
+  (kontenery, tabela, kalendarz, chooser’y, kreator kroków, pasek stanu z cz. 5–12).
 - Motywy: wariant (light/dark/auto) + akcent, z trwałością. **Component metrics**: rozmiary
   i paddingi kontrolek wyniesione z widgetów do tokenów (`Theme::metrics`), więc styl steruje
   też geometrią (README, „Własny wygląd”).

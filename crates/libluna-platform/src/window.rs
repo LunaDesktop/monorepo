@@ -9,7 +9,7 @@
 //! Dekoracje są po stronie klienta (CSD) — rysujemy własny HeaderBar.
 
 use std::error::Error;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use libluna_core::{
     Accent, ButtonState, Event, KeyEvent, Modifiers, Point, PointerButton, PointerEvent,
@@ -117,8 +117,11 @@ pub struct Frame<'a> {
     pub scale: f64,
     /// Zdarzenia wejścia od poprzedniej klatki.
     pub events: &'a [Event],
+    /// Czas od poprzedniej klatki (sekundy) — dla animacji (`advance(dt, …)`).
+    pub dt: f64,
     settings: &'a mut ThemeSettings,
     actions: &'a mut WindowActions,
+    frame_requested: &'a mut bool,
     system_dark: bool,
 }
 
@@ -136,6 +139,17 @@ impl Frame<'_> {
     /// Przełącza maksymalizację okna.
     pub fn toggle_maximize(&mut self) {
         self.actions.toggle_maximize = true;
+    }
+
+    /// Czas od poprzedniej klatki w sekundach (do kroku animacji).
+    pub fn delta_time(&self) -> f64 {
+        self.dt
+    }
+
+    /// Prosi o kolejną klatkę — używane, gdy trwa animacja (utrzymuje płynność).
+    /// Dopóki aplikacja nie zawoła tej metody, okno odświeża się tylko na zdarzenia.
+    pub fn request_frame(&mut self) {
+        *self.frame_requested = true;
     }
     /// Bieżące ustawienia wyglądu (kopia).
     pub fn settings(&self) -> ThemeSettings {
@@ -244,11 +258,19 @@ where
         pending_events: Vec::new(),
         needs_redraw: true,
         actions: WindowActions::default(),
+        frame_requested: false,
+        last_tick: Instant::now(),
         maximized: false,
     };
 
     while !app.exit {
-        event_loop.dispatch(Duration::from_millis(100), &mut app)?;
+        // Gdy trwa animacja (aplikacja prosi o klatki), odświeżamy płynnie (~60 Hz).
+        let timeout = if app.needs_redraw {
+            Duration::from_millis(16)
+        } else {
+            Duration::from_millis(100)
+        };
+        event_loop.dispatch(timeout, &mut app)?;
         if app.needs_redraw {
             app.redraw();
         }
@@ -281,6 +303,10 @@ struct App {
     pending_events: Vec<Event>,
     needs_redraw: bool,
     actions: WindowActions,
+    /// Aplikacja poprosiła o kolejną klatkę (animacja w toku).
+    frame_requested: bool,
+    /// Znacznik czasu poprzedniej klatki (do liczenia `dt`).
+    last_tick: Instant,
     maximized: bool,
 }
 
@@ -291,20 +317,25 @@ impl App {
     }
 
     fn redraw(&mut self) {
+        let now = Instant::now();
+        let dt = (now - self.last_tick).as_secs_f64().clamp(0.0, 0.1);
+        self.last_tick = now;
+
         let events = std::mem::take(&mut self.pending_events);
         self.needs_redraw = false;
         self.actions = WindowActions::default();
+        self.frame_requested = false;
 
         self.settings.clear_dirty();
         let mut theme = self.settings.resolve(self.system_dark);
-        self.render_frame(theme, &events);
+        self.render_frame(theme, &events, dt);
 
         // Jeśli domknięcie zmieniło motyw w trakcie, przerysuj bez zdarzeń.
         let mut guard = 0;
         while self.settings.is_dirty() && guard < 4 {
             self.settings.clear_dirty();
             theme = self.settings.resolve(self.system_dark);
-            self.render_frame(theme, &[]);
+            self.render_frame(theme, &[], dt);
             guard += 1;
         }
         if self.settings.is_dirty() {
@@ -314,6 +345,11 @@ impl App {
 
         self.present();
         self.apply_actions();
+
+        // Aplikacja poprosiła o kolejną klatkę (animacja) — odśwież ponownie.
+        if self.frame_requested {
+            self.needs_redraw = true;
+        }
     }
 
     /// Wykonuje akcje okna zgłoszone w trakcie klatki.
@@ -334,7 +370,7 @@ impl App {
         }
     }
 
-    fn render_frame(&mut self, theme: Theme, events: &[Event]) {
+    fn render_frame(&mut self, theme: Theme, events: &[Event], dt: f64) {
         let (width, height, scale, system_dark) =
             (self.width, self.height, self.scale, self.system_dark);
         let phys_w = (width as f64 * scale).round().max(1.0) as u32;
@@ -348,6 +384,7 @@ impl App {
                 renderer,
                 settings,
                 actions,
+                frame_requested,
                 ..
             } = self;
             let mut frame = Frame {
@@ -357,8 +394,10 @@ impl App {
                 size: Size::new(width as f64, height as f64),
                 scale,
                 events,
+                dt,
                 settings,
                 actions,
+                frame_requested,
                 system_dark,
             };
             render(&mut frame);
