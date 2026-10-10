@@ -36,8 +36,10 @@ gnieździe nasłuchu i deskryptorze backendu. `libLuna` jest zwykłą zależnoś
   przekazuje zdarzenia od rodzica; protokół trasuje je do klientów:
   `wl_pointer` (`enter`/`motion`/`button`/`axis`/`leave`) i `wl_keyboard` (`keymap`
   z wbudowanej mapy XKB, `enter`/`leave`/`key`/`modifiers` z syntezą modyfikatorów).
-- **Zarządzanie oknami (pływające)**: trafienie w okno = fokus + podniesienie (`z`),
-  przeciągnięcie lewym przyciskiem przenosi okno; kaskada przy starcie.
+- **Zarządzanie oknami (pływające)**: trafienie w okno = fokus + podniesienie (`z`);
+  **dekoracja po stronie serwera** (SSD): pasek tytułu z tytułem (`set_title`), przycisk
+  zamknięcia (→ `xdg_toplevel.close`) i uchwyt przeskalowania (→ `xdg_toplevel.configure`);
+  przeciągnięcie paska przenosi okno, uchwyt zmienia rozmiar; kaskada przy starcie.
 - **Monitory**: model `Vec<OutputInfo>` (gotowy na wiele); okno nested = jeden monitor
   (rozmiar śledzony z konfiguracji okna).
 - Wielojęzyczność (`libluna-i18n`) i optymalizacja (`[profile.release]` LTO).
@@ -45,8 +47,8 @@ gnieździe nasłuchu i deskryptorze backendu. `libLuna` jest zwykłą zależnoś
 ## Jeszcze nie / Not yet
 
 - **Wiele monitorów**: realne wyjścia DRM/KMS i przypisywanie okien do monitorów (dziś jeden).
-- **Dekoracje/zachowanie okien**: brak `xdg-decoration`, resize krawędziami, minimalizacji,
-  pełnego ekranu, `xdg_popup`, `layer-shell`.
+- **Dekoracje/zachowanie okien**: brak `xdg-decoration` (mamy SSD własne), resize krawędziami
+  (dziś uchwyt w narożniku), minimalizacja, pełny ekran, `xdg_popup`, `layer-shell`.
 - **Klawiatura**: mapa `us` przez systemowe dane XKB (`/usr/share/X11/xkb`); inne układy,
   IME i `repeat_info` — do zrobienia.
 - Schowek (`wl_data_device`), `wl_output` dynamiczne (zmiana trybu), fokus klawiatury na klik

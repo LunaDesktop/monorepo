@@ -38,20 +38,17 @@ impl XdgSurfaceData {
 pub struct XdgToplevelData {
     pub title: Mutex<String>,
     pub app_id: Mutex<String>,
+    /// Powiązana powierzchnia (do aktualizacji modelu okien).
+    pub surface: WlSurface,
 }
 
 impl XdgToplevelData {
-    pub fn new() -> Self {
+    pub fn new(surface: WlSurface) -> Self {
         Self {
             title: Mutex::new(String::new()),
             app_id: Mutex::new(String::new()),
+            surface,
         }
-    }
-}
-
-impl Default for XdgToplevelData {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -106,7 +103,7 @@ impl Dispatch<xdg_surface::XdgSurface, XdgSurfaceData> for State {
     ) {
         match request {
             xdg_surface::Request::GetToplevel { id } => {
-                let toplevel = data_init.init(id, XdgToplevelData::new());
+                let toplevel = data_init.init(id, XdgToplevelData::new(data.wl_surface.clone()));
                 *data.toplevel.lock().unwrap() = Some(toplevel);
             }
             xdg_surface::Request::AckConfigure { .. } => {
@@ -129,8 +126,16 @@ impl Dispatch<xdg_toplevel::XdgToplevel, XdgToplevelData> for State {
     ) {
         match request {
             xdg_toplevel::Request::SetTitle { title } => {
-                *data.title.lock().unwrap() = title;
+                *data.title.lock().unwrap() = title.clone();
                 state.toplevels += 1;
+                // Odśwież tytuł w modelu okien (dekoracja rysuje go na pasku).
+                if let Some(sd) = data.surface.data::<SurfaceData>() {
+                    if let Some(slot) = *sd.slot.lock().unwrap() {
+                        if let Some(window) = state.windows.lock().unwrap().get_mut(slot) {
+                            window.title = title;
+                        }
+                    }
+                }
             }
             xdg_toplevel::Request::SetAppId { app_id } => {
                 *data.app_id.lock().unwrap() = app_id;

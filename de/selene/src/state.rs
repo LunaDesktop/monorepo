@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use libluna_core::Modifiers;
+use libluna_core::{Modifiers, Rect};
 use libluna_render::ImageData;
 use wayland_server::protocol::wl_keyboard::WlKeyboard;
 use wayland_server::protocol::wl_pointer::WlPointer;
@@ -11,16 +11,67 @@ use wayland_server::protocol::wl_surface::WlSurface;
 
 use crate::monitors::{OutputInfo, Outputs};
 
+/// Wysokość paska tytułu dekoracji (SSD), w pikselach logicznych.
+pub const TITLEBAR: f64 = 30.0;
+/// Bok uchwytu przeskalowania w prawym-dolnym narożniku.
+pub const GRIP: f64 = 16.0;
+
 /// Okno (toplevel) w modelu kompozycji: pozycja, rozmiar, kolejność i gotowe piksele.
 pub struct Window {
     pub x: f64,
     pub y: f64,
+    /// Rozmiar **treści** (bufora klienta).
     pub width: i32,
     pub height: i32,
     /// Kolejność (wyższa = wyżej); do renderu i trafień.
     pub z: i32,
+    /// Tytuł okna (z `xdg_toplevel.set_title`).
+    pub title: String,
     /// Piksele (premultiplied RGBA8) ostatnio zacommitowanego bufora.
     pub data: Arc<ImageData>,
+}
+
+impl Window {
+    /// Prostokąt całego okna (dekoracja + treść).
+    pub fn outer(&self) -> Rect {
+        Rect::from_xywh(
+            self.x,
+            self.y,
+            self.width as f64,
+            TITLEBAR + self.height as f64,
+        )
+    }
+
+    /// Pasek tytułu (górna część dekoracji).
+    pub fn titlebar(&self) -> Rect {
+        Rect::from_xywh(self.x, self.y, self.width as f64, TITLEBAR)
+    }
+
+    /// Obszar treści (klienta).
+    pub fn content(&self) -> Rect {
+        Rect::from_xywh(
+            self.x,
+            self.y + TITLEBAR,
+            self.width as f64,
+            self.height as f64,
+        )
+    }
+
+    /// Kwadratowy przycisk zamknięcia w prawym górnym narożniku.
+    pub fn close_rect(&self) -> Rect {
+        Rect::from_xywh(
+            self.x + self.width as f64 - TITLEBAR,
+            self.y,
+            TITLEBAR,
+            TITLEBAR,
+        )
+    }
+
+    /// Uchwyt przeskalowania (prawy-dolny narożnik treści).
+    pub fn grip_rect(&self) -> Rect {
+        let c = self.content();
+        Rect::from_xywh(c.right() - GRIP, c.bottom() - GRIP, GRIP, GRIP)
+    }
 }
 
 /// Współdzielony model okien (pisany przez wątek protokołu, czytany przez wyjście).
@@ -33,6 +84,16 @@ pub struct DragState {
     /// Przesunięcie kursora względem lewego-górnego narożnika okna w chwili wciśnięcia.
     pub off_x: f64,
     pub off_y: f64,
+}
+
+/// Trwające przeskalowanie okna (uchwyt w prawym-dolnym narożniku).
+#[derive(Debug, Clone, Copy)]
+pub struct ResizeState {
+    pub slot: usize,
+    pub start_w: f64,
+    pub start_h: f64,
+    pub start_px: f64,
+    pub start_py: f64,
 }
 
 /// Stan współdzielony przez wszystkie handlery protokołu.
@@ -63,6 +124,8 @@ pub struct State {
     pub sent_mods: Modifiers,
     /// Trwające przeciąganie okna.
     pub drag: Option<DragState>,
+    /// Trwające przeskalowanie okna.
+    pub resize: Option<ResizeState>,
 }
 
 impl Default for State {
@@ -83,6 +146,7 @@ impl Default for State {
             keyboard_focus: None,
             sent_mods: Modifiers::NONE,
             drag: None,
+            resize: None,
         }
     }
 }

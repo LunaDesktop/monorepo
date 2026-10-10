@@ -138,6 +138,8 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   ✅ M-K2: **wejście** — `wl_output`, `wl_seat` z wskaźnikiem i klawiaturą (`wl_pointer`,
   `wl_keyboard` z mapą XKB i syntezą modyfikatorów), magistrala wejścia z wybudzaniem,
   oraz **pływające okna** (fokus, podnoszenie, przeciąganie).
+  ✅ M-K3: **dekoracje po stronie serwera** (pasek tytułu, przycisk zamknięcia, uchwyt
+  przeskalowania) + operacje okna (przeciąganie, `xdg_toplevel.configure`/`close`).
   Uruchomienie: `cargo run -p selene` (szczegóły: `de/README.md`).
 - Dalej: **wiele monitorów** (DRM/KMS), dekory/zachowanie okien (`xdg-decoration`, resize,
   pełny ekran, `xdg_popup`, `layer-shell`), schowek (`wl_data_device`), układy klawiatury/IME,

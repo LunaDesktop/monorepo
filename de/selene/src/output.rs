@@ -60,9 +60,51 @@ fn draw(frame: &mut Frame, model: &WindowModel) {
         let mut order: Vec<&Window> = windows.iter().collect();
         order.sort_by_key(|w| w.z);
         for w in order {
-            frame.scene.image(
-                Rect::from_xywh(w.x, w.y, w.width as f64, w.height as f64),
-                w.data.clone(),
+            // Tło treści (na wypadek przezroczystości bufora klienta).
+            frame
+                .scene
+                .fill_rect(w.content(), Color::from_rgba8(0x00, 0x00, 0x00, 0xff));
+            // Treść okna (bufor klienta).
+            frame.scene.image(w.content(), w.data.clone());
+            // Pasek tytułu (dekoracja po stronie serwera).
+            frame
+                .scene
+                .fill_rect(w.titlebar(), Color::from_rgba8(0x2c, 0x2f, 0x38, 0xff));
+            frame.scene.text(
+                TextRun::new(Point::new(w.x + 10.0, w.y + 20.0), &w.title, 13.0)
+                    .with_color(Color::from_rgba8(0xee, 0xee, 0xee, 0xff)),
+            );
+            // Przycisk zamknięcia (krzyżyk).
+            let c = w.close_rect().center();
+            let glyph = Color::from_rgba8(0xd0, 0xd0, 0xd0, 0xff);
+            frame.scene.stroke_line(
+                Point::new(c.x - 4.0, c.y - 4.0),
+                Point::new(c.x + 4.0, c.y + 4.0),
+                1.6,
+                glyph,
+            );
+            frame.scene.stroke_line(
+                Point::new(c.x + 4.0, c.y - 4.0),
+                Point::new(c.x - 4.0, c.y + 4.0),
+                1.6,
+                glyph,
+            );
+            // Uchwyt przeskalowania (3 kropki w narożniku).
+            let g = w.grip_rect();
+            for i in 0..3 {
+                let x = g.right() - 3.0 - i as f64 * 4.0;
+                let y = g.bottom() - 3.0 - i as f64 * 4.0;
+                frame.scene.fill_rect(
+                    Rect::from_xywh(x, y, 2.0, 2.0),
+                    Color::from_rgba8(0x9a, 0x9e, 0xa8, 0xff),
+                );
+            }
+            // Obramowanie całego okna.
+            frame.scene.stroke_rounded_rect(
+                w.outer(),
+                6.0,
+                1.0,
+                Color::from_rgba8(0x50, 0x54, 0x60, 0xff),
             );
         }
     }

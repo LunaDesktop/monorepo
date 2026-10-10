@@ -2,18 +2,22 @@
 //!
 //! Zdarzenia wejścia pochodzą z magistrali (`crate::input`) — przekazuje je wątek wyjścia,
 //! który odbiera je od nadrzędnego kompozytora. Tutaj tłumaczymy je na zdarzenia protokołu
-//! wysyłane do sfokusowanych powierzchni klientów.
+//! wysyłane do sfokusowanych powierzchni klientów oraz na operacje okien (przeciąganie,
+//! przeskalowanie, zamknięcie) wykonywane przez wbudowaną dekorację (SSD).
 
 use std::io::{Seek, Write};
 use std::os::fd::{AsFd, OwnedFd};
 
 use libluna_core::{ButtonState, Event, Modifiers, Point, PointerButton};
+use wayland_protocols::xdg::shell::server::{xdg_surface, xdg_toplevel};
 use wayland_server::protocol::{wl_keyboard, wl_pointer, wl_seat, wl_touch};
 use wayland_server::{
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource, WEnum,
 };
 
-use crate::state::{DragState, State};
+use crate::compositor::SurfaceData;
+use crate::shell::XdgSurfaceData;
+use crate::state::{DragState, ResizeState, State, TITLEBAR};
 
 /// Kompaktowa mapa klawiszy (standardowe reguły XKB z systemowych danych).
 const KEYMAP: &str = r#"xkb_keymap {
@@ -24,6 +28,10 @@ const KEYMAP: &str = r#"xkb_keymap {
     xkb_geometry { include "pc(pc105)" };
 };
 "#;
+
+/// Minimalny rozmiar treści okna przy przeskalowaniu.
+const MIN_W: f64 = 120.0;
+const MIN_H: f64 = 80.0;
 
 impl GlobalDispatch<wl_seat::WlSeat, ()> for State {
     fn bind(
@@ -109,7 +117,16 @@ fn make_keymap() -> Option<(OwnedFd, u32)> {
 
 // --- Trasowanie wejścia ---
 
-/// Trasuje jedno zdarzenie wejścia do klientów.
+/// Część okna, w którą trafił wskaźnik.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Part {
+    Close,
+    Grip,
+    Title,
+    Content,
+}
+
+/// Trasuje jedno zdarzenie wejścia do klientów/okien.
 pub fn handle_input(state: &mut State, event: &Event) {
     match event {
         Event::PointerMotion { position, .. } => pointer_motion(state, *position),
@@ -121,16 +138,38 @@ pub fn handle_input(state: &mut State, event: &Event) {
     }
 }
 
-/// Ostatnio przeniesiona pozycja kursora (do trasowania bez `motion`).
-fn topmost_window(state: &State, pos: Point) -> Option<usize> {
+/// Trafienie w okno (najwyższe wg `z`) i w którą jego część.
+fn hit(state: &State, pos: Point) -> Option<(usize, Part)> {
     let windows = state.windows.lock().unwrap();
     let mut best: Option<(usize, i32)> = None;
     for (i, w) in windows.iter().enumerate() {
-        if pos.x >= w.x
-            && pos.x < w.x + w.width as f64
-            && pos.y >= w.y
-            && pos.y < w.y + w.height as f64
-        {
+        if w.outer().contains(pos) {
+            match best {
+                Some((_, z)) if z >= w.z => {}
+                _ => best = Some((i, w.z)),
+            }
+        }
+    }
+    let (i, _) = best?;
+    let w = &windows[i];
+    let part = if w.close_rect().contains(pos) {
+        Part::Close
+    } else if w.grip_rect().contains(pos) {
+        Part::Grip
+    } else if w.titlebar().contains(pos) {
+        Part::Title
+    } else {
+        Part::Content
+    };
+    Some((i, part))
+}
+
+/// Najwyższe okno, którego **treść** zawiera punkt (do zdarzeń klienta).
+fn content_window(state: &State, pos: Point) -> Option<usize> {
+    let windows = state.windows.lock().unwrap();
+    let mut best: Option<(usize, i32)> = None;
+    for (i, w) in windows.iter().enumerate() {
+        if w.content().contains(pos) {
             match best {
                 Some((_, z)) if z >= w.z => {}
                 _ => best = Some((i, w.z)),
@@ -140,13 +179,25 @@ fn topmost_window(state: &State, pos: Point) -> Option<usize> {
     best.map(|(i, _)| i)
 }
 
-fn window_origin(state: &State, slot: usize) -> (f64, f64) {
+fn window_geometry(state: &State, slot: usize) -> Option<(f64, f64, f64, f64)> {
     let windows = state.windows.lock().unwrap();
-    windows.get(slot).map(|w| (w.x, w.y)).unwrap_or((0.0, 0.0))
+    windows
+        .get(slot)
+        .map(|w| (w.x, w.y, w.width as f64, w.height as f64))
+}
+
+fn content_local(state: &State, slot: usize, pos: Point) -> (f64, f64) {
+    match window_geometry(state, slot) {
+        Some((x, y, _, _)) => (pos.x - x, pos.y - (y + TITLEBAR)),
+        None => (pos.x, pos.y),
+    }
 }
 
 fn pointer_motion(state: &mut State, pos: Point) {
-    // Przeciąganie okna — przesuń je razem z kursorem.
+    if state.resize.is_some() {
+        do_resize(state, pos);
+        return;
+    }
     if let Some(drag) = state.drag {
         let mut windows = state.windows.lock().unwrap();
         if let Some(w) = windows.get_mut(drag.slot) {
@@ -157,28 +208,74 @@ fn pointer_motion(state: &mut State, pos: Point) {
     update_pointer_focus(state, pos);
     if let Some((slot, _)) = state.pointer_focus.clone() {
         let ptr = state.pointer.clone();
-        let (ox, oy) = window_origin(state, slot);
+        let (lx, ly) = content_local(state, slot, pos);
         let time = state.time_ms();
         if let Some(ptr) = ptr {
             let _ = ptr.send_event(wl_pointer::Event::Motion {
                 time,
-                surface_x: pos.x - ox,
-                surface_y: pos.y - oy,
+                surface_x: lx,
+                surface_y: ly,
             });
         }
     }
 }
 
 fn pointer_button(state: &mut State, pos: Point, button: PointerButton, st: ButtonState) {
-    update_pointer_focus(state, pos);
-    if st == ButtonState::Pressed {
-        if let Some(slot) = topmost_window(state, pos) {
-            raise_and_focus(state, slot);
-        }
+    if st == ButtonState::Released {
+        state.drag = None;
+        state.resize = None;
     }
+
+    // Obsłuż dekorację/okno pod kursorem.
+    if let Some((slot, part)) = hit(state, pos) {
+        if st == ButtonState::Pressed {
+            raise_and_focus(state, slot);
+            match part {
+                Part::Close => {
+                    pointer_leave(state);
+                    send_close(state, slot);
+                    return;
+                }
+                Part::Grip => {
+                    pointer_leave(state);
+                    if let Some((_, _, w, h)) = window_geometry(state, slot) {
+                        state.resize = Some(ResizeState {
+                            slot,
+                            start_w: w,
+                            start_h: h,
+                            start_px: pos.x,
+                            start_py: pos.y,
+                        });
+                    }
+                    return;
+                }
+                Part::Title => {
+                    pointer_leave(state);
+                    if let Some((ox, oy, _, _)) = window_geometry(state, slot) {
+                        state.drag = Some(DragState {
+                            slot,
+                            off_x: pos.x - ox,
+                            off_y: pos.y - oy,
+                        });
+                    }
+                    return;
+                }
+                Part::Content => update_pointer_focus(state, pos),
+            }
+        } else if part == Part::Content {
+            // Zwolnienie nad treścią → przekaż je klientowi poniżej.
+            update_pointer_focus(state, pos);
+        } else {
+            return;
+        }
+    } else {
+        update_pointer_focus(state, pos);
+    }
+
+    // Zdarzenie przycisku do klienta — tylko gdy kursor nad treścią okna.
     let focused = state.pointer_focus.clone();
     let ptr = state.pointer.clone();
-    if let (Some((slot, _)), Some(ptr)) = (focused, ptr) {
+    if let (Some(_), Some(ptr)) = (focused, ptr) {
         let serial = state.next_serial();
         let time = state.time_ms();
         let wl_state = match st {
@@ -191,20 +288,6 @@ fn pointer_button(state: &mut State, pos: Point, button: PointerButton, st: Butt
             button: button_code(button),
             state: wl_state,
         });
-        // Lewy przycisk: początek/koniec przeciągania okna.
-        if button == PointerButton::Left {
-            match st {
-                ButtonState::Pressed => {
-                    let (ox, oy) = window_origin(state, slot);
-                    state.drag = Some(DragState {
-                        slot,
-                        off_x: pos.x - ox,
-                        off_y: pos.y - oy,
-                    });
-                }
-                ButtonState::Released => state.drag = None,
-            }
-        }
     }
 }
 
@@ -219,52 +302,111 @@ fn pointer_leave(state: &mut State) {
 
 fn pointer_axis(state: &mut State, dx: f64, dy: f64) {
     let ptr = state.pointer.clone();
-    if let (true, Some(ptr)) = (state.pointer_focus.is_some(), ptr) {
-        let time = state.time_ms();
-        if dy != 0.0 {
-            let _ = ptr.send_event(wl_pointer::Event::Axis {
-                time,
-                axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
-                value: dy,
-            });
-        }
-        if dx != 0.0 {
-            let _ = ptr.send_event(wl_pointer::Event::Axis {
-                time,
-                axis: WEnum::Value(wl_pointer::Axis::HorizontalScroll),
-                value: dx,
-            });
+    if state.pointer_focus.is_some() {
+        if let Some(ptr) = ptr {
+            let time = state.time_ms();
+            if dy != 0.0 {
+                let _ = ptr.send_event(wl_pointer::Event::Axis {
+                    time,
+                    axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
+                    value: dy,
+                });
+            }
+            if dx != 0.0 {
+                let _ = ptr.send_event(wl_pointer::Event::Axis {
+                    time,
+                    axis: WEnum::Value(wl_pointer::Axis::HorizontalScroll),
+                    value: dx,
+                });
+            }
         }
     }
 }
 
 fn update_pointer_focus(state: &mut State, pos: Point) {
-    let target = topmost_window(state, pos);
+    let target = content_window(state, pos);
     let same = matches!((state.pointer_focus.as_ref(), target), (Some((s, _)), Some(t)) if *s == t);
     if same {
         return;
     }
-    // Opuść poprzednią powierzchnię.
     let ptr = state.pointer.clone();
     if let (Some((_, surface)), Some(ptr)) = (state.pointer_focus.clone(), ptr.clone()) {
         let serial = state.next_serial();
         let _ = ptr.send_event(wl_pointer::Event::Leave { serial, surface });
     }
     state.pointer_focus = None;
-    // Wejdź na nową.
     if let Some(slot) = target {
         if let Some(surface) = state.slots.get(slot).cloned() {
             let serial = state.next_serial();
-            let (ox, oy) = window_origin(state, slot);
+            let (lx, ly) = content_local(state, slot, pos);
             if let Some(ptr) = ptr {
                 let _ = ptr.send_event(wl_pointer::Event::Enter {
                     serial,
                     surface: surface.clone(),
-                    surface_x: pos.x - ox,
-                    surface_y: pos.y - oy,
+                    surface_x: lx,
+                    surface_y: ly,
                 });
             }
             state.pointer_focus = Some((slot, surface));
+        }
+    }
+}
+
+/// Przeskalowanie okna w trakcie przeciągania uchwytu; wysyła `xdg_toplevel.configure`.
+fn do_resize(state: &mut State, pos: Point) {
+    let Some(rs) = state.resize else {
+        return;
+    };
+    let nw = (rs.start_w + (pos.x - rs.start_px)).max(MIN_W);
+    let nh = (rs.start_h + (pos.y - rs.start_py)).max(MIN_H);
+    {
+        let mut windows = state.windows.lock().unwrap();
+        if let Some(w) = windows.get_mut(rs.slot) {
+            w.width = nw as i32;
+            w.height = nh as i32;
+        }
+    }
+    send_configure(state, rs.slot, nw, nh);
+}
+
+/// Wysyła konfigurację rozmiaru (`xdg_surface.configure` + `xdg_toplevel.configure`).
+fn send_configure(state: &mut State, slot: usize, w: f64, h: f64) {
+    let Some(surface) = state.slots.get(slot).cloned() else {
+        return;
+    };
+    let Some(sd) = surface.data::<SurfaceData>() else {
+        return;
+    };
+    let Some(xs) = sd.xdg_surface.lock().unwrap().clone() else {
+        return;
+    };
+    let serial = state.next_serial();
+    let _ = xs.send_event(xdg_surface::Event::Configure { serial });
+    if let Some(xd) = xs.data::<XdgSurfaceData>() {
+        if let Some(tl) = xd.toplevel.lock().unwrap().as_ref() {
+            let _ = tl.send_event(xdg_toplevel::Event::Configure {
+                width: w as i32,
+                height: h as i32,
+                states: vec![3],
+            });
+        }
+    }
+}
+
+/// Prosi klienta o zamknięcie okna (`xdg_toplevel.close`).
+fn send_close(state: &mut State, slot: usize) {
+    let Some(surface) = state.slots.get(slot).cloned() else {
+        return;
+    };
+    let Some(sd) = surface.data::<SurfaceData>() else {
+        return;
+    };
+    let Some(xs) = sd.xdg_surface.lock().unwrap().clone() else {
+        return;
+    };
+    if let Some(xd) = xs.data::<XdgSurfaceData>() {
+        if let Some(tl) = xd.toplevel.lock().unwrap().as_ref() {
+            let _ = tl.send_event(xdg_toplevel::Event::Close);
         }
     }
 }
@@ -309,7 +451,6 @@ fn keyboard_key(state: &mut State, keysym: u32, st: ButtonState) {
     }
     let kb = state.keyboard.clone();
     let Some(kb) = kb else { return };
-    // Modyfikatory: synchronizuj wciśnięcia Shift/Ctrl/Alt/Super.
     sync_modifiers(state, &kb, keysym, st);
     if is_modifier_keysym(keysym) {
         return;
@@ -331,19 +472,14 @@ fn keyboard_key(state: &mut State, keysym: u32, st: ButtonState) {
 }
 
 /// Wysyła wciśnięcia/zwolnienia klawiszy modyfikujących wynikające z bieżącego stanu.
-///
-/// `keysym`/`st` opisują zdarzenie, które przyszło; aktualny stan modyfikatorów wyliczamy
-/// z samego zdarzenia (nacisk modyfikatora) — dla liter to wystarcza w praktyce.
 fn sync_modifiers(state: &mut State, kb: &wl_keyboard::WlKeyboard, keysym: u32, st: ButtonState) {
     let mut mods = state.sent_mods;
-    let target = modifier_for_keysym(keysym);
-    if let Some(field) = target {
+    if let Some(field) = modifier_for_keysym(keysym) {
         match st {
             ButtonState::Pressed => *field(&mut mods) = true,
             ButtonState::Released => *field(&mut mods) = false,
         }
     }
-    // Wyślij różnice jako wciśnięcia/zwolnienia konkretnych klawiszy.
     for (before, now, code) in [
         (state.sent_mods.shift, mods.shift, 50u32),
         (state.sent_mods.ctrl, mods.ctrl, 37),
@@ -481,6 +617,9 @@ fn keysym_to_keycode(keysym: u32) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::Window;
+    use libluna_render::ImageData;
+    use std::sync::Arc;
 
     #[test]
     fn maps_common_keys() {
@@ -505,5 +644,33 @@ mod tests {
     fn recognizes_modifier_keysyms() {
         assert!(is_modifier_keysym(0xffe1)); // Shift_L
         assert!(!is_modifier_keysym(0x0061));
+    }
+
+    fn sample_window() -> Window {
+        Window {
+            x: 100.0,
+            y: 50.0,
+            width: 200,
+            height: 120,
+            z: 1,
+            title: "Test".to_owned(),
+            data: Arc::new(ImageData::empty(200, 120)),
+        }
+    }
+
+    #[test]
+    fn decoration_parts_are_laid_out() {
+        let w = sample_window();
+        // Pasek tytułu na górze, treść pod nim.
+        assert_eq!(w.titlebar().bottom(), w.y + TITLEBAR);
+        assert_eq!(w.content().y(), w.y + TITLEBAR);
+        // Przycisk zamknięcia w prawym górnym narożniku.
+        let c = w.close_rect();
+        assert!(c.contains(Point::new(w.x + 200.0 - 1.0, w.y + 1.0)));
+        assert!(!c.contains(Point::new(w.x + 10.0, w.y + 5.0)));
+        // Uchwyt przeskalowania w prawym-dolnym narożniku treści.
+        let g = w.grip_rect();
+        let c = w.content();
+        assert!(g.contains(Point::new(c.right() - 1.0, c.bottom() - 1.0)));
     }
 }

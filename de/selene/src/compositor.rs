@@ -9,7 +9,7 @@ use wayland_server::{
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
 };
 
-use crate::shell::XdgSurfaceData;
+use crate::shell::{XdgSurfaceData, XdgToplevelData};
 use crate::shm::BufferData;
 use crate::state::{State, Window};
 
@@ -162,6 +162,15 @@ fn composite(state: &mut State, surface: &wl_surface::WlSurface, data: &SurfaceD
     };
     let image = std::sync::Arc::new(ImageData::new(w as u32, h as u32, rgba));
     let z = state.next_z();
+    let title = xdg_surface
+        .data::<XdgSurfaceData>()
+        .and_then(|d| {
+            d.toplevel.lock().unwrap().as_ref().and_then(|tl| {
+                tl.data::<XdgToplevelData>()
+                    .map(|td| td.title.lock().unwrap().clone())
+            })
+        })
+        .unwrap_or_default();
 
     let mut slot = data.slot.lock().unwrap();
     let mut windows = state.windows.lock().unwrap();
@@ -176,6 +185,7 @@ fn composite(state: &mut State, surface: &wl_surface::WlSurface, data: &SurfaceD
                 width: w,
                 height: h,
                 z,
+                title: title.clone(),
                 data: image.clone(),
             });
             *slot = Some(i);
@@ -186,6 +196,9 @@ fn composite(state: &mut State, surface: &wl_surface::WlSurface, data: &SurfaceD
     if let Some(window) = windows.get_mut(idx) {
         window.width = w;
         window.height = h;
+        if !title.is_empty() {
+            window.title = title;
+        }
         window.data = image;
     }
     drop(windows);
