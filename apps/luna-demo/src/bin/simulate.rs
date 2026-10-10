@@ -9,7 +9,7 @@
 use std::error::Error;
 
 use libluna_core::{
-    Accent, ButtonState, Event, Modifiers, Point, PointerButton, PointerEvent, Size,
+    Accent, ButtonState, Event, KeyEvent, Modifiers, Point, PointerButton, PointerEvent, Size,
     ThemePreference, ThemeSettings,
 };
 use libluna_i18n::{set_locale, Locale};
@@ -198,6 +198,72 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     frames.push(render_pixels(&settings, &demo, &text, size));
     labels.push("11. Popover \u{201e}Opcje\u{201d}".into());
+
+    // 12. Klik popovera (zamknięcie) i zmiana akcentu → powiadomienie (Toast) z „Cofnij”.
+    click!(Point::new(450.0, 300.0));
+    let c = layout!().accents[1].center();
+    click!(c);
+    assert_eq!(
+        settings.accent(),
+        Accent::Teal,
+        "akcent nie ustawił się na Teal"
+    );
+    assert!(demo.toast.is_open(), "powiadomienie się nie pokazało");
+    frames.push(render_pixels(&settings, &demo, &text, size));
+    labels.push("12. Powiadomienie (Toast)".into());
+
+    // 13. Klik „Cofnij” w powiadomieniu → powrót akcentu, powiadomienie znika.
+    let theme = settings.resolve(false);
+    let undo = demo
+        .toast
+        .action_rect(size, &theme, &text)
+        .expect("akcja powiadomienia")
+        .center();
+    click!(undo);
+    assert_eq!(
+        settings.accent(),
+        Accent::Purple,
+        "akcent nie wrócił po „Cofnij”"
+    );
+    assert!(!demo.toast.is_open(), "powiadomienie nie zniknęło");
+    frames.push(render_pixels(&settings, &demo, &text, size));
+    labels.push("13. Cofnięto akcent".into());
+
+    // 14. Filtr bez wyników → ekran stanu (StatusPage) z akcją „Wyczyść”.
+    let c = layout!().search.center();
+    click!(c);
+    assert!(demo.search.is_focused(), "pole wyszukiwania bez fokusu");
+    for ch in ['x', 'y', 'z'] {
+        let key = Event::Key(KeyEvent {
+            keysym: ch as u32,
+            text: Some(ch.to_string()),
+            state: ButtonState::Pressed,
+            modifiers: Modifiers::NONE,
+            repeat: false,
+        });
+        let theme = settings.resolve(false);
+        ui::handle_events(&mut settings, &[key], size, &theme, &text, &mut demo);
+    }
+    assert!(
+        ui::empty_state(&demo).is_some(),
+        "brak ekranu stanu dla braku wyników"
+    );
+    frames.push(render_pixels(&settings, &demo, &text, size));
+    labels.push("14. Brak wyników (StatusPage)".into());
+
+    // 15. Klik „Wyczyść” w ekranie stanu → lista wraca.
+    let theme = settings.resolve(false);
+    let clear = ui::empty_state(&demo)
+        .expect("ekran stanu")
+        .rects(layout!().items, &theme)
+        .action
+        .expect("akcja ekranu stanu")
+        .center();
+    click!(clear);
+    assert!(demo.search.is_empty(), "filtr nie został wyczyszczony");
+    assert!(ui::empty_state(&demo).is_none(), "ekran stanu nie zniknął");
+    frames.push(render_pixels(&settings, &demo, &text, size));
+    labels.push("15. Filtr wyczyszczony".into());
 
     // Zapis klatek.
     for (i, pixels) in frames.iter().enumerate() {

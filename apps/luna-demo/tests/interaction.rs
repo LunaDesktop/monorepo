@@ -309,3 +309,69 @@ fn language_dropdown_opens_and_selects() {
     click(&mut settings, &mut demo, last);
     assert!(demo.popover.is_none());
 }
+
+#[test]
+fn accent_change_shows_toast_and_undo_reverts() {
+    let mut settings = ThemeSettings::default();
+    let mut demo = Demo::default();
+
+    // Zmiana akcentu pokazuje powiadomienie.
+    let dot = layout(&settings, &demo).accents[2].center();
+    click(&mut settings, &mut demo, dot);
+    assert_eq!(settings.accent(), Accent::ALL[2]);
+    assert!(demo.toast.is_open());
+
+    // Klik „Cofnij” przywraca poprzedni akcent i chowa powiadomienie.
+    let theme = settings.resolve(false);
+    let text = TextEngine::system();
+    let undo = demo
+        .toast
+        .action_rect(size(), &theme, &text)
+        .expect("akcja powiadomienia")
+        .center();
+    click(&mut settings, &mut demo, undo);
+    assert_eq!(settings.accent(), Accent::default());
+    assert!(!demo.toast.is_open());
+}
+
+#[test]
+fn search_without_results_shows_empty_state_that_clears() {
+    let mut settings = ThemeSettings::default();
+    let mut demo = Demo::default();
+    demo.search.set_text("zzz");
+
+    let theme = settings.resolve(false);
+    let action = ui::empty_state(&demo)
+        .expect("ekran stanu dla braku wyników")
+        .rects(layout(&settings, &demo).items, &theme)
+        .action
+        .expect("przycisk akcji")
+        .center();
+    click(&mut settings, &mut demo, action);
+    assert!(demo.search.is_empty());
+    assert!(ui::empty_state(&demo).is_none());
+}
+
+#[test]
+fn search_filters_items_and_selection_maps_to_full_list() {
+    let mut settings = ThemeSettings::default();
+    let mut demo = Demo::default();
+    demo.search.set_text("proj");
+
+    let visible = ui::visible_indices(&demo);
+    assert_eq!(
+        visible.len(),
+        1,
+        "filtr powinien zawęzić listę do jednego elementu"
+    );
+    let view = ui::item_view(&demo);
+    assert_eq!(view.len(), 1);
+
+    // Klik widocznego elementu zaznacza go w pełnej liście.
+    let theme = settings.resolve(false);
+    let slot = view
+        .slot_rect(layout(&settings, &demo).items, 0, &theme)
+        .center();
+    click(&mut settings, &mut demo, slot);
+    assert_eq!(demo.items.selected(), Some(visible[0]));
+}

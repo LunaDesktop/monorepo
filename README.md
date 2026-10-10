@@ -198,7 +198,10 @@ cargo run -p libluna --example minimal
   (`BottomSheet` z karuzelą stron `Pager`), zamykany klikiem w tło, przyciskiem `✕` lub
   przeciągnięciem w dół. W karcie **Pliki** kliknij element **okruszków** (nawigacja „w górę”),
   **pole wyszukiwania** (fokus) lub **plik/katalog** (zaznaczenie); przełącznik `Lista | Siatka`
-  zmienia tryb `ItemView`, a **rolka/przeciąganie paska** przewija listę. Klikaj segmenty `Jasny | Ciemny | Auto`, kropki
+  zmienia tryb `ItemView`, a **rolka/przeciąganie paska** przewija listę. Wpisany tekst w polu
+  **wyszukiwania filtruje** elementy; gdy nic nie pasuje, pojawia się ekran stanu (`StatusPage`)
+  z przyciskiem **„Wyczyść”**. Zmiana **koloru akcentu** pokazuje `Toast` z akcją **„Cofnij”**,
+  która przywraca poprzedni akcent. Klikaj segmenty `Jasny | Ciemny | Auto`, kropki
   **koloru akcentu**, przełączniki OPCJA A / **Pasek dolny** / **Pasek boczny** i **przeciągaj**
   suwak głośności oraz krawędź paska bocznego (150–460 px). Kontrolki okna `[—][□][✕]` działają
   (minimalizacja/maksymalizacja/zamknięcie przez warstwę platformy).
@@ -226,7 +229,7 @@ w `~/.config/luna/theme.conf`.
 Rozmiary i paddingi kontrolek nie są już stałymi w widgetach, lecz **tokenami**
 (`Theme::metrics`) podzielonymi na sekcje per widget: `headerbar`, `button`, `switch`,
 `slider`, `dropdown`, `menu`, `nav`, `segmented`, `tabs`, `sheet`, `pager`, `pathbar`, `entry`,
-`itemview`, `scrollview`, `stepper`, `check`, `radio`, `card`, `row`. Dzięki temu wygląd steruje **także
+`itemview`, `scrollview`, `stepper`, `check`, `radio`, `card`, `row`, `toast`, `status`. Dzięki temu wygląd steruje **także
 geometrią**, nie tylko kolorami — np. `theme.metrics.switch.width` albo
 `theme.metrics.headerbar.height`. Widgety czytają te wartości w `paint`/`layout`, więc
 przyszły, instalowany styl może zmienić np. wysokość paska tytułu czy rozmiar przełącznika
@@ -301,14 +304,18 @@ XDG_CONFIG_HOME="$PWD/examples" cargo run -p luna-demo --bin render -- --lang fr
   (pole wyszukiwania: lupka, kursor, czyszczenie), `ItemView` (pliki/katalogi w siatce lub
   liście, z zaznaczaniem i przewijaniem) i `ScrollView` (pionowe przewijanie: rolka + „kciuk”)
   oraz `Stepper`, `CheckButton` i `RadioGroup` (krokowiec, pole wyboru, wybór jednokrotny),
-  a także `Card` (karta z nagłówkiem) i `ActionRow` (wiersz ustawień) oraz wspólny `PaintCtx`.
+  a także `Card` (karta z nagłówkiem), `ActionRow` (wiersz ustawień), `Toast` (powiadomienie
+  nakładkowe z akcją, np. „Cofnij”) oraz `StatusPage` (ekran stanu: ikona, tytuł, opis, akcja —
+  używany jako „pusty stan” listy) i wspólny `PaintCtx`.
 - `luna-demo`: `HeaderBar` jako widget (tytuł + `[—][□][✕]` po prawej + treść: `◧`, `+`,
   „Opcje ▾”, `☰`); karty i wiersze ustawień rysowane widgetami (`Card`, `ActionRow`);
   **popover `☰`**, chowany i rozciągany (drag) panel boczny (`NavList`),
   chowany **pasek dolny**, wybór motywu/widoku (`ViewSwitcher`), `Switch`, `Slider`, `DropDown`,
   **zakładki** (`TabBar` + `TabView`) oraz **dolny panel** (`BottomSheet` z karuzelą `Pager`,
   otwierany z menu `☰` → „O aplikacji”), a także kartę **Pliki** (`PathBar` + `SearchEntry` +
-  `ItemView` — przełącznik **Widok: Lista | Siatka** zmienia tryb widoku elementów).
+  `ItemView` — przełącznik **Widok: Lista | Siatka** zmienia tryb widoku elementów; wyszukiwanie
+  **filtruje** elementy, a brak wyników pokazuje `StatusPage` „Brak wyników” z akcją „Wyczyść”).
+  Zmiana **koloru akcentu** wyświetla `Toast` z akcją **„Cofnij”**.
 - Rozmiary i paddingi kontrolek są **tokenami** (`Theme::metrics`), więc geometria jest tak samo
   „stylowalna” jak kolory — nie ma już stałych typów w widgetach (`HeaderBar::HEIGHT`,
   `Switch::WIDTH`, `Button::HEIGHT`…).
@@ -322,6 +329,11 @@ z pliku doładowanego w runtime:
 ![Ustawienia — ciemny](docs/images/settings-dark.png)
 ![Ustawienia — ciemny, DE, fioletowy](docs/images/settings-de-dark.png)
 ![Ustawienia — francuski z pliku](docs/images/settings-fr.png)
+
+Przebieg interakcji (headless `simulate`) — m.in. menu `☰`, dolny panel, powiadomienie (`Toast`)
+karta 12 i ekran stanu („Brak wyników”) klatka 14:
+
+![Interakcje demo](docs/images/demo-montage.png)
 
 ## Motywacja i kontekst
 

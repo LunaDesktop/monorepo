@@ -13,8 +13,8 @@ use libluna_render::TextEngine;
 use libluna_widgets::{
     ActionRow, BottomSheet, Button, Card, CheckButton, ControlsLayout, ControlsSide, DropDown,
     HeaderBar, Item, ItemView, Menu, MenuEntry, NavEntry, NavList, Pager, PaintCtx, PathBar,
-    RadioGroup, ScrollView, SearchEntry, Slider, Stepper, StepperSide, Switch, Tab, TabBar,
-    TabView, ViewMode, ViewSwitcher, WindowControl,
+    RadioGroup, ScrollView, SearchEntry, Slider, StatusPage, Stepper, StepperSide, Switch, Tab,
+    TabBar, TabView, Toast, ViewMode, ViewSwitcher, WindowControl,
 };
 
 const STATUS_H: f64 = 28.0;
@@ -93,6 +93,9 @@ pub struct Demo {
     pub options_stepper_hover: Option<StepperSide>,
     pub options_radio_hover: Option<usize>,
     pub options_check_hover: bool,
+    /// Powiadomienie (nakładka) oraz akcent sprzed ostatniej zmiany (do „Cofnij”).
+    pub toast: Toast,
+    pub prev_accent: Accent,
 }
 
 impl Default for Demo {
@@ -154,6 +157,8 @@ impl Default for Demo {
             options_stepper_hover: None,
             options_radio_hover: None,
             options_check_hover: false,
+            toast: Toast::new(""),
+            prev_accent: Accent::default(),
         }
     }
 }
@@ -244,13 +249,30 @@ pub fn path_bar(demo: &Demo) -> PathBar {
     bar
 }
 
+/// Indeksy elementów z `demo.items`, które przechodzą obecny filtr wyszukiwania.
+pub fn visible_indices(demo: &Demo) -> Vec<usize> {
+    let query = demo.search.text().trim().to_lowercase();
+    let all = demo.items.items();
+    if query.is_empty() {
+        return (0..all.len()).collect();
+    }
+    all.iter()
+        .enumerate()
+        .filter(|(_, it)| tr(&it.label).to_lowercase().contains(&query))
+        .map(|(i, _)| i)
+        .collect()
+}
+
 /// Widok elementów demo z przetłumaczonymi etykietami (etykiety to klucze i18n).
+///
+/// Wykorzystuje filtr wyszukiwania, a zaznaczenie (indeks w pełnej liście) mapuje
+/// na widoczną pozycję.
 pub fn item_view(demo: &Demo) -> ItemView {
-    let items: Vec<Item> = demo
-        .items
-        .items()
+    let visible = visible_indices(demo);
+    let items: Vec<Item> = visible
         .iter()
-        .map(|it| {
+        .map(|&i| {
+            let it = &demo.items.items()[i];
             let mut item = Item::new(tr(&it.label)).kind(it.kind);
             if let Some(detail) = &it.detail {
                 item = item.detail(detail.clone());
@@ -260,10 +282,31 @@ pub fn item_view(demo: &Demo) -> ItemView {
         .collect();
     let mut view = ItemView::new(items);
     view.set_mode(demo.items.mode());
-    view.set_selected(demo.items.selected());
+    view.set_selected(
+        demo.items
+            .selected()
+            .and_then(|s| visible.iter().position(|&i| i == s)),
+    );
     view.set_hovered(demo.items_hover);
     view.set_scroll(demo.items.scroll());
     view
+}
+
+/// Ekran stanu dla listy plików: brak wyników wyszukiwania albo pusty katalog.
+///
+/// W demo obszar listy jest niski, więc używamy wariantu kompaktowego (tytuł + akcja).
+pub fn empty_state(demo: &Demo) -> Option<StatusPage> {
+    let query = demo.search.text().trim();
+    if !query.is_empty() {
+        if visible_indices(demo).is_empty() {
+            return Some(StatusPage::new(tr("No results")).action(tr("Clear")));
+        }
+        None
+    } else if demo.items.is_empty() {
+        Some(StatusPage::new(tr("Nothing here")))
+    } else {
+        None
+    }
 }
 
 /// Kody języków i kontrolka wyboru (nazwy natywne).
@@ -554,6 +597,7 @@ pub fn handle_events(
     let tabs_bar = tab_bar(demo);
     let path = path_bar(demo);
     let items = item_view(demo);
+    let visible = visible_indices(demo);
     let nav = make_nav();
     let slider = Slider::new(demo.volume);
     let popover = popover_menu(size, theme, text, &lay, demo);
@@ -561,7 +605,7 @@ pub fn handle_events(
     let header = header_bar();
 
     demo.files_scroll
-        .set_content_height(demo.items.content_height(lay.items, theme));
+        .set_content_height(items.content_height(lay.items, theme));
 
     for event in events {
         match event {
@@ -584,6 +628,13 @@ pub fn handle_events(
                                 demo.pager_dragging = true;
                                 demo.pager.begin_drag(p.x);
                             }
+                            continue;
+                        }
+
+                        // Akcja powiadomienia (nakładka) ma pierwszeństwo nad treścią.
+                        if demo.toast.is_open() && demo.toast.action_at(size, theme, text, p) {
+                            settings.set_accent(demo.prev_accent);
+                            demo.toast.set_open(false);
                             continue;
                         }
 
@@ -656,10 +707,13 @@ pub fn handle_events(
                             } else {
                                 ViewMode::List
                             });
+                            let mut view = item_view(demo);
+                            view.set_scroll(demo.items.scroll());
+                            view.clamp_scroll(lay.items, theme);
+                            demo.items.set_scroll(view.scroll());
                             demo.files_scroll
-                                .set_content_height(demo.items.content_height(lay.items, theme));
-                            demo.items.clamp_scroll(lay.items, theme);
-                            demo.files_scroll.set_offset(demo.items.scroll(), lay.items);
+                                .set_content_height(view.content_height(lay.items, theme));
+                            demo.files_scroll.set_offset(view.scroll(), lay.items);
                         } else if let Some(i) = tabs_bar.index_at(lay.tabs, text, theme, p) {
                             demo.tabs.select(i);
                         } else if demo.search.contains(lay.search, p) {
@@ -669,10 +723,15 @@ pub fn handle_events(
                             demo.search.set_focused(true);
                         } else if let Some(i) = path.index_at(lay.path, text, theme, p) {
                             demo.path.truncate(i + 1);
+                        } else if let Some(page) = empty_state(demo) {
+                            // Akcja pustego stanu (np. „Wyczyść” w braku wyników).
+                            if page.action_at(lay.items, theme, p) {
+                                demo.search.clear();
+                            }
                         } else if demo.files_scroll.begin_drag(p, lay.items, theme) {
                             demo.scroll_dragging = true;
                         } else if let Some(i) = items.index_at(lay.items, p, theme) {
-                            demo.items.set_selected(Some(i));
+                            demo.items.set_selected(visible.get(i).copied());
                         } else if let Some(i) = nav.index_at(lay.sidebar, p, theme) {
                             demo.nav_selected = Some(i);
                         } else if lay.option_a.contains(p) {
@@ -687,7 +746,7 @@ pub fn handle_events(
                         } else {
                             for (i, r) in lay.accents.iter().enumerate() {
                                 if r.contains(p) {
-                                    settings.set_accent(Accent::ALL[i]);
+                                    apply_accent(settings, demo, Accent::ALL[i]);
                                 }
                             }
                         }
@@ -805,7 +864,7 @@ pub fn handle_events(
                             .iter()
                             .position(|a| *a == settings.accent())
                             .unwrap_or(0);
-                        settings.set_accent(Accent::ALL[(idx + 1) % Accent::ALL.len()]);
+                        apply_accent(settings, demo, Accent::ALL[(idx + 1) % Accent::ALL.len()]);
                     }
                     // `g` — następny język
                     0x67 => cycle_language(),
@@ -823,6 +882,17 @@ pub fn handle_events(
             _ => {}
         }
     }
+}
+
+/// Zmienia akcent (o ile inny), zapamiętuje poprzedni i pokazuje powiadomienie z „Cofnij”.
+fn apply_accent(settings: &mut ThemeSettings, demo: &mut Demo, accent: Accent) {
+    if settings.accent() == accent {
+        return;
+    }
+    demo.prev_accent = settings.accent();
+    settings.set_accent(accent);
+    demo.toast = Toast::new(tr("Accent changed")).action(tr("Undo"));
+    demo.toast.show();
 }
 
 fn cycle_language() {
@@ -914,6 +984,11 @@ pub fn build_scene(
         sheet.set_title(Some(tr("About")));
         sheet.paint(&mut paint, size);
         draw_sheet_content(&mut paint, demo, size);
+    }
+
+    // Powiadomienie („toast”) nad wszystkim.
+    if demo.toast.is_open() {
+        demo.toast.paint(&mut paint, size);
     }
 }
 
@@ -1128,8 +1203,13 @@ fn draw_content(
 
     item_view(demo).paint(paint, lay.items);
 
+    // Pusty stan (brak wyników / pusty katalog) zamiast listy.
+    if let Some(page) = empty_state(demo) {
+        page.paint(paint, lay.items);
+    }
+
     let mut scrollbar = demo.files_scroll;
-    scrollbar.set_content_height(demo.items.content_height(lay.items, &theme));
+    scrollbar.set_content_height(item_view(demo).content_height(lay.items, &theme));
     scrollbar.paint_scrollbar(paint, lay.items);
 }
 

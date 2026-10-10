@@ -40,7 +40,8 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   `PathBar` (okruszki), `SearchEntry` (pole wyszukiwania), `ItemView` (pliki/katalogi: siatka
   lub lista) i `ScrollView` (przewijanie), oraz `Stepper`, `CheckButton` i `RadioGroup`
   (krokowiec, checkbox, wybór jednokrotny); do tego `Card` i `ActionRow` (karty i wiersze
-  ustawień); wspólny `PaintCtx`; testy hit-testingu bez okna.
+  ustawień), `Toast` (powiadomienie nakładkowe z akcją) i `StatusPage` (ekran stanu: ikona,
+  tytuł, opis, akcja — np. „pusty stan” listy); wspólny `PaintCtx`; testy hit-testingu bez okna.
 - `libluna-platform`: realne akcje okna z `Frame` (`close`/`minimize`/`toggle_maximize`).
 - Demo używa widgetów zamiast ręcznego rysowania (pasek boczny, wybór motywu/widoku, menu `☰`,
   przycisk „Opcje”, przełączniki, suwak, wybór języka, pasek tytułu, zakładki `TabBar`/`TabView`).
@@ -108,8 +109,9 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
 | DropDown | `libluna-widgets` | Settings |
 | Button (pill/suggested/flat) | `libluna-widgets` | Settings |
 | Stepper / Check / Radio | `libluna-widgets` | Files (popover) |
+| Toast | `libluna-widgets` | Settings, Files |
 | StatusBar / bottom info | `libluna-widgets` | obie |
-| StatusPage | `libluna-adwaita` | (docelowo) |
+| StatusPage (pusty stan) | `libluna-widgets` | Files |
 
 ## Kryterium „gotowca” (Definition of Done dla MVP)
 Odtworzenie **obu makiet** (Settings i Files) wyłącznie na libLunie, bez GTK4, z jasnym i

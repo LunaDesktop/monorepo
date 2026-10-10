@@ -447,6 +447,32 @@ pub struct ActionRowMetrics {
     pub gap: f64,
 }
 
+/// Geometria powiadomienia ([`Toast`](crate::style)).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ToastMetrics {
+    /// Odstęp od dolnej krawędzi okna.
+    pub margin_bottom: f64,
+    /// Padding poziomy (wewnątrz).
+    pub pad_x: f64,
+    /// Odstęp między tekstem a akcją.
+    pub gap: f64,
+    /// Wysokość powiadomienia.
+    pub height: f64,
+}
+
+/// Geometria strony stanu ([`StatusPage`](crate::style)).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StatusPageMetrics {
+    /// Bok ikony.
+    pub icon: f64,
+    /// Odstęp pionowy między elementami.
+    pub gap: f64,
+    /// Szerokość przycisku akcji.
+    pub button_w: f64,
+    /// Wysokość przycisku akcji.
+    pub button_h: f64,
+}
+
 /// Geometria kontrolek („component metrics”) — rozmiary i paddingi w pikselach logicznych.
 ///
 /// Widgety nie mają już własnych stałych rozmiarów: czytają je z motywu, dzięki czemu
@@ -474,6 +500,8 @@ pub struct Metrics {
     pub radio: RadioMetrics,
     pub card: CardMetrics,
     pub row: ActionRowMetrics,
+    pub toast: ToastMetrics,
+    pub status: StatusPageMetrics,
 }
 
 impl Metrics {
@@ -589,6 +617,18 @@ impl Metrics {
             row: ActionRowMetrics {
                 pad_x: 12.0,
                 gap: 8.0,
+            },
+            toast: ToastMetrics {
+                margin_bottom: 40.0,
+                pad_x: 16.0,
+                gap: 16.0,
+                height: 40.0,
+            },
+            status: StatusPageMetrics {
+                icon: 64.0,
+                gap: 12.0,
+                button_w: 160.0,
+                button_h: 34.0,
             },
         }
     }
