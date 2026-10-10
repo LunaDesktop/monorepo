@@ -6,7 +6,7 @@
 //! te ze stanem (Paned, Stack, PopoverMenuBar) rysują się i obsługują trafienia.
 
 use libluna_core::style::weight;
-use libluna_core::{Point, Rect, Theme};
+use libluna_core::{Animation, Easing, Point, Rect, Theme};
 use libluna_render::TextEngine;
 
 use crate::ctx::PaintCtx;
@@ -308,14 +308,41 @@ impl Paned {
     }
 }
 
+/// Sposób przejścia między stronami [`Stack`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StackTransition {
+    /// Bez animacji (natychmiastowa zmiana).
+    #[default]
+    None,
+    /// Wsuwanie w poziomie.
+    SlideHorizontal,
+    /// Wsuwanie w pionie.
+    SlideVertical,
+    /// Przenikanie (crossfade).
+    Fade,
+}
+
+/// Pojedyncza klatka strony w trakcie przejścia: prostokąt i krycie (0..1).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StackFrame {
+    pub rect: Rect,
+    pub alpha: f64,
+}
+
 /// Stos stron: wiele dzieci, jedno widoczne (bez zakładek).
 ///
 /// W odróżnieniu od [`TabView`](crate::TabView) nie ma paska zakładek — przełączaniem
-/// steruje aplikacja (np. przez [`ViewSwitcher`](crate::ViewSwitcher)).
+/// steruje aplikacja (np. przez [`ViewSwitcher`](crate::ViewSwitcher)). Opcjonalnie zmiana
+/// strony może być animowana ([`StackTransition`]); postęp animacji sterowany jest
+/// z aplikacji przez [`Stack::advance`], a klatki wychodzącej/przychodzącej daje
+/// [`Stack::frames`].
 #[derive(Debug, Clone, Default)]
 pub struct Stack {
     count: usize,
     visible: usize,
+    previous: Option<usize>,
+    transition: StackTransition,
+    progress: Animation,
 }
 
 impl Stack {
@@ -324,7 +351,11 @@ impl Stack {
     }
 
     pub fn with_count(count: usize) -> Self {
-        Self { count, visible: 0 }
+        Self {
+            count,
+            visible: 0,
+            ..Self::default()
+        }
     }
 
     pub fn count(&self) -> usize {
@@ -335,10 +366,44 @@ impl Stack {
         self.visible
     }
 
+    /// Indeks strony wychodzącej w trakcie animacji przejścia.
+    pub fn previous_index(&self) -> Option<usize> {
+        self.previous
+    }
+
+    /// Ustawia sposób przejścia między stronami.
+    pub fn set_transition(&mut self, transition: StackTransition) {
+        self.transition = transition;
+    }
+
+    pub fn transition(&self) -> StackTransition {
+        self.transition
+    }
+
+    /// Ustawia krzywą wygładzania przejścia.
+    pub fn set_transition_easing(&mut self, easing: Easing) {
+        self.progress.set_easing(easing);
+    }
+
+    pub fn is_animating(&self) -> bool {
+        self.previous.is_some() && self.progress.is_animating()
+    }
+
+    /// Ustawia widoczną stronę; przy włączonym przejściu startuje animację.
     pub fn set_visible_index(&mut self, index: usize) {
-        if self.count > 0 {
-            self.visible = index.min(self.count - 1);
+        if self.count == 0 {
+            return;
         }
+        let index = index.min(self.count - 1);
+        if index == self.visible {
+            return;
+        }
+        if self.transition != StackTransition::None {
+            self.previous = Some(self.visible);
+            self.progress.jump_to(0.0);
+            self.progress.animate_to(1.0);
+        }
+        self.visible = index;
     }
 
     pub fn is_visible(&self, index: usize) -> bool {
@@ -357,18 +422,93 @@ impl Stack {
             if self.visible >= self.count && self.count > 0 {
                 self.visible = self.count - 1;
             }
+            self.previous = None;
         }
     }
 
     pub fn next(&mut self) {
         if self.count > 0 {
-            self.visible = (self.visible + 1) % self.count;
+            self.set_visible_index((self.visible + 1) % self.count);
         }
     }
 
     pub fn prev(&mut self) {
         if self.count > 0 {
-            self.visible = (self.visible + self.count - 1) % self.count;
+            self.set_visible_index((self.visible + self.count - 1) % self.count);
+        }
+    }
+
+    /// Krok animacji przejścia; po jej zakończeniu czyści stronę wychodzącą.
+    /// Zwraca `true`, gdy animacja trwa dalej.
+    pub fn advance(&mut self, dt: f64, duration: f64) -> bool {
+        if self.previous.is_none() {
+            return false;
+        }
+        let animating = self.progress.advance(dt, duration);
+        if !animating {
+            self.previous = None;
+        }
+        animating
+    }
+
+    /// Klatki `(wychodząca, przychodząca)` dla bieżącego postępu przejścia.
+    pub fn frames(&self, rect: Rect) -> (StackFrame, StackFrame) {
+        let full = |alpha: f64| StackFrame { rect, alpha };
+        if self.previous.is_none() {
+            return (full(0.0), full(1.0));
+        }
+        let t = self.progress.value().clamp(0.0, 1.0);
+        match self.transition {
+            StackTransition::None => (full(0.0), full(1.0)),
+            StackTransition::Fade => (full(1.0 - t), full(t)),
+            StackTransition::SlideHorizontal => {
+                let out = Rect::from_xywh(
+                    rect.x() - rect.width() * t,
+                    rect.y(),
+                    rect.width(),
+                    rect.height(),
+                );
+                let inc = Rect::from_xywh(
+                    rect.x() + rect.width() * (1.0 - t),
+                    rect.y(),
+                    rect.width(),
+                    rect.height(),
+                );
+                (
+                    StackFrame {
+                        rect: out,
+                        alpha: 1.0,
+                    },
+                    StackFrame {
+                        rect: inc,
+                        alpha: 1.0,
+                    },
+                )
+            }
+            StackTransition::SlideVertical => {
+                let out = Rect::from_xywh(
+                    rect.x(),
+                    rect.y() - rect.height() * t,
+                    rect.width(),
+                    rect.height(),
+                );
+                let inc = Rect::from_xywh(
+                    rect.x(),
+                    rect.y() + rect.height() * (1.0 - t),
+                    rect.width(),
+                    rect.height(),
+                );
+                (
+                    StackFrame {
+                        rect: out,
+                        alpha: 1.0,
+                    },
+                    StackFrame {
+                        rect: inc,
+                        alpha: 1.0,
+                    },
+                )
+            }
         }
     }
 }
@@ -616,6 +756,47 @@ mod tests {
         s.remove(2);
         assert_eq!(s.count(), 2);
         assert_eq!(s.visible_index(), 1);
+    }
+
+    #[test]
+    fn stack_without_transition_hides_outgoing() {
+        let s = Stack::with_count(2);
+        let rect = Rect::from_xywh(0.0, 0.0, 100.0, 50.0);
+        let (out, inc) = s.frames(rect);
+        assert_eq!(out.alpha, 0.0);
+        assert_eq!(inc.alpha, 1.0);
+        assert!(!s.is_animating());
+    }
+
+    #[test]
+    fn stack_slide_moves_frames() {
+        let rect = Rect::from_xywh(0.0, 0.0, 100.0, 50.0);
+        let mut s = Stack::with_count(2);
+        s.set_transition(StackTransition::SlideHorizontal);
+        s.set_visible_index(1);
+        assert!(s.is_animating());
+        assert_eq!(s.previous_index(), Some(0));
+        let (out, inc) = s.frames(rect);
+        assert_eq!(out.rect.x(), 0.0);
+        assert_eq!(inc.rect.x(), 100.0);
+        assert!(!s.advance(1.0, 1.0));
+        assert!(!s.is_animating());
+        assert_eq!(s.frames(rect).1.rect.x(), 0.0);
+    }
+
+    #[test]
+    fn stack_fade_crossfades() {
+        let rect = Rect::from_xywh(0.0, 0.0, 100.0, 50.0);
+        let mut s = Stack::with_count(2);
+        s.set_transition(StackTransition::Fade);
+        s.set_visible_index(1);
+        let (out, inc) = s.frames(rect);
+        assert_eq!(out.alpha, 1.0);
+        assert_eq!(inc.alpha, 0.0);
+        assert!(s.advance(0.5, 1.0)); // EaseInOut w połowie = 0.5
+        let (out2, inc2) = s.frames(rect);
+        assert!((out2.alpha - 0.5).abs() < 1e-9);
+        assert!((inc2.alpha - 0.5).abs() < 1e-9);
     }
 
     #[test]

@@ -59,7 +59,8 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   `Adjustment`, `ColorChooser`; aliasy GTK4 `ScrolledWindow` = `ScrollView`,
   `StackSwitcher` = `ViewSwitcher`, `Notebook` = `TabView`, `ListBox` = `NavList`.
   Tokeny metryk kontenerów: `Theme::metrics.container`. Animacje: `libluna-core` `motion`
-  (`Easing`, `lerp`).
+  (`Easing`, `lerp`, `Animation`), użyte w `Stack` (przejścia `StackTransition`), `Revealer`
+  i `Toast` (sterowane `advance(dt, …)`).
 - `libluna-platform`: realne akcje okna z `Frame` (`close`/`minimize`/`toggle_maximize`).
 - Demo używa widgetów zamiast ręcznego rysowania (pasek boczny, wybór motywu/widoku, menu `☰`,
   przycisk „Opcje”, przełączniki, suwak, wybór języka, pasek tytułu, zakładki `TabBar`/`TabView`).

@@ -27,7 +27,7 @@ pub use event::{
     ButtonState, Event, KeyEvent, Modifiers, PointerButton, PointerEvent, ScrollEvent, WindowEvent,
 };
 pub use geometry::{Insets, Point, Rect, Size};
-pub use motion::{lerp, Easing};
+pub use motion::{lerp, Animation, Easing};
 pub use scale::Scale;
 pub use style::{
     ActionRowMetrics, AvatarMetrics, BannerMetrics, BarMetrics, BottomSheetMetrics, ButtonMetrics,

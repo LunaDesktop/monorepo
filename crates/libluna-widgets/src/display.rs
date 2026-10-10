@@ -2,7 +2,7 @@
 //! `Revealer`, `Overlay`, `AspectFrame`.
 
 use libluna_core::style::weight;
-use libluna_core::{Rect, Size, Theme};
+use libluna_core::{Animation, Easing, Rect, Size, Theme};
 use libluna_render::TextEngine;
 
 use crate::bin::BinAlign;
@@ -290,20 +290,20 @@ impl Frame {
     }
 }
 
-/// Odkrywanie/ukrywanie zawartości (bez animacji — ułamek zadaje aplikacja).
+/// Odkrywanie/ukrywanie zawartości; ułamek można zadać wprost albo animować [`Revealer::advance`].
 #[derive(Debug, Clone, Copy)]
 pub struct Revealer {
     open: bool,
-    fraction: f64,
     orientation: Orientation,
+    animation: Animation,
 }
 
 impl Default for Revealer {
     fn default() -> Self {
         Self {
             open: false,
-            fraction: 0.0,
             orientation: Orientation::Vertical,
+            animation: Animation::default(),
         }
     }
 }
@@ -318,35 +318,54 @@ impl Revealer {
         self
     }
 
+    /// Ustawia stan natychmiast (bez animacji).
     pub fn set_open(&mut self, open: bool) {
         self.open = open;
-        self.fraction = if open { 1.0 } else { 0.0 };
+        self.animation.jump_to(if open { 1.0 } else { 0.0 });
     }
 
+    /// Ustawia ułamek odsłonięcia natychmiast.
     pub fn set_fraction(&mut self, fraction: f64) {
-        self.fraction = fraction.clamp(0.0, 1.0);
-        self.open = self.fraction > 0.0;
+        let fraction = fraction.clamp(0.0, 1.0);
+        self.animation.jump_to(fraction);
+        self.open = fraction > 0.0;
     }
 
     pub fn is_open(&self) -> bool {
         self.open
     }
 
+    /// Bieżący ułamek odsłonięcia (0..1).
+    pub fn fraction(&self) -> f64 {
+        self.animation.value()
+    }
+
+    /// Rozpoczyna płynne odsłanianie/ukrywanie z zadaną krzywą.
+    pub fn animate_open(&mut self, open: bool, easing: Easing) {
+        self.open = open;
+        self.animation.set_easing(easing);
+        self.animation.animate_to(if open { 1.0 } else { 0.0 });
+    }
+
+    /// Krok animacji (`dt` i czas `duration` w sekundach); zwraca `true`, gdy trwa dalej.
+    pub fn advance(&mut self, dt: f64, duration: f64) -> bool {
+        self.animation.advance(dt, duration)
+    }
+
+    pub fn is_animating(&self) -> bool {
+        self.animation.is_animating()
+    }
+
     /// Widoczny prostokąt zawartości (przycięty wg ułamka).
     pub fn reveal_rect(&self, rect: Rect) -> Rect {
+        let f = self.fraction();
         match self.orientation {
-            Orientation::Vertical => Rect::from_xywh(
-                rect.x(),
-                rect.y(),
-                rect.width(),
-                rect.height() * self.fraction,
-            ),
-            Orientation::Horizontal => Rect::from_xywh(
-                rect.x(),
-                rect.y(),
-                rect.width() * self.fraction,
-                rect.height(),
-            ),
+            Orientation::Vertical => {
+                Rect::from_xywh(rect.x(), rect.y(), rect.width(), rect.height() * f)
+            }
+            Orientation::Horizontal => {
+                Rect::from_xywh(rect.x(), rect.y(), rect.width() * f, rect.height())
+            }
         }
     }
 }
@@ -468,6 +487,19 @@ mod tests {
         assert_eq!(r.reveal_rect(rect()).height(), 40.0);
         r.set_open(false);
         assert_eq!(r.reveal_rect(rect()).height(), 0.0);
+    }
+
+    #[test]
+    fn revealer_animates_open() {
+        let mut r = Revealer::new();
+        r.animate_open(true, Easing::Linear);
+        assert!(r.is_animating());
+        assert!(r.advance(0.5, 1.0));
+        assert!((r.fraction() - 0.5).abs() < 1e-9);
+        assert!(!r.advance(0.5, 1.0));
+        assert_eq!(r.fraction(), 1.0);
+        assert!(!r.is_animating());
+        assert_eq!(r.reveal_rect(rect()).height(), 40.0);
     }
 
     #[test]

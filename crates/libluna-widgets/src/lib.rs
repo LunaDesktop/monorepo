@@ -53,6 +53,8 @@
 //! - [`Image`], [`TextView`] — obrazek (ikony wektorowe) i pole wielolinijkowe (GTK4).
 //! - [`Popover`], [`ColumnView`], [`Assistant`] — generyczny popover, tabela i kreator kroków (GTK4).
 //! - [`Scrollbar`]/[`Adjustment`], [`ColorChooser`] — przewijanie (obie osie) i paleta kolorów.
+//! - Animacje (`libluna-core::motion`): `Easing`/`lerp`/`Animation`; użyte w [`Revealer`],
+//!   [`Toast`] i przejściach [`Stack`] ([`StackTransition`]).
 //! - Aliasy w duchu GTK4: [`Carousel`] = [`Pager`], [`ScrolledWindow`] = [`ScrollView`],
 //!   [`StackSwitcher`] = [`ViewSwitcher`], [`Notebook`] = [`TabView`], [`ListBox`] = [`NavList`].
 //! - [`Carousel`] (alias [`Pager`]), [`ToolbarView`], [`WindowTitle`], [`Clamp`], [`WrapBox`],
@@ -138,7 +140,9 @@ pub use card::Card;
 pub use check_button::CheckButton;
 pub use color_chooser::ColorChooser;
 pub use column_view::{Column, ColumnView};
-pub use containers::{ActionBar, CenterBox, Fixed, Grid, Paned, PopoverMenuBar, Stack};
+pub use containers::{
+    ActionBar, CenterBox, Fixed, Grid, Paned, PopoverMenuBar, Stack, StackFrame, StackTransition,
+};
 pub use ctx::PaintCtx;
 pub use dialogs::{
     AboutDialog, AlertDialog, AlertRects, Dialog, DialogRects, PreferencesDialog, ShortcutsDialog,

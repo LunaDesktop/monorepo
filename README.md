@@ -313,7 +313,7 @@ XDG_CONFIG_HOME="$PWD/examples" cargo run -p luna-demo --bin render -- --lang fr
   **ustawienia wyglądu** (`ThemePreference`, `Accent`, `ThemeSettings` z trwałością
   i rozwiązywaniem `light/dark`), a także **style instalowane z plików** (`theme_file`:
   `ThemePatch`, skanowanie katalogów `available_themes()`). Animacje: `motion` (`Easing`,
-  `lerp`) — matematyka ruchu bez stanu.
+  `lerp`, `Animation`) — matematyka ruchu i animowany skalar, bez stanu w widgetach.
 - `libluna-i18n`: `Locale` (z `LANG`/`LC_*`), `Catalog`, `Translations`, globalne `tr`/`set_locale`,
   makro `t!` z podstawianiem argumentów, **języki z osobnych plików** `i18n/<kod>.lang`
   (wbudowane) oraz **doładowywane w runtime** z katalogów; `languages()` i `language_name()`.
@@ -357,6 +357,8 @@ XDG_CONFIG_HOME="$PWD/examples" cargo run -p luna-demo --bin render -- --lang fr
   `Assistant` (kreator kroków), `Scrollbar`/`Adjustment` (przewijanie w obu osiach),
   `ColorChooser` (paleta); aliasy `ScrolledWindow` = `ScrollView`,
   `StackSwitcher` = `ViewSwitcher`, `Notebook` = `TabView`, `ListBox` = `NavList`.
+  **Animacje wcielone w widgety**: przejścia `Stack` (slide/fade przez `StackTransition`),
+  płynny `Revealer` i `Toast` (wjazd + fade) — sterowane z aplikacji przez `advance(dt, …)`.
 - `libluna-widgets::layout`: **dwuprzebiegowy układ** (retencyjne drzewo `measure`/`allocate`) —
   [`Node`] (`VBox`/`HBox`, `Padding`, `Expanded`, `Center`, `Spacer`, `Label`, `Fixed`),
   [`Constraints`](min/max) i [`Layout`](`desired_size`/`fit`). Liście pochłaniają nadmiar
