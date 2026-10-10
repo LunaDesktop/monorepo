@@ -1,11 +1,12 @@
 //! Renderuje scenę demo do pliku PNG — pozwala obejrzeć wynik bez kompozytora.
 //!
 //! Użycie:
-//!   `cargo run -p luna-demo --bin render -- [--dark] [--accent NAME] [--lang CODE] [wyjście.png]`
+//!   `cargo run -p luna-demo --bin render -- [--dark] [--accent NAME] [--lang CODE] [--theme NAME|PATH] [wyjście.png]`
 //!
 //! Przykłady:
 //!   `render --lang pl docs/images/settings-light.png`
 //!   `render --dark --accent purple --lang de docs/images/settings-dark.png`
+//!   `render --theme examples/luna/themes/nord.theme docs/images/settings-nord.png`
 
 use std::error::Error;
 
@@ -20,6 +21,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut dark = false;
     let mut lang = "pl".to_owned();
     let mut accent = Accent::Blue;
+    let mut theme_spec: Option<String> = None;
     let mut no_bottom_bar = false;
     let mut no_sidebar = false;
     let mut sidebar_width: Option<f64> = None;
@@ -58,6 +60,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
                 i += 2;
             }
+            "--theme" => {
+                if let Some(v) = args.get(i + 1) {
+                    theme_spec = Some(v.clone());
+                }
+                i += 2;
+            }
             other => {
                 out = Some(other.to_owned());
                 i += 1;
@@ -83,6 +91,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         ThemePreference::Light
     };
     let theme = preference.resolve(false, accent);
+    let theme = match theme_spec.as_deref() {
+        Some(spec) => match libluna_core::theme_file::load_spec(spec) {
+            Some(patch) => patch.build(theme),
+            None => {
+                eprintln!("theme not found: {spec}");
+                theme
+            }
+        },
+        None => theme,
+    };
 
     let (w, h) = (900u32, 1028u32);
     let size = Size::new(w as f64, h as f64);

@@ -139,7 +139,7 @@ impl Frame<'_> {
     }
     /// Bieżące ustawienia wyglądu (kopia).
     pub fn settings(&self) -> ThemeSettings {
-        *self.settings
+        self.settings.clone()
     }
 
     /// Mierzy tekst w pikselach logicznych (szerokość i wysokość).

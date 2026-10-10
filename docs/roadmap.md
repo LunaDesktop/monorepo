@@ -52,7 +52,10 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
 - Układ: **retencyjne drzewo `measure`/`allocate`** (`libluna-widgets::layout`) — `Node`
   (`VBox`/`HBox`, `Padding`, `Expanded`, `Center`, `Spacer`, `Label`, `Fixed`), `Constraints`,
   `Layout::fit`; przykład karty złożonej z drzewa (`bin/layout.rs` → `docs/images/layout.png`).
-- Dalej: **style instalowane jako pliki** (jak w GNOME/KDE) z **oknem podglądu** przy wyborze,
+- **Style instalowane z plików**: `libluna-core::theme_file` (`ThemePatch`, klucze kropkowe,
+  `available_themes()`, nakładanie na bazę), trwały wybór stylu w `ThemeSettings` (`theme.conf`),
+  przykłady `examples/luna/themes/*.theme`, podgląd przez `render/layout --theme`.
+- Dalej: **interaktywny wybór stylu** w Ustawieniach + **okno podglądu** przy wyborze,
   a potem scroll/overflow w `TabBar`, migracja `luna-demo` na drzewo układu.
 
 ## M2 — Układ + widgety bazowe

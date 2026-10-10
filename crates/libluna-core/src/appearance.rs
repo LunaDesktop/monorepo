@@ -132,11 +132,12 @@ impl ThemePreference {
     }
 }
 
-/// Trwałe ustawienia wyglądu (tryb + akcent) z flagą „zmienione”.
-#[derive(Debug, Clone, Copy)]
+/// Trwałe ustawienia wyglądu (tryb + akcent + styl) z flagą „zmienione”.
+#[derive(Debug, Clone)]
 pub struct ThemeSettings {
     preference: ThemePreference,
     accent: Accent,
+    style: Option<String>,
     dirty: bool,
 }
 
@@ -145,6 +146,7 @@ impl Default for ThemeSettings {
         Self {
             preference: ThemePreference::System,
             accent: Accent::Blue,
+            style: None,
             dirty: false,
         }
     }
@@ -152,7 +154,9 @@ impl Default for ThemeSettings {
 
 impl PartialEq for ThemeSettings {
     fn eq(&self, other: &Self) -> bool {
-        self.preference == other.preference && self.accent == other.accent
+        self.preference == other.preference
+            && self.accent == other.accent
+            && self.style == other.style
     }
 }
 
@@ -161,6 +165,7 @@ impl ThemeSettings {
         Self {
             preference,
             accent,
+            style: None,
             dirty: false,
         }
     }
@@ -173,6 +178,11 @@ impl ThemeSettings {
         self.accent
     }
 
+    /// Nazwa wybranego stylu (instalowanego z pliku), jeśli ustawiona.
+    pub fn style(&self) -> Option<&str> {
+        self.style.as_deref()
+    }
+
     pub fn set_preference(&mut self, preference: ThemePreference) {
         if self.preference != preference {
             self.preference = preference;
@@ -183,6 +193,14 @@ impl ThemeSettings {
     pub fn set_accent(&mut self, accent: Accent) {
         if self.accent != accent {
             self.accent = accent;
+            self.dirty = true;
+        }
+    }
+
+    /// Ustawia styl (instalowany z pliku); `None` = wbudowany wygląd.
+    pub fn set_style(&mut self, style: Option<String>) {
+        if self.style != style {
+            self.style = style;
             self.dirty = true;
         }
     }
@@ -205,6 +223,16 @@ impl ThemeSettings {
             Theme::light()
         };
         base.accented(self.accent.color(), self.accent.foreground())
+    }
+
+    /// Jak [`resolve`](Self::resolve), ale nakłada też wybrany **styl** z pliku
+    /// (`~/.local/share/luna/themes/<nazwa>.theme` itd.).
+    pub fn resolve_themed(&self, system_dark: bool) -> Theme {
+        let base = self.resolve(system_dark);
+        match self.style.as_deref().and_then(crate::theme_file::load) {
+            Some(patch) => patch.build(base),
+            None => base,
+        }
     }
 
     // --- Trwałość (prosty format `klucz = wartość`) ---
@@ -248,6 +276,13 @@ impl ThemeSettings {
                         settings.accent = a;
                     }
                 }
+                "style" => {
+                    settings.style = if value.is_empty() {
+                        None
+                    } else {
+                        Some(value.to_owned())
+                    };
+                }
                 _ => {}
             }
         }
@@ -257,11 +292,15 @@ impl ThemeSettings {
 
     /// Serializuje ustawienia do tekstu konfiguracji.
     pub fn to_config_string(&self) -> String {
-        format!(
+        let mut out = format!(
             "preference = {}\naccent = {}\n",
             self.preference.name(),
             self.accent.name()
-        )
+        );
+        if let Some(style) = &self.style {
+            out.push_str(&format!("style = {style}\n"));
+        }
+        out
     }
 
     /// Zapisuje ustawienia do domyślnej ścieżki (tworzy katalogi).
@@ -310,9 +349,11 @@ mod tests {
         let mut s = ThemeSettings::default();
         s.set_preference(ThemePreference::Dark);
         s.set_accent(Accent::Teal);
+        s.set_style(Some("nord".to_owned()));
         assert!(s.is_dirty());
         let parsed = ThemeSettings::from_config_str(&s.to_config_string());
         assert_eq!(parsed, s);
+        assert_eq!(parsed.style(), Some("nord"));
         assert!(!parsed.is_dirty());
     }
 

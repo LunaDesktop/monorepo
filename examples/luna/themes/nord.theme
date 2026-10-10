@@ -1,0 +1,28 @@
+# Styl „Nord" — chłodna, ciemna paleta (przykład instalowanego stylu).
+# Skopiuj do ~/.local/share/luna/themes/ albo /usr/share/luna/themes/.
+# Klucze są kropkowe; nieznane są ignorowane. `__name__` to nazwa w UI.
+__name__ = Nord
+appearance = dark
+
+colors.window_bg = #2e3440
+colors.view_bg = #2e3440
+colors.card_bg = #3b4252
+colors.headerbar_bg = #3b4252
+colors.sidebar_bg = #323844
+colors.text = #eceff4
+colors.dim_text = #a7b1c0
+colors.accent = #88c0d0
+colors.accent_fg = #2e3440
+colors.border = #4c566a
+colors.shade = #434c5e
+colors.error = #bf616a
+colors.warning = #ebcb8b
+colors.success = #a3be8c
+
+radius.small = 5
+radius.medium = 8
+radius.large = 11
+
+metrics.headerbar.height = 48
+metrics.button.height = 36
+metrics.card.header = 42

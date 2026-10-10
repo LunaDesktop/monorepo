@@ -17,6 +17,7 @@ pub mod event;
 pub mod geometry;
 pub mod scale;
 pub mod style;
+pub mod theme_file;
 
 pub use appearance::{Accent, ThemePreference, ThemeSettings};
 pub use color::Color;
@@ -32,3 +33,4 @@ pub use style::{
     SegmentedMetrics, SliderMetrics, Spacing, StatusPageMetrics, StepperMetrics, SwitchMetrics,
     TabsMetrics, Theme, ToastMetrics, Typography,
 };
+pub use theme_file::{available as available_themes, StyledTheme, ThemePatch};

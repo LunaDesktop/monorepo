@@ -236,18 +236,41 @@ geometrią**, nie tylko kolorami — np. `theme.metrics.switch.width` albo
 przyszły, instalowany styl może zmienić np. wysokość paska tytułu czy rozmiar przełącznika
 bez dotykania kodu.
 
-### Plan: style instalowane (jak w GNOME/KDE)
+### Style instalowane z plików (jak w GNOME/KDE)
 
-Docelowo wybór wyglądu nie będzie enumem zaszytym w kodzie, lecz **stylem instalowanym jako
-plik** — tak jak robią to GNOME i KDE. Aplikacja ma wtedy:
+Wygląd można wybrać nie tylko enumatorem w kodzie, lecz **stylem zainstalowanym jako plik**.
+Style to pliki `*.theme` w katalogach (kolejność = priorytet):
+`~/.config/luna/themes`, `~/.local/share/luna/themes`, `/usr/share/luna/themes`.
 
-- wykrywać style z katalogów (`~/.local/share/luna/themes`, `/usr/share/luna/themes`),
-- pokazywać je na liście w Ustawieniach,
-- otwierać **okno podglądu** na żywo przy wyborze (miniatura budowana z realnych widgetów),
-- wczytywać tokeny z pliku bez rekompilacji.
+Format jest liniowy (`klucz = wartość`, `#` = komentarz), z **kropkowymi kluczami**:
 
-Do tego czasu motyw buduje się wprost z tokenów (`Theme::light()` / `Theme::dark()` +
-`accented(...)`), więc podmiana palety czy geometrii to kwestia kilku linii.
+```ini
+__name__ = Nord          # nazwa w UI
+appearance = dark        # light | dark (wybiera bazową paletę)
+colors.card_bg = #3b4252
+colors.text = #eceff4
+accent = teal
+radius.small = 5
+metrics.button.height = 36
+metrics.headerbar.height = 48
+```
+
+Klucze pokrywają `colors.*`, `spacing.*`, `radius.*`, `typography.*.size` i `metrics.*`
+(np. `metrics.switch.width`) — **styl steruje więc nie tylko kolorami, ale i geometrią**.
+Nieznane klucze są ignorowane (zgodność wprzód). Wczytuje/nakłada to
+`libluna_core::theme_file` (`ThemePatch`), a wybrany styl zapisuje się w `theme.conf`
+(`style = <nazwa>`). Przykłady: `examples/luna/themes/nord.theme`, `paper.theme`.
+
+Podgląd (headless) tego samego okna w stylach:
+
+```sh
+cargo run -p luna-demo --bin render -- --theme examples/luna/themes/nord.theme docs/images/settings-nord.png
+cargo run -p luna-demo --bin layout -- --theme examples/luna/themes/nord.theme --out docs/images/layout-nord.png
+```
+
+Do zrobienia pozostaje **interaktywny wybór stylu w Ustawieniach** oraz **okno podglądu**
+na żywo przy wyborze — silnik (skanowanie katalogów: `available_themes()`, wczytywanie,
+nakładanie) jest już gotowy.
 
 ### Co jeszcze decyduje o „looku GTK4”
 
@@ -285,7 +308,8 @@ XDG_CONFIG_HOME="$PWD/examples" cargo run -p luna-demo --bin render -- --lang fr
 - `libluna-core`: `Point/Size/Rect/Insets`, `Color` (sRGB, hex), `Scale`, zdarzenia, tokeny
   motywu (`Spacing`, `Radius`, `Typography`), **metryki kontrolek** (`Metrics`) oraz
   **ustawienia wyglądu** (`ThemePreference`, `Accent`, `ThemeSettings` z trwałością
-  i rozwiązywaniem `light/dark`).
+  i rozwiązywaniem `light/dark`), a także **style instalowane z plików** (`theme_file`:
+  `ThemePatch`, skanowanie katalogów `available_themes()`).
 - `libluna-i18n`: `Locale` (z `LANG`/`LC_*`), `Catalog`, `Translations`, globalne `tr`/`set_locale`,
   makro `t!` z podstawianiem argumentów, **języki z osobnych plików** `i18n/<kod>.lang`
   (wbudowane) oraz **doładowywane w runtime** z katalogów; `languages()` i `language_name()`.
@@ -352,6 +376,11 @@ z pliku doładowanego w runtime:
 ![Ustawienia — ciemny](docs/images/settings-dark.png)
 ![Ustawienia — ciemny, DE, fioletowy](docs/images/settings-de-dark.png)
 ![Ustawienia — francuski z pliku](docs/images/settings-fr.png)
+
+Style instalowane z plików (`examples/luna/themes/nord.theme`, `paper.theme`) — kolor **i geometria**:
+
+![Ustawienia — styl Nord](docs/images/settings-nord.png)
+![Ustawienia — styl Paper](docs/images/settings-paper.png)
 
 Przebieg interakcji (headless `simulate`) — m.in. menu `☰`, dolny panel, powiadomienie (`Toast`)
 karta 12 i ekran stanu („Brak wyników”) klatka 14:

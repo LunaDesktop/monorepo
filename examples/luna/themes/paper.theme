@@ -1,0 +1,21 @@
+# Styl „Paper" — ciepły, jasny wariant (przykład instalowanego stylu).
+# Pokazuje, że styl steruje też geometrią (promienie, wysokość kontrolek).
+__name__ = Paper
+appearance = light
+
+colors.window_bg = #f6f2e7
+colors.view_bg = #fbf8f0
+colors.card_bg = #ffffff
+colors.headerbar_bg = #efe9da
+colors.sidebar_bg = #e9e2d0
+colors.text = #3a342a
+colors.dim_text = #7a7264
+colors.border = #d8cfba
+colors.shade = #00000014
+
+radius.small = 3
+radius.medium = 6
+radius.large = 9
+
+metrics.button.height = 30
+spacing.md = 10

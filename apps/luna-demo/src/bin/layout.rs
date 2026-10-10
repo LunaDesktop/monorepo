@@ -1,8 +1,8 @@
 //! Przykład: okno (karta ustawień) zbudowane **wyłącznie** z drzewa układu
 //! (`measure`/`allocate`) — bez ręcznego liczenia prostokątów.
 //!
-//! Uruchom: `cargo run -p luna-demo --bin layout`
-//! Efekt:   `docs/images/layout.png`
+//! Uruchom: `cargo run -p luna-demo --bin layout [--theme PATH|NAME] [--out ŚCIEŻKA]`
+//! Efekt:   `docs/images/layout.png` (albo wskazane `--out`).
 
 use std::error::Error;
 
@@ -31,7 +31,35 @@ fn row(label: &str, style: FontStyle, control: Node) -> Node {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let theme = Theme::dark();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut theme_spec: Option<String> = None;
+    let mut out = "docs/images/layout.png".to_owned();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--theme" => {
+                if let Some(v) = args.get(i + 1) {
+                    theme_spec = Some(v.clone());
+                }
+                i += 2;
+            }
+            "--out" => {
+                if let Some(v) = args.get(i + 1) {
+                    out = v.clone();
+                }
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+
+    let mut theme = Theme::dark();
+    if let Some(spec) = &theme_spec {
+        match libluna_core::theme_file::load_spec(spec) {
+            Some(patch) => theme = patch.build(theme),
+            None => eprintln!("theme not found: {spec}"),
+        }
+    }
     let text = TextEngine::system();
     let size = Size::new(W as f64, H as f64);
     let ctx = LayoutCtx {
@@ -194,10 +222,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut renderer = SoftwareRenderer::new(W, H);
     renderer.draw(&scene, 1.0, colors.window_bg);
     let png = renderer.encode_png().ok_or("failed to encode PNG")?;
-    std::fs::write("docs/images/layout.png", png)?;
-    println!(
-        "saved docs/images/layout.png ({W}x{H}, {} leaves)",
-        rects.len()
-    );
+    std::fs::write(&out, png)?;
+    println!("saved {out} ({W}x{H}, {} leaves)", rects.len());
     Ok(())
 }
