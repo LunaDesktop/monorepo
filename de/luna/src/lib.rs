@@ -7,6 +7,7 @@
 //! podglądy headless (zrzuty do dokumentacji) i sesję na żywo.
 
 pub mod apps;
+pub mod dbus_notifications;
 pub mod notifications;
 pub mod osd;
 pub mod panel;

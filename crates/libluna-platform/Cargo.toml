@@ -13,3 +13,4 @@ libluna-render.workspace = true
 
 smithay-client-toolkit = "0.19"
 wayland-client = "0.31"
+calloop = "0.13"

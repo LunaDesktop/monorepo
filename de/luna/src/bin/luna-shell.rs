@@ -12,7 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use libluna_core::{ButtonState, Event, PointerButton, Rect};
 use libluna_platform::{run, AppConfig, Frame, LayerConfig};
 use libluna_widgets::{IconName, PaintCtx};
-use luna::notifications::Notifications;
+use luna::dbus_notifications::{Incoming, NotificationsBus};
+use luna::notifications::{Notification, Notifications};
 use luna::osd::Osd;
 use luna::panel::{
     self, App, Launcher, PanelState, Toggle, ToggleAction, LAUNCHER_H, LAUNCHER_W, THICKNESS,
@@ -48,6 +49,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut power_open = false;
     let mut osd = Osd::new(IconName::Volume, "Głośność", 0.0);
     let mut notes = Notifications::new();
+    // Daemon powiadomień D‑Bus (rejestrowany przy pierwszej klatce).
+    let mut bus: Option<NotificationsBus> = None;
+    let mut bus_tried = false;
     // Lista okien z kompozytora (foreign-toplevel) — własne połączenie + wątek.
     let toplevels = luna::toplevels::Toplevels::spawn();
     // Realny stan systemu (użytkownik, dźwięk, Wi-Fi, bateria) — odpytywany w tle.
@@ -57,6 +61,18 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     run(cfg, move |frame: &mut Frame| {
         let dt = frame.delta_time();
+
+        // Rejestrujemy się jako daemon powiadomień raz, po pierwszej klatce
+        // (potrzebny jest wtedy uchwyt do wybudzania pętli).
+        if !bus_tried {
+            bus_tried = true;
+            bus = NotificationsBus::spawn(frame.waker());
+        }
+        if let Some(b) = &bus {
+            for inc in b.drain() {
+                notes.push(notification_from(inc));
+            }
+        }
 
         let size = frame.size;
         let theme = &frame.theme;
@@ -259,6 +275,33 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         last_sig = sig;
     })
+}
+
+/// Zamienia powiadomienie z magistrali D‑Bus na toast Luny.
+fn notification_from(inc: Incoming) -> Notification {
+    let icon = icon_for(&inc.app_name);
+    let timeout = inc.timeout_secs();
+    let mut n = Notification::new(inc.app_name, inc.summary, inc.body).with_icon(icon);
+    n.timeout = timeout;
+    n
+}
+
+/// Dobiera ikonę pakietu do nazwy aplikacji wysyłającej powiadomienie.
+fn icon_for(app: &str) -> IconName {
+    let a = app.to_lowercase();
+    if a.contains("file") || a.contains("plik") {
+        IconName::Files
+    } else if a.contains("term") {
+        IconName::Terminal
+    } else if a.contains("music") || a.contains("muzy") || a.contains("audio") {
+        IconName::Music
+    } else if a.contains("setting") || a.contains("ustaw") {
+        IconName::Settings
+    } else if a.contains("browser") || a.contains("przegl") {
+        IconName::Search
+    } else {
+        IconName::Info
+    }
 }
 
 /// Buduje przełączniki paska z realnego stanu systemu.

@@ -56,6 +56,22 @@ use wayland_client::{
 /// Domknięcie rysujące jedną klatkę (łącznie z obsługą zdarzeń).
 type RenderFn = dyn for<'a> FnMut(&mut Frame<'a>);
 
+/// Uchwyt do wybudzania pętli zdarzeń z innego wątku.
+///
+/// Używany np. przez powłokę po odebraniu powiadomienia D-Bus: [`WakeHandle::wake`]
+/// sprawia, że okno zostanie przerysowane, mimo że nie było żadnego zdarzenia wejścia.
+#[derive(Clone)]
+pub struct WakeHandle {
+    ping: calloop::ping::Ping,
+}
+
+impl WakeHandle {
+    /// Budzi pętlę zdarzeń (bezpieczne z dowolnego wątku).
+    pub fn wake(&self) {
+        self.ping.ping();
+    }
+}
+
 /// Konfiguracja okna.
 #[derive(Debug, Clone)]
 pub struct AppConfig {
@@ -207,6 +223,8 @@ pub struct Frame<'a> {
     actions: &'a mut WindowActions,
     frame_requested: &'a mut bool,
     system_dark: bool,
+    /// Uchwyt do wybudzania pętli z innego wątku (np. po powiadomieniu D-Bus).
+    waker: WakeHandle,
 }
 
 impl Frame<'_> {
@@ -282,6 +300,11 @@ impl Frame<'_> {
     pub const fn system_dark(&self) -> bool {
         self.system_dark
     }
+
+    /// Uchwyt do wybudzania pętli zdarzeń z innego wątku.
+    pub fn waker(&self) -> WakeHandle {
+        self.waker.clone()
+    }
 }
 
 /// Otwiera okno i uruchamia pętlę zdarzeń, wołając `render` przy każdej potrzebie
@@ -305,6 +328,13 @@ where
     let mut event_loop: EventLoop<App> = EventLoop::try_new()?;
     let loop_handle = event_loop.handle();
     WaylandSource::new(conn.clone(), event_queue).insert(loop_handle)?;
+
+    // Wybudzanie pętli z innego wątku (np. powiadomienia z magistrali D‑Bus).
+    let (ping, ping_source) = calloop::ping::make_ping()?;
+    event_loop
+        .handle()
+        .insert_source(ping_source, |_, _, app: &mut App| app.needs_redraw = true)?;
+    let wake = WakeHandle { ping };
 
     let compositor = CompositorState::bind(&globals, &qh)
         .map_err(|e| format!("wl_compositor unavailable: {e}"))?;
@@ -390,6 +420,7 @@ where
         frame_requested: false,
         last_tick: Instant::now(),
         maximized: false,
+        wake,
     };
 
     while !app.exit {
@@ -441,6 +472,8 @@ struct App {
     /// Znacznik czasu poprzedniej klatki (do liczenia `dt`).
     last_tick: Instant,
     maximized: bool,
+    /// Uchwyt wybudzania pętli (np. z wątku D‑Bus).
+    wake: WakeHandle,
 }
 
 /// Powierzchnia docelowa: zwykłe okno albo powierzchnia warstwowa (panel/dock).
@@ -542,6 +575,7 @@ impl App {
                 settings,
                 actions,
                 frame_requested,
+                wake,
                 ..
             } = self;
             let mut frame = Frame {
@@ -556,6 +590,7 @@ impl App {
                 actions,
                 frame_requested,
                 system_dark,
+                waker: wake.clone(),
             };
             render(&mut frame);
         }
