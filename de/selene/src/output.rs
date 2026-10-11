@@ -68,19 +68,21 @@ pub fn spawn(
 /// trzyma master DRM. Bez ponowień Selene od razu widzi `MasterBusy` i zostawia czarny
 /// ekran. Czekamy do ~5 s, aż greeter zwolni mastera.
 fn open_drm_waiting() -> Result<DrmBackend, DrmError> {
-    match DrmBackend::open() {
-        Err(DrmError::MasterBusy) => {
-            for _ in 0..50 {
-                std::thread::sleep(Duration::from_millis(100));
-                match DrmBackend::open() {
-                    Err(DrmError::MasterBusy) => continue,
-                    other => return other,
-                }
-            }
-            Err(DrmError::MasterBusy)
+    // LightDM potrafi wystartować sesję, zanim greeter (Xorg) zwolni ekran — bywa, że
+    // master jest już wolny, ale CRTC-e jeszcze zajęte (modeset się nie udaje). Dlatego
+    // próbujemy przez ~5 s niezależnie od powodu (master/zasoby/modeset).
+    let mut last = DrmError::MasterBusy;
+    for attempt in 0..50 {
+        match DrmBackend::open() {
+            Ok(backend) => return Ok(backend),
+            Err(e) => last = e,
         }
-        other => other,
+        if attempt == 0 && std::env::var("SELENE_STATS").is_ok() {
+            eprintln!("selene/drm: init nieudany ({last:?}) — czekam na zwolnienie ekranu…");
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
+    Err(last)
 }
 
 /// Uruchamia wątek wyjścia DRM/KMS — renderuje scenę do buforów i skanuje na monitorach.
