@@ -63,10 +63,13 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   contain/cover/fill/fit-width/fit-height) i `MediaControls` (play/pauza + pasek postępu +
   czasy); podgląd: `cargo run -p luna-demo --bin new-widgets` → `docs/images/new-widgets.png`.
 - **Pakiet ikon symbolicznych** (`libluna-widgets::icon`): `IconName` + `paint_icon`,
-  ~27 ikon rysowanych wektorowo w naszym stylu (Menu/Search/Files/Settings/Terminal/Music/
-  Star/Clock/Store/Edit/Wifi/Volume/Battery/Power/Grid/List/Carousel/…). Renderer zyskał
-  prymitywy: `fill_circle`, `stroke_circle`, `stroke_polyline`, `fill_polygon` (z zaokrąglonymi
-  końcami). Ikony użyte w panelu i launcherze Luny (zamiast glifów fontu).
+  28 ikon rysowanych wektorowo w naszym stylu (Menu/Search/Files/Settings/Terminal/Music/
+  Star/Clock/Store/Edit/Wifi/Volume/Battery/Power/Grid/List/Carousel/…). Zestaw jest
+  **wyliczalny** (`IconName::ALL` + `IconName::name()`), a cały pakiet ma galerię-podgląd:
+  `cargo run -p luna-demo --bin icons` → `docs/images/icons.png` (motyw jasny i ciemny).
+  Renderer zyskał prymitywy: `fill_circle`, `stroke_circle`, `stroke_polyline`, `fill_polygon`
+  (z zaokrąglonymi końcami). Ikony użyte w panelu, launcherze oraz w OSD i powiadomieniach
+  Luny (zamiast glifów fontu).
   Tokeny metryk kontenerów: `Theme::metrics.container`. Animacje: `libluna-core` `motion`
   (`Easing`, `lerp`, `Animation`), użyte w `Stack` (przejścia `StackTransition`), `Revealer`,
   `Toast`, `BottomSheet` i `Pager` (sterowane `advance(dt, …)`).
@@ -180,16 +183,21 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   podglądów i sesji na żywo. ✅ **Prawdziwe aplikacje**: `apps.rs` skanuje pliki `.desktop`
   (XDG), parsuje `[Desktop Entry]` z lokalizacją nazw i filtrowaniem `NoDisplay`/`Hidden`;
   klik w pozycję uruchamia polecenie. Podgląd listy: `cargo run -p luna --bin luna-apps`.
+  ✅ **Przewijanie** listy/siatki (scroll + klip zawartości). ✅ **Nawigacja klawiaturą**:
+  strzałki (lista ±1, siatka kolumny/wiersze, karuzela karty), `Enter` uruchamia zaznaczoną
+  pozycję, `Esc` zamyka; zaznaczenie automatycznie przewija się do widoku
+  (`Launcher::navigate` + `ensure_selection_visible`).
   ✅ **`luna-shell`** (bin) uruchamia panel jako prawdziwą **powierzchnię
   warstwową** (`wlr-layer-shell` po stronie klienta w `libluna-platform`); bez kompozytora
   kończy się czytelnym `NoCompositor`. ✅ **OSD** (`osd.rs`) i **powiadomienia** (`notifications.rs`)
-  — pokazywane pod paskiem na powierzchni „chrome”. Dalej: usługa D-Bus
-  `org.freedesktop.Notifications`, centrum powiadomień, menu kontekstowe, scroll w liście.
+  — pokazywane pod paskiem na powierzchni „chrome”; oba korzystają z pakietu ikon
+  (`IconName`) zamiast glifów tekstowych. Dalej: usługa D-Bus
+  `org.freedesktop.Notifications`, centrum powiadomień, menu kontekstowe.
 
 ## Później (poza MVP)
 - Dostępność AT-SPI, IME, schowek, drag & drop, animacje, backend GPU, mini-CSS dla motywów.
-- Renderer: **klip nie obejmuje tekstu** (`DrawCommand::Text` ignoruje maskę) — naprawić,
-  bo dotyczy `ScrollView` i innych przewijanych widoków.
+- Renderer: ✅ **klip obejmuje tekst** (`DrawCommand::Text` respektuje `ClipRect`) — naprawione,
+  `ScrollView` i inne przewijane widoki przycinają też napisy.
 
 ## Inwentarz widgetów (z makiet → moduł docelowy)
 

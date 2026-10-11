@@ -77,8 +77,11 @@ Selene.
 - `luna-panel` (bin) — render headless: `docs/images/luna-shell-{light,dark}.png`
   oraz `docs/images/luna-launcher-{list,grid,carousel}.png`.
 - `luna-shell` (bin) — powierzchnia „chrome” na żywo: burger otwiera/zamyka launcher,
-  przełącznik widoku, **przewijanie listy**, klik w aplikację **uruchamia** ją, `Esc` zamyka;
-  do tego **OSD** i **powiadomienia** (`osd.rs`, `notifications.rs`).
+  przełącznik widoku, **przewijanie listy**, klik w aplikację **uruchamia** ją;
+  **nawigacja klawiaturą** (strzałki poruszają zaznaczeniem, `Enter` uruchamia, `Esc` zamyka),
+  do tego **OSD** i **powiadomienia** (`osd.rs`, `notifications.rs`) z ikonami pakietu.
+- **Galeria ikon**: `cargo run -p luna-demo --bin icons` → `docs/images/icons.png`
+  (cały `IconName::ALL` z podpisami, motyw jasny i ciemny).
 - **Prawdziwe aplikacje**: `apps.rs` skanuje pliki `.desktop` (`XDG_DATA_HOME`/`XDG_DATA_DIRS`),
   parsuje `[Desktop Entry]` (nazwy lokalizowane po `LANG`), filtruje `NoDisplay`/`Hidden`;
   podgląd: `cargo run -p luna --bin luna-apps`. Gdy brak `.desktop` — zestaw demo.
