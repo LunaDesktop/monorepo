@@ -28,4 +28,16 @@ if [ "$SELENE_BACKEND" = "drm" ]; then
     export SELENE_INPUT
 fi
 
+# Trwały log sesji: LightDM trzyma tylko 2 pliki `.xsession-errors` i obraca je przy
+# każdym starcie sesji, przez co logi Luny przepadają. Piszemy do stałego pliku w
+# katalogu stanu użytkownika, żeby każdą próbę dało się obejrzeć po fakcie.
+log_dir="${XDG_STATE_HOME:-$HOME/.local/state}/luna"
+if mkdir -p "$log_dir" 2>/dev/null; then
+    log="$log_dir/session.log"
+    printf '=== luna-session %s ===\nXDG_RUNTIME_DIR=%s SELENE_BACKEND=%s SELENE_INPUT=%s\n' \
+        "$(date -Is)" "${XDG_RUNTIME_DIR:-<brak>}" "$SELENE_BACKEND" "${SELENE_INPUT:-<brak>}" \
+        >>"$log" 2>/dev/null || true
+    exec >>"$log" 2>&1
+fi
+
 exec selene

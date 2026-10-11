@@ -12,7 +12,7 @@ use libluna_core::{Color, Point, Rect, Size, ThemeSettings};
 use libluna_platform::{run, AppConfig, Frame};
 use libluna_render::{Scene, SoftwareRenderer, TextRun};
 
-use crate::drm::DrmBackend;
+use crate::drm::{DrmBackend, DrmError};
 use crate::input::{self, Events};
 use crate::monitors::Outputs;
 use crate::state::{Window, WindowModel};
@@ -68,12 +68,24 @@ pub fn spawn(
 /// (wywołujący powinien wtedy użyć wyjścia nested).
 pub fn spawn_drm(model: WindowModel) {
     std::thread::spawn(move || {
-        let Some(mut backend) = DrmBackend::open() else {
-            eprintln!(
-                "{}",
-                libluna_i18n::tr("DRM backend unavailable (no master)")
-            );
-            return;
+        let mut backend = match DrmBackend::open() {
+            Ok(backend) => backend,
+            Err(reason) => {
+                // Rozróżniamy powód — inaczej „brak mastera” maskuje błędy inicjalizacji.
+                let msg = match reason {
+                    DrmError::MasterBusy => {
+                        libluna_i18n::tr("DRM backend unavailable (master held by another session)")
+                    }
+                    DrmError::Resources => {
+                        libluna_i18n::tr("DRM backend unavailable (cannot read card resources)")
+                    }
+                    DrmError::NoOutputs => {
+                        libluna_i18n::tr("DRM backend unavailable (no monitor could be set up)")
+                    }
+                };
+                eprintln!("{msg}");
+                return;
+            }
         };
         let infos = backend.outputs();
         let sizes: Vec<(u32, u32)> = infos.iter().map(|(_, w, h)| (*w, *h)).collect();
@@ -98,6 +110,8 @@ pub fn spawn_drm(model: WindowModel) {
             .collect();
         let bg = Color::from_rgba8(0x1e, 0x20, 0x28, 0xff);
 
+        // Gdy page-flip zawodzi (np. sterownik/karta), ekran zostaje czarny — logujemy raz.
+        let mut flip_error_logged = false;
         loop {
             for i in 0..sizes.len() {
                 let (w, h) = sizes[i];
@@ -105,7 +119,13 @@ pub fn spawn_drm(model: WindowModel) {
                 let mut scene = Scene::new();
                 build_scene(&mut scene, Size::new(w as f64, h as f64), ox, oy, &model);
                 renderers[i].draw(&scene, 1.0, bg);
-                backend.present(i, renderers[i].data());
+                if !backend.present(i, renderers[i].data()) && !flip_error_logged {
+                    eprintln!(
+                        "{}",
+                        libluna_i18n::tr("DRM page-flip failed (screen may stay blank)")
+                    );
+                    flip_error_logged = true;
+                }
                 backend.wait_flip();
             }
             // Bez wejścia w trybie DRM odświeżamy w stałym rytmie (~60 Hz).

@@ -446,6 +446,17 @@ struct DrmOutput {
     front: usize,
 }
 
+/// Powód, dla którego nie udało się otworzyć wyjścia DRM (do diagnostyki).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrmError {
+    /// Inna sesja trzyma mastera DRM — nie odbieramy ekranu.
+    MasterBusy,
+    /// Nie udało się odczytać zasobów karty (`GETRESOURCES`).
+    Resources,
+    /// Nie udało się ustawić trybu na żadnym podłączonym monitorze.
+    NoOutputs,
+}
+
 /// Backend wyjścia DRM/KMS (jedna karta, wiele monitorów).
 pub struct DrmBackend {
     fd: OwnedFd,
@@ -462,17 +473,20 @@ impl Drop for DrmBackend {
 impl DrmBackend {
     /// Otwiera kartę, przejmuje mastera i ustawia tryb na wszystkich podłączonych monitorach.
     /// Zwraca `None`, gdy DRM jest niedostępne lub ktoś inny trzyma mastera (np. sesja użytkownika).
-    pub fn open() -> Option<Self> {
+    pub fn open() -> Result<Self, DrmError> {
+        let mut last = DrmError::NoOutputs;
         for card in card_paths() {
             let Ok(fd) = rustix::fs::open(&card, OFlags::RDWR | OFlags::CLOEXEC, Mode::empty())
             else {
                 continue;
             };
             if ioctl_none::<DRM_IOCTL_SET_MASTER, _>(&fd).is_err() {
-                continue; // inny master (uruchomiona sesja) — nie odbieramy ekranu
+                last = DrmError::MasterBusy; // inna sesja trzyma mastera
+                continue;
             }
             let Some(res) = fetch_resources(fd.as_fd()) else {
                 let _ = ioctl_none::<DRM_IOCTL_DROP_MASTER, _>(&fd);
+                last = DrmError::Resources;
                 continue;
             };
             let mut outputs = Vec::new();
@@ -483,11 +497,12 @@ impl DrmBackend {
             }
             if outputs.is_empty() {
                 let _ = ioctl_none::<DRM_IOCTL_DROP_MASTER, _>(&fd);
+                last = DrmError::NoOutputs;
                 continue;
             }
-            return Some(Self { fd, outputs });
+            return Ok(Self { fd, outputs });
         }
-        None
+        Err(last)
     }
 
     /// `(nazwa, szerokość, wysokość)` każdego wyjścia.

@@ -111,6 +111,10 @@ założył sesji), Selene wybiera katalog sam: najpierw `/run/user/<uid>`, a gdy
 istnieje — tworzy prywatny katalog `0700` pod `$TMPDIR`. Skrypt `luna-session` robi ten
 sam wybór wcześniej, żeby zmienną dziedziczyli także klienci.
 
+Log uruchomienia sesji trafia do stałego pliku `~/.local/state/luna/session.log`
+(LightDM trzyma tylko dwa pliki `.xsession-errors` i obraca je przy każdej sesji, więc
+bez tego diagnostyka przepada).
+
 Tryb nested (domyślny) uruchamia okno na nadrzędnym kompozytorze. **Realne wyjście DRM**
 (gdy masz wolnego mastera, np. z osobnej konsoli):
 
