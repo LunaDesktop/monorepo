@@ -7,6 +7,7 @@
 //! - [`scale`] — [`Scale`] do przeliczania pikseli logicznych na fizyczne.
 //! - [`event`] — [`Event`] i towarzyszące typy wejścia.
 //! - [`motion`] — krzywe [`Easing`] i interpolacja [`lerp`] (matematyka ruchu).
+//! - [`runtime`] — wybór katalogu `XDG_RUNTIME_DIR` (wspólny dla kompozytora i klientów).
 //! - [`style`] — tokeny wyglądu ([`style::Theme`], spacing, radius, typografia).
 //!
 //! Moduł nie zależy od Waylanda ani od konkretnego rasteryzatora — jest wspólnym
@@ -17,6 +18,7 @@ pub mod color;
 pub mod event;
 pub mod geometry;
 pub mod motion;
+pub mod runtime;
 pub mod scale;
 pub mod style;
 pub mod theme_file;

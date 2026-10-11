@@ -33,7 +33,7 @@ pub fn spawn(
             .app_id("eu.paganlinux.Luna.Selene")
             .initial_size(width, height)
             .settings(ThemeSettings::default());
-        let _ = run(config, move |frame: &mut Frame| {
+        let result = run(config, move |frame: &mut Frame| {
             // Zgłoś bieżący rozmiar monitora (okno może być zmieniane przez rodzica).
             {
                 let mut outs = outputs.lock_or_recover();
@@ -50,6 +50,15 @@ pub fn spawn(
             // Utrzymuj klatki — model okien zmienia się poza tą pętlą.
             frame.request_frame();
         });
+        // Nested rysuje do okna na nadrzędnym kompozytorze Wayland. Gdy go nie ma
+        // (np. uruchomienie na X11), nie połykamy błędu — inaczej wygląda to jak
+        // „kompozytor działa, ale nic nie widać”.
+        if let Err(e) = result {
+            eprintln!(
+                "{}: {e}",
+                libluna_i18n::tr("nested output unavailable (no parent compositor)")
+            );
+        }
     });
 }
 

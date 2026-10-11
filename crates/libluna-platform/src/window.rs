@@ -292,6 +292,12 @@ pub fn run<F>(config: AppConfig, render: F) -> Result<(), Box<dyn Error>>
 where
     F: for<'a> FnMut(&mut Frame<'a>) + 'static,
 {
+    // Klient potrzebuje `XDG_RUNTIME_DIR`, żeby znaleźć gniazdo kompozytora. Menedżer
+    // sesji zwykle go ustawia; gdy brak (np. zepsuty pam_systemd), wybieramy wspólny
+    // katalog — ten sam co kompozytor — żeby uniknąć `NoCompositor`.
+    if let Ok(Some(dir)) = libluna_core::runtime::ensure_runtime_dir() {
+        eprintln!("libLuna: XDG_RUNTIME_DIR not set, using {}", dir.display());
+    }
     let conn = Connection::connect_to_env()?;
     let (globals, event_queue) = registry_queue_init(&conn)?;
     let qh = event_queue.handle();

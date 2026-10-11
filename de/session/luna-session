@@ -21,4 +21,11 @@ fi
 : "${SELENE_BACKEND:=drm}"
 export SELENE_BACKEND
 
+# Tryb DRM nie ma nadrzędnego kompozytora — wejście czytamy wprost z /dev/input
+# (wymaga dostępu do urządzeń: grupa `input` albo root).
+if [ "$SELENE_BACKEND" = "drm" ]; then
+    : "${SELENE_INPUT:=evdev}"
+    export SELENE_INPUT
+fi
+
 exec selene
