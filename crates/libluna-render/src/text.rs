@@ -87,6 +87,8 @@ impl TextEngine {
     /// Rysuje tekst do bufora RGBA8888 **premnożonego** (format tiny-skia).
     ///
     /// `origin` w pikselach fizycznych, `size` skalowana przez `scale`.
+    /// `clip` ogranicza rysowanie do prostokąta (piksele fizyczne) — używane
+    /// przy aktywnym `Scene::push_clip`.
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &self,
@@ -100,6 +102,7 @@ impl TextEngine {
         weight: u16,
         color: Color,
         scale: f64,
+        clip: Option<ClipRect>,
     ) {
         let Some(font) = self.font_for(weight) else {
             return;
@@ -130,6 +133,7 @@ impl TextEngine {
                     g,
                     b,
                     alpha,
+                    clip,
                 );
             }
             pen_x += metrics.advance_width as f64;
@@ -150,6 +154,15 @@ fn load_font(path: &str) -> Option<Font> {
     Font::from_bytes(bytes, FontSettings::default()).ok()
 }
 
+/// Prostokąt obcinania w pikselach fizycznych (półotwarty: `x0..x1`, `y0..y1`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClipRect {
+    pub x0: i64,
+    pub y0: i64,
+    pub x1: i64,
+    pub y1: i64,
+}
+
 /// Nakłada bitmapę krycia glifu na bufor premnożony (operacja „over”).
 #[allow(clippy::too_many_arguments)]
 fn blend_glyph(
@@ -165,16 +178,27 @@ fn blend_glyph(
     sg: f32,
     sb: f32,
     sa: f32,
+    clip: Option<ClipRect>,
 ) {
     for row in 0..gh {
         let y = gy + row as i64;
         if y < 0 || y >= buf_h as i64 {
             continue;
         }
+        if let Some(c) = clip {
+            if y < c.y0 || y >= c.y1 {
+                continue;
+            }
+        }
         for col in 0..gw {
             let x = gx + col as i64;
             if x < 0 || x >= buf_w as i64 {
                 continue;
+            }
+            if let Some(c) = clip {
+                if x < c.x0 || x >= c.x1 {
+                    continue;
+                }
             }
             let cov = coverage[row * gw + col] as f32 / 255.0;
             if cov <= 0.0 {
@@ -227,5 +251,30 @@ mod tests {
         let engine = TextEngine::system();
         let s = engine.measure("AG", 14.0, weight::NORMAL);
         assert!(s.width > 0.0);
+    }
+
+    #[test]
+    fn blend_glyph_respects_clip() {
+        // Białe 4×2, pełne krycie glifu; czerwony glif obcięty do kolumn 0..2.
+        let (w, h) = (4usize, 2usize);
+        let mut buf = vec![255u8; w * h * 4];
+        let cov = vec![255u8; w * h];
+        let clip = Some(ClipRect {
+            x0: 0,
+            y0: 0,
+            x1: 2,
+            y1: 2,
+        });
+        blend_glyph(&mut buf, w, h, 0, 0, w, h, &cov, 1.0, 0.0, 0.0, 1.0, clip);
+        let px = |x: usize, y: usize| {
+            let i = (y * w + x) * 4;
+            (buf[i], buf[i + 1], buf[i + 2], buf[i + 3])
+        };
+        // W klipie: czerwony, pełne krycie.
+        assert_eq!(px(0, 0), (255, 0, 0, 255));
+        assert_eq!(px(1, 1), (255, 0, 0, 255));
+        // Poza klipem: nietknięte białe tło.
+        assert_eq!(px(2, 0), (255, 255, 255, 255));
+        assert_eq!(px(3, 1), (255, 255, 255, 255));
     }
 }

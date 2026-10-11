@@ -174,6 +174,14 @@ impl SoftwareRenderer {
                 }
                 DrawCommand::Text(run) => {
                     let (w, h) = (pixmap.width() as usize, pixmap.height() as usize);
+                    // Tekst nie korzysta z maski kształtów — obcinamy wprost piksele.
+                    let k = scale.factor();
+                    let clip = clip_stack.last().map(|r| crate::text::ClipRect {
+                        x0: (r.x() * k).floor() as i64,
+                        y0: (r.y() * k).floor() as i64,
+                        x1: (r.right() * k).ceil() as i64,
+                        y1: (r.bottom() * k).ceil() as i64,
+                    });
                     text.draw(
                         pixmap.data_mut(),
                         w,
@@ -185,6 +193,7 @@ impl SoftwareRenderer {
                         run.weight,
                         run.color,
                         scale.factor(),
+                        clip,
                     );
                 }
                 DrawCommand::Image { rect, data } => {
