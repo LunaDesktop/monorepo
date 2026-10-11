@@ -10,6 +10,7 @@ use wayland_server::protocol::wl_output::{self, WlOutput};
 use wayland_server::{Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource};
 
 use crate::state::State;
+use crate::sync::LockExt;
 
 /// Informacje o monitorze (współdzielone z wątkiem wyjścia, który zna bieżący rozmiar).
 #[derive(Debug, Clone)]
@@ -106,8 +107,7 @@ impl GlobalDispatch<WlOutput, usize> for State {
         let output = data_init.init(resource, *data);
         let info = state
             .outputs
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .get(*data)
             .cloned()
             .unwrap_or_default();

@@ -19,6 +19,7 @@ use crate::compositor::SurfaceData;
 use crate::data;
 use crate::shell::XdgSurfaceData;
 use crate::state::{DragState, ResizeState, SavedGeom, State, TITLEBAR};
+use crate::sync::LockExt;
 
 /// Buduje tekst mapy klawiszy XKB dla danego układu (i opcjonalnego wariantu).
 ///
@@ -179,7 +180,7 @@ pub fn handle_input(state: &mut State, handle: &DisplayHandle, event: &Event) {
 
 /// Trafienie w okno (najwyższe wg `z`) i w którą jego część.
 fn hit(state: &State, pos: Point) -> Option<(usize, Part)> {
-    let windows = state.windows.lock().unwrap();
+    let windows = state.windows.lock_or_recover();
     let mut best: Option<(usize, i32)> = None;
     for (i, w) in windows.iter().enumerate() {
         if w.mapped && !w.minimized && w.outer().contains(pos) {
@@ -212,7 +213,7 @@ fn hit(state: &State, pos: Point) -> Option<(usize, Part)> {
 
 /// Najwyższe okno, którego **treść** zawiera punkt (do zdarzeń klienta).
 fn content_window(state: &State, pos: Point) -> Option<usize> {
-    let windows = state.windows.lock().unwrap();
+    let windows = state.windows.lock_or_recover();
     let mut best: Option<(usize, i32)> = None;
     for (i, w) in windows.iter().enumerate() {
         if w.mapped && !w.minimized && w.content().contains(pos) {
@@ -229,7 +230,7 @@ fn content_window(state: &State, pos: Point) -> Option<usize> {
 fn dismiss_popups(state: &mut State, pos: Point) {
     loop {
         let top = {
-            let windows = state.windows.lock().unwrap();
+            let windows = state.windows.lock_or_recover();
             let mut best: Option<(usize, i32)> = None;
             for (i, w) in windows.iter().enumerate() {
                 if w.popup && w.mapped {
@@ -244,8 +245,7 @@ fn dismiss_popups(state: &mut State, pos: Point) {
         let Some(slot) = top else { break };
         let inside = state
             .windows
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .get(slot)
             .map(|w| w.outer().contains(pos))
             .unwrap_or(false);
@@ -254,16 +254,16 @@ fn dismiss_popups(state: &mut State, pos: Point) {
         }
         if let Some(surface) = state.slots.get(slot).cloned() {
             if let Some(sd) = surface.data::<SurfaceData>() {
-                if let Some(xs) = sd.xdg_surface.lock().unwrap().clone() {
+                if let Some(xs) = sd.xdg_surface.lock_or_recover().clone() {
                     if let Some(d) = xs.data::<XdgSurfaceData>() {
-                        if let Some(popup) = d.popup.lock().unwrap().as_ref() {
+                        if let Some(popup) = d.popup.lock_or_recover().as_ref() {
                             let _ = popup.send_event(xdg_popup::Event::PopupDone);
                         }
                     }
                 }
             }
         }
-        if let Some(w) = state.windows.lock().unwrap().get_mut(slot) {
+        if let Some(w) = state.windows.lock_or_recover().get_mut(slot) {
             w.mapped = false;
         }
     }
@@ -275,7 +275,7 @@ pub(crate) fn window_at(state: &State, pos: (f64, f64)) -> Option<usize> {
 }
 
 fn window_geometry(state: &State, slot: usize) -> Option<(f64, f64, f64, f64)> {
-    let windows = state.windows.lock().unwrap();
+    let windows = state.windows.lock_or_recover();
     windows
         .get(slot)
         .map(|w| (w.x, w.y, w.width as f64, w.height as f64))
@@ -295,7 +295,7 @@ fn pointer_motion(state: &mut State, handle: &DisplayHandle, pos: Point) {
         return;
     }
     if let Some(drag) = state.drag {
-        let mut windows = state.windows.lock().unwrap();
+        let mut windows = state.windows.lock_or_recover();
         if let Some(w) = windows.get_mut(drag.slot) {
             w.x = pos.x - drag.off_x;
             w.y = pos.y - drag.off_y;
@@ -502,7 +502,7 @@ fn do_resize(state: &mut State, pos: Point) {
         h = (rs.start_h + dy).max(MIN_H);
     }
     {
-        let mut windows = state.windows.lock().unwrap();
+        let mut windows = state.windows.lock_or_recover();
         if let Some(w2) = windows.get_mut(rs.slot) {
             w2.x = x;
             w2.y = y;
@@ -521,14 +521,14 @@ fn send_configure(state: &mut State, slot: usize, w: f64, h: f64) {
     let Some(sd) = surface.data::<SurfaceData>() else {
         return;
     };
-    let Some(xs) = sd.xdg_surface.lock().unwrap().clone() else {
+    let Some(xs) = sd.xdg_surface.lock_or_recover().clone() else {
         return;
     };
     let states = window_states(state, slot);
     let serial = state.next_serial();
     let _ = xs.send_event(xdg_surface::Event::Configure { serial });
     if let Some(xd) = xs.data::<XdgSurfaceData>() {
-        if let Some(tl) = xd.toplevel.lock().unwrap().as_ref() {
+        if let Some(tl) = xd.toplevel.lock_or_recover().as_ref() {
             let _ = tl.send_event(xdg_toplevel::Event::Configure {
                 width: w as i32,
                 height: h as i32,
@@ -541,7 +541,7 @@ fn send_configure(state: &mut State, slot: usize, w: f64, h: f64) {
 /// Stany `xdg_toplevel` dla okna (ACTIVATED + ewentualnie MAXIMIZED/FULLSCREEN).
 fn window_states(state: &State, slot: usize) -> Vec<u8> {
     let mut states = vec![4u8]; // ACTIVATED
-    if let Some(w) = state.windows.lock().unwrap().get(slot) {
+    if let Some(w) = state.windows.lock_or_recover().get(slot) {
         if w.maximized {
             states.push(1); // MAXIMIZED
         }
@@ -556,15 +556,14 @@ fn window_states(state: &State, slot: usize) -> Vec<u8> {
 fn window_output_rect(state: &State, slot: usize) -> (f64, f64, f64, f64) {
     let (cx, cy) = state
         .windows
-        .lock()
-        .unwrap()
+        .lock_or_recover()
         .get(slot)
         .map(|w| {
             let c = w.content().center();
             (c.x, c.y)
         })
         .unwrap_or((0.0, 0.0));
-    let outs = state.outputs.lock().unwrap();
+    let outs = state.outputs.lock_or_recover();
     let idx = crate::monitors::output_at(&outs, cx, cy);
     match outs.get(idx).or_else(|| outs.first()) {
         Some(o) => (o.x as f64, o.y as f64, o.width as f64, o.height as f64),
@@ -575,7 +574,7 @@ fn window_output_rect(state: &State, slot: usize) -> (f64, f64, f64, f64) {
 /// Przełącza minimalizację (ukrycie przez kompozytor).
 fn toggle_minimize(state: &mut State, slot: usize) {
     let minimized = {
-        let mut windows = state.windows.lock().unwrap();
+        let mut windows = state.windows.lock_or_recover();
         match windows.get_mut(slot) {
             Some(w) if !w.popup && !w.layer => {
                 w.minimized = !w.minimized;
@@ -593,7 +592,7 @@ fn toggle_minimize(state: &mut State, slot: usize) {
 fn toggle_maximize(state: &mut State, slot: usize) {
     let (ox, oy, ow, oh) = window_output_rect(state, slot);
     {
-        let mut windows = state.windows.lock().unwrap();
+        let mut windows = state.windows.lock_or_recover();
         let Some(w) = windows.get_mut(slot) else {
             return;
         };
@@ -636,7 +635,7 @@ fn toggle_maximize(state: &mut State, slot: usize) {
 fn toggle_fullscreen(state: &mut State, slot: usize) {
     let (ox, oy, ow, oh) = window_output_rect(state, slot);
     {
-        let mut windows = state.windows.lock().unwrap();
+        let mut windows = state.windows.lock_or_recover();
         let Some(w) = windows.get_mut(slot) else {
             return;
         };
@@ -698,11 +697,11 @@ fn send_close(state: &mut State, slot: usize) {
     let Some(sd) = surface.data::<SurfaceData>() else {
         return;
     };
-    let Some(xs) = sd.xdg_surface.lock().unwrap().clone() else {
+    let Some(xs) = sd.xdg_surface.lock_or_recover().clone() else {
         return;
     };
     if let Some(xd) = xs.data::<XdgSurfaceData>() {
-        if let Some(tl) = xd.toplevel.lock().unwrap().as_ref() {
+        if let Some(tl) = xd.toplevel.lock_or_recover().as_ref() {
             let _ = tl.send_event(xdg_toplevel::Event::Close);
         }
     }
@@ -711,7 +710,7 @@ fn send_close(state: &mut State, slot: usize) {
 fn raise_and_focus(state: &mut State, slot: usize) {
     let z = state.next_z();
     {
-        let mut windows = state.windows.lock().unwrap();
+        let mut windows = state.windows.lock_or_recover();
         if let Some(w) = windows.get_mut(slot) {
             // Powierzchnie warstwowe (panele/docki) trzymają stałą kolejność.
             if !w.layer {
@@ -823,7 +822,7 @@ fn window_shortcut(state: &mut State, keysym: u32, st: ButtonState) -> bool {
 /// Przywraca okno z minimalizacji/maksymalizacji/fullscreenu.
 fn restore_window(state: &mut State, slot: usize) {
     let (min, max, full) = {
-        let windows = state.windows.lock().unwrap();
+        let windows = state.windows.lock_or_recover();
         match windows.get(slot) {
             Some(w) => (w.minimized, w.maximized, w.fullscreen),
             None => return,
@@ -841,7 +840,7 @@ fn restore_window(state: &mut State, slot: usize) {
 /// Przełącza fokus na kolejne okno (przywracając je, jeśli było zminimalizowane).
 fn cycle_windows(state: &mut State) {
     let slots: Vec<usize> = {
-        let windows = state.windows.lock().unwrap();
+        let windows = state.windows.lock_or_recover();
         windows
             .iter()
             .enumerate()
@@ -857,7 +856,7 @@ fn cycle_windows(state: &mut State) {
         Some(p) => slots[(p + 1) % slots.len()],
         None => slots[0],
     };
-    if let Some(w) = state.windows.lock().unwrap().get_mut(next) {
+    if let Some(w) = state.windows.lock_or_recover().get_mut(next) {
         w.minimized = false;
     }
     raise_and_focus(state, next);

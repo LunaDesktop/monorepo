@@ -14,6 +14,7 @@ use crate::layer::LayerData;
 use crate::shell::{XdgSurfaceData, XdgToplevelData};
 use crate::shm::BufferData;
 use crate::state::{State, Window};
+use crate::sync::LockExt;
 
 /// Dane powierzchni (`wl_surface`).
 pub struct SurfaceData {
@@ -109,6 +110,9 @@ impl Dispatch<wl_callback::WlCallback, ()> for State {
     }
 }
 
+/// Górny limit oczekujących frame-callbacków na powierzchnię (ochrona przed OOM).
+const MAX_PENDING_FRAMES: usize = 256;
+
 impl Dispatch<wl_surface::WlSurface, SurfaceData> for State {
     fn request(
         state: &mut Self,
@@ -122,15 +126,23 @@ impl Dispatch<wl_surface::WlSurface, SurfaceData> for State {
         match request {
             wl_surface::Request::Frame { callback } => {
                 let cb = data_init.init(callback, ());
-                data.frames.lock().unwrap().push(cb);
+                let mut frames = data.frames.lock_or_recover();
+                // Limit oczekujących callbacków — klient bez `commit` nie wysypie pamięci.
+                if frames.len() >= MAX_PENDING_FRAMES {
+                    let _ = cb.send_event(wl_callback::Event::Done {
+                        callback_data: state.time_ms(),
+                    });
+                } else {
+                    frames.push(cb);
+                }
             }
             wl_surface::Request::Attach { buffer, .. } => {
-                *data.buffer.lock().unwrap() = buffer;
+                *data.buffer.lock_or_recover() = buffer;
             }
             wl_surface::Request::Commit => {
                 // Wywołaj oczekujące frame-callbacki.
                 let now = state.time_ms();
-                for cb in data.frames.lock().unwrap().drain(..) {
+                for cb in data.frames.lock_or_recover().drain(..) {
                     let _ = cb.send_event(wl_callback::Event::Done { callback_data: now });
                 }
                 // Pierwszy commit powierzchni z `xdg_surface` → wyślij konfigurację.
@@ -146,24 +158,24 @@ impl Dispatch<wl_surface::WlSurface, SurfaceData> for State {
 /// Skomponuj powierzchnię do modelu okien (toplevel, popup lub powierzchnia warstwowa).
 fn composite(state: &mut State, surface: &wl_surface::WlSurface, data: &SurfaceData) {
     // Powierzchnia warstwowa (panel/dock) — własna ścieżka (bez xdg_surface).
-    if let Some(ls) = data.layer.lock().unwrap().clone() {
+    if let Some(ls) = data.layer.lock_or_recover().clone() {
         composite_layer(state, surface, data, &ls);
         return;
     }
-    let Some(xdg_surface) = data.xdg_surface.lock().unwrap().clone() else {
+    let Some(xdg_surface) = data.xdg_surface.lock_or_recover().clone() else {
         return;
     };
     let (is_toplevel, is_popup) = match xdg_surface.data::<XdgSurfaceData>() {
         Some(d) => (
-            d.toplevel.lock().unwrap().is_some(),
-            *d.is_popup.lock().unwrap(),
+            d.toplevel.lock_or_recover().is_some(),
+            *d.is_popup.lock_or_recover(),
         ),
         None => (false, false),
     };
     if !is_toplevel && !is_popup {
         return;
     }
-    let Some(buffer) = data.buffer.lock().unwrap().clone() else {
+    let Some(buffer) = data.buffer.lock_or_recover().clone() else {
         return;
     };
     let Some(buf_data) = buffer.data::<BufferData>() else {
@@ -185,9 +197,9 @@ fn composite(state: &mut State, surface: &wl_surface::WlSurface, data: &SurfaceD
         xdg_surface
             .data::<XdgSurfaceData>()
             .and_then(|d| {
-                d.toplevel.lock().unwrap().as_ref().and_then(|tl| {
+                d.toplevel.lock_or_recover().as_ref().and_then(|tl| {
                     tl.data::<XdgToplevelData>()
-                        .map(|td| td.title.lock().unwrap().clone())
+                        .map(|td| td.title.lock_or_recover().clone())
                 })
             })
             .unwrap_or_default()
@@ -195,7 +207,7 @@ fn composite(state: &mut State, surface: &wl_surface::WlSurface, data: &SurfaceD
         String::new()
     };
 
-    let count = state.windows.lock().unwrap().len();
+    let count = state.windows.lock_or_recover().len();
     let (px, py) = popup_xy.unwrap_or((60.0 + count as f64 * 36.0, 60.0 + count as f64 * 36.0));
     let (_, created) = upsert_window(
         state, surface, data, px, py, w, h, z, &title, is_popup, false, false, image,
@@ -220,10 +232,10 @@ fn composite_layer(
     };
     let out_idx = ld.output.unwrap_or(0);
     let (ox, oy, out_w, out_h) = output_rect(state, out_idx);
-    let buffer = data.buffer.lock().unwrap().clone();
+    let buffer = data.buffer.lock_or_recover().clone();
     // Pierwszy `commit` (zwykle bez bufora) → wyślij `configure` z rozmiarem.
-    if !*ld.configured.lock().unwrap() {
-        let st = *ld.state.lock().unwrap();
+    if !*ld.configured.lock_or_recover() {
+        let st = *ld.state.lock_or_recover();
         let (cw, ch) = st.configure_size(out_w, out_h);
         let serial = state.next_serial();
         let _ = ls.send_event(zwlr_layer_surface_v1::Event::Configure {
@@ -231,7 +243,7 @@ fn composite_layer(
             width: cw.max(0) as u32,
             height: ch.max(0) as u32,
         });
-        *ld.configured.lock().unwrap() = true;
+        *ld.configured.lock_or_recover() = true;
         if buffer.is_none() {
             return;
         }
@@ -247,7 +259,7 @@ fn composite_layer(
         return;
     };
     let image = std::sync::Arc::new(ImageData::new(w as u32, h as u32, rgba));
-    let st = *ld.state.lock().unwrap();
+    let st = *ld.state.lock_or_recover();
     let (rx, ry) = st.position(out_w, out_h, w as f64, h as f64);
     let z = crate::layer::layer_z(st.layer);
     upsert_window(
@@ -285,8 +297,8 @@ fn upsert_window(
     reposition: bool,
     image: std::sync::Arc<ImageData>,
 ) -> (usize, bool) {
-    let mut slot = data.slot.lock().unwrap();
-    let mut windows = state.windows.lock().unwrap();
+    let mut slot = data.slot.lock_or_recover();
+    let mut windows = state.windows.lock_or_recover();
     let mut created = false;
     let idx = match *slot {
         Some(i) => {
@@ -343,7 +355,7 @@ fn upsert_window(
 
 /// Geometria monitora `idx` (x, y, szerokość, wysokość); `idx` poza zakresem → pierwszy.
 fn output_rect(state: &State, idx: usize) -> (f64, f64, f64, f64) {
-    let outs = state.outputs.lock().unwrap();
+    let outs = state.outputs.lock_or_recover();
     let o = outs.get(idx).or_else(|| outs.first());
     match o {
         Some(o) => (o.x as f64, o.y as f64, o.width as f64, o.height as f64),
@@ -356,16 +368,18 @@ fn popup_position(state: &State, xdg_surface: &xdg_surface::XdgSurface) -> (f64,
     let Some(d) = xdg_surface.data::<XdgSurfaceData>() else {
         return (0.0, 0.0);
     };
-    let geom = *d.geom.lock().unwrap();
+    let geom = *d.geom.lock_or_recover();
     let parent_origin = d
         .parent
-        .lock()
-        .unwrap()
+        .lock_or_recover()
         .clone()
-        .and_then(|ps| ps.data::<SurfaceData>().map(|sd| *sd.slot.lock().unwrap()))
+        .and_then(|ps| {
+            ps.data::<SurfaceData>()
+                .map(|sd| *sd.slot.lock_or_recover())
+        })
         .flatten()
         .and_then(|slot| {
-            state.windows.lock().unwrap().get(slot).map(|w| {
+            state.windows.lock_or_recover().get(slot).map(|w| {
                 let c = w.content();
                 (c.x(), c.y())
             })
@@ -387,7 +401,7 @@ fn send_popup_configure(
 ) {
     let serial = state.next_serial();
     if let Some(d) = xdg_surface.data::<XdgSurfaceData>() {
-        if let Some(popup) = d.popup.lock().unwrap().as_ref() {
+        if let Some(popup) = d.popup.lock_or_recover().as_ref() {
             let _ = popup.send_event(xdg_popup::Event::Configure {
                 x: x as i32,
                 y: y as i32,
@@ -395,30 +409,30 @@ fn send_popup_configure(
                 height: h,
             });
         }
-        if !*d.configured.lock().unwrap() {
+        if !*d.configured.lock_or_recover() {
             let _ = xdg_surface.send_event(xdg_surface::Event::Configure { serial });
-            *d.configured.lock().unwrap() = true;
+            *d.configured.lock_or_recover() = true;
         }
     }
 }
 
 /// Jeśli toplevel nie ma jeszcze konfiguracji, wyślij `configure` (popupy mają własną).
 fn maybe_configure_xdg(state: &mut State, data: &SurfaceData) {
-    let Some(xdg_surface) = data.xdg_surface.lock().unwrap().clone() else {
+    let Some(xdg_surface) = data.xdg_surface.lock_or_recover().clone() else {
         return;
     };
     let Some(xdg_data) = xdg_surface.data::<XdgSurfaceData>() else {
         return;
     };
-    if *xdg_data.is_popup.lock().unwrap() {
+    if *xdg_data.is_popup.lock_or_recover() {
         return;
     }
-    if *xdg_data.configured.lock().unwrap() {
+    if *xdg_data.configured.lock_or_recover() {
         return;
     }
     let serial = state.next_serial();
     let _ = xdg_surface.send_event(xdg_surface::Event::Configure { serial });
-    if let Some(toplevel) = xdg_data.toplevel.lock().unwrap().as_ref() {
+    if let Some(toplevel) = xdg_data.toplevel.lock_or_recover().as_ref() {
         let _ = toplevel.send_event(xdg_toplevel::Event::Configure {
             width: 1024,
             height: 720,
@@ -428,5 +442,5 @@ fn maybe_configure_xdg(state: &mut State, data: &SurfaceData) {
             capabilities: vec![],
         });
     }
-    *xdg_data.configured.lock().unwrap() = true;
+    *xdg_data.configured.lock_or_recover() = true;
 }

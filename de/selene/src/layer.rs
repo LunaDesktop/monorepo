@@ -15,6 +15,7 @@ use wayland_server::{
 
 use crate::compositor::SurfaceData;
 use crate::state::State;
+use crate::sync::LockExt;
 
 /// Kotwice krawędzi (`zwlr_layer_surface_v1.anchor`).
 pub const ANCHOR_TOP: u32 = 1;
@@ -173,7 +174,7 @@ impl Dispatch<layer_shell::ZwlrLayerShellV1, ()> for State {
             let ls = data_init.init(id, LayerData::new(surface.clone(), layer, output));
             // Zapamiętaj powiązanie po stronie `wl_surface` (potrzebne przy `commit`).
             if let Some(sd) = surface.data::<SurfaceData>() {
-                *sd.layer.lock().unwrap() = Some(ls);
+                *sd.layer.lock_or_recover() = Some(ls);
             }
         }
     }
@@ -189,7 +190,7 @@ impl Dispatch<layer_surface::ZwlrLayerSurfaceV1, LayerData> for State {
         _handle: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {
-        let mut st = data.state.lock().unwrap();
+        let mut st = data.state.lock_or_recover();
         match request {
             layer_surface::Request::SetSize { width, height } => {
                 st.width = width as i32;
@@ -230,8 +231,8 @@ impl Dispatch<layer_surface::ZwlrLayerSurfaceV1, LayerData> for State {
                 // Zdejmij powierzchnię z widoku.
                 drop(st);
                 if let Some(sd) = data.surface.data::<SurfaceData>() {
-                    if let Some(slot) = *sd.slot.lock().unwrap() {
-                        if let Some(w) = state.windows.lock().unwrap().get_mut(slot) {
+                    if let Some(slot) = *sd.slot.lock_or_recover() {
+                        if let Some(w) = state.windows.lock_or_recover().get_mut(slot) {
                             w.mapped = false;
                         }
                     }

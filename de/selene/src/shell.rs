@@ -12,6 +12,7 @@ use wayland_server::{
 
 use crate::compositor::SurfaceData;
 use crate::state::State;
+use crate::sync::LockExt;
 
 /// Geometria popupu zebrana z `xdg_positioner` (uproszczona: prostokąt kotwicy + offset).
 #[derive(Debug, Clone, Copy, Default)]
@@ -117,7 +118,7 @@ impl Dispatch<xdg_wm_base::XdgWmBase, ()> for State {
                 let xdg = data_init.init(id, XdgSurfaceData::new(surface.clone()));
                 // Zapamiętaj powiązanie po stronie `wl_surface` (do konfiguracji przy commit).
                 if let Some(sd) = surface.data::<SurfaceData>() {
-                    *sd.xdg_surface.lock().unwrap() = Some(xdg);
+                    *sd.xdg_surface.lock_or_recover() = Some(xdg);
                 }
             }
             _ => {}
@@ -138,7 +139,7 @@ impl Dispatch<xdg_surface::XdgSurface, XdgSurfaceData> for State {
         match request {
             xdg_surface::Request::GetToplevel { id } => {
                 let toplevel = data_init.init(id, XdgToplevelData::new(data.wl_surface.clone()));
-                *data.toplevel.lock().unwrap() = Some(toplevel);
+                *data.toplevel.lock_or_recover() = Some(toplevel);
             }
             xdg_surface::Request::GetPopup {
                 id,
@@ -146,15 +147,15 @@ impl Dispatch<xdg_surface::XdgSurface, XdgSurfaceData> for State {
                 positioner,
             } => {
                 let popup = data_init.init(id, ());
-                *data.popup.lock().unwrap() = Some(popup);
-                *data.is_popup.lock().unwrap() = true;
-                *data.parent.lock().unwrap() = parent
+                *data.popup.lock_or_recover() = Some(popup);
+                *data.is_popup.lock_or_recover() = true;
+                *data.parent.lock_or_recover() = parent
                     .as_ref()
                     .and_then(|p| p.data::<XdgSurfaceData>())
                     .map(|p| p.wl_surface.clone());
-                *data.geom.lock().unwrap() = positioner
+                *data.geom.lock_or_recover() = positioner
                     .data::<XdgPositionerData>()
-                    .map(|p| *p.geom.lock().unwrap())
+                    .map(|p| *p.geom.lock_or_recover())
                     .unwrap_or_default();
             }
             xdg_surface::Request::AckConfigure { .. } => {
@@ -177,19 +178,19 @@ impl Dispatch<xdg_toplevel::XdgToplevel, XdgToplevelData> for State {
     ) {
         match request {
             xdg_toplevel::Request::SetTitle { title } => {
-                *data.title.lock().unwrap() = title.clone();
+                *data.title.lock_or_recover() = title.clone();
                 state.toplevels += 1;
                 // Odśwież tytuł w modelu okien (dekoracja rysuje go na pasku).
                 if let Some(sd) = data.surface.data::<SurfaceData>() {
-                    if let Some(slot) = *sd.slot.lock().unwrap() {
-                        if let Some(window) = state.windows.lock().unwrap().get_mut(slot) {
+                    if let Some(slot) = *sd.slot.lock_or_recover() {
+                        if let Some(window) = state.windows.lock_or_recover().get_mut(slot) {
                             window.title = title;
                         }
                     }
                 }
             }
             xdg_toplevel::Request::SetAppId { app_id } => {
-                *data.app_id.lock().unwrap() = app_id;
+                *data.app_id.lock_or_recover() = app_id;
             }
             _ => {}
         }
@@ -206,7 +207,7 @@ impl Dispatch<xdg_positioner::XdgPositioner, XdgPositionerData> for State {
         _handle: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {
-        let mut geom = data.geom.lock().unwrap();
+        let mut geom = data.geom.lock_or_recover();
         match request {
             xdg_positioner::Request::SetSize { width, height } => {
                 geom.width = width;

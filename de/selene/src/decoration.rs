@@ -13,6 +13,7 @@ use wayland_server::{
 
 use crate::shell::XdgToplevelData;
 use crate::state::State;
+use crate::sync::LockExt;
 
 /// Uchwyt obiektu dekoracji okna.
 pub type ToplevelDecoration = toplevel_decoration::ZxdgToplevelDecorationV1;
@@ -43,7 +44,7 @@ impl Dispatch<decoration_manager::ZxdgDecorationManagerV1, ()> for State {
         if let decoration_manager::Request::GetToplevelDecoration { id, toplevel } = request {
             let deco = data_init.init(id, ());
             if let Some(td) = toplevel.data::<XdgToplevelData>() {
-                *td.decoration.lock().unwrap() = Some(deco);
+                *td.decoration.lock_or_recover() = Some(deco);
             }
         }
     }

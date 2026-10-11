@@ -18,10 +18,12 @@ mod seat;
 mod shell;
 mod shm;
 mod state;
+mod sync;
 
 use std::error::Error;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::os::unix::fs::MetadataExt;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -32,12 +34,17 @@ use wayland_protocols_wlr::layer_shell::v1::server::zwlr_layer_shell_v1;
 use wayland_server::protocol::{wl_compositor, wl_data_device_manager, wl_output, wl_seat, wl_shm};
 use wayland_server::{Display, ListeningSocket};
 
+use crate::sync::LockExt;
 use state::State;
 
 fn main() -> Result<(), Box<dyn Error>> {
     // Wielojęzyczność: lokalizacja z otoczenia + katalogi `i18n/` doładowane w runtime.
     libluna_i18n::set_locale(libluna_i18n::Locale::from_env());
     libluna_i18n::load_catalogs_from_dirs();
+
+    // Krótszy, jednoznaczny log panik — bez zasypywania sesji pełnym backtrace'em.
+    // Paniki klientów są łapane niżej (`catch_unwind`), więc sesja żyje dalej.
+    std::panic::set_hook(Box::new(|info| eprintln!("Selene panic: {info}")));
 
     let mut display: Display<State> = Display::new()?;
     let mut handle = display.handle();
@@ -64,10 +71,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .collect::<Vec<_>>()
                     .join(", ")
             );
-            *state.outputs.lock().unwrap() = outs;
+            *state.outputs.lock_or_recover() = outs;
         }
     }
-    let output_count = state.outputs.lock().unwrap().len();
+    let output_count = state.outputs.lock_or_recover().len();
 
     // Globalne interfejsy protokołu.
     handle.create_global::<State, wl_compositor::WlCompositor, ()>(4, ());
@@ -162,8 +169,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             if let Some(input) = evdev_input.as_mut() {
                 let bounds = state
                     .outputs
-                    .lock()
-                    .unwrap()
+                    .lock_or_recover()
                     .first()
                     .map(|o| (o.width as f64, o.height as f64))
                     .unwrap_or((1280.0, 800.0));
@@ -177,8 +183,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         // Nowy klient.
         if fds[0].revents().contains(rustix::event::PollFlags::IN) {
             while let Ok(Some(stream)) = socket.accept() {
-                handle.insert_client(stream, Arc::new(()))?;
-                state.clients += 1;
+                match handle.insert_client(stream, Arc::new(())) {
+                    Ok(_) => state.clients += 1,
+                    Err(e) => eprintln!("client rejected: {e}"),
+                }
             }
         }
 
@@ -186,7 +194,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         if fds[2].revents().contains(rustix::event::PollFlags::IN) {
             input::drain_wake(&mut wake_read);
             let batch: Vec<Event> = {
-                let mut queue = events.lock().unwrap();
+                let mut queue = events.lock_or_recover();
                 std::mem::take(&mut *queue)
             };
             for event in &batch {
@@ -194,8 +202,18 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
 
-        display.dispatch_clients(&mut state)?;
-        display.flush_clients()?;
+        // Odporność: panika albo błąd w obsłudze pojedynczego klienta nie może zabić
+        // całej sesji — łapiemy panikę i kontynuujemy pętlę.
+        match catch_unwind(AssertUnwindSafe(|| display.dispatch_clients(&mut state))) {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => eprintln!("{}", libluna_i18n::tr("client request panicked; ignoring")),
+        }
+        match catch_unwind(AssertUnwindSafe(|| display.flush_clients())) {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => eprintln!("{}", libluna_i18n::tr("client request panicked; ignoring")),
+        }
     }
 }
 

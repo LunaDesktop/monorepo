@@ -16,6 +16,7 @@ use crate::drm::DrmBackend;
 use crate::input::{self, Events};
 use crate::monitors::Outputs;
 use crate::state::{Window, WindowModel};
+use crate::sync::LockExt;
 
 /// Uruchamia wątek wyjścia (nested Wayland) o zadanym rozmiarze.
 pub fn spawn(
@@ -35,7 +36,7 @@ pub fn spawn(
         let _ = run(config, move |frame: &mut Frame| {
             // Zgłoś bieżący rozmiar monitora (okno może być zmieniane przez rodzica).
             {
-                let mut outs = outputs.lock().unwrap();
+                let mut outs = outputs.lock_or_recover();
                 if let Some(out) = outs.first_mut() {
                     out.width = frame.size.width as i32;
                     out.height = frame.size.height as i32;
@@ -114,7 +115,7 @@ fn build_scene(scene: &mut Scene, size: Size, ox: f64, oy: f64, model: &WindowMo
     );
 
     {
-        let windows = model.lock().unwrap();
+        let windows = model.lock_or_recover();
         let mut order: Vec<&Window> = windows.iter().collect();
         order.sort_by_key(|w| w.z);
         for w in order {

@@ -10,6 +10,8 @@ use std::sync::{Arc, Mutex};
 
 use libluna_core::Event;
 
+use crate::sync::LockExt;
+
 /// Współdzielona kolejka zdarzeń wejścia.
 pub type Events = Arc<Mutex<Vec<Event>>>;
 
@@ -24,7 +26,7 @@ pub fn push(events: &Events, wake: &mut UnixStream, batch: &[Event]) {
     if batch.is_empty() {
         return;
     }
-    events.lock().unwrap().extend_from_slice(batch);
+    events.lock_or_recover().extend_from_slice(batch);
     let _ = wake.write_all(&[1u8]);
 }
 

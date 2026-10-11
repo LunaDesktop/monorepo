@@ -26,6 +26,10 @@ use wayland_server::protocol::wl_data_source::{
 use wayland_server::{Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource};
 
 use crate::state::State;
+use crate::sync::LockExt;
+
+/// Górny limit typów MIME oferowanych przez jedno źródło danych (ochrona przed OOM).
+const MAX_MIME_TYPES: usize = 64;
 
 /// Dane `wl_data_source`: oferowane typy MIME.
 #[derive(Default)]
@@ -90,7 +94,11 @@ impl Dispatch<WlDataSource, DataSourceData> for State {
     ) {
         match request {
             SourceRequest::Offer { mime_type } => {
-                data.mimes.lock().unwrap().push(mime_type);
+                let mut mimes = data.mimes.lock_or_recover();
+                // Limit liczby oferowanych typów MIME (ochrona przed OOM).
+                if mimes.len() < MAX_MIME_TYPES {
+                    mimes.push(mime_type);
+                }
             }
             SourceRequest::Destroy => {
                 // Jeśli to była bieżąca selekcja — wyczyść.
@@ -166,7 +174,7 @@ impl Dispatch<WlDataOffer, DataOfferData> for State {
         match request {
             OfferRequest::Receive { mime_type, fd } => {
                 // Przekaż żądanie danych do źródła.
-                if let Some(src) = data.source.lock().unwrap().clone() {
+                if let Some(src) = data.source.lock_or_recover().clone() {
                     let _ = src.send_event(SourceEvent::Send {
                         mime_type,
                         fd: fd.as_fd(),
@@ -291,7 +299,7 @@ fn enter_target(state: &mut State, handle: &DisplayHandle, slot: usize, pos: (f6
     let mimes = source
         .as_ref()
         .and_then(|s| s.data::<DataSourceData>())
-        .map(|d| d.mimes.lock().unwrap().clone())
+        .map(|d| d.mimes.lock_or_recover().clone())
         .unwrap_or_default();
     let offer_data = DataOfferData {
         source: Mutex::new(source),
@@ -321,7 +329,7 @@ fn enter_target(state: &mut State, handle: &DisplayHandle, slot: usize, pos: (f6
 
 /// Współrzędne powierzchniowe (lokalne dla treści okna `slot`).
 fn local_coords(state: &State, slot: usize, pos: (f64, f64)) -> (f64, f64) {
-    match state.windows.lock().unwrap().get(slot) {
+    match state.windows.lock_or_recover().get(slot) {
         Some(w) => {
             let c = w.content();
             (pos.0 - c.x(), pos.1 - c.y())
@@ -349,7 +357,7 @@ fn broadcast_selection(
             Some(src) => {
                 let mimes = src
                     .data::<DataSourceData>()
-                    .map(|d| d.mimes.lock().unwrap().clone())
+                    .map(|d| d.mimes.lock_or_recover().clone())
                     .unwrap_or_default();
                 let offer_data = DataOfferData {
                     source: Mutex::new(Some(src.clone())),

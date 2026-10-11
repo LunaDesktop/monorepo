@@ -132,6 +132,18 @@ Pliki sesji: `de/session/luna-session` (launcher) i `de/session/selene.desktop`
 Klienta podłączysz ustawiając `WAYLAND_DISPLAY=wayland-0` i `XDG_RUNTIME_DIR` na ten sam
 katalog (renderowanie pojawi się, gdy wejdzie backend wyświetlania).
 
+## Bezpieczeństwo / Security
+
+- Klienty Wayland działają z prawami tego samego użytkownika i są **zaufane** — kompozytor
+  nie sandboxuje aplikacji (jak w każdym Waylandzie). Granica bezpieczeństwa to użytkownik/system.
+- Gniazdo Wayland powstaje w `XDG_RUNTIME_DIR` o prawach `0700`; Selene waliduje ten katalog,
+  a gdy go brak — wybiera bezpieczny fallback (bez setuid, bez gniazd sieciowych).
+- Wejście (`/dev/input`, grupa `input`) i master DRM (`/dev/dri`, grupa `video`/root) to
+  uprawnienia grupowe — świadoma decyzja trybu DRM, nie wymóg trybu nested.
+- Odporność: obsługa klienta jest izolowana (`catch_unwind`), blokady odzyskują stan po
+  „zatruciu” mutexa (`sync::LockExt`), bufor `wl_shm` walidowany (rozmiary, `stride`, bez
+  SIGBUS/OOM), a kolejki (frame-callbacks, MIME) mają limity.
+
 ## Architektura / Architecture
 
 ```
