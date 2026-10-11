@@ -209,6 +209,26 @@ fn main() -> Result<(), Box<dyn Error>> {
                         if let Some(ws) = &workspaces {
                             ws.activate(i);
                         }
+                    } else if !open && !power_open {
+                        // Klik w toast: wywołaj akcję (jeśli jest) i zamknij powiadomienie.
+                        let area = Rect::from_xywh(
+                            0.0,
+                            THICKNESS + 8.0,
+                            size.width,
+                            size.height - THICKNESS,
+                        );
+                        if let Some(i) = notes.hit(area, pe.position) {
+                            if let Some(n) = notes.get(i) {
+                                if let Some(bus) = &bus {
+                                    if let Some(key) = n.actions.first() {
+                                        bus.signal_action(n.id, key);
+                                    }
+                                    // 2 = zamknięte przez użytkownika.
+                                    bus.signal_closed(n.id, 2);
+                                }
+                            }
+                            notes.remove(i);
+                        }
                     }
                 }
                 Event::PointerButton(pe)
@@ -330,7 +350,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 fn notification_from(inc: Incoming) -> Notification {
     let icon = icon_for(&inc.app_name);
     let timeout = inc.timeout_secs();
-    let mut n = Notification::new(inc.app_name, inc.summary, inc.body).with_icon(icon);
+    let mut n = Notification::new(inc.app_name, inc.summary, inc.body)
+        .with_icon(icon)
+        .with_id(inc.id)
+        .with_actions(inc.actions);
     n.timeout = timeout;
     n
 }

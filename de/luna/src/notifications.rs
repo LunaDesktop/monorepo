@@ -5,7 +5,7 @@
 //! `org.freedesktop.Notifications` to kolejny krok (patrz roadmapa).
 
 use libluna_core::style::weight;
-use libluna_core::Rect;
+use libluna_core::{Point, Rect};
 use libluna_widgets::{paint_icon, IconName, PaintCtx};
 
 /// Czas animacji wejścia/wyjścia (s).
@@ -28,6 +28,10 @@ pub struct Notification {
     pub icon: IconName,
     /// Czas życia (s); 0 = nie zamykaj automatycznie.
     pub timeout: f64,
+    /// Identyfikator z magistrali D‑Bus (0 = powiadomienie lokalne).
+    pub id: u32,
+    /// Klucze akcji (`ActionInvoked`); puste, gdy brak akcji.
+    pub actions: Vec<String>,
 }
 
 impl Notification {
@@ -38,11 +42,25 @@ impl Notification {
             body: body.into(),
             icon: IconName::Info,
             timeout: 5.0,
+            id: 0,
+            actions: Vec::new(),
         }
     }
 
     pub fn with_icon(mut self, icon: IconName) -> Self {
         self.icon = icon;
+        self
+    }
+
+    /// Ustawia identyfikator z magistrali (do wysłania `NotificationClosed`).
+    pub fn with_id(mut self, id: u32) -> Self {
+        self.id = id;
+        self
+    }
+
+    /// Ustawia klucze akcji (do wysłania `ActionInvoked`).
+    pub fn with_actions(mut self, actions: Vec<String>) -> Self {
+        self.actions = actions;
         self
     }
 }
@@ -83,6 +101,25 @@ impl Notifications {
 
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
+    }
+
+    /// Indeks powiadomienia pod punktem `p` (od wierzchu stosu).
+    pub fn hit(&self, area: Rect, p: Point) -> Option<usize> {
+        (0..self.items.len())
+            .rev()
+            .find(|&i| Self::rect_in(area, i).contains(p))
+    }
+
+    /// Powiadomienie o indeksie `i`.
+    pub fn get(&self, i: usize) -> Option<&Notification> {
+        self.items.get(i).map(|(n, _)| n)
+    }
+
+    /// Usuwa powiadomienie o indeksie `i` (np. po kliknięciu).
+    pub fn remove(&mut self, i: usize) {
+        if i < self.items.len() {
+            self.items.remove(i);
+        }
     }
 
     /// Prostokąt `i`-tego powiadomienia w kolumnie zakotwiczonej w prawym-górnym
@@ -206,6 +243,26 @@ mod tests {
         let b = Notifications::rect_in(area, 1);
         assert_eq!(a.right(), area.right());
         assert!(b.y() > a.y());
+    }
+
+    #[test]
+    fn hit_and_remove_by_point() {
+        let mut n = Notifications::new();
+        n.push(
+            Notification::new("A", "t", "b")
+                .with_id(7)
+                .with_actions(vec!["default".to_owned()]),
+        );
+        n.advance(0.3);
+        let area = Rect::from_xywh(0.0, 40.0, 1280.0, 200.0);
+        let rect = Notifications::rect_in(area, 0);
+        assert_eq!(n.hit(area, rect.center()), Some(0));
+        assert_eq!(n.hit(area, Point::new(-10.0, -10.0)), None);
+        let n0 = n.get(0).unwrap();
+        assert_eq!(n0.id, 7);
+        assert_eq!(n0.actions, vec!["default".to_owned()]);
+        n.remove(0);
+        assert!(n.is_empty());
     }
 
     #[test]

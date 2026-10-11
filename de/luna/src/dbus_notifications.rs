@@ -18,6 +18,8 @@ use zbus::zvariant::OwnedValue;
 /// Żądanie powiadomienia odebrane z magistrali.
 #[derive(Debug, Clone, Default)]
 pub struct Incoming {
+    /// Identyfikator nadany przez nas (do `NotificationClosed`/`ActionInvoked`).
+    pub id: u32,
     /// Nazwa aplikacji wysyłającej.
     pub app_name: String,
     /// Podsumowanie (tytuł toasta).
@@ -26,6 +28,8 @@ pub struct Incoming {
     pub body: String,
     /// Czas życia w ms: `-1` = domyślny serwera, `0` = trwałe, `> 0` = jawny.
     pub expire_ms: i32,
+    /// Klucze akcji (bez etykiet) do `ActionInvoked`.
+    pub actions: Vec<String>,
 }
 
 impl Incoming {
@@ -62,19 +66,23 @@ impl Server {
         _app_icon: String,
         summary: String,
         body: String,
-        _actions: Vec<String>,
+        actions: Vec<String>,
         _hints: HashMap<String, OwnedValue>,
         expire_ms: i32,
     ) -> u32 {
+        let keys: Vec<String> = actions.chunks_exact(2).map(|c| c[0].clone()).collect();
         let id = {
             let mut q = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+            let id = q.iter().map(|i| i.id).max().unwrap_or(0) + 1;
             q.push(Incoming {
+                id,
                 app_name,
                 summary,
                 body,
                 expire_ms,
+                actions: keys,
             });
-            q.len() as u32
+            id
         };
         // Obudź pętlę powłoki, żeby nowy toast został narysowany.
         self.waker.wake();
@@ -125,6 +133,30 @@ impl NotificationsBus {
     pub fn drain(&self) -> Vec<Incoming> {
         let mut q = self.queue.lock().unwrap_or_else(|e| e.into_inner());
         std::mem::take(&mut *q)
+    }
+
+    /// Sygnalizuje zamknięcie powiadomienia (`NotificationClosed`).
+    ///
+    /// `reason`: 1 = wygasło, 2 = zamknięte przez użytkownika, 3 = `CloseNotification`.
+    pub fn signal_closed(&self, id: u32, reason: u32) {
+        let _ = self._conn.emit_signal(
+            None::<&str>,
+            "/org/freedesktop/Notifications",
+            "org.freedesktop.Notifications",
+            "NotificationClosed",
+            &(id, reason),
+        );
+    }
+
+    /// Sygnalizuje wywołanie akcji (`ActionInvoked`).
+    pub fn signal_action(&self, id: u32, key: &str) {
+        let _ = self._conn.emit_signal(
+            None::<&str>,
+            "/org/freedesktop/Notifications",
+            "org.freedesktop.Notifications",
+            "ActionInvoked",
+            &(id, key),
+        );
     }
 }
 
