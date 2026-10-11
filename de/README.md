@@ -57,7 +57,8 @@ gnieździe nasłuchu i deskryptorze backendu. `libLuna` jest zwykłą zależnoś
   `drop` do celu (z ofertą), `dnd_drop_performed`/`dnd_finished`/`cancelled` do źródła.
 - **Klawiatura**: układ i wariant z otoczenia (`LUNA_KEYBOARD_LAYOUT`, `LUNA_KEYBOARD_VARIANT`,
   sanityzowane), `wl_keyboard.repeat_info`.
-- **Realne wyjście DRM/KMS** (`SELENE_BACKEND=drm`, opcjonalne): przejęcie mastera, bufor
+- **Realne wyjście DRM/KMS** (`SELENE_BACKEND=drm`, opcjonalne): przejęcie mastera, wybór
+  trybu natywnego monitora (maks. rozdzielczość, potem najwyższe odświeżanie), bufor
   „dumb”, framebuffer (`ADDFB2`), `SETCRTC` i **page-flip** na wykrytych monitorach; render
   sceny wprost do buforów (podwójne buforowanie). Gdy master trzyma inna sesja — bezpieczny
   fallback do nested (nie odbiera ekranu).

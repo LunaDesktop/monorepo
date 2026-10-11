@@ -111,7 +111,7 @@ pub fn spawn_drm(model: WindowModel, cursor: CursorModel) {
             }
         };
         let infos = backend.outputs();
-        let sizes: Vec<(u32, u32)> = infos.iter().map(|(_, w, h)| (*w, *h)).collect();
+        let sizes: Vec<(u32, u32)> = infos.iter().map(|(_, w, h, _)| (*w, *h)).collect();
         let origins: Vec<(f64, f64)> = {
             // Wyjścia ułożone poziomo (spójne z modelem monitorów).
             let mut x = 0.0;
@@ -124,8 +124,15 @@ pub fn spawn_drm(model: WindowModel, cursor: CursorModel) {
                 })
                 .collect()
         };
-        for (name, w, h) in &infos {
-            println!("{}: {} {}x{}", libluna_i18n::tr("DRM output"), name, w, h);
+        for (name, w, h, hz) in &infos {
+            println!(
+                "{}: {} {}x{}@{}Hz",
+                libluna_i18n::tr("DRM output"),
+                name,
+                w,
+                h,
+                hz
+            );
         }
         let mut renderers: Vec<SoftwareRenderer> = sizes
             .iter()

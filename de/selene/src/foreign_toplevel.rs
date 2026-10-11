@@ -311,7 +311,7 @@ mod tests {
 
     #[test]
     fn state_encoding_is_one_u32_per_flag() {
-        let mut s = State::default();
+        let s = State::default();
         s.windows.lock_or_recover().push(crate::state::Window {
             x: 0.0,
             y: 0.0,

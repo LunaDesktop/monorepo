@@ -336,10 +336,7 @@ fn probe_connector(fd: BorrowedFd, id: u32) -> Option<OutputInfo> {
     };
     let c = ioctl_rw::<ModeGetConnector, DRM_IOCTL_MODE_GETCONNECTOR, _>(fd, req).ok()?;
 
-    let mode = modes
-        .iter()
-        .find(|m| m.type_ & DRM_MODE_TYPE_PREFERRED != 0)
-        .or_else(|| modes.first())?;
+    let mode = pick_best_mode(&modes)?;
 
     Some(OutputInfo {
         name: connector_name(c.connector_type, c.connector_type_id),
@@ -348,6 +345,17 @@ fn probe_connector(fd: BorrowedFd, id: u32) -> Option<OutputInfo> {
         scale: 1,
         x: 0,
         y: 0,
+    })
+}
+
+/// Wybiera najlepszy tryb monitora: **największa rozdzielczość**, potem **najwyższy
+/// `vrefresh`**; przy remisie preferuje tryb natywny (`PREFERRED`).
+fn pick_best_mode(modes: &[ModeInfo]) -> Option<&ModeInfo> {
+    modes.iter().max_by_key(|m| {
+        let area = m.hdisplay as u64 * m.vdisplay as u64;
+        let hz = m.vrefresh as u64;
+        let preferred = u64::from(m.type_ & DRM_MODE_TYPE_PREFERRED != 0);
+        (area, hz, preferred)
     })
 }
 
@@ -442,6 +450,7 @@ struct DrmOutput {
     crtc_id: u32,
     width: u32,
     height: u32,
+    hz: u32,
     buffers: [DumbBuffer; 2],
     front: usize,
 }
@@ -505,11 +514,11 @@ impl DrmBackend {
         Err(last)
     }
 
-    /// `(nazwa, szerokość, wysokość)` każdego wyjścia.
-    pub fn outputs(&self) -> Vec<(String, u32, u32)> {
+    /// `(nazwa, szerokość, wysokość, odświeżanie)` każdego wyjścia.
+    pub fn outputs(&self) -> Vec<(String, u32, u32, u32)> {
         self.outputs
             .iter()
-            .map(|o| (o.name.clone(), o.width, o.height))
+            .map(|o| (o.name.clone(), o.width, o.height, o.hz))
             .collect()
     }
 
@@ -587,10 +596,7 @@ fn setup_output(fd: BorrowedFd, conn_id: u32, res: &Resources) -> Option<DrmOutp
         },
     )
     .ok()?;
-    let mode = *modes
-        .iter()
-        .find(|m| m.type_ & DRM_MODE_TYPE_PREFERRED != 0)
-        .or_else(|| modes.first())?;
+    let mode = *pick_best_mode(&modes)?;
 
     // Enkoder → CRTC (lub pierwszy możliwy).
     let enc = ioctl_rw::<ModeGetEncoder, DRM_IOCTL_MODE_GETENCODER, _>(
@@ -620,6 +626,7 @@ fn setup_output(fd: BorrowedFd, conn_id: u32, res: &Resources) -> Option<DrmOutp
         crtc_id,
         width,
         height,
+        hz: mode.vrefresh,
         buffers: [b0, b1],
         front: 0,
     })
@@ -742,5 +749,39 @@ mod tests {
     fn xrgb8888_fourcc_is_little_endian_bgrx() {
         // 'X','R','2','4' — kontroluje kolejność bajtów przy przepisywaniu klatki.
         assert_eq!(DRM_FORMAT_XRGB8888.to_le_bytes(), *b"XR24");
+    }
+
+    fn mode(w: u16, h: u16, hz: u32, preferred: bool) -> ModeInfo {
+        ModeInfo {
+            hdisplay: w,
+            vdisplay: h,
+            vrefresh: hz,
+            type_: if preferred {
+                DRM_MODE_TYPE_PREFERRED
+            } else {
+                0
+            },
+            ..ModeInfo::default()
+        }
+    }
+
+    #[test]
+    fn picks_highest_resolution_then_refresh() {
+        let modes = [
+            mode(1280, 720, 60, false),
+            mode(1920, 1080, 60, false),
+            mode(1920, 1080, 144, false),
+        ];
+        let best = pick_best_mode(&modes).unwrap();
+        assert_eq!(
+            (best.hdisplay, best.vdisplay, best.vrefresh),
+            (1920, 1080, 144)
+        );
+    }
+
+    #[test]
+    fn preferred_mode_breaks_ties() {
+        let modes = [mode(1920, 1080, 60, false), mode(1920, 1080, 60, true)];
+        assert!(pick_best_mode(&modes).unwrap().type_ & DRM_MODE_TYPE_PREFERRED != 0);
     }
 }
