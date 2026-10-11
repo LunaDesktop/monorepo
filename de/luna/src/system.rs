@@ -15,6 +15,8 @@ pub struct SystemStatus {
     pub wifi: Option<(bool, Option<String>)>,
     /// `(procent, ładuje)`.
     pub battery: Option<(u8, bool)>,
+    /// Jasność ekranu (procent), gdy jest podświetlenie (`/sys/class/backlight`).
+    pub brightness: Option<u8>,
 }
 
 impl SystemStatus {
@@ -25,6 +27,7 @@ impl SystemStatus {
             volume: read_volume(),
             wifi: wifi(),
             battery: battery(),
+            brightness: read_brightness(),
         }
     }
 }
@@ -32,6 +35,60 @@ impl SystemStatus {
 /// Bieżąca głośność i wyciszenie domyślnego wyjścia (`(procent, wyciszone)`).
 pub fn read_volume() -> Option<(u8, bool)> {
     volume()
+}
+
+/// Bieżąca jasność ekranu w procentach (z `/sys/class/backlight`), gdy dostępna.
+pub fn read_brightness() -> Option<u8> {
+    let dir = backlight_dir()?;
+    let cur: u32 = std::fs::read_to_string(dir.join("brightness"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    let max: u32 = std::fs::read_to_string(dir.join("max_brightness"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    if max == 0 {
+        return None;
+    }
+    Some(((cur * 100 + max / 2) / max) as u8)
+}
+
+/// Ustawia jasność ekranu (procent). Bez uprawnień do sysfs cicho nic nie robi.
+pub fn set_brightness(percent: u8) {
+    let Some(dir) = backlight_dir() else { return };
+    let Ok(text) = std::fs::read_to_string(dir.join("max_brightness")) else {
+        return;
+    };
+    let Ok(max) = text.trim().parse::<u32>() else {
+        return;
+    };
+    if max == 0 {
+        return;
+    }
+    let value = (percent as u32 * max + 50) / 100;
+    let _ = std::fs::write(dir.join("brightness"), format!("{value}\n"));
+}
+
+/// Katalog pierwszego podświetlenia (pierwszy wpis `/sys/class/backlight`).
+fn backlight_dir() -> Option<std::path::PathBuf> {
+    std::fs::read_dir("/sys/class/backlight")
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .next()
+}
+
+/// Kolejny poziom jasności po kliknięciu (cykl 25 → 50 → 75 → 100 → 25).
+pub fn next_brightness_level(current: u8) -> u8 {
+    for level in [25u8, 50, 75, 100] {
+        if current + 6 < level {
+            return level;
+        }
+    }
+    25
 }
 
 /// Współdzielony stan, aktualizowany w tle.
@@ -145,6 +202,15 @@ fn battery() -> Option<(u8, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn brightness_cycles_levels() {
+        assert_eq!(next_brightness_level(0), 25);
+        assert_eq!(next_brightness_level(25), 50);
+        assert_eq!(next_brightness_level(50), 75);
+        assert_eq!(next_brightness_level(75), 100);
+        assert_eq!(next_brightness_level(100), 25);
+    }
 
     #[test]
     fn parses_volume_and_mute() {

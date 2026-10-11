@@ -252,11 +252,12 @@ pub enum IconName {
     User,
     Info,
     App,
+    Brightness,
 }
 
 impl IconName {
     /// Wszystkie ikony z pakietu (kolejność = kolejność w galerii).
-    pub const ALL: [IconName; 28] = [
+    pub const ALL: [IconName; 29] = [
         IconName::Menu,
         IconName::Search,
         IconName::Files,
@@ -285,6 +286,7 @@ impl IconName {
         IconName::User,
         IconName::Info,
         IconName::App,
+        IconName::Brightness,
     ];
 
     /// Nazwa ikony (do galerii/diagnostyki).
@@ -318,6 +320,7 @@ impl IconName {
             IconName::User => "User",
             IconName::Info => "Info",
             IconName::App => "App",
+            IconName::Brightness => "Brightness",
         }
     }
 }
@@ -633,6 +636,19 @@ pub fn paint_icon(paint: &mut PaintCtx, name: IconName, rect: Rect, color: Color
                 g.d(1.5),
                 color,
             );
+        }
+        IconName::Brightness => {
+            scene.stroke_circle(g.p(12.0, 12.0), g.d(4.0), w, color);
+            for k in 0..8 {
+                let a = (k as f64 * 45.0).to_radians();
+                let (c, s) = (a.cos(), a.sin());
+                scene.stroke_line(
+                    g.p(12.0 + 6.4 * c, 12.0 + 6.4 * s),
+                    g.p(12.0 + 9.2 * c, 12.0 + 9.2 * s),
+                    g.d(2.0),
+                    color,
+                );
+            }
         }
     }
 }

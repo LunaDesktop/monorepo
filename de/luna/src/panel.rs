@@ -39,6 +39,8 @@ pub enum ToggleAction {
     None,
     Wifi,
     Volume,
+    /// Jasność ekranu (klik cyklicznie zmienia poziom).
+    Brightness,
 }
 
 /// Przełącznik szybkiego dostępu (Wi-Fi, dźwięk, bateria…).

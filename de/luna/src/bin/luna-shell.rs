@@ -51,6 +51,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Daemon powiadomień D‑Bus (rejestrowany przy pierwszej klatce).
     let mut bus: Option<NotificationsBus> = None;
     let mut bus_tried = false;
+    // Bieżąca jasność (procent) — sterowana klikiem w pigułkę jasności.
+    let mut brightness_pct: u8 = 0;
     // Lista okien z kompozytora (foreign-toplevel) — własne połączenie + wątek.
     let toplevels = luna::toplevels::Toplevels::spawn();
     // Przestrzenie robocze z kompozytora (ext-workspace) — własne połączenie + wątek.
@@ -98,6 +100,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         if let Ok(sys) = system.lock() {
             state.user = sys.user.clone();
             state.toggles = build_toggles(&sys);
+            brightness_pct = sys.brightness.unwrap_or(0);
         }
         // Przestrzenie robocze z kompozytora.
         match &workspaces {
@@ -200,6 +203,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 luna::system::set_wifi(!state.toggles[i].active);
                             }
                             ToggleAction::Volume => luna::system::toggle_mute(),
+                            ToggleAction::Brightness => {
+                                let next = luna::system::next_brightness_level(brightness_pct);
+                                luna::system::set_brightness(next);
+                                brightness_pct = next;
+                                osd.icon = IconName::Brightness;
+                                osd.show("Jasność", next as f64 / 100.0);
+                            }
                             ToggleAction::None => {}
                         }
                     } else if let Some(i) =
@@ -327,9 +337,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .wrapping_add(u64::from(t.active) ^ t.title.len() as u64);
         }
         for tg in &state.toggles {
+            let mut lh: u64 = 0;
+            for b in tg.label.bytes() {
+                lh = lh.wrapping_mul(31).wrapping_add(u64::from(b));
+            }
             th = th
                 .wrapping_mul(1_099_511_628_211)
-                .wrapping_add(u64::from(tg.active) ^ tg.label.len() as u64);
+                .wrapping_add(u64::from(tg.active) ^ lh);
         }
         th = th
             .wrapping_mul(1_099_511_628_211)
@@ -401,6 +415,14 @@ fn build_toggles(s: &luna::system::SystemStatus) -> Vec<Toggle> {
             icon: IconName::Battery,
             active: charging,
             action: ToggleAction::None,
+        });
+    }
+    if let Some(pct) = s.brightness {
+        v.push(Toggle {
+            label: format!("{pct}%"),
+            icon: IconName::Brightness,
+            active: pct > 0,
+            action: ToggleAction::Brightness,
         });
     }
     v
