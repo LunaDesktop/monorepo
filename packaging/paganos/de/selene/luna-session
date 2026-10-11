@@ -28,6 +28,9 @@ if [ "$SELENE_BACKEND" = "drm" ]; then
     export SELENE_INPUT
 fi
 
+# Diagnostyka wydajności (fps DRM + tempo kursora) — tymczasowo włączona.
+export SELENE_STATS=1
+
 # Trwały log sesji: LightDM trzyma tylko 2 pliki `.xsession-errors` i obraca je przy
 # każdym starcie sesji, przez co logi Luny przepadają. Piszemy do stałego pliku w
 # katalogu stanu użytkownika, żeby każdą próbę dało się obejrzeć po fakcie.
@@ -54,7 +57,10 @@ done
 # Powłoka Luna (panel, launcher, OSD) — o ile jest zainstalowana.
 if command -v luna-shell >/dev/null 2>&1; then
     export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
+    echo "luna-session: uruchamiam luna-shell ($(command -v luna-shell))"
     luna-shell &
+else
+    echo "luna-session: brak luna-shell w PATH"
 fi
 
 # Sesja żyje, dopóki działa kompozytor.

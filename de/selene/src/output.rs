@@ -131,13 +131,19 @@ pub fn spawn_drm(model: WindowModel, cursor: CursorModel) {
             .collect();
         let bg = Color::from_rgba8(0x1e, 0x20, 0x28, 0xff);
 
-        // Gdy page-flip zawodzi (np. sterownik/karta), ekran zostaje czarny — logujemy raz.
+        // Diagnostyka (SELENE_STATS=1): fps i rozbicie czasu na render/present/wait_flip.
+        let stats = std::env::var("SELENE_STATS").is_ok();
         let mut flip_error_logged = false;
+        let mut frames = 0u64;
+        let (mut ms_render, mut ms_present, mut ms_wait) = (0.0f64, 0.0f64, 0.0f64);
+        let mut report = std::time::Instant::now();
         loop {
             for i in 0..sizes.len() {
                 let (w, h) = sizes[i];
                 let (ox, oy) = origins[i];
                 let cur = *cursor.lock_or_recover();
+
+                let t = std::time::Instant::now();
                 let mut scene = Scene::new();
                 build_scene(
                     &mut scene,
@@ -148,6 +154,9 @@ pub fn spawn_drm(model: WindowModel, cursor: CursorModel) {
                     cur,
                 );
                 renderers[i].draw(&scene, 1.0, bg);
+                ms_render += t.elapsed().as_secs_f64() * 1000.0;
+
+                let t = std::time::Instant::now();
                 if !backend.present(i, renderers[i].data()) && !flip_error_logged {
                     eprintln!(
                         "{}",
@@ -155,10 +164,32 @@ pub fn spawn_drm(model: WindowModel, cursor: CursorModel) {
                     );
                     flip_error_logged = true;
                 }
+                ms_present += t.elapsed().as_secs_f64() * 1000.0;
+
+                let t = std::time::Instant::now();
                 backend.wait_flip();
+                ms_wait += t.elapsed().as_secs_f64() * 1000.0;
             }
             // Bez wejścia w trybie DRM odświeżamy w stałym rytmie (~60 Hz).
             std::thread::sleep(Duration::from_millis(16));
+            frames += 1;
+
+            if stats && report.elapsed().as_secs_f64() >= 2.0 {
+                let secs = report.elapsed().as_secs_f64();
+                let per_frame = (frames * sizes.len() as u64).max(1) as f64;
+                eprintln!(
+                    "selene/drm: {:.1} fps | render {:.2} ms, present {:.2} ms, wait_flip {:.2} ms",
+                    frames as f64 / secs,
+                    ms_render / per_frame,
+                    ms_present / per_frame,
+                    ms_wait / per_frame
+                );
+                frames = 0;
+                ms_render = 0.0;
+                ms_present = 0.0;
+                ms_wait = 0.0;
+                report = std::time::Instant::now();
+            }
         }
     });
 }
@@ -292,5 +323,33 @@ mod tests {
             .chunks_exact(4)
             .any(|px| px[0] > 0 || px[1] > 0 || px[2] > 0);
         assert!(painted, "kursor powinien zostawić niezerowe piksele");
+    }
+
+    #[test]
+    #[ignore = "benchmark reczny"]
+    fn bench_1080p_frame() {
+        use std::sync::{Arc, Mutex};
+        use std::time::Instant;
+        let model: WindowModel = Arc::new(Mutex::new(Vec::new()));
+        let bg = Color::from_rgba8(0x1e, 0x20, 0x28, 0xff);
+        let mut renderer = SoftwareRenderer::new(1920, 1080);
+        let n = 30;
+        let t = Instant::now();
+        for _ in 0..n {
+            let mut scene = Scene::new();
+            build_scene(
+                &mut scene,
+                Size::new(1920.0, 1080.0),
+                0.0,
+                0.0,
+                &model,
+                Some(Point::new(100.0, 100.0)),
+            );
+            renderer.draw(&scene, 1.0, bg);
+        }
+        println!(
+            "render 1920x1080: {:.2} ms/klatke",
+            t.elapsed().as_secs_f64() * 1000.0 / n as f64
+        );
     }
 }

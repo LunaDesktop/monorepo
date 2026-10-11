@@ -135,6 +135,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         None
     };
 
+    // Diagnostyka (SELENE_STATS=1): częstość aktualizacji kursora (tempo wejścia evdev).
+    let stats = std::env::var("SELENE_STATS").is_ok();
+    let mut cursor_updates = 0u64;
+    let mut stats_report = std::time::Instant::now();
+
     loop {
         let backend_fd = display.backend().poll_fd().as_raw_fd();
         let wake_fd = wake_read.as_raw_fd();
@@ -173,6 +178,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .unwrap_or((1280.0, 800.0));
                 let batch = input.read_events(bounds);
                 *state.cursor.lock_or_recover() = Some(input.cursor());
+                cursor_updates += 1;
                 for event in &batch {
                     seat::handle_input(&mut state, &handle, event);
                 }
@@ -212,6 +218,19 @@ fn main() -> Result<(), Box<dyn Error>> {
             Ok(Ok(())) => {}
             Ok(Err(e)) => return Err(e.into()),
             Err(_) => eprintln!("{}", libluna_i18n::tr("client request panicked; ignoring")),
+        }
+
+        if stats && stats_report.elapsed().as_secs_f64() >= 2.0 {
+            let secs = stats_report.elapsed().as_secs_f64();
+            let windows = state.windows.lock_or_recover().len();
+            eprintln!(
+                "selene/input: {:.0} aktualizacji kursora/s | klienci={} okna={}",
+                cursor_updates as f64 / secs,
+                state.clients,
+                windows
+            );
+            cursor_updates = 0;
+            stats_report = std::time::Instant::now();
         }
     }
 }
