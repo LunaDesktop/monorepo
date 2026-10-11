@@ -32,6 +32,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         .transparent(true);
 
     let mut state = PanelState::sample();
+    // Selene nie ma jeszcze przestrzeni roboczych — nie pokazuj fałszywych kropek.
+    state.workspaces = 0;
     // Prawdziwe aplikacje z plików `.desktop`; gdy brak (np. kontener) — zestaw demo.
     let desktop = luna::apps::scan();
     let apps = if desktop.is_empty() {
