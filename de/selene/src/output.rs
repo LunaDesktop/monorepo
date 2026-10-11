@@ -218,8 +218,11 @@ fn build_scene(
             if !w.mapped || w.minimized {
                 continue;
             }
-            // Tło treści (na wypadek przezroczystości bufora klienta).
-            scene.fill_rect(sh(w.content()), Color::from_rgba8(0x00, 0x00, 0x00, 0xff));
+            // Tło treści tylko dla zwykłych okien — powierzchnie warstwowe (panele)
+            // bywają przezroczyste, więc nie zakrywamy ich czernią.
+            if !w.layer {
+                scene.fill_rect(sh(w.content()), Color::from_rgba8(0x00, 0x00, 0x00, 0xff));
+            }
             // Treść okna (bufor klienta).
             scene.image(sh(w.content()), w.data.clone());
             // Dekoracja tylko dla topleveli (popupy i panele jej nie mają).
