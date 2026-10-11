@@ -18,6 +18,7 @@ use wayland_server::protocol::wl_surface::WlSurface;
 
 use crate::data::DndState;
 use crate::monitors::{OutputInfo, Outputs};
+use crate::sync::LockExt;
 
 /// Wysokość paska tytułu dekoracji (SSD), w pikselach logicznych.
 pub const TITLEBAR: f64 = 30.0;
@@ -173,6 +174,76 @@ pub type CursorModel = Arc<Mutex<Option<Point>>>;
 /// Współdzielony numer bieżącej przestrzeni roboczej (kompozytor ↔ wątek wyjścia).
 pub type WorkspaceModel = Arc<Mutex<usize>>;
 
+/// Współdzielony tryb podglądu okien/przestrzeni (kompozytor ↔ wątek wyjścia).
+pub type OverviewModel = Arc<Mutex<bool>>;
+
+/// Margines podglądu (od krawędzi ekranu).
+pub const OVERVIEW_PAD: f64 = 56.0;
+/// Odstęp między kafelkami podglądu.
+pub const OVERVIEW_GAP: f64 = 16.0;
+/// Wysokość pasa „chipsów” przestrzeni u dołu podglądu.
+pub const OVERVIEW_STRIP_H: f64 = 56.0;
+/// Wysokość paska tytułu kafelka.
+pub const OVERVIEW_TITLE: f64 = 26.0;
+
+/// Sloty okien bieżącej przestrzeni (bez paneli/popupów), w kolejności z-order.
+pub fn overview_slots(windows: &[Window], current_ws: usize) -> Vec<usize> {
+    let mut v: Vec<(usize, i32)> = windows
+        .iter()
+        .enumerate()
+        .filter(|(_, w)| {
+            w.mapped && !w.minimized && !w.popup && !w.layer && w.workspace == current_ws
+        })
+        .map(|(i, w)| (i, w.z))
+        .collect();
+    v.sort_by_key(|&(_, z)| z);
+    v.into_iter().map(|(i, _)| i).collect()
+}
+
+/// Prostokąty kafelków w siatce na obszarze `size` (zostawiając pas u dołu).
+pub fn overview_tiles(count: usize, size: (f64, f64)) -> Vec<Rect> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let cols = (count as f64).sqrt().ceil() as usize;
+    let cols = cols.max(1);
+    let rows = count.div_ceil(cols);
+    let avail_w = (size.0 - 2.0 * OVERVIEW_PAD).max(1.0);
+    let avail_h = (size.1 - 2.0 * OVERVIEW_PAD - OVERVIEW_STRIP_H).max(1.0);
+    let tw = ((avail_w - (cols - 1) as f64 * OVERVIEW_GAP) / cols as f64).max(1.0);
+    let th = ((avail_h - (rows - 1) as f64 * OVERVIEW_GAP) / rows as f64).max(1.0);
+    let grid_w = cols as f64 * tw + (cols - 1) as f64 * OVERVIEW_GAP;
+    let grid_h = rows as f64 * th + (rows - 1) as f64 * OVERVIEW_GAP;
+    let x0 = (size.0 - grid_w) / 2.0;
+    let y0 = OVERVIEW_PAD + ((avail_h - grid_h) / 2.0).max(0.0);
+    (0..count)
+        .map(|k| {
+            let c = (k % cols) as f64;
+            let r = (k / cols) as f64;
+            Rect::from_xywh(
+                x0 + c * (tw + OVERVIEW_GAP),
+                y0 + r * (th + OVERVIEW_GAP),
+                tw,
+                th,
+            )
+        })
+        .collect()
+}
+
+/// Prostokąty „chipsów” przestrzeni na dole podglądu.
+pub fn overview_ws_chips(count: usize, size: (f64, f64)) -> Vec<Rect> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let (w, h, gap) = (128.0, 36.0, 12.0);
+    let total = count as f64 * w + (count - 1) as f64 * gap;
+    let x0 = (size.0 - total) / 2.0;
+    let y = size.1 - OVERVIEW_PAD - h;
+    (0..count)
+        .map(|i| Rect::from_xywh(x0 + i as f64 * (w + gap), y, w, h))
+        .collect()
+}
+
 /// Trwające przeciąganie okna.
 #[derive(Debug, Clone, Copy)]
 pub struct DragState {
@@ -224,6 +295,8 @@ pub struct State {
     pub ws_count: usize,
     /// Bieżąca przestrzeń robocza (współdzielona z wątkiem wyjścia).
     pub ws_current: WorkspaceModel,
+    /// Tryb podglądu okien/przestrzeni (`Super+Tab`), współdzielony z wątkiem wyjścia.
+    pub overview: OverviewModel,
     /// Podłączeni menedżerowie `ext_workspace` oraz ich grupy i uchwyty przestrzeni.
     pub ws_managers: Vec<ExtWorkspaceManagerV1>,
     pub ws_groups: Vec<ExtWorkspaceGroupHandleV1>,
@@ -266,6 +339,7 @@ impl Default for State {
             toplevel_managers: Vec::new(),
             ws_count: 4,
             ws_current: Arc::new(Mutex::new(0)),
+            overview: Arc::new(Mutex::new(false)),
             ws_managers: Vec::new(),
             ws_groups: Vec::new(),
             ws_handles: Vec::new(),
@@ -301,6 +375,16 @@ impl State {
         self.z_counter += 1;
         self.z_counter
     }
+
+    /// Czy trwa podgląd okien/przestrzeni.
+    pub fn overview_on(&self) -> bool {
+        *self.overview.lock_or_recover()
+    }
+
+    /// Włącza/wyłącza podgląd okien/przestrzeni.
+    pub fn set_overview(&self, on: bool) {
+        *self.overview.lock_or_recover() = on;
+    }
 }
 
 #[cfg(test)]
@@ -322,5 +406,58 @@ mod tests {
         let a = s.next_z();
         let b = s.next_z();
         assert!(b > a);
+    }
+
+    fn window_at_ws(ws: usize, z: i32) -> Window {
+        Window {
+            x: 0.0,
+            y: 0.0,
+            width: 10,
+            height: 10,
+            z,
+            title: String::new(),
+            popup: false,
+            layer: false,
+            mapped: true,
+            workspace: ws,
+            minimized: false,
+            maximized: false,
+            fullscreen: false,
+            saved: None,
+            data: std::sync::Arc::new(libluna_render::ImageData::empty(1, 1)),
+        }
+    }
+
+    #[test]
+    fn overview_slots_filter_and_order() {
+        let mut panel = window_at_ws(0, 100);
+        panel.layer = true;
+        let ws = vec![
+            window_at_ws(0, 5),
+            window_at_ws(1, 9),
+            window_at_ws(0, 1),
+            panel,
+        ];
+        // Tylko okna bieżącej przestrzeni, bez panelu, w kolejności z.
+        assert_eq!(overview_slots(&ws, 0), vec![2, 0]);
+        assert_eq!(overview_slots(&ws, 1), vec![1]);
+    }
+
+    #[test]
+    fn overview_tiles_and_chips_layout() {
+        let size = (1920.0, 1080.0);
+        assert!(overview_tiles(0, size).is_empty());
+        let four = overview_tiles(4, size);
+        assert_eq!(four.len(), 4);
+        // Drugi kafelek na prawo od pierwszego i bez nachodzenia.
+        assert!(four[1].x() > four[0].x());
+        assert!(four[0].right() <= four[1].x());
+        for r in &four {
+            assert!(r.x() >= 0.0 && r.right() <= size.0 + 0.5);
+            assert!(r.bottom() <= size.1 + 0.5);
+        }
+        let chips = overview_ws_chips(4, size);
+        assert_eq!(chips.len(), 4);
+        assert!(chips[0].x() < chips[3].x());
     }
 }

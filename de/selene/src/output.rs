@@ -15,7 +15,7 @@ use libluna_render::{Scene, SoftwareRenderer, TextRun};
 use crate::drm::{DrmBackend, DrmError};
 use crate::input::{self, Events};
 use crate::monitors::Outputs;
-use crate::state::{CursorModel, Window, WindowModel, WorkspaceModel};
+use crate::state::{CursorModel, OverviewModel, Window, WindowModel, WorkspaceModel};
 use crate::sync::LockExt;
 
 /// Uruchamia wątek wyjścia (nested Wayland) o zadanym rozmiarze.
@@ -25,6 +25,8 @@ pub fn spawn(
     events: Events,
     wake: UnixStream,
     ws: WorkspaceModel,
+    overview: OverviewModel,
+    ws_count: usize,
     width: u32,
     height: u32,
 ) {
@@ -48,7 +50,19 @@ pub fn spawn(
             // Narysuj scenę.
             let size = frame.size;
             let cur_ws = *ws.lock_or_recover();
-            build_scene(frame.scene, size, 0.0, 0.0, &model, cur_ws, None);
+            let ov = *overview.lock_or_recover();
+            build_scene(
+                frame.scene,
+                size,
+                0.0,
+                0.0,
+                &model,
+                cur_ws,
+                ws_count,
+                ov,
+                true,
+                None,
+            );
             // Utrzymuj klatki — model okien zmienia się poza tą pętlą.
             frame.request_frame();
         });
@@ -91,7 +105,13 @@ fn open_drm_waiting() -> Result<DrmBackend, DrmError> {
 ///
 /// Wymaga bycia DRM masterem; jeśli inną sesję trzyma master, kończy bez efektu
 /// (wywołujący powinien wtedy użyć wyjścia nested).
-pub fn spawn_drm(model: WindowModel, cursor: CursorModel, ws: WorkspaceModel) {
+pub fn spawn_drm(
+    model: WindowModel,
+    cursor: CursorModel,
+    ws: WorkspaceModel,
+    overview: OverviewModel,
+    ws_count: usize,
+) {
     std::thread::spawn(move || {
         let mut backend = match open_drm_waiting() {
             Ok(backend) => backend,
@@ -171,10 +191,11 @@ pub fn spawn_drm(model: WindowModel, cursor: CursorModel, ws: WorkspaceModel) {
         loop {
             let cur = *cursor.lock_or_recover();
             let cur_ws = *ws.lock_or_recover();
+            let ov = *overview.lock_or_recover();
 
             // Sygnatura sceny nie zależy od kursora, gdy rysuje go sprzęt — dzięki temu
             // samo przesunięcie myszy nie powoduje przemalowania sceny.
-            let sig = scene_signature(&model, cur_ws, if hw_cursor { None } else { cur });
+            let sig = scene_signature(&model, cur_ws, ov, if hw_cursor { None } else { cur });
             let scene_changed = last_sig != Some(sig);
             let cur_changed = last_cur != cur;
             if !scene_changed && !cur_changed {
@@ -225,6 +246,9 @@ pub fn spawn_drm(model: WindowModel, cursor: CursorModel, ws: WorkspaceModel) {
                         oy,
                         &model,
                         cur_ws,
+                        ws_count,
+                        ov,
+                        i == 0,
                         if hw_cursor { None } else { cur },
                     );
                     renderers[i].draw(&scene, 1.0, bg);
@@ -282,14 +306,20 @@ fn cursor_image() -> (Vec<u8>, u32, u32) {
     (renderer.data().to_vec(), w, h)
 }
 
-/// Sygnatura sceny (okna + kursor + przestrzeń) — do wykrywania, że nic się nie zmieniło.
-fn scene_signature(model: &WindowModel, current_ws: usize, cursor: Option<Point>) -> u64 {
+/// Sygnatura sceny (okna + kursor + przestrzeń + podgląd) — do wykrywania zmian.
+fn scene_signature(
+    model: &WindowModel,
+    current_ws: usize,
+    overview: bool,
+    cursor: Option<Point>,
+) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let mut mix = |v: u64| {
         h ^= v;
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     };
     mix(current_ws as u64);
+    mix(u64::from(overview));
     {
         let windows = model.lock_or_recover();
         mix(windows.len() as u64);
@@ -311,6 +341,7 @@ fn scene_signature(model: &WindowModel, current_ws: usize, cursor: Option<Point>
 }
 
 /// Buduje scenę okien w rozmiarze wyjścia, przesuniętą o `(ox, oy)` (origin monitora).
+#[allow(clippy::too_many_arguments)]
 fn build_scene(
     scene: &mut Scene,
     size: Size,
@@ -318,6 +349,9 @@ fn build_scene(
     oy: f64,
     model: &WindowModel,
     current_ws: usize,
+    ws_count: usize,
+    overview: bool,
+    is_primary: bool,
     cursor: Option<Point>,
 ) {
     let sh = |r: Rect| r.offset(-ox, -oy);
@@ -399,12 +433,77 @@ fn build_scene(
             .with_color(Color::from_rgba8(0xdd, 0xdd, 0xdd, 0xff)),
     );
 
+    // Podgląd okien i przestrzeni (Super+Tab) — rysowany na głównym monitorze.
+    if overview && is_primary {
+        draw_overview(scene, size, model, current_ws, ws_count);
+    }
+
     // Kursor rysuje ten monitor, na którym leży (tryb DRM — nikt go za nas nie narysuje).
     if let Some(c) = cursor {
         let (cx, cy) = (c.x - ox, c.y - oy);
         if cx >= 0.0 && cy >= 0.0 && cx < size.width && cy < size.height {
             draw_cursor(scene, Point::new(cx, cy));
         }
+    }
+}
+
+/// Rysuje podgląd okien i przestrzeni — kafelki z podglądem treści + pasek przestrzeni.
+fn draw_overview(
+    scene: &mut Scene,
+    size: Size,
+    model: &WindowModel,
+    current_ws: usize,
+    ws_count: usize,
+) {
+    // Przygaszenie tła.
+    scene.fill_rect(
+        Rect::from_size(size),
+        Color::from_rgba8(0x0b, 0x0d, 0x13, 0xd6),
+    );
+    let slots = {
+        let w = model.lock_or_recover();
+        crate::state::overview_slots(&w, current_ws)
+    };
+    let tiles = crate::state::overview_tiles(slots.len(), (size.width, size.height));
+    let windows = model.lock_or_recover();
+    for (k, &slot) in slots.iter().enumerate() {
+        let (Some(r), Some(w)) = (tiles.get(k), windows.get(slot)) else {
+            continue;
+        };
+        let title_h = crate::state::OVERVIEW_TITLE;
+        scene.fill_rounded_rect(*r, 8.0, Color::from_rgba8(0x1a, 0x1d, 0x25, 0xff));
+        let bar = Rect::from_xywh(r.x(), r.y(), r.width(), title_h);
+        scene.fill_rounded_rect(bar, 8.0, Color::from_rgba8(0x2c, 0x2f, 0x38, 0xff));
+        let img = Rect::from_xywh(
+            r.x(),
+            r.y() + title_h,
+            r.width(),
+            (r.height() - title_h).max(1.0),
+        );
+        scene.image(img, w.data.clone());
+        scene.stroke_rounded_rect(*r, 8.0, 1.5, Color::from_rgba8(0x6c, 0x74, 0x86, 0xff));
+        scene.text(
+            TextRun::new(Point::new(r.x() + 10.0, r.y() + 18.0), &w.title, 13.0)
+                .with_color(Color::from_rgba8(0xee, 0xee, 0xee, 0xff)),
+        );
+    }
+    // Pasek przestrzeni roboczych.
+    let chips = crate::state::overview_ws_chips(ws_count, (size.width, size.height));
+    for (i, c) in chips.iter().enumerate() {
+        let bg = if i == current_ws {
+            Color::from_rgba8(0x5b, 0x8d, 0xef, 0xff)
+        } else {
+            Color::from_rgba8(0x2c, 0x2f, 0x38, 0xff)
+        };
+        scene.fill_rounded_rect(*c, c.height() / 2.0, bg);
+        scene.text(
+            TextRun::new(
+                Point::new(c.center().x - 6.0, c.center().y + 6.0),
+                &format!("{}", i + 1),
+                16.0,
+            )
+            .with_color(Color::from_rgba8(0xf5, 0xf5, 0xf5, 0xff)),
+        );
     }
 }
 
@@ -464,6 +563,9 @@ mod tests {
                 0.0,
                 &model,
                 0,
+                1,
+                false,
+                true,
                 Some(Point::new(100.0, 100.0)),
             );
             renderer.draw(&scene, 1.0, bg);
@@ -516,6 +618,9 @@ mod tests {
                 0.0,
                 &model,
                 0,
+                1,
+                false,
+                true,
                 Some(Point::new(100.0, 100.0)),
             );
             renderer.draw(&scene, 1.0, bg);

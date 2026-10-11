@@ -329,6 +329,13 @@ fn pointer_button(
     button: PointerButton,
     st: ButtonState,
 ) {
+    // W trybie podglądu klik wybiera kafelek/chip lub zamyka podgląd.
+    if state.overview_on() {
+        if st == ButtonState::Pressed && button == PointerButton::Left {
+            overview_click(state, pos);
+        }
+        return;
+    }
     if st == ButtonState::Released {
         state.drag = None;
         state.resize = None;
@@ -772,6 +779,11 @@ fn keyboard_key(state: &mut State, keysym: u32, st: ButtonState) {
     if is_modifier_keysym(keysym) {
         return;
     }
+    // Escape zamyka podgląd (Super+Tab) i nie trafia do klienta.
+    if keysym == 0xff1b && state.overview_on() {
+        state.set_overview(false);
+        return;
+    }
     // Skróty menedżera okien (Super + …) przechwytujemy przed klientem.
     if state.sent_mods.logo && window_shortcut(state, keysym, st) {
         return;
@@ -801,7 +813,7 @@ fn window_shortcut(state: &mut State, keysym: u32, st: ButtonState) -> bool {
         // Zjedz także zwolnienia naszych klawiszy, by nie trafiły do klienta.
         return matches!(
             keysym,
-            0x006d | 0x0066 | 0x006c | 0x004c | 0xff52 | 0xff54 | 0xff09 | 0x0031..=0x0038
+            0x006d | 0x0066 | 0x006c | 0x004c | 0xff52 | 0xff54 | 0xff09 | 0x0060 | 0x0031..=0x0038
         );
     }
     let focused = state.keyboard_focus.as_ref().map(|(s, _)| *s);
@@ -841,7 +853,13 @@ fn window_shortcut(state: &mut State, keysym: u32, st: ButtonState) -> bool {
             true
         }
         0xff09 => {
-            // Super+Tab — przełącz okna (przywraca zminimalizowane).
+            // Super+Tab — podgląd okien i przestrzeni.
+            let on = state.overview_on();
+            state.set_overview(!on);
+            true
+        }
+        0x0060 => {
+            // Super+` — przełącz okna (przywraca zminimalizowane).
             cycle_windows(state);
             true
         }
@@ -963,6 +981,41 @@ fn move_window_to_workspace(state: &mut State, slot: usize, ws: usize) {
         }
     }
     crate::workspace::broadcast_workspace_states(state);
+}
+
+/// Rozmiar głównego monitora — obszar układu podglądu.
+fn primary_size(state: &State) -> (f64, f64) {
+    state
+        .outputs
+        .lock_or_recover()
+        .first()
+        .map(|o| (o.width as f64, o.height as f64))
+        .unwrap_or((1280.0, 800.0))
+}
+
+/// Klik w trybie podglądu: kafelek → fokus okna, chip → przestrzeń, poza → zamknij.
+fn overview_click(state: &mut State, pos: Point) {
+    let size = primary_size(state);
+    let slots = {
+        let w = state.windows.lock_or_recover();
+        crate::state::overview_slots(&w, *state.ws_current.lock_or_recover())
+    };
+    let tiles = crate::state::overview_tiles(slots.len(), size);
+    if let Some(k) = tiles.iter().position(|r| r.contains(pos)) {
+        if let Some(&slot) = slots.get(k) {
+            state.set_overview(false);
+            raise_and_focus(state, slot);
+            return;
+        }
+    }
+    let chips = crate::state::overview_ws_chips(state.ws_count, size);
+    if let Some(i) = chips.iter().position(|r| r.contains(pos)) {
+        state.set_overview(false);
+        switch_workspace(state, i);
+        return;
+    }
+    // Klik poza kafelkami — zamknij podgląd.
+    state.set_overview(false);
 }
 
 /// Wysyła wciśnięcia/zwolnienia klawiszy modyfikujących wynikające z bieżącego stanu.

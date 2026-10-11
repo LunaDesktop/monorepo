@@ -77,6 +77,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
     let output_count = state.outputs.lock_or_recover().len();
+    let ws_count = state.ws_count;
 
     // Globalne interfejsy protokołu.
     handle.create_global::<State, wl_compositor::WlCompositor, ()>(4, ());
@@ -115,6 +116,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             Arc::clone(&state.windows),
             Arc::clone(&state.cursor),
             Arc::clone(&state.ws_current),
+            Arc::clone(&state.overview),
+            ws_count,
         );
     } else {
         output::spawn(
@@ -123,6 +126,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             Arc::clone(&events),
             wake_write,
             Arc::clone(&state.ws_current),
+            Arc::clone(&state.overview),
+            ws_count,
             1280,
             800,
         );
