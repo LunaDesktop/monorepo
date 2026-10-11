@@ -70,11 +70,14 @@ gnieździe nasłuchu i deskryptorze backendu. `libLuna` jest zwykłą zależnoś
 Środowisko graficzne Luna (odpowiednik GNOME Shell) na libLunie, działające na kompozytorze
 Selene.
 
-- `de/luna/src/panel.rs` — **panel górny** (menu, tytuł okna, zegar/data, przełączniki,
-  przestrzenie robocze, użytkownik) i **launcher** (siatka aplikacji + wyszukiwanie).
-- `luna-panel` (bin) — render headless: `docs/images/luna-shell-{light,dark}.png`.
-- `luna-shell` (bin) — powierzchnia „chrome” na żywo: pasek + **OSD** + **powiadomienia**
-  (`osd.rs`, `notifications.rs`; animacja, auto-zamknięcie).
+- `de/luna/src/panel.rs` — **panel górny** (sam przycisk burger, tytuł okna, zegar/data,
+  przełączniki, przestrzenie robocze, użytkownik) i **launcher** w trzech widokach:
+  **Lista**, **Siatka**, **Karuzela** (segmentowy przełącznik w nagłówku).
+- `luna-panel` (bin) — render headless: `docs/images/luna-shell-{light,dark}.png`
+  oraz `docs/images/luna-launcher-{list,grid,carousel}.png`.
+- `luna-shell` (bin) — powierzchnia „chrome” na żywo: burger otwiera/zamyka launcher,
+  przełącznik widoku, klik w aplikację zamyka, `Esc` zamyka; do tego **OSD** i **powiadomienia**
+  (`osd.rs`, `notifications.rs`).
 - `libluna-platform` obsługuje teraz oba tryby: okno `xdg-shell` (CSD) i powierzchnię
   warstwową (`AppConfig::layer(LayerConfig::…)`) — `LayerConfig::top_panel`/`overlay`/`top_chrome`
   oraz przezroczyste tło (`AppConfig::transparent`).

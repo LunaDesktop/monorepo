@@ -140,57 +140,6 @@ impl BufferData {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Write;
-
-    fn pool(bytes: &[u8]) -> Arc<ShmPoolData> {
-        let fd =
-            rustix::fs::memfd_create("selene-shm-test", rustix::fs::MemfdFlags::CLOEXEC).unwrap();
-        let mut file = std::fs::File::from(fd);
-        file.write_all(bytes).unwrap();
-        Arc::new(ShmPoolData::new(file.into(), bytes.len()))
-    }
-
-    fn buffer(pool: Arc<ShmPoolData>, w: i32, h: i32, stride: i32) -> BufferData {
-        BufferData {
-            pool,
-            offset: 0,
-            width: w,
-            height: h,
-            stride,
-            format: wl_shm::Format::Argb8888,
-        }
-    }
-
-    #[test]
-    fn to_rgba_swizzles_bgra_to_rgba() {
-        // 1x1: pamięć B,G,R,A = (10,20,30,40) → RGBA (30,20,10,40).
-        let rgba = buffer(pool(&[10, 20, 30, 40]), 1, 1, 4).to_rgba().unwrap();
-        assert_eq!(rgba, vec![30, 20, 10, 40]);
-    }
-
-    #[test]
-    fn xrgb_forces_opaque_alpha() {
-        let mut b = buffer(pool(&[1, 2, 3, 0]), 1, 1, 4);
-        b.format = wl_shm::Format::Xrgb8888;
-        assert_eq!(b.to_rgba().unwrap(), vec![3, 2, 1, 255]);
-    }
-
-    #[test]
-    fn rejects_stride_smaller_than_row() {
-        // stride 2 < width*4 → odrzucone, bez paniki/OOB.
-        assert!(buffer(pool(&[0u8; 64]), 4, 1, 2).to_rgba().is_none());
-    }
-
-    #[test]
-    fn rejects_buffer_outside_pool() {
-        // 2x2 ARGB = 16 bajtów > pula 8 → odrzucone.
-        assert!(buffer(pool(&[0u8; 8]), 2, 2, 8).to_rgba().is_none());
-    }
-}
-
 impl GlobalDispatch<wl_shm::WlShm, ()> for State {
     fn bind(
         _state: &mut Self,
@@ -268,5 +217,56 @@ impl Dispatch<wl_buffer::WlBuffer, BufferData> for State {
         _handle: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn pool(bytes: &[u8]) -> Arc<ShmPoolData> {
+        let fd =
+            rustix::fs::memfd_create("selene-shm-test", rustix::fs::MemfdFlags::CLOEXEC).unwrap();
+        let mut file = std::fs::File::from(fd);
+        file.write_all(bytes).unwrap();
+        Arc::new(ShmPoolData::new(file.into(), bytes.len()))
+    }
+
+    fn buffer(pool: Arc<ShmPoolData>, w: i32, h: i32, stride: i32) -> BufferData {
+        BufferData {
+            pool,
+            offset: 0,
+            width: w,
+            height: h,
+            stride,
+            format: wl_shm::Format::Argb8888,
+        }
+    }
+
+    #[test]
+    fn to_rgba_swizzles_bgra_to_rgba() {
+        // 1x1: pamięć B,G,R,A = (10,20,30,40) → RGBA (30,20,10,40).
+        let rgba = buffer(pool(&[10, 20, 30, 40]), 1, 1, 4).to_rgba().unwrap();
+        assert_eq!(rgba, vec![30, 20, 10, 40]);
+    }
+
+    #[test]
+    fn xrgb_forces_opaque_alpha() {
+        let mut b = buffer(pool(&[1, 2, 3, 0]), 1, 1, 4);
+        b.format = wl_shm::Format::Xrgb8888;
+        assert_eq!(b.to_rgba().unwrap(), vec![3, 2, 1, 255]);
+    }
+
+    #[test]
+    fn rejects_stride_smaller_than_row() {
+        // stride 2 < width*4 → odrzucone, bez paniki/OOB.
+        assert!(buffer(pool(&[0u8; 64]), 4, 1, 2).to_rgba().is_none());
+    }
+
+    #[test]
+    fn rejects_buffer_outside_pool() {
+        // 2x2 ARGB = 16 bajtów > pula 8 → odrzucone.
+        assert!(buffer(pool(&[0u8; 8]), 2, 2, 8).to_rgba().is_none());
     }
 }

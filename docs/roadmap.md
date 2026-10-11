@@ -167,16 +167,16 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
 - Dalej: GLES/akceleracja, hotplug monitorów (`zwlr_output_manager`), `libinput` (gesty),
   selekcja pierwotna, IME (`text-input`).
 - **Luna** (`de/luna`) — powłoka środowiska na `libluna-widgets`. ✅ start: **panel górny**
-  (menu, tytuł okna, zegar/data, przełączniki, przestrzenie, użytkownik) i **launcher**
-  (siatka aplikacji + wyszukiwanie); render headless do `docs/images/luna-shell-{light,dark}.png`.
-  Dane (`PanelState`, `App`) oddzielone od rysowania (`PaintCtx`) — ten sam kod do podglądów
-  i sesji na żywo. ✅ **`luna-shell`** (bin) uruchamia panel jako prawdziwą **powierzchnię
+  (sam **burger** — bez etykiety, który otwiera launcher; tytuł okna, zegar/data,
+  przełączniki, przestrzenie, użytkownik) i **launcher** w trzech widokach
+  (**Lista / Siatka / Karuzela** z segmentowym przełącznikiem); render headless do
+  `docs/images/luna-shell-{light,dark}.png` i `docs/images/luna-launcher-{list,grid,carousel}.png`.
+  Dane (`PanelState`, `App`, `Launcher`) oddzielone od rysowania (`PaintCtx`) — ten sam kod do
+  podglądów i sesji na żywo. ✅ **`luna-shell`** (bin) uruchamia panel jako prawdziwą **powierzchnię
   warstwową** (`wlr-layer-shell` po stronie klienta w `libluna-platform`); bez kompozytora
-  kończy się czytelnym `NoCompositor`. ✅ **OSD** (`osd.rs`: głośność/jasność, animacja
-  wejścia/wyjścia) i **powiadomienia** (`notifications.rs`: kolejka, wjazd z prawej, pasek
-  czasu, auto-zamknięcie) — pokazywane pod paskiem na powierzchni „chrome”; podglądy
-  w `docs/images/luna-shell-{light,dark}.png`. Dalej: usługa D-Bus
-  `org.freedesktop.Notifications`, menu kontekstowe, centrum powiadomień.
+  kończy się czytelnym `NoCompositor`. ✅ **OSD** (`osd.rs`) i **powiadomienia** (`notifications.rs`)
+  — pokazywane pod paskiem na powierzchni „chrome”. Dalej: usługa D-Bus
+  `org.freedesktop.Notifications`, centrum powiadomień, menu kontekstowe, scroll w liście.
 
 ## Później (poza MVP)
 - Dostępność AT-SPI, IME, schowek, drag & drop, animacje, backend GPU, mini-CSS dla motywów.

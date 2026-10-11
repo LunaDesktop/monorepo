@@ -1,22 +1,23 @@
-//! Powłoka Luny na żywo — pasek, OSD i powiadomienia jako powierzchnia warstwowa.
+//! Powłoka Luny na żywo — pasek, launcher (Lista/Siatka/Karuzela), OSD i powiadomienia.
 //!
 //! `luna-shell` tworzy powierzchnię „chrome" (`wlr-layer-shell`): pasek na górze,
-//! a pod nim przezroczysty obszar na OSD i powiadomienia. Bez usługi D-Bus
-//! `org.freedesktop.Notifications` (kolejny krok) demo samo cyklicznie pokazuje OSD
-//! i powiadomienia, żeby warstwę prezentacji dało się zobaczyć na żywo.
+//! a pod nim przezroczysty obszar na launcher, OSD i powiadomienia.
+//!
+//! Interakcja: klik w **burger** otwiera/zamyka launcher; w launcherze przełącznik
+//! widoku (Lista/Siatka/Karuzela), klik w aplikację zamyka launcher; `Esc` zamyka.
 
 use std::error::Error;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use libluna_core::{Rect, Theme};
+use libluna_core::{ButtonState, Event, PointerButton, Rect};
 use libluna_platform::{run, AppConfig, Frame, LayerConfig};
 use libluna_widgets::PaintCtx;
 use luna::notifications::{Notification, Notifications};
 use luna::osd::Osd;
-use luna::panel::{self, PanelState, THICKNESS};
+use luna::panel::{self, App, Launcher, PanelState, LAUNCHER_H, LAUNCHER_W, THICKNESS};
 
-/// Wysokość powierzchni „chrome" (pasek + obszar nakładek).
-const CHROME_H: u32 = 240;
+/// Wysokość powierzchni „chrome" (pasek + launcher + OSD/powiadomienia).
+const CHROME_H: u32 = 680;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let cfg = AppConfig::new("Luna Shell")
@@ -29,6 +30,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         .transparent(true);
 
     let mut state = PanelState::sample();
+    let apps = App::sample();
+    let mut launcher = Launcher::new();
+    let mut open = false;
     let mut osd = Osd::new("◆", "Głośność", 0.0);
     let mut notes = Notifications::new();
     let mut timer = 0.0f64;
@@ -36,6 +40,48 @@ fn main() -> Result<(), Box<dyn Error>> {
     run(cfg, move |frame: &mut Frame| {
         let dt = frame.delta_time();
         timer += dt;
+
+        let size = frame.size;
+        let theme = &frame.theme;
+        let text = frame.text;
+        let bar = Rect::from_xywh(0.0, 0.0, size.width, THICKNESS);
+
+        let lw = LAUNCHER_W.min((size.width - 80.0).max(320.0));
+        let larea = Rect::from_xywh((size.width - lw) / 2.0, THICKNESS + 24.0, lw, LAUNCHER_H);
+
+        // ── Obsługa wejścia ──
+        for ev in frame.events {
+            match ev {
+                Event::PointerButton(pe) if pe.state == ButtonState::Pressed => match pe.button {
+                    PointerButton::Left
+                        if panel::burger_rect(bar, &frame.theme).contains(pe.position) =>
+                    {
+                        open = !open;
+                    }
+                    PointerButton::Left if open => {
+                        if let Some(v) =
+                            panel::launcher_view_at(larea, &frame.theme, text, pe.position)
+                        {
+                            launcher.view = v;
+                        } else if panel::launcher_app_at(
+                            &apps,
+                            &launcher,
+                            larea,
+                            &frame.theme,
+                            text,
+                            pe.position,
+                        )
+                        .is_some()
+                        {
+                            open = false;
+                        }
+                    }
+                    _ => {}
+                },
+                Event::Key(ke) if ke.keysym == 0xff1b => open = false, // Escape
+                _ => {}
+            }
+        }
 
         // Zegar (UTC).
         let (clock, date) = now_clock();
@@ -50,22 +96,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         if timer % 4.0 < dt {
             notes.push(
                 Notification::new("Pliki", "Kopiowanie zakończone", "12 plików → Dokumenty")
-                    .with_glyph("▦"),
+                    .with_glyph("◆"),
             );
         }
         osd.advance(dt);
         notes.advance(dt);
 
-        let size = frame.size;
-        let theme: &Theme = &frame.theme;
-        let mut ctx = PaintCtx::new(frame.scene, theme, frame.text);
-        // Pasek na górze.
-        panel::paint_panel(
-            &state,
-            &mut ctx,
-            Rect::from_xywh(0.0, 0.0, size.width, THICKNESS),
-        );
-        // OSD wyśrodkowany pod paskiem.
+        // ── Rysowanie ──
+        let mut ctx = PaintCtx::new(frame.scene, theme, text);
+        panel::paint_panel(&state, &mut ctx, bar);
+        if open {
+            panel::paint_launcher(&apps, &launcher, &mut ctx, larea);
+        }
         if osd.visible() {
             let w = 340.0;
             osd.paint(
@@ -73,7 +115,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Rect::from_xywh((size.width - w) / 2.0, THICKNESS + 16.0, w, 72.0),
             );
         }
-        // Powiadomienia w prawym-górnym narożniku (pod paskiem).
         notes.paint(
             &mut ctx,
             Rect::from_xywh(0.0, THICKNESS + 8.0, size.width, size.height - THICKNESS),
