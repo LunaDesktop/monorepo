@@ -778,7 +778,10 @@ fn keyboard_key(state: &mut State, keysym: u32, st: ButtonState) {
 fn window_shortcut(state: &mut State, keysym: u32, st: ButtonState) -> bool {
     if st != ButtonState::Pressed {
         // Zjedz także zwolnienia naszych klawiszy, by nie trafiły do klienta.
-        return matches!(keysym, 0x006d | 0x0066 | 0xff52 | 0xff54 | 0xff09);
+        return matches!(
+            keysym,
+            0x006d | 0x0066 | 0x006c | 0x004c | 0xff52 | 0xff54 | 0xff09
+        );
     }
     let focused = state.keyboard_focus.as_ref().map(|(s, _)| *s);
     match keysym {
@@ -795,6 +798,12 @@ fn window_shortcut(state: &mut State, keysym: u32, st: ButtonState) -> bool {
                 toggle_fullscreen(state, s);
             }
             true
+        }
+        0x006c | 0x004c => {
+            // Super+L — wyloguj. Kończymy kompozytor (sesję), więc menedżer logowania
+            // wraca do greetera; jądro zwalnia mastera DRM przy zamknięciu deskryptorów.
+            println!("{}", libluna_i18n::tr("logging out"));
+            std::process::exit(0);
         }
         0xff52 => {
             // Super+Up — maksymalizuj/przywróć.

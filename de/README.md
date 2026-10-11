@@ -42,7 +42,8 @@ gnieździe nasłuchu i deskryptorze backendu. `libLuna` jest zwykłą zależnoś
   **minimalizuj / maksymalizuj / zamknij**, **zmiana rozmiaru za wszystkie krawędzie i narożniki**,
   **maksymalizacja** i **pełny ekran** (okno ląduje na swoim monitorze), `xdg-decoration`
   (zawsze `server_side`). Skróty: `Super+M` (minimalizuj), `Super+F` (pełny ekran),
-  `Super+↑`/`Super+↓` (maksymalizuj/przywróć), `Super+Tab` (przełącz okna).
+  `Super+↑`/`Super+↓` (maksymalizuj/przywróć), `Super+Tab` (przełącz okna),
+  `Super+L` (wyloguj — kończy sesję).
 - **`xdg_popup`**: menu/kontekstowe z pozycjonera (`anchor_rect` + offset), zamknięcie
   kliknięciem poza (`popup_done`).
 - **`wlr-layer-shell`**: panele/docki — kotwice, marginesy, strefa wyłączna, warstwy
