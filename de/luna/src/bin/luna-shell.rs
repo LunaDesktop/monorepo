@@ -52,17 +52,27 @@ fn main() -> Result<(), Box<dyn Error>> {
         // ── Obsługa wejścia ──
         for ev in frame.events {
             match ev {
-                Event::PointerButton(pe) if pe.state == ButtonState::Pressed => match pe.button {
-                    PointerButton::Left
-                        if panel::burger_rect(bar, &frame.theme).contains(pe.position) =>
-                    {
+                Event::PointerButton(pe)
+                    if pe.state == ButtonState::Pressed && pe.button == PointerButton::Left =>
+                {
+                    if panel::burger_rect(bar, &frame.theme).contains(pe.position) {
                         open = !open;
-                    }
-                    PointerButton::Left if open => {
+                        if open {
+                            let max = panel::launcher_scroll_max(
+                                &apps,
+                                &launcher,
+                                larea,
+                                &frame.theme,
+                                text,
+                            );
+                            launcher.scroll = launcher.scroll.clamp(0.0, max);
+                        }
+                    } else if open {
                         if let Some(v) =
                             panel::launcher_view_at(larea, &frame.theme, text, pe.position)
                         {
                             launcher.view = v;
+                            launcher.scroll = 0.0;
                         } else if panel::launcher_app_at(
                             &apps,
                             &launcher,
@@ -76,8 +86,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                             open = false;
                         }
                     }
-                    _ => {}
-                },
+                }
+                Event::Scroll(se) if open => {
+                    if panel::launcher_rects(larea, &frame.theme, text)
+                        .content
+                        .contains(se.position)
+                    {
+                        let max =
+                            panel::launcher_scroll_max(&apps, &launcher, larea, &frame.theme, text);
+                        launcher.scroll = (launcher.scroll - se.dy * 24.0).clamp(0.0, max);
+                    }
+                }
                 Event::Key(ke) if ke.keysym == 0xff1b => open = false, // Escape
                 _ => {}
             }

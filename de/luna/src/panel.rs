@@ -122,11 +122,13 @@ impl LauncherView {
     }
 }
 
-/// Stan launchera (widok + bieżąca karta karuzeli).
+/// Stan launchera (widok + bieżąca karta karuzeli + przewinięcie).
 #[derive(Debug, Clone, Default)]
 pub struct Launcher {
     pub view: LauncherView,
     pub carousel: usize,
+    /// Pionowe przewinięcie zawartości (Lista/Siatka), w pikselach.
+    pub scroll: f64,
 }
 
 impl Launcher {
@@ -153,7 +155,7 @@ pub struct App {
 impl App {
     /// Przykładowy zestaw ikon (podglądy).
     pub fn sample() -> Vec<App> {
-        const APPS: [(IconName, &str, &str); 8] = [
+        const APPS: [(IconName, &str, &str); 12] = [
             (IconName::Files, "Pliki", "System"),
             (IconName::Settings, "Ustawienia", "System"),
             (IconName::Edit, "Edytor", "Akcesoria"),
@@ -162,6 +164,10 @@ impl App {
             (IconName::Clock, "Zegar", "Akcesoria"),
             (IconName::Terminal, "Terminal", "System"),
             (IconName::Store, "Sklep", "System"),
+            (IconName::Wifi, "Sieć", "System"),
+            (IconName::Home, "Katalog", "System"),
+            (IconName::User, "Konta", "System"),
+            (IconName::Info, "Pomoc", "System"),
         ];
         APPS.iter()
             .map(|(i, n, c)| App {
@@ -409,9 +415,16 @@ pub fn launcher_app_at(
     p: Point,
 ) -> Option<usize> {
     let content = launcher_rects(area, theme, text).content;
+    let sy = launcher.scroll;
     match launcher.view {
-        LauncherView::Grid => (0..apps.len()).find(|&i| grid_tile(content, i).contains(p)),
-        LauncherView::List => (0..apps.len()).find(|&i| list_row(content, i).contains(p)),
+        LauncherView::Grid => (0..apps.len()).find(|&i| {
+            let t = grid_tile(content, i);
+            Rect::from_xywh(t.x(), t.y() - sy, t.width(), t.height()).contains(p)
+        }),
+        LauncherView::List => (0..apps.len()).find(|&i| {
+            let t = list_row(content, i);
+            Rect::from_xywh(t.x(), t.y() - sy, t.width(), t.height()).contains(p)
+        }),
         LauncherView::Carousel => {
             (0..apps.len()).find(|&i| carousel_card(content, i, launcher.carousel).contains(p))
         }
@@ -452,6 +465,28 @@ fn carousel_card(content: Rect, i: usize, selected: usize) -> Rect {
     )
 }
 
+/// Maksymalne pionowe przewinięcie dla danego widoku.
+pub fn launcher_scroll_max(
+    apps: &[App],
+    launcher: &Launcher,
+    area: Rect,
+    theme: &Theme,
+    text: &TextEngine,
+) -> f64 {
+    let content = launcher_rects(area, theme, text).content;
+    let gap_list = 8.0;
+    let gap_grid = 12.0;
+    let total = match launcher.view {
+        LauncherView::List => (apps.len() as f64) * (LIST_ROW_H + gap_list) - gap_list,
+        LauncherView::Grid => {
+            let rows = apps.len().div_ceil(GRID_COLS) as f64;
+            rows * (GRID_CELL_H + gap_grid) - gap_grid
+        }
+        LauncherView::Carousel => 0.0,
+    };
+    (total - content.height()).max(0.0)
+}
+
 /// Rysuje launcher w zadanym prostokącie.
 pub fn paint_launcher(apps: &[App], launcher: &Launcher, ctx: &mut PaintCtx, area: Rect) {
     let t = *ctx.theme;
@@ -490,37 +525,42 @@ pub fn paint_launcher(apps: &[App], launcher: &Launcher, ctx: &mut PaintCtx, are
         t.colors.dim_text,
     );
 
-    // Liczba pozycji mieszczących się w obszarze zawartości (bez przewijania).
-    let max_grid = (((r.content.height() + 12.0) / (GRID_CELL_H + 12.0))
-        .floor()
-        .max(0.0) as usize)
-        * GRID_COLS;
-    let max_list = ((r.content.height() + 8.0) / (LIST_ROW_H + 8.0))
-        .floor()
-        .max(0.0) as usize;
-
+    // Zawartość przewijana pionowo (Lista/Siatka) — obcinana do karty.
+    let scroll = launcher.scroll;
+    ctx.scene.push_clip(r.content);
     match launcher.view {
         LauncherView::Grid => {
-            for (i, app) in apps.iter().take(max_grid).enumerate() {
-                paint_grid_tile(app, ctx, grid_tile(r.content, i));
+            for (i, app) in apps.iter().enumerate() {
+                let t = grid_tile(r.content, i);
+                paint_grid_tile(
+                    app,
+                    ctx,
+                    Rect::from_xywh(t.x(), t.y() - scroll, t.width(), t.height()),
+                );
             }
         }
         LauncherView::List => {
-            for (i, app) in apps.iter().take(max_list).enumerate() {
-                paint_list_row(app, ctx, list_row(r.content, i));
+            for (i, app) in apps.iter().enumerate() {
+                let t = list_row(r.content, i);
+                paint_list_row(
+                    app,
+                    ctx,
+                    Rect::from_xywh(t.x(), t.y() - scroll, t.width(), t.height()),
+                );
             }
         }
         LauncherView::Carousel => {
             for (i, app) in apps.iter().enumerate() {
-                let card = carousel_card(r.content, i, launcher.carousel);
-                // Rysujemy tylko karty mieszczące się całe w obszarze (brak obcinania tekstu).
-                if card.x() < r.content.x() || card.right() > r.content.right() {
-                    continue;
-                }
-                paint_carousel_card(app, i == launcher.carousel, ctx, card);
+                paint_carousel_card(
+                    app,
+                    i == launcher.carousel,
+                    ctx,
+                    carousel_card(r.content, i, launcher.carousel),
+                );
             }
         }
     }
+    ctx.scene.pop_clip();
 }
 
 /// Kafelek siatki: ikona + nazwa.
@@ -681,7 +721,11 @@ mod tests {
             &mut ctx,
             Rect::from_xywh(0.0, 0.0, 1280.0, THICKNESS),
         );
-        let launcher = Launcher { view, carousel: 2 };
+        let launcher = Launcher {
+            view,
+            carousel: 2,
+            scroll: 0.0,
+        };
         paint_launcher(&App::sample(), &launcher, &mut ctx, area());
         scene.len()
     }
@@ -712,6 +756,29 @@ mod tests {
     }
 
     #[test]
+    fn list_scroll_is_clamped_and_offsets_hit_test() {
+        let theme = Theme::light();
+        let text = TextEngine::none();
+        let apps = App::sample();
+        let mut launcher = Launcher {
+            view: LauncherView::List,
+            carousel: 0,
+            scroll: 0.0,
+        };
+        let max = launcher_scroll_max(&apps, &launcher, area(), &theme, &text);
+        assert!(max > 0.0, "lista 12 pozycji powinna się przewijać");
+
+        // Po przewinięciu o jeden wiersz pierwsza pozycja jest nad obszarem → trafiamy w drugą.
+        launcher.scroll = (LIST_ROW_H + 8.0).min(max);
+        let r = launcher_rects(area(), &theme, &text);
+        let top = Point::new(r.content.x() + 5.0, r.content.y() + 5.0);
+        assert_eq!(
+            launcher_app_at(&apps, &launcher, area(), &theme, &text, top),
+            Some(1)
+        );
+    }
+
+    #[test]
     fn all_three_views_paint() {
         assert!(panel_commands(LauncherView::List) > 20);
         assert!(panel_commands(LauncherView::Grid) > 20);
@@ -724,7 +791,11 @@ mod tests {
         let text = TextEngine::none();
         let apps = App::sample();
         for view in LauncherView::ALL {
-            let launcher = Launcher { view, carousel: 2 };
+            let launcher = Launcher {
+                view,
+                carousel: 2,
+                scroll: 0.0,
+            };
             let r = launcher_rects(area(), &theme, &text);
             // Punkt wnętrza znanej pozycji (pierwszy kafel/wiersz, albo środek wybranej karty).
             let (p, expected) = match view {

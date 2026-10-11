@@ -29,6 +29,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let launcher = Launcher {
             view: LauncherView::Grid,
             carousel: 0,
+            scroll: 0.0,
         };
         panel::paint_desktop(&pstate, &apps, &launcher, &mut paint, size);
 
@@ -55,7 +56,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         )?;
     }
 
-    // 2) Launcher w trzech widokach (ciemny motyw).
+    // 2) Launcher w trzech widokach (ciemny motyw). Lista pokazuje przewinięcie.
     for (name, view) in [
         ("list", LauncherView::List),
         ("grid", LauncherView::Grid),
@@ -64,7 +65,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         let theme = Theme::dark();
         let mut scene = Scene::new();
         let mut paint = PaintCtx::new(&mut scene, &theme, &text);
-        let launcher = Launcher { view, carousel: 2 };
+        let launcher = Launcher {
+            view,
+            carousel: 2,
+            scroll: if view == LauncherView::List {
+                140.0
+            } else {
+                0.0
+            },
+        };
         panel::paint_desktop(&pstate, &apps, &launcher, &mut paint, size);
         save(
             &scene,
