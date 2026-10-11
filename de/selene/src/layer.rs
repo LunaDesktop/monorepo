@@ -171,6 +171,9 @@ impl Dispatch<layer_shell::ZwlrLayerShellV1, ()> for State {
             };
             // Indeks monitora niesiony przez zasób `wl_output`.
             let output = output.and_then(|o| o.data::<usize>().copied());
+            if std::env::var("SELENE_STATS").is_ok() {
+                eprintln!("selene/layer: get_layer_surface (layer={layer}, output={output:?})");
+            }
             let ls = data_init.init(id, LayerData::new(surface.clone(), layer, output));
             // Zapamiętaj powiązanie po stronie `wl_surface` (potrzebne przy `commit`).
             if let Some(sd) = surface.data::<SurfaceData>() {

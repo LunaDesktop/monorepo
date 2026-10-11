@@ -233,6 +233,7 @@ fn composite_layer(
     let out_idx = ld.output.unwrap_or(0);
     let (ox, oy, out_w, out_h) = output_rect(state, out_idx);
     let buffer = data.buffer.lock_or_recover().clone();
+    let debug = std::env::var("SELENE_STATS").is_ok();
     // Pierwszy `commit` (zwykle bez bufora) → wyślij `configure` z rozmiarem.
     if !*ld.configured.lock_or_recover() {
         let st = *ld.state.lock_or_recover();
@@ -244,6 +245,9 @@ fn composite_layer(
             height: ch.max(0) as u32,
         });
         *ld.configured.lock_or_recover() = true;
+        if debug {
+            eprintln!("selene/layer: configure {}x{}", cw.max(0), ch.max(0));
+        }
         if buffer.is_none() {
             return;
         }
@@ -252,17 +256,26 @@ fn composite_layer(
         return;
     };
     let Some(buf_data) = buffer.data::<BufferData>() else {
+        if debug {
+            eprintln!("selene/layer: commit bez BufferData");
+        }
         return;
     };
     let (w, h) = (buf_data.width, buf_data.height);
     let Some(rgba) = buf_data.to_rgba() else {
+        if debug {
+            eprintln!(
+                "selene/layer: bufor odrzucony (to_rgba None) {}x{} stride={} offset={}",
+                buf_data.width, buf_data.height, buf_data.stride, buf_data.offset
+            );
+        }
         return;
     };
     let image = std::sync::Arc::new(ImageData::new(w as u32, h as u32, rgba));
     let st = *ld.state.lock_or_recover();
     let (rx, ry) = st.position(out_w, out_h, w as f64, h as f64);
     let z = crate::layer::layer_z(st.layer);
-    upsert_window(
+    let (_, created) = upsert_window(
         state,
         surface,
         data,
@@ -277,6 +290,16 @@ fn composite_layer(
         true,
         image,
     );
+    if debug && created {
+        eprintln!(
+            "selene/layer: okno utworzone {}x{} @ ({:.0},{:.0}), z={}",
+            w,
+            h,
+            ox + rx,
+            oy + ry,
+            z
+        );
+    }
     let _ = buffer.send_event(wl_buffer::Event::Release);
 }
 

@@ -170,8 +170,8 @@ pub fn spawn_drm(model: WindowModel, cursor: CursorModel) {
                 backend.wait_flip();
                 ms_wait += t.elapsed().as_secs_f64() * 1000.0;
             }
-            // Bez wejścia w trybie DRM odświeżamy w stałym rytmie (~60 Hz).
-            std::thread::sleep(Duration::from_millis(16));
+            // `wait_flip` i tak synchronizuje z vblankiem, więc nie dosypujemy snu
+            // (wcześniejsze 16 ms samo ograniczało do ~20 fps).
             frames += 1;
 
             if stats && report.elapsed().as_secs_f64() >= 2.0 {
