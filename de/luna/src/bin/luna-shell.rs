@@ -12,9 +12,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use libluna_core::{ButtonState, Event, PointerButton, Rect};
 use libluna_platform::{run, AppConfig, Frame, LayerConfig};
 use libluna_widgets::{IconName, PaintCtx};
-use luna::notifications::{Notification, Notifications};
+use luna::notifications::Notifications;
 use luna::osd::Osd;
-use luna::panel::{self, App, Launcher, PanelState, LAUNCHER_H, LAUNCHER_W, THICKNESS};
+use luna::panel::{
+    self, App, Launcher, PanelState, Toggle, ToggleAction, LAUNCHER_H, LAUNCHER_W, THICKNESS,
+};
 
 /// Wysokość powierzchni „chrome" (pasek + launcher + OSD/powiadomienia).
 const CHROME_H: u32 = 680;
@@ -41,15 +43,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut open = false;
     let mut osd = Osd::new(IconName::Volume, "Głośność", 0.0);
     let mut notes = Notifications::new();
-    let mut timer = 0.0f64;
     // Lista okien z kompozytora (foreign-toplevel) — własne połączenie + wątek.
     let toplevels = luna::toplevels::Toplevels::spawn();
+    // Realny stan systemu (użytkownik, dźwięk, Wi-Fi, bateria) — odpytywany w tle.
+    let system = luna::system::spawn();
     // Sygnatura stanu — przerysowujemy tylko, gdy coś się zmieniło.
     let mut last_sig: (bool, String, u64) = (false, String::new(), u64::MAX);
 
     run(cfg, move |frame: &mut Frame| {
         let dt = frame.delta_time();
-        timer += dt;
 
         let size = frame.size;
         let theme = &frame.theme;
@@ -65,6 +67,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             state.tasks = tl.tasks();
         } else {
             state.tasks.clear();
+        }
+        // Realny stan systemu → użytkownik i przełączniki.
+        if let Ok(sys) = system.lock() {
+            state.user = sys.user.clone();
+            state.toggles = build_toggles(&sys);
         }
 
         let lw = LAUNCHER_W.min((size.width - 80.0).max(320.0));
@@ -112,6 +119,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                         // Klik w okno na pasku — aktywuj je.
                         if let Some(tl) = &toplevels {
                             tl.activate(i);
+                        }
+                    } else if let Some(i) =
+                        panel::toggle_at(bar, &frame.theme, text, &state, pe.position)
+                    {
+                        // Klik w przełącznik — realna akcja systemowa.
+                        match state.toggles[i].action {
+                            ToggleAction::Wifi => {
+                                luna::system::set_wifi(!state.toggles[i].active);
+                            }
+                            ToggleAction::Volume => luna::system::toggle_mute(),
+                            ToggleAction::None => {}
                         }
                     }
                 }
@@ -176,17 +194,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
 
-        // Demo: co ~4 s OSD, co ~7 s powiadomienie.
-        if timer % 7.0 < dt {
-            let value = 0.15 + (timer as i64 % 8) as f64 / 10.0;
-            osd.show("Głośność", value);
-        }
-        if timer % 4.0 < dt {
-            notes.push(
-                Notification::new("Pliki", "Kopiowanie zakończone", "12 plików → Dokumenty")
-                    .with_icon(IconName::Files),
-            );
-        }
+        // OSD/powiadomienia sterowane zdarzeniami (demo usunięte).
         osd.advance(dt);
         notes.advance(dt);
 
@@ -216,6 +224,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .wrapping_mul(1_099_511_628_211)
                 .wrapping_add(u64::from(t.active) ^ t.title.len() as u64);
         }
+        for tg in &state.toggles {
+            th = th
+                .wrapping_mul(1_099_511_628_211)
+                .wrapping_add(u64::from(tg.active) ^ tg.label.len() as u64);
+        }
+        th = th
+            .wrapping_mul(1_099_511_628_211)
+            .wrapping_add(state.user.len() as u64);
         let sig = (open, state.clock.clone(), th);
         let animating = osd.visible() || notes.visible();
         if !frame.events.is_empty() || animating || open || sig != last_sig {
@@ -223,6 +239,36 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         last_sig = sig;
     })
+}
+
+/// Buduje przełączniki paska z realnego stanu systemu.
+fn build_toggles(s: &luna::system::SystemStatus) -> Vec<Toggle> {
+    let mut v = Vec::new();
+    if let Some((on, ssid)) = &s.wifi {
+        v.push(Toggle {
+            label: ssid.clone().unwrap_or_else(|| "Wi-Fi".to_owned()),
+            icon: IconName::Wifi,
+            active: *on,
+            action: ToggleAction::Wifi,
+        });
+    }
+    if let Some((pct, muted)) = s.volume {
+        v.push(Toggle {
+            label: format!("{pct}%"),
+            icon: IconName::Volume,
+            active: !muted,
+            action: ToggleAction::Volume,
+        });
+    }
+    if let Some((pct, charging)) = s.battery {
+        v.push(Toggle {
+            label: format!("{pct}%"),
+            icon: IconName::Battery,
+            active: charging,
+            action: ToggleAction::None,
+        });
+    }
+    v
 }
 
 /// Uruchamia aplikację o indeksie `i` (jeśli ma polecenie).

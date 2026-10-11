@@ -10,4 +10,5 @@ pub mod apps;
 pub mod notifications;
 pub mod osd;
 pub mod panel;
+pub mod system;
 pub mod toplevels;

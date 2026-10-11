@@ -26,6 +26,15 @@ const LIST_ROW_H: f64 = 52.0;
 const CARD_W: f64 = 168.0;
 const CARD_H: f64 = 200.0;
 
+/// Akcja przełącznika w pasku (kliknięcie).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ToggleAction {
+    #[default]
+    None,
+    Wifi,
+    Volume,
+}
+
 /// Przełącznik szybkiego dostępu (Wi-Fi, dźwięk, bateria…).
 #[derive(Debug, Clone)]
 pub struct Toggle {
@@ -33,6 +42,8 @@ pub struct Toggle {
     /// Ikona z pakietu Luny.
     pub icon: IconName,
     pub active: bool,
+    /// Co robi klik (jeśli cokolwiek).
+    pub action: ToggleAction,
 }
 
 /// Stan panelu — czyste dane, bez logiki okna (łatwe do testów i podglądów).
@@ -70,16 +81,19 @@ impl PanelState {
                     label: "Wi-Fi".to_owned(),
                     icon: IconName::Wifi,
                     active: true,
+                    action: ToggleAction::Wifi,
                 },
                 Toggle {
                     label: "Dźwięk".to_owned(),
                     icon: IconName::Volume,
                     active: true,
+                    action: ToggleAction::Volume,
                 },
                 Toggle {
                     label: "82%".to_owned(),
                     icon: IconName::Battery,
                     active: false,
+                    action: ToggleAction::None,
                 },
             ],
             user: "patryks".to_owned(),
@@ -251,6 +265,42 @@ impl App {
 pub fn burger_rect(panel: Rect, theme: &Theme) -> Rect {
     let cy = panel.center().y;
     Rect::from_xywh(panel.x() + theme.spacing.md, cy - 14.0, 28.0, 28.0)
+}
+
+/// Prostokąty pigułek przełączników (spójne z `paint_panel`), w kolejności `state.toggles`.
+pub fn toggle_rects(bar: Rect, theme: &Theme, text: &TextEngine, state: &PanelState) -> Vec<Rect> {
+    let t = theme;
+    let cy = bar.center().y;
+    let cap = t.typography.caption.size;
+    let pad = t.spacing.md;
+    let uw = text
+        .measure(&state.user, t.typography.body.size, weight::NORMAL)
+        .width;
+    // Za użytkownikiem i separatorem (jak w `paint_panel`).
+    let mut right = bar.right() - pad - uw - 2.0 * t.spacing.md;
+    let mut rects = vec![Rect::ZERO; state.toggles.len()];
+    for (i, toggle) in state.toggles.iter().enumerate().rev() {
+        let icon = 13.0;
+        let lw = text.measure(&toggle.label, cap, weight::MEDIUM).width;
+        let w = t.spacing.sm * 2.0 + icon + t.spacing.xs + lw;
+        let pill = Rect::from_xywh(right - w, cy - 12.0, w, 24.0);
+        rects[i] = pill;
+        right = pill.x() - t.spacing.sm;
+    }
+    rects
+}
+
+/// Indeks przełącznika pod punktem `p`.
+pub fn toggle_at(
+    bar: Rect,
+    theme: &Theme,
+    text: &TextEngine,
+    state: &PanelState,
+    p: Point,
+) -> Option<usize> {
+    toggle_rects(bar, theme, text, state)
+        .iter()
+        .position(|r| r.contains(p))
 }
 
 /// Rozmieszczenie przycisków okien (taskbar) w pasku.
@@ -428,14 +478,13 @@ pub fn paint_panel(panel: &PanelState, ctx: &mut PaintCtx, rect: Rect) {
         .fill_rect(Rect::from_xywh(right, cy - 8.0, 1.0, 16.0), t.colors.border);
     right -= t.spacing.md;
 
-    for toggle in panel.toggles.iter().rev() {
-        let cap = t.typography.caption.size;
-        let lw = ctx.measure(&toggle.label, cap, weight::MEDIUM);
-        let icon = 13.0;
-        let w = t.spacing.sm * 2.0 + icon + t.spacing.xs + lw;
-        let pill = Rect::from_xywh(right - w, cy - 12.0, w, 24.0);
-        paint_toggle_pill(ctx, pill, toggle);
-        right = pill.x() - t.spacing.sm;
+    // Przełączniki szybkiego dostępu (pigułki).
+    let toggles = toggle_rects(rect, t, ctx.text, panel);
+    for (r, toggle) in toggles.iter().zip(panel.toggles.iter()) {
+        paint_toggle_pill(ctx, *r, toggle);
+    }
+    if let Some(last) = toggles.last() {
+        right = last.x() - t.spacing.sm;
     }
 
     for i in (0..panel.workspaces).rev() {
