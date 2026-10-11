@@ -128,18 +128,24 @@ impl Dispatch<xdg_wm_base::XdgWmBase, ()> for State {
 
 impl Dispatch<xdg_surface::XdgSurface, XdgSurfaceData> for State {
     fn request(
-        _state: &mut Self,
+        state: &mut Self,
         _client: &Client,
         _resource: &xdg_surface::XdgSurface,
         request: xdg_surface::Request,
         data: &XdgSurfaceData,
-        _handle: &DisplayHandle,
+        handle: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
             xdg_surface::Request::GetToplevel { id } => {
                 let toplevel = data_init.init(id, XdgToplevelData::new(data.wl_surface.clone()));
                 *data.toplevel.lock_or_recover() = Some(toplevel);
+                // Zarejestruj okno dla paska (foreign-toplevel) i zgłoś menedżerom.
+                crate::foreign_toplevel::register_toplevel(&data.wl_surface);
+                let managers = state.toplevel_managers.clone();
+                for mgr in &managers {
+                    crate::foreign_toplevel::announce(state, handle, mgr, &data.wl_surface);
+                }
             }
             xdg_surface::Request::GetPopup {
                 id,
@@ -180,17 +186,30 @@ impl Dispatch<xdg_toplevel::XdgToplevel, XdgToplevelData> for State {
             xdg_toplevel::Request::SetTitle { title } => {
                 *data.title.lock_or_recover() = title.clone();
                 state.toplevels += 1;
-                // Odśwież tytuł w modelu okien (dekoracja rysuje go na pasku).
+                // Odśwież tytuł w modelu okien i rozgłoś do pasków (foreign-toplevel).
                 if let Some(sd) = data.surface.data::<SurfaceData>() {
+                    if let Some(info) = sd.toplevel.lock_or_recover().as_mut() {
+                        info.title = title.clone();
+                    }
                     if let Some(slot) = *sd.slot.lock_or_recover() {
                         if let Some(window) = state.windows.lock_or_recover().get_mut(slot) {
-                            window.title = title;
+                            window.title = title.clone();
                         }
                     }
                 }
+                crate::foreign_toplevel::broadcast_title(state, &data.surface, &title);
             }
             xdg_toplevel::Request::SetAppId { app_id } => {
-                *data.app_id.lock_or_recover() = app_id;
+                *data.app_id.lock_or_recover() = app_id.clone();
+                if let Some(sd) = data.surface.data::<SurfaceData>() {
+                    if let Some(info) = sd.toplevel.lock_or_recover().as_mut() {
+                        info.app_id = app_id.clone();
+                    }
+                }
+                crate::foreign_toplevel::broadcast_app_id(state, &data.surface, &app_id);
+            }
+            xdg_toplevel::Request::Destroy => {
+                crate::foreign_toplevel::announce_closed(&data.surface);
             }
             _ => {}
         }

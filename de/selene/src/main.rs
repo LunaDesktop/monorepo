@@ -10,6 +10,7 @@ mod data;
 mod decoration;
 mod drm;
 mod evdev;
+mod foreign_toplevel;
 mod input;
 mod layer;
 mod monitors;
@@ -28,6 +29,7 @@ use std::sync::Arc;
 use libluna_core::Event;
 use wayland_protocols::xdg::decoration::zv1::server::zxdg_decoration_manager_v1;
 use wayland_protocols::xdg::shell::server::xdg_wm_base;
+use wayland_protocols_wlr::foreign_toplevel::v1::server::zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1;
 use wayland_protocols_wlr::layer_shell::v1::server::zwlr_layer_shell_v1;
 use wayland_server::protocol::{wl_compositor, wl_data_device_manager, wl_output, wl_seat, wl_shm};
 use wayland_server::{Display, ListeningSocket};
@@ -86,6 +88,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     handle.create_global::<State, zwlr_layer_shell_v1::ZwlrLayerShellV1, ()>(4, ());
     handle.create_global::<State, wl_data_device_manager::WlDataDeviceManager, ()>(3, ());
     handle.create_global::<State, wl_seat::WlSeat, ()>(1, ());
+    handle.create_global::<State, ZwlrForeignToplevelManagerV1, ()>(3, ());
 
     // Gniazdo nasłuchu: `wayland-0`, `wayland-1`, …
     ensure_runtime_dir()?;

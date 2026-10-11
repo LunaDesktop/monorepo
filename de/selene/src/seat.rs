@@ -586,6 +586,7 @@ fn toggle_minimize(state: &mut State, slot: usize) {
     if minimized {
         clear_focus_if(state, slot);
     }
+    crate::foreign_toplevel::broadcast_states(state);
 }
 
 /// Przełącza maksymalizację (zapamiętuje/odtwarza geometrię).
@@ -629,6 +630,7 @@ fn toggle_maximize(state: &mut State, slot: usize) {
         .map(|(_, _, w, h)| (w, h))
         .unwrap_or((ow, oh));
     send_configure(state, slot, nw, nh);
+    crate::foreign_toplevel::broadcast_states(state);
 }
 
 /// Przełącza pełny ekran (ukrywa dekorację).
@@ -672,6 +674,7 @@ fn toggle_fullscreen(state: &mut State, slot: usize) {
         .map(|(_, _, w, h)| (w, h))
         .unwrap_or((ow, oh));
     send_configure(state, slot, nw, nh);
+    crate::foreign_toplevel::broadcast_states(state);
 }
 
 /// Zdejmuje fokus klawiatury/wskaźnika z okna (np. po minimalizacji).
@@ -687,6 +690,7 @@ fn clear_focus_if(state: &mut State, slot: usize) {
     if state.pointer_focus.as_ref().map(|(s, _)| *s) == Some(slot) {
         pointer_leave(state);
     }
+    crate::foreign_toplevel::broadcast_states(state);
 }
 
 /// Prosi klienta o zamknięcie okna (`xdg_toplevel.close`).
@@ -719,6 +723,21 @@ fn raise_and_focus(state: &mut State, slot: usize) {
         }
     }
     set_keyboard_focus(state, slot);
+    crate::foreign_toplevel::broadcast_states(state);
+}
+
+/// Aktywuje okno o podanym slocie (z `zwlr_foreign_toplevel_handle_v1.activate`).
+pub fn activate_slot(state: &mut State, slot: usize) {
+    raise_and_focus(state, slot);
+}
+
+/// Zamyka okno reprezentowane przez `surface` (z `...handle_v1.close`).
+pub fn close_surface(state: &mut State, surface: &wayland_server::protocol::wl_surface::WlSurface) {
+    if let Some(sd) = surface.data::<SurfaceData>() {
+        if let Some(slot) = *sd.slot.lock_or_recover() {
+            send_close(state, slot);
+        }
+    }
 }
 
 fn set_keyboard_focus(state: &mut State, slot: usize) {

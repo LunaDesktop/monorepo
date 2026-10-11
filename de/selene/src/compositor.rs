@@ -28,6 +28,8 @@ pub struct SurfaceData {
     pub slot: Mutex<Option<usize>>,
     /// Powiązana powierzchnia warstwowa (`wlr-layer-shell`), jeśli klient ją utworzył.
     pub layer: Mutex<Option<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1>>,
+    /// Uchwyty `zwlr_foreign_toplevel` (gdy to okno najwyższego poziomu).
+    pub toplevel: Mutex<Option<crate::foreign_toplevel::ToplevelInfo>>,
 }
 
 impl SurfaceData {
@@ -38,6 +40,7 @@ impl SurfaceData {
             buffer: Mutex::new(None),
             slot: Mutex::new(None),
             layer: Mutex::new(None),
+            toplevel: Mutex::new(None),
         }
     }
 }

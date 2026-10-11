@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use libluna_core::{Modifiers, Point, Rect};
 use libluna_render::ImageData;
+use wayland_protocols_wlr::foreign_toplevel::v1::server::zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1;
 use wayland_server::protocol::wl_data_device::WlDataDevice;
 use wayland_server::protocol::wl_data_source::WlDataSource;
 use wayland_server::protocol::wl_keyboard::WlKeyboard;
@@ -198,6 +199,8 @@ pub struct State {
     z_counter: i32,
     /// Monitory (współdzielone z wątkiem wyjścia).
     pub outputs: Outputs,
+    /// Podłączeni menedżerowie `zwlr_foreign_toplevel` (paski/taskbary).
+    pub toplevel_managers: Vec<ZwlrForeignToplevelManagerV1>,
 
     // — Wejście —
     pub pointer: Option<WlPointer>,
@@ -233,6 +236,7 @@ impl Default for State {
             slots: Vec::new(),
             z_counter: 1,
             outputs: Arc::new(Mutex::new(vec![OutputInfo::default()])),
+            toplevel_managers: Vec::new(),
             pointer: None,
             keyboard: None,
             pointer_focus: None,
