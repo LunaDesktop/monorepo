@@ -140,6 +140,24 @@ pub fn spawn_drm(model: WindowModel, cursor: CursorModel) {
             .collect();
         let bg = Color::from_rgba8(0x1e, 0x20, 0x28, 0xff);
 
+        // Sprzętowy kursor: renderujemy raz obraz strzałki (ARGB) i odtąd poruszamy
+        // tylko płaszczyzną kursora — ruch myszy nie przemalowuje sceny.
+        let (cursor_rgba, cw, ch) = cursor_image();
+        let mut hw_cursor = true;
+        for i in 0..sizes.len() {
+            // Próba ustawienia obrazu (potem chowamy); gdy sterownik nie umie — kursor programowy.
+            if !backend.set_cursor_image(i, &cursor_rgba, cw, ch, 0, 0) || !backend.hide_cursor(i) {
+                hw_cursor = false;
+            }
+        }
+        if !hw_cursor {
+            eprintln!(
+                "{}",
+                libluna_i18n::tr("DRM hardware cursor unavailable; using software cursor")
+            );
+        }
+        let mut cursor_shown = vec![false; sizes.len()];
+
         // Diagnostyka (SELENE_STATS=1): fps i rozbicie czasu na render/present/wait_flip.
         let stats = std::env::var("SELENE_STATS").is_ok();
         let mut flip_error_logged = false;
@@ -147,72 +165,117 @@ pub fn spawn_drm(model: WindowModel, cursor: CursorModel) {
         let (mut ms_render, mut ms_present, mut ms_wait) = (0.0f64, 0.0f64, 0.0f64);
         let mut report = std::time::Instant::now();
         let mut last_sig: Option<u64> = None;
+        let mut last_cur: Option<Point> = None;
         loop {
-            // Przerysowujemy tylko, gdy coś się zmieniło (okna albo kursor). Inaczej
-            // śpimy — mniej CPU i brak zbędnych page-flipów, przy płynnym kursorze.
             let cur = *cursor.lock_or_recover();
-            let sig = scene_signature(&model, cur);
-            if last_sig == Some(sig) {
+
+            // Sygnatura sceny nie zależy od kursora, gdy rysuje go sprzęt — dzięki temu
+            // samo przesunięcie myszy nie powoduje przemalowania sceny.
+            let sig = scene_signature(&model, if hw_cursor { None } else { cur });
+            let scene_changed = last_sig != Some(sig);
+            let cur_changed = last_cur != cur;
+            if !scene_changed && !cur_changed {
                 std::thread::sleep(Duration::from_millis(4));
                 continue;
             }
-            last_sig = Some(sig);
+            last_cur = cur;
 
-            for i in 0..sizes.len() {
-                let (w, h) = sizes[i];
-                let (ox, oy) = origins[i];
-
-                let t = std::time::Instant::now();
-                let mut scene = Scene::new();
-                build_scene(
-                    &mut scene,
-                    Size::new(w as f64, h as f64),
-                    ox,
-                    oy,
-                    &model,
-                    cur,
-                );
-                renderers[i].draw(&scene, 1.0, bg);
-                ms_render += t.elapsed().as_secs_f64() * 1000.0;
-
-                let t = std::time::Instant::now();
-                let flipped = backend.present(i, renderers[i].data());
-                if !flipped && !flip_error_logged {
-                    eprintln!(
-                        "{}",
-                        libluna_i18n::tr("DRM page-flip failed (screen may stay blank)")
-                    );
-                    flip_error_logged = true;
-                }
-                ms_present += t.elapsed().as_secs_f64() * 1000.0;
-
-                // Czekamy na flip tylko, gdy został zakolejkowany (inaczej `read`
-                // mógłby zablokować się na zawsze).
-                if flipped {
-                    let t = std::time::Instant::now();
-                    backend.wait_flip();
-                    ms_wait += t.elapsed().as_secs_f64() * 1000.0;
+            // Kursor sprzętowy: ustaw/przesuń płaszczyznę kursora (bez dotykania sceny).
+            if hw_cursor && cur_changed {
+                for i in 0..sizes.len() {
+                    let (w, h) = sizes[i];
+                    let (ox, oy) = origins[i];
+                    let local = cur.map(|c| ((c.x - ox) as i32, (c.y - oy) as i32));
+                    let inside = cur
+                        .map(|c| {
+                            let (lx, ly) = (c.x - ox, c.y - oy);
+                            lx >= 0.0 && ly >= 0.0 && lx < w as f64 && ly < h as f64
+                        })
+                        .unwrap_or(false);
+                    if inside {
+                        let (x, y) = local.unwrap();
+                        if cursor_shown[i] {
+                            backend.move_cursor(i, x, y);
+                        } else {
+                            backend.set_cursor_image(i, &cursor_rgba, cw, ch, x, y);
+                            cursor_shown[i] = true;
+                        }
+                    } else if cursor_shown[i] {
+                        backend.hide_cursor(i);
+                        cursor_shown[i] = false;
+                    }
                 }
             }
-            frames += 1;
-            if stats && report.elapsed().as_secs_f64() >= 2.0 {
-                let secs = report.elapsed().as_secs_f64();
-                let per_frame = (frames * sizes.len() as u64).max(1) as f64;
-                eprintln!(
-                    "selene/drm: {:.1} fps | render {:.2} ms, present {:.2} ms, wait_flip {:.2} ms",
-                    frames as f64 / secs,
-                    ms_render / per_frame,
-                    ms_present / per_frame,
-                    ms_wait / per_frame
-                );
-                frames = 0;
-                ms_render = 0.0;
-                ms_present = 0.0;
-                ms_wait = 0.0;
-                report = std::time::Instant::now();
+
+            if scene_changed {
+                last_sig = Some(sig);
+                for i in 0..sizes.len() {
+                    let (w, h) = sizes[i];
+                    let (ox, oy) = origins[i];
+
+                    let t = std::time::Instant::now();
+                    let mut scene = Scene::new();
+                    build_scene(
+                        &mut scene,
+                        Size::new(w as f64, h as f64),
+                        ox,
+                        oy,
+                        &model,
+                        if hw_cursor { None } else { cur },
+                    );
+                    renderers[i].draw(&scene, 1.0, bg);
+                    ms_render += t.elapsed().as_secs_f64() * 1000.0;
+
+                    let t = std::time::Instant::now();
+                    let flipped = backend.present(i, renderers[i].data());
+                    if !flipped && !flip_error_logged {
+                        eprintln!(
+                            "{}",
+                            libluna_i18n::tr("DRM page-flip failed (screen may stay blank)")
+                        );
+                        flip_error_logged = true;
+                    }
+                    ms_present += t.elapsed().as_secs_f64() * 1000.0;
+
+                    // Czekamy na flip tylko, gdy został zakolejkowany (inaczej `read`
+                    // mógłby zablokować się na zawsze).
+                    if flipped {
+                        let t = std::time::Instant::now();
+                        backend.wait_flip();
+                        ms_wait += t.elapsed().as_secs_f64() * 1000.0;
+                    }
+                }
+                frames += 1;
+                if stats && report.elapsed().as_secs_f64() >= 2.0 {
+                    let secs = report.elapsed().as_secs_f64();
+                    let per_frame = (frames * sizes.len() as u64).max(1) as f64;
+                    eprintln!(
+                        "selene/drm: {:.1} klatek/s | render {:.2} ms, present {:.2} ms, wait_flip {:.2} ms",
+                        frames as f64 / secs,
+                        ms_render / per_frame,
+                        ms_present / per_frame,
+                        ms_wait / per_frame
+                    );
+                    frames = 0;
+                    ms_render = 0.0;
+                    ms_present = 0.0;
+                    ms_wait = 0.0;
+                    report = std::time::Instant::now();
+                }
             }
         }
     });
+}
+
+/// Obraz kursora (strzałka) w RGBA8 — do płaszczyzny kursora DRM.
+fn cursor_image() -> (Vec<u8>, u32, u32) {
+    let (w, h) = (64u32, 64u32);
+    let mut renderer = SoftwareRenderer::new(w, h);
+    let mut scene = Scene::new();
+    scene.clear();
+    draw_cursor(&mut scene, Point::new(2.0, 2.0));
+    renderer.draw(&scene, 1.0, Color::rgba(0.0, 0.0, 0.0, 0.0));
+    (renderer.data().to_vec(), w, h)
 }
 
 /// Sygnatura sceny (okna + kursor) — do wykrywania, że nic się nie zmieniło.

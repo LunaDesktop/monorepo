@@ -26,6 +26,8 @@ const DRM_IOCTL_MODE_CREATE_DUMB: u32 = 0xC020_64B2;
 const DRM_IOCTL_MODE_MAP_DUMB: u32 = 0xC010_64B3;
 const DRM_IOCTL_MODE_ADDFB2: u32 = 0xC068_64B8;
 const DRM_IOCTL_MODE_PAGE_FLIP: u32 = 0xC018_64B0;
+/// `drm_mode_cursor` (`sizeof` = 28 = 0x1C).
+const DRM_IOCTL_MODE_CURSOR: u32 = 0xC01C_64A3;
 
 // — ioctle bez argumentu (`_IO`) —
 const DRM_IOCTL_SET_MASTER: u32 = 0x0000_641E;
@@ -38,6 +40,12 @@ const DRM_MODE_TYPE_PREFERRED: u32 = 1 << 3;
 const DRM_MODE_PAGE_FLIP_EVENT: u32 = 1;
 /// Cztery znaki `XRGB8888` (kolejność bajtów B,G,R,X).
 const DRM_FORMAT_XRGB8888: u32 = 0x3432_5258;
+/// Cztery znaki `ARGB8888` (kolejność bajtów B,G,R,A) — format kursora.
+const DRM_FORMAT_ARGB8888: u32 = 0x3432_5241;
+/// `DRM_MODE_CURSOR_BO` — ustaw obraz kursora (albo wyłącz, gdy `handle` = 0).
+const DRM_MODE_CURSOR_BO: u32 = 0x01;
+/// `DRM_MODE_CURSOR_MOVE` — przesuń kursor bez zmiany obrazu.
+const DRM_MODE_CURSOR_MOVE: u32 = 0x02;
 /// `DRM_EVENT_FLIP_COMPLETE`.
 const DRM_EVENT_FLIP_COMPLETE: u32 = 2;
 
@@ -174,6 +182,19 @@ struct ModePageFlip {
     flags: u32,
     reserved: u32,
     user_data: u64,
+}
+
+/// `struct drm_mode_cursor` — ustawienie/przesunięcie kursora sprzętowego.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ModeCursor {
+    flags: u32,
+    crtc_id: u32,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    handle: u32,
 }
 
 /// Opakowanie na ioctl typu „read-write” z jednym struktem wejścia/wyjścia.
@@ -426,6 +447,8 @@ fn fetch_resources(fd: BorrowedFd) -> Option<Resources> {
 /// Bufor „dumb” (bez GPU): sterta pamięci zmapowana do renderowania i skanowania.
 struct DumbBuffer {
     fb_id: u32,
+    /// Uchwyt GEM (potrzebny m.in. do kursora sprzętowego).
+    handle: u32,
     pitch: usize,
     size: usize,
     ptr: *mut u8,
@@ -453,6 +476,8 @@ struct DrmOutput {
     hz: u32,
     buffers: [DumbBuffer; 2],
     front: usize,
+    /// Bufor obrazu kursora sprzętowego (tworzony leniwie).
+    cursor: Option<DumbBuffer>,
 }
 
 /// Powód, dla którego nie udało się otworzyć wyjścia DRM (do diagnostyki).
@@ -566,6 +591,73 @@ impl DrmBackend {
             }
         }
     }
+
+    /// Ustawia obraz kursora sprzętowego na wyjściu `idx` w pozycji `(x, y)`.
+    ///
+    /// `false`, gdy sterownik nie obsługuje kursora — wywołujący wraca do kursora
+    /// programowego (rysowanego w scenie).
+    pub fn set_cursor_image(
+        &mut self,
+        idx: usize,
+        rgba: &[u8],
+        w: u32,
+        h: u32,
+        x: i32,
+        y: i32,
+    ) -> bool {
+        let fd = self.fd.as_fd();
+        let Some(out) = self.outputs.get_mut(idx) else {
+            return false;
+        };
+        if out.cursor.is_none() {
+            match create_dumb_fmt(fd, w, h, DRM_FORMAT_ARGB8888, false) {
+                Some(b) => out.cursor = Some(b),
+                None => return false,
+            }
+        }
+        let Some(cur) = out.cursor.as_mut() else {
+            return false;
+        };
+        swizzle_argb_into(cur.ptr, cur.pitch, rgba, w as usize, h as usize);
+        let req = ModeCursor {
+            flags: DRM_MODE_CURSOR_BO,
+            crtc_id: out.crtc_id,
+            x,
+            y,
+            width: w,
+            height: h,
+            handle: cur.handle,
+        };
+        ioctl_rw::<ModeCursor, DRM_IOCTL_MODE_CURSOR, _>(&self.fd, req).is_ok()
+    }
+
+    /// Przesuwa kursor sprzętowy na wyjściu `idx` (bez zmiany obrazu).
+    pub fn move_cursor(&mut self, idx: usize, x: i32, y: i32) -> bool {
+        let Some(crtc_id) = self.outputs.get(idx).map(|o| o.crtc_id) else {
+            return false;
+        };
+        let req = ModeCursor {
+            flags: DRM_MODE_CURSOR_MOVE,
+            crtc_id,
+            x,
+            y,
+            ..ModeCursor::default()
+        };
+        ioctl_rw::<ModeCursor, DRM_IOCTL_MODE_CURSOR, _>(&self.fd, req).is_ok()
+    }
+
+    /// Wyłącza kursor sprzętowy na wyjściu `idx`.
+    pub fn hide_cursor(&mut self, idx: usize) -> bool {
+        let Some(crtc_id) = self.outputs.get(idx).map(|o| o.crtc_id) else {
+            return false;
+        };
+        let req = ModeCursor {
+            flags: DRM_MODE_CURSOR_BO,
+            crtc_id,
+            ..ModeCursor::default()
+        };
+        ioctl_rw::<ModeCursor, DRM_IOCTL_MODE_CURSOR, _>(&self.fd, req).is_ok()
+    }
 }
 
 /// Konfiguruje jedno wyjście: tryb, bufor dumb, framebuffer i `SETCRTC`.
@@ -629,11 +721,24 @@ fn setup_output(fd: BorrowedFd, conn_id: u32, res: &Resources) -> Option<DrmOutp
         hz: mode.vrefresh,
         buffers: [b0, b1],
         front: 0,
+        cursor: None,
     })
 }
 
-/// Tworzy bufor dumb, mapuje go i rejestruje jako framebuffer.
+/// Tworzy bufor dumb, mapuje go i rejestruje jako framebuffer (scanout).
 fn create_dumb(fd: BorrowedFd, width: u32, height: u32) -> Option<DumbBuffer> {
+    create_dumb_fmt(fd, width, height, DRM_FORMAT_XRGB8888, true)
+}
+
+/// Tworzy bufor dumb w zadanym formacie; `register_fb` dodaje też framebuffer
+/// (niepotrzebne dla kursora, gdzie liczy się tylko uchwyt GEM).
+fn create_dumb_fmt(
+    fd: BorrowedFd,
+    width: u32,
+    height: u32,
+    format: u32,
+    register_fb: bool,
+) -> Option<DumbBuffer> {
     let dumb = ioctl_rw::<ModeCreateDumb, DRM_IOCTL_MODE_CREATE_DUMB, _>(
         fd,
         ModeCreateDumb {
@@ -663,20 +768,26 @@ fn create_dumb(fd: BorrowedFd, width: u32, height: u32) -> Option<DumbBuffer> {
         )
     }
     .ok()? as *mut u8;
-    let fb = ioctl_rw::<ModeFbCmd2, DRM_IOCTL_MODE_ADDFB2, _>(
-        fd,
-        ModeFbCmd2 {
-            width,
-            height,
-            pixel_format: DRM_FORMAT_XRGB8888,
-            handles: [dumb.handle, 0, 0, 0],
-            pitches: [dumb.pitch, 0, 0, 0],
-            ..ModeFbCmd2::default()
-        },
-    )
-    .ok()?;
+    let fb_id = if register_fb {
+        ioctl_rw::<ModeFbCmd2, DRM_IOCTL_MODE_ADDFB2, _>(
+            fd,
+            ModeFbCmd2 {
+                width,
+                height,
+                pixel_format: format,
+                handles: [dumb.handle, 0, 0, 0],
+                pitches: [dumb.pitch, 0, 0, 0],
+                ..ModeFbCmd2::default()
+            },
+        )
+        .ok()?
+        .fb_id
+    } else {
+        0
+    };
     Some(DumbBuffer {
-        fb_id: fb.fb_id,
+        fb_id,
+        handle: dumb.handle,
         pitch: dumb.pitch as usize,
         size: dumb.size as usize,
         ptr,
@@ -696,6 +807,27 @@ fn set_crtc(fd: BorrowedFd, crtc_id: u32, fb_id: u32, connector_id: u32, mode: &
         ..ModeCrtc::default()
     };
     ioctl_rw::<ModeCrtc, DRM_IOCTL_MODE_SETCRTC, _>(fd, req).is_ok()
+}
+
+/// Przepisuje RGBA do bufora kursora w formacie `ARGB8888` (kolejność B,G,R,A).
+fn swizzle_argb_into(dst: *mut u8, pitch: usize, rgba: &[u8], width: usize, height: usize) {
+    if dst.is_null() || rgba.len() < width * height * 4 {
+        return;
+    }
+    unsafe {
+        for y in 0..height {
+            let src = &rgba[y * width * 4..(y + 1) * width * 4];
+            let row = dst.add(y * pitch);
+            for x in 0..width {
+                let s = &src[x * 4..x * 4 + 4];
+                let d = row.add(x * 4);
+                *d = s[2];
+                *d.add(1) = s[1];
+                *d.add(2) = s[0];
+                *d.add(3) = s[3];
+            }
+        }
+    }
 }
 
 /// Przepisuje klatkę RGBA do bufora w formacie `XRGB8888` (kolejność B,G,R,X).
@@ -743,12 +875,15 @@ mod tests {
         assert_eq!(core::mem::size_of::<ModeMapDumb>(), 16);
         assert_eq!(core::mem::size_of::<ModeFbCmd2>(), 104);
         assert_eq!(core::mem::size_of::<ModePageFlip>(), 24);
+        assert_eq!(core::mem::size_of::<ModeCursor>(), 28);
     }
 
     #[test]
     fn xrgb8888_fourcc_is_little_endian_bgrx() {
         // 'X','R','2','4' — kontroluje kolejność bajtów przy przepisywaniu klatki.
         assert_eq!(DRM_FORMAT_XRGB8888.to_le_bytes(), *b"XR24");
+        // 'A','R','2','4' — format kursora (z kanałem alfa).
+        assert_eq!(DRM_FORMAT_ARGB8888.to_le_bytes(), *b"AR24");
     }
 
     fn mode(w: u16, h: u16, hz: u32, preferred: bool) -> ModeInfo {
