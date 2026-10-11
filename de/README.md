@@ -102,6 +102,11 @@ XDG_RUNTIME_DIR="$PWD/.selene-runtime" cargo run -p selene
 # → "Selene compositor started (wayland-0)" + gniazdo wayland-0 w katalogu runtime
 ```
 
+`XDG_RUNTIME_DIR` zwykle ustawia menedżer sesji. Gdy go brak (np. `pam_systemd` nie
+założył sesji), Selene wybiera katalog sam: najpierw `/run/user/<uid>`, a gdy ten nie
+istnieje — tworzy prywatny katalog `0700` pod `$TMPDIR`. Skrypt `luna-session` robi ten
+sam wybór wcześniej, żeby zmienną dziedziczyli także klienci.
+
 Tryb nested (domyślny) uruchamia okno na nadrzędnym kompozytorze. **Realne wyjście DRM**
 (gdy masz wolnego mastera, np. z osobnej konsoli):
 

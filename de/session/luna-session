@@ -10,6 +10,14 @@ export XDG_CURRENT_DESKTOP=Luna
 export XDG_SESSION_TYPE=wayland
 export XDG_SESSION_DESKTOP=Luna
 
+# XDG_RUNTIME_DIR normalnie ustawia menedżer sesji (logind/pam_systemd). Gdy go brak
+# (np. pam_systemd nie zdołał założyć sesji), wskazujemy katalog per-uid, żeby Selene
+# i klienci mieli gdzie założyć gniazdo Wayland. Selene sam waliduje ten katalog.
+if [ -z "${XDG_RUNTIME_DIR:-}" ] && [ -d "/run/user/$(id -u)" ]; then
+    XDG_RUNTIME_DIR="/run/user/$(id -u)"
+    export XDG_RUNTIME_DIR
+fi
+
 : "${SELENE_BACKEND:=drm}"
 export SELENE_BACKEND
 

@@ -21,6 +21,8 @@ mod state;
 
 use std::error::Error;
 use std::os::fd::{AsRawFd, BorrowedFd};
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use libluna_core::Event;
@@ -81,6 +83,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     handle.create_global::<State, wl_seat::WlSeat, ()>(1, ());
 
     // Gniazdo nasłuchu: `wayland-0`, `wayland-1`, …
+    ensure_runtime_dir()?;
     let socket =
         ListeningSocket::bind_auto("wayland", 0..33).map_err(|e| format!("bind socket: {e:?}"))?;
     println!(
@@ -193,5 +196,94 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         display.dispatch_clients(&mut state)?;
         display.flush_clients()?;
+    }
+}
+
+/// Zapewnia, że `XDG_RUNTIME_DIR` wskazuje prywatny katalog użytkownika, zanim
+/// zwiążemy gniazdo Wayland.
+///
+/// Menedżer sesji (logind/`pam_systemd`) normalnie ustawia tę zmienną. Gdy jej brak
+/// lub jest bezużyteczna (np. `pam_systemd` nie zdołał założyć sesji i zmienna nie
+/// trafiła do środowiska), `ListeningSocket::bind_auto` kończy się błędem
+/// `RuntimeDirNotSet`, a kompozytor wychodzi natychmiast — co z zewnątrz wygląda jak
+/// „sesja się nie uruchomiła”. Dlatego wybieramy `/run/user/<uid>`, a gdy ono nie
+/// istnieje — tworzymy własny katalog `0700` pod `$TMPDIR`.
+fn ensure_runtime_dir() -> Result<(), Box<dyn Error>> {
+    let uid = rustix::process::getuid().as_raw() as u32;
+
+    if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+        if is_private_dir_owned_by(&PathBuf::from(dir), uid) {
+            return Ok(());
+        }
+    }
+
+    let run_user = PathBuf::from(format!("/run/user/{uid}"));
+    let dir = if is_private_dir_owned_by(&run_user, uid) {
+        run_user
+    } else {
+        let base = std::env::var_os("TMPDIR")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| PathBuf::from("/tmp"));
+        let dir = base.join(format!("selene-runtime-{uid}"));
+        match rustix::fs::mkdir(&dir, rustix::fs::Mode::RWXU) {
+            Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+            Err(e) => return Err(format!("mkdir {}: {e}", dir.display()).into()),
+        }
+        if !is_private_dir_owned_by(&dir, uid) {
+            return Err(format!(
+                "runtime dir {} nie należy do uid {uid} lub jest dostępny dla grupy/innych",
+                dir.display()
+            )
+            .into());
+        }
+        dir
+    };
+
+    println!(
+        "{} {}",
+        libluna_i18n::tr("XDG_RUNTIME_DIR not set, using"),
+        dir.display()
+    );
+    std::env::set_var("XDG_RUNTIME_DIR", &dir);
+    Ok(())
+}
+
+/// Czy `path` to istniejący, bezwzględny katalog należący do `uid`, bez dostępu dla
+/// grupy i innych użytkowników (tryb `0700`)?
+fn is_private_dir_owned_by(path: &Path, uid: u32) -> bool {
+    path.is_absolute()
+        && std::fs::metadata(path)
+            .map(|m| m.is_dir() && m.uid() == uid && m.mode() & 0o077 == 0)
+            .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod runtime_dir_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn private_dir_owned_by_uid_is_accepted() {
+        let uid = rustix::process::getuid().as_raw() as u32;
+        let dir = std::env::temp_dir().join(format!("selene-rdir-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(
+            is_private_dir_owned_by(&dir, uid),
+            "katalog 0700 naszego uid"
+        );
+        // Obcy uid: nie jest nasz.
+        assert!(!is_private_dir_owned_by(&dir, uid.wrapping_add(1)));
+        // Zbyt otwarte uprawnienia: grupa/inny mają dostęp.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!is_private_dir_owned_by(&dir, uid));
+        // Nieistniejąca ścieżka.
+        assert!(!is_private_dir_owned_by(&dir.join("missing"), uid));
+        // Ścieżka względna nie nadaje się na `XDG_RUNTIME_DIR`.
+        assert!(!is_private_dir_owned_by(Path::new("relative/dir"), uid));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

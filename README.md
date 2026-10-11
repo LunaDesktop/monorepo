@@ -170,7 +170,8 @@ Po instalacji sesja „Luna” pojawia się w menedżerze logowania (`share/wayl
 Na sprzęcie Selene przejmuje ekran przez DRM/KMS — trzeba **wylogować bieżący pulpit** (wolny
 master DRM) i mieć dostęp do `/dev/input` (grupa `input`) dla wejścia. Testowo, obok działającej
 sesji, można uruchomić `SELENE_BACKEND=nested selene` (okno na obecnym pulpicie) i podłączyć
-`luna-shell`. Szczegóły: `de/README.md`.
+`luna-shell`. Gdy sesja od razu wraca do menedżera logowania, sprawdź `XDG_RUNTIME_DIR` —
+Selene i `luna-session` wybierają go awaryjnie same. Szczegóły: `de/README.md`.
 
 ## Budowanie własnej aplikacji na libLunie
 

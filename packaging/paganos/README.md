@@ -54,6 +54,9 @@ sum — te wpisuje dopiero skrypt, bo zależą od konkretnego commita/taga.
 
 - `Selene` to kompozytor Wayland; wpis sesji startuje na DRM/KMS (`SELENE_BACKEND=drm`).
   Gdy master DRM trzyma inna sesja, Selene **bezpiecznie** spada do wyjścia nested.
+- `XDG_RUNTIME_DIR` pochodzi od menedżera sesji; gdy go brak (np. `pam_systemd` nie założył
+  sesji), `luna-session` i sam Selene wybierają katalog awaryjnie (`/run/user/<uid>`, dalej
+  prywatny `0700` pod `$TMPDIR`).
 - Wejście w trybie DRM (evdev) to kolejny krok — póki go nie ma, sesja jest „podglądowa”.
 - `selene` nie deklaruje zależności od pakietu `libluna`, bo linkuje toolkit statycznie
   (Rust) — zależność nie jest potrzebna w runtime.
