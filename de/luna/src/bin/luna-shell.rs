@@ -57,8 +57,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let workspaces = luna::workspaces::Workspaces::spawn();
     // Realny stan systemu (użytkownik, dźwięk, Wi-Fi, bateria) — odpytywany w tle.
     let system = luna::system::spawn();
+    // Podgląd głośności — OSD na klawisze multimedialne.
+    let volume = luna::volume::VolumeWatcher::spawn();
     // Sygnatura stanu — przerysowujemy tylko, gdy coś się zmieniło.
     let mut last_sig: (bool, bool, String, u64) = (false, false, String::new(), u64::MAX);
+    let mut vol_seq: Option<u64> = None;
+    let mut last_ws: Option<usize> = None;
 
     run(cfg, move |frame: &mut Frame| {
         let dt = frame.delta_time();
@@ -106,6 +110,28 @@ fn main() -> Result<(), Box<dyn Error>> {
                 state.workspaces = 0;
                 state.current_ws = 0;
             }
+        }
+
+        // OSD: zmiana głośności (np. klawisze multimedialne).
+        let (vseq, vvol) = volume.current();
+        if let (Some(prev), Some((pct, muted))) = (vol_seq, vvol) {
+            if vseq != prev {
+                osd.icon = IconName::Volume;
+                osd.show(luna::volume::label(muted), pct as f64 / 100.0);
+            }
+        }
+        vol_seq = Some(vseq);
+
+        // OSD: przełączenie przestrzeni roboczej.
+        if state.workspaces > 0 {
+            if let Some(prev) = last_ws {
+                if prev != state.current_ws {
+                    osd.icon = IconName::Grid;
+                    let frac = (state.current_ws + 1) as f64 / state.workspaces as f64;
+                    osd.show(format!("Przestrzeń {}", state.current_ws + 1), frac);
+                }
+            }
+            last_ws = Some(state.current_ws);
         }
 
         let lw = LAUNCHER_W.min((size.width - 80.0).max(320.0));

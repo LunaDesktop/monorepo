@@ -28,8 +28,8 @@ if [ "$SELENE_BACKEND" = "drm" ]; then
     export SELENE_INPUT
 fi
 
-# Diagnostyka wydajności (fps DRM + tempo kursora) — tymczasowo włączona.
-export SELENE_STATS=1
+# Diagnostyka wydajności (fps DRM + tempo kursora). Domyślnie wyłączona; włącz
+# jednorazowo w otoczeniu, gdy diagnozujesz płynność:  SELENE_STATS=1 luna-session
 
 # Trwały log sesji: LightDM trzyma tylko 2 pliki `.xsession-errors` i obraca je przy
 # każdym starcie sesji, przez co logi Luny przepadają. Piszemy do stałego pliku w

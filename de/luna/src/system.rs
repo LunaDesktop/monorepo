@@ -22,11 +22,16 @@ impl SystemStatus {
     pub fn poll() -> Self {
         Self {
             user: user_name(),
-            volume: volume(),
+            volume: read_volume(),
             wifi: wifi(),
             battery: battery(),
         }
     }
+}
+
+/// Bieżąca głośność i wyciszenie domyślnego wyjścia (`(procent, wyciszone)`).
+pub fn read_volume() -> Option<(u8, bool)> {
+    volume()
 }
 
 /// Współdzielony stan, aktualizowany w tle.

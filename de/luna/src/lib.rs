@@ -14,4 +14,5 @@ pub mod panel;
 pub mod power;
 pub mod system;
 pub mod toplevels;
+pub mod volume;
 pub mod workspaces;
