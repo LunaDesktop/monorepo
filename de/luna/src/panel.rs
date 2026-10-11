@@ -11,6 +11,8 @@ use libluna_core::{Color, Point, Rect, Size, Theme};
 use libluna_render::TextEngine;
 use libluna_widgets::{paint_icon, IconName, PaintCtx};
 
+use crate::toplevels::Task;
+
 /// Wysokość panelu (piksele logiczne).
 pub const THICKNESS: f64 = 40.0;
 /// Domyślna szerokość karty launchera.
@@ -50,6 +52,8 @@ pub struct PanelState {
     pub toggles: Vec<Toggle>,
     /// Nazwa zalogowanego użytkownika.
     pub user: String,
+    /// Okna z kompozytora (`zwlr_foreign_toplevel`) — taskbar na pasku.
+    pub tasks: Vec<Task>,
 }
 
 impl PanelState {
@@ -79,6 +83,18 @@ impl PanelState {
                 },
             ],
             user: "patryks".to_owned(),
+            tasks: vec![
+                Task {
+                    title: "Pliki — Dokumenty".to_owned(),
+                    app_id: "files".to_owned(),
+                    active: true,
+                },
+                Task {
+                    title: "Terminal".to_owned(),
+                    app_id: "terminal".to_owned(),
+                    active: false,
+                },
+            ],
         }
     }
 }
@@ -237,6 +253,117 @@ pub fn burger_rect(panel: Rect, theme: &Theme) -> Rect {
     Rect::from_xywh(panel.x() + theme.spacing.md, cy - 14.0, 28.0, 28.0)
 }
 
+/// Rozmieszczenie przycisków okien (taskbar) w pasku.
+pub fn task_rects(bar: Rect, theme: &Theme, text: &TextEngine, tasks: &[Task]) -> Vec<Rect> {
+    let t = theme;
+    let cy = bar.center().y;
+    let cap = t.typography.caption.size;
+    // Start: za burgerem + separator + odstęp (spójne z `paint_panel`).
+    let mut x = burger_rect(bar, t).right() + t.spacing.md + 1.0 + t.spacing.md;
+    let limit = bar.center().x - t.spacing.lg;
+    let mut rects = Vec::new();
+    for task in tasks {
+        let label = task_label(task);
+        let w = (text.measure(&label, cap, weight::MEDIUM).width + 2.0 * t.spacing.md).min(200.0);
+        if x + w > limit {
+            break;
+        }
+        rects.push(Rect::from_xywh(x, cy - 12.0, w, 24.0));
+        x += w + t.spacing.sm;
+    }
+    rects
+}
+
+/// Indeks okna (przycisku) pod punktem `p`.
+pub fn task_at(
+    bar: Rect,
+    theme: &Theme,
+    text: &TextEngine,
+    tasks: &[Task],
+    p: Point,
+) -> Option<usize> {
+    task_rects(bar, theme, text, tasks)
+        .iter()
+        .position(|r| r.contains(p))
+}
+
+#[cfg(test)]
+mod taskbar_tests {
+    use super::*;
+
+    #[test]
+    fn task_buttons_layout_and_hit_test() {
+        let theme = Theme::light();
+        let text = TextEngine::system();
+        let bar = Rect::from_xywh(0.0, 0.0, 1280.0, THICKNESS);
+        let tasks = vec![
+            Task {
+                title: "Pliki".into(),
+                app_id: "files".into(),
+                active: true,
+            },
+            Task {
+                title: "Terminal".into(),
+                app_id: "term".into(),
+                active: false,
+            },
+        ];
+        let rects = task_rects(bar, &theme, &text, &tasks);
+        assert_eq!(rects.len(), 2);
+        assert!(rects[1].x() > rects[0].right());
+        assert_eq!(
+            task_at(bar, &theme, &text, &tasks, rects[1].center()),
+            Some(1)
+        );
+        assert_eq!(
+            task_at(bar, &theme, &text, &tasks, Point::new(2.0, 2.0)),
+            None
+        );
+    }
+}
+
+/// Krótka etykieta okna (tytuł, a gdy pusty — `app_id`), przycięta do ~28 znaków.
+fn task_label(task: &Task) -> String {
+    let s = if !task.title.is_empty() {
+        task.title.clone()
+    } else {
+        task.app_id.clone()
+    };
+    let max = 28;
+    if s.chars().count() > max {
+        let mut out: String = s.chars().take(max - 1).collect();
+        out.push('…');
+        out
+    } else {
+        s
+    }
+}
+
+/// Rysuje przycisk okna w taskbarze (aktywny — akcent).
+fn paint_task_button(ctx: &mut PaintCtx, rect: Rect, task: &Task) {
+    let t = ctx.theme;
+    let label = task_label(task);
+    let cap = t.typography.caption.size;
+    let (bg, fg) = if task.active {
+        (t.colors.accent, t.colors.accent_fg)
+    } else {
+        (t.colors.card_bg, t.colors.text)
+    };
+    ctx.scene.fill_rounded_rect(rect, rect.height() / 2.0, bg);
+    if !task.active {
+        ctx.scene
+            .stroke_rounded_rect(rect, rect.height() / 2.0, 1.0, t.colors.border);
+    }
+    ctx.label_center(
+        rect.center().x,
+        rect.center().y,
+        &label,
+        cap,
+        weight::MEDIUM,
+        fg,
+    );
+}
+
 /// Rysuje panel górny w zadanym prostokącie.
 pub fn paint_panel(panel: &PanelState, ctx: &mut PaintCtx, rect: Rect) {
     let t = ctx.theme;
@@ -270,7 +397,15 @@ pub fn paint_panel(panel: &PanelState, ctx: &mut PaintCtx, rect: Rect) {
     ctx.scene
         .fill_rect(Rect::from_xywh(x, cy - 8.0, 1.0, 16.0), t.colors.border);
     x += t.spacing.md;
-    ctx.label_left(x, cy, &panel.title, body, weight::NORMAL, t.colors.dim_text);
+    // Taskbar: przyciski okien; przy braku okien — tytuł (podglądy headless).
+    if panel.tasks.is_empty() {
+        ctx.label_left(x, cy, &panel.title, body, weight::NORMAL, t.colors.dim_text);
+    } else {
+        let rects = task_rects(rect, t, ctx.text, &panel.tasks);
+        for (r, task) in rects.iter().zip(panel.tasks.iter()) {
+            paint_task_button(ctx, *r, task);
+        }
+    }
 
     // ── Środek: zegar + data ──
     let clock = format!("{}   ·   {}", panel.clock, panel.date);

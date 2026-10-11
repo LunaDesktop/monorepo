@@ -305,6 +305,8 @@ dependencies = [
  "libluna-platform",
  "libluna-render",
  "libluna-widgets",
+ "wayland-client",
+ "wayland-protocols-wlr",
 ]
 
 [[package]]

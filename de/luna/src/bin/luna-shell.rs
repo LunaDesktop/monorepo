@@ -42,6 +42,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut osd = Osd::new(IconName::Volume, "Głośność", 0.0);
     let mut notes = Notifications::new();
     let mut timer = 0.0f64;
+    // Lista okien z kompozytora (foreign-toplevel) — własne połączenie + wątek.
+    let toplevels = luna::toplevels::Toplevels::spawn();
 
     run(cfg, move |frame: &mut Frame| {
         let dt = frame.delta_time();
@@ -51,6 +53,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         let theme = &frame.theme;
         let text = frame.text;
         let bar = Rect::from_xywh(0.0, 0.0, size.width, THICKNESS);
+
+        // Zegar (UTC) i lista okien z kompozytora (taskbar) — na bieżąco.
+        let (clock, date) = now_clock();
+        state.clock = clock;
+        state.date = date;
+        state.title.clear();
+        if let Some(tl) = &toplevels {
+            state.tasks = tl.tasks();
+        } else {
+            state.tasks.clear();
+        }
 
         let lw = LAUNCHER_W.min((size.width - 80.0).max(320.0));
         let larea = Rect::from_xywh((size.width - lw) / 2.0, THICKNESS + 24.0, lw, LAUNCHER_H);
@@ -90,6 +103,25 @@ fn main() -> Result<(), Box<dyn Error>> {
                             // Uruchom aplikację (jeśli ma polecenie).
                             launch(&apps, i);
                             open = false;
+                        }
+                    } else if let Some(i) =
+                        panel::task_at(bar, &frame.theme, text, &state.tasks, pe.position)
+                    {
+                        // Klik w okno na pasku — aktywuj je.
+                        if let Some(tl) = &toplevels {
+                            tl.activate(i);
+                        }
+                    }
+                }
+                Event::PointerButton(pe)
+                    if pe.state == ButtonState::Pressed && pe.button == PointerButton::Middle =>
+                {
+                    // Środkowy klik na oknie na pasku — zamknij je.
+                    if let Some(i) =
+                        panel::task_at(bar, &frame.theme, text, &state.tasks, pe.position)
+                    {
+                        if let Some(tl) = &toplevels {
+                            tl.close(i);
                         }
                     }
                 }
@@ -141,11 +173,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                 _ => {}
             }
         }
-
-        // Zegar (UTC).
-        let (clock, date) = now_clock();
-        state.clock = clock;
-        state.date = date;
 
         // Demo: co ~4 s OSD, co ~7 s powiadomienie.
         if timer % 7.0 < dt {
