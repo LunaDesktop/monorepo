@@ -19,6 +19,12 @@ pub const THICKNESS: f64 = 40.0;
 pub const LAUNCHER_W: f64 = 720.0;
 /// Domyślna wysokość karty launchera.
 pub const LAUNCHER_H: f64 = 600.0;
+/// Bok przycisku zasilania w pasku.
+pub const POWER_BTN: f64 = 26.0;
+/// Szerokość rozwijanego menu zasilania.
+pub const POWER_MENU_W: f64 = 176.0;
+/// Wysokość pozycji menu zasilania.
+pub const POWER_ITEM_H: f64 = 34.0;
 
 const GRID_COLS: usize = 4;
 const GRID_CELL_H: f64 = 76.0;
@@ -267,6 +273,18 @@ pub fn burger_rect(panel: Rect, theme: &Theme) -> Rect {
     Rect::from_xywh(panel.x() + theme.spacing.md, cy - 14.0, 28.0, 28.0)
 }
 
+/// Prostokąt przycisku zasilania (skrajna prawa strona paska).
+pub fn power_rect(bar: Rect, theme: &Theme) -> Rect {
+    let cy = bar.center().y;
+    let pad = theme.spacing.md;
+    Rect::from_xywh(
+        bar.right() - pad - POWER_BTN,
+        cy - POWER_BTN / 2.0,
+        POWER_BTN,
+        POWER_BTN,
+    )
+}
+
 /// Prostokąty pigułek przełączników (spójne z `paint_panel`), w kolejności `state.toggles`.
 pub fn toggle_rects(bar: Rect, theme: &Theme, text: &TextEngine, state: &PanelState) -> Vec<Rect> {
     let t = theme;
@@ -276,8 +294,8 @@ pub fn toggle_rects(bar: Rect, theme: &Theme, text: &TextEngine, state: &PanelSt
     let uw = text
         .measure(&state.user, t.typography.body.size, weight::NORMAL)
         .width;
-    // Za użytkownikiem i separatorem (jak w `paint_panel`).
-    let mut right = bar.right() - pad - uw - 2.0 * t.spacing.md;
+    // Za użytkownikiem i separatorem (jak w `paint_panel`); dalej przycisk zasilania.
+    let mut right = bar.right() - pad - POWER_BTN - t.spacing.sm - uw - 2.0 * t.spacing.md;
     let mut rects = vec![Rect::ZERO; state.toggles.len()];
     for (i, toggle) in state.toggles.iter().enumerate().rev() {
         let icon = 13.0;
@@ -301,6 +319,59 @@ pub fn toggle_at(
     toggle_rects(bar, theme, text, state)
         .iter()
         .position(|r| r.contains(p))
+}
+
+/// Prostokąt rozwijanego menu zasilania (pod przyciskiem, wyrównany do prawej).
+pub fn power_menu_rect(bar: Rect, theme: &Theme, items: usize) -> Rect {
+    let p = power_rect(bar, theme);
+    let pad = 6.0;
+    let h = items as f64 * POWER_ITEM_H + 2.0 * pad;
+    Rect::from_xywh(
+        p.right() - POWER_MENU_W,
+        bar.bottom() + pad,
+        POWER_MENU_W,
+        h,
+    )
+}
+
+/// Indeks pozycji menu zasilania pod punktem `p`.
+pub fn power_item_at(bar: Rect, theme: &Theme, items: usize, p: Point) -> Option<usize> {
+    let menu = power_menu_rect(bar, theme, items);
+    let inner = Rect::from_xywh(
+        menu.x() + 6.0,
+        menu.y() + 6.0,
+        menu.width() - 12.0,
+        items as f64 * POWER_ITEM_H,
+    );
+    if !inner.contains(p) {
+        return None;
+    }
+    let i = ((p.y - inner.y()) / POWER_ITEM_H).floor() as usize;
+    (i < items).then_some(i)
+}
+
+/// Rysuje menu zasilania z podanymi etykietami (spójne z [`power_item_at`]).
+pub fn paint_power_menu(ctx: &mut PaintCtx, bar: Rect, labels: &[&str]) {
+    let t = ctx.theme;
+    let menu = power_menu_rect(bar, t, labels.len());
+    ctx.scene
+        .fill_rounded_rect(menu, t.radius.medium, t.colors.card_bg);
+    ctx.scene
+        .stroke_rounded_rect(menu, t.radius.medium, 1.0, t.colors.border);
+    let x = menu.x() + 6.0;
+    let y = menu.y() + 6.0;
+    let w = menu.width() - 12.0;
+    for (i, label) in labels.iter().enumerate() {
+        let row = Rect::from_xywh(x, y + i as f64 * POWER_ITEM_H, w, POWER_ITEM_H);
+        ctx.label_left(
+            row.x() + 10.0,
+            row.center().y,
+            label,
+            t.typography.body.size,
+            weight::NORMAL,
+            t.colors.text,
+        );
+    }
 }
 
 /// Rozmieszczenie przycisków okien (taskbar) w pasku.
@@ -468,9 +539,24 @@ pub fn paint_panel(panel: &PanelState, ctx: &mut PaintCtx, rect: Rect) {
         t.colors.text,
     );
 
-    // ── Prawa grupa (od prawej): użytkownik, przełączniki, przestrzenie ──
-    let pad = t.spacing.md;
-    let mut right = rect.right() - pad;
+    // ── Prawa grupa (od prawej): zasilanie, użytkownik, przełączniki, przestrzenie ──
+    // Przycisk zasilania (skrajna prawa strona).
+    let power = power_rect(rect, t);
+    ctx.scene
+        .fill_rounded_rect(power, t.radius.small, t.colors.shade);
+    let pisz = POWER_BTN * 0.6;
+    paint_icon(
+        ctx,
+        IconName::Power,
+        Rect::from_xywh(
+            power.center().x - pisz / 2.0,
+            power.center().y - pisz / 2.0,
+            pisz,
+            pisz,
+        ),
+        t.colors.text,
+    );
+    let mut right = power.x() - t.spacing.sm;
     let uw = ctx.measure(&panel.user, body, weight::NORMAL);
     ctx.label_right(right, cy, &panel.user, body, weight::NORMAL, t.colors.text);
     right -= uw + t.spacing.md;
@@ -1009,6 +1095,34 @@ mod tests {
 
     fn area() -> Rect {
         Rect::from_xywh(100.0, 60.0, LAUNCHER_W, LAUNCHER_H)
+    }
+
+    #[test]
+    fn power_menu_items_hit_test() {
+        let theme = Theme::dark();
+        let bar = Rect::from_xywh(0.0, 0.0, 1280.0, THICKNESS);
+        let n = 3;
+        let menu = power_menu_rect(bar, &theme, n);
+        let row = |i: usize| {
+            Rect::from_xywh(
+                menu.x() + 6.0,
+                menu.y() + 6.0 + i as f64 * POWER_ITEM_H,
+                menu.width() - 12.0,
+                POWER_ITEM_H,
+            )
+        };
+        for i in 0..n {
+            assert_eq!(power_item_at(bar, &theme, n, row(i).center()), Some(i));
+        }
+        // Poza pozycjami (róg menu) brak trafienia.
+        assert_eq!(
+            power_item_at(bar, &theme, n, Point::new(menu.x() + 1.0, menu.y() + 1.0)),
+            None
+        );
+        // Przycisk zasilania mieści się w pasku, przy prawej krawędzi.
+        let p = power_rect(bar, &theme);
+        assert!(p.right() <= bar.right());
+        assert!(bar.contains(p.center()));
     }
 
     fn panel_commands(view: LauncherView) -> usize {

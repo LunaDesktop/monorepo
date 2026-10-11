@@ -43,6 +43,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     let mut launcher = Launcher::new();
     let mut open = false;
+    // Menu zasilania (wyloguj/restart/wyłącz).
+    let power_items = luna::power::items();
+    let mut power_open = false;
     let mut osd = Osd::new(IconName::Volume, "Głośność", 0.0);
     let mut notes = Notifications::new();
     // Lista okien z kompozytora (foreign-toplevel) — własne połączenie + wątek.
@@ -50,7 +53,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Realny stan systemu (użytkownik, dźwięk, Wi-Fi, bateria) — odpytywany w tle.
     let system = luna::system::spawn();
     // Sygnatura stanu — przerysowujemy tylko, gdy coś się zmieniło.
-    let mut last_sig: (bool, String, u64) = (false, String::new(), u64::MAX);
+    let mut last_sig: (bool, bool, String, u64) = (false, false, String::new(), u64::MAX);
 
     run(cfg, move |frame: &mut Frame| {
         let dt = frame.delta_time();
@@ -85,7 +88,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Event::PointerButton(pe)
                     if pe.state == ButtonState::Pressed && pe.button == PointerButton::Left =>
                 {
-                    if panel::burger_rect(bar, &frame.theme).contains(pe.position) {
+                    if panel::power_rect(bar, &frame.theme).contains(pe.position) {
+                        // Przycisk zasilania — otwórz/zamknij menu.
+                        power_open = !power_open;
+                    } else if power_open {
+                        // Menu zasilania otwarte: wybierz pozycję albo zamknij.
+                        if let Some(i) =
+                            panel::power_item_at(bar, &frame.theme, power_items.len(), pe.position)
+                        {
+                            luna::power::perform(power_items[i].action);
+                        }
+                        power_open = false;
+                    } else if panel::burger_rect(bar, &frame.theme).contains(pe.position) {
                         open = !open;
                         if open {
                             let max = panel::launcher_scroll_max(
@@ -206,6 +220,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         if open {
             panel::paint_launcher(&apps, &launcher, &mut ctx, larea);
         }
+        if power_open {
+            let labels: Vec<&str> = power_items.iter().map(|p| p.label.as_str()).collect();
+            panel::paint_power_menu(&mut ctx, bar, &labels);
+        }
         if osd.visible() {
             let w = 340.0;
             osd.paint(
@@ -234,7 +252,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         th = th
             .wrapping_mul(1_099_511_628_211)
             .wrapping_add(state.user.len() as u64);
-        let sig = (open, state.clock.clone(), th);
+        let sig = (open, power_open, state.clock.clone(), th);
         let animating = osd.visible() || notes.visible();
         if !frame.events.is_empty() || animating || open || sig != last_sig {
             frame.request_frame();
