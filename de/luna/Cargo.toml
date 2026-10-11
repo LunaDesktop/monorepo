@@ -19,6 +19,10 @@ path = "src/bin/luna-panel.rs"
 name = "luna-shell"
 path = "src/bin/luna-shell.rs"
 
+[[bin]]
+name = "luna-apps"
+path = "src/bin/luna-apps.rs"
+
 [dependencies]
 libluna-core.workspace = true
 libluna-widgets.workspace = true

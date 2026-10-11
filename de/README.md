@@ -77,8 +77,11 @@ Selene.
 - `luna-panel` (bin) — render headless: `docs/images/luna-shell-{light,dark}.png`
   oraz `docs/images/luna-launcher-{list,grid,carousel}.png`.
 - `luna-shell` (bin) — powierzchnia „chrome” na żywo: burger otwiera/zamyka launcher,
-  przełącznik widoku, klik w aplikację zamyka, `Esc` zamyka; do tego **OSD** i **powiadomienia**
-  (`osd.rs`, `notifications.rs`).
+  przełącznik widoku, **przewijanie listy**, klik w aplikację **uruchamia** ją, `Esc` zamyka;
+  do tego **OSD** i **powiadomienia** (`osd.rs`, `notifications.rs`).
+- **Prawdziwe aplikacje**: `apps.rs` skanuje pliki `.desktop` (`XDG_DATA_HOME`/`XDG_DATA_DIRS`),
+  parsuje `[Desktop Entry]` (nazwy lokalizowane po `LANG`), filtruje `NoDisplay`/`Hidden`;
+  podgląd: `cargo run -p luna --bin luna-apps`. Gdy brak `.desktop` — zestaw demo.
 - `libluna-platform` obsługuje teraz oba tryby: okno `xdg-shell` (CSD) i powierzchnię
   warstwową (`AppConfig::layer(LayerConfig::…)`) — `LayerConfig::top_panel`/`overlay`/`top_chrome`
   oraz przezroczyste tło (`AppConfig::transparent`).

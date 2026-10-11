@@ -251,6 +251,7 @@ pub enum IconName {
     Home,
     User,
     Info,
+    App,
 }
 
 /// Współrzędne w siatce 24×24 mapowane na prostokąt docelowy.
@@ -552,6 +553,19 @@ pub fn paint_icon(paint: &mut PaintCtx, name: IconName, rect: Rect, color: Color
             scene.fill_circle(g.p(12.0, 7.8), g.d(1.3), color);
             scene.stroke_line(g.p(12.0, 11.0), g.p(12.0, 16.5), w, color);
         }
+        IconName::App => {
+            scene.stroke_rounded_rect(
+                Rect::from_xywh(g.p(4.0, 4.0).x, g.p(4.0, 4.0).y, g.d(16.0), g.d(16.0)),
+                g.d(3.0),
+                w,
+                color,
+            );
+            scene.fill_rounded_rect(
+                Rect::from_xywh(g.p(8.5, 8.5).x, g.p(8.5, 8.5).y, g.d(7.0), g.d(7.0)),
+                g.d(1.5),
+                color,
+            );
+        }
     }
 }
 
@@ -593,6 +607,7 @@ mod icon_tests {
             IconName::Home,
             IconName::User,
             IconName::Info,
+            IconName::App,
         ] {
             let mut scene = Scene::new();
             let mut ctx = PaintCtx::new(&mut scene, &theme, &text);

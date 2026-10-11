@@ -30,7 +30,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         .transparent(true);
 
     let mut state = PanelState::sample();
-    let apps = App::sample();
+    // Prawdziwe aplikacje z plików `.desktop`; gdy brak (np. kontener) — zestaw demo.
+    let desktop = luna::apps::scan();
+    let apps = if desktop.is_empty() {
+        App::sample()
+    } else {
+        App::from_desktop(&desktop)
+    };
     let mut launcher = Launcher::new();
     let mut open = false;
     let mut osd = Osd::new("◆", "Głośność", 0.0);
@@ -73,16 +79,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                         {
                             launcher.view = v;
                             launcher.scroll = 0.0;
-                        } else if panel::launcher_app_at(
+                        } else if let Some(i) = panel::launcher_app_at(
                             &apps,
                             &launcher,
                             larea,
                             &frame.theme,
                             text,
                             pe.position,
-                        )
-                        .is_some()
-                        {
+                        ) {
+                            // Uruchom aplikację (jeśli ma polecenie).
+                            if let Some(exec) = apps.get(i).and_then(|a| a.exec.clone()) {
+                                let _ =
+                                    std::process::Command::new("sh").arg("-c").arg(exec).spawn();
+                            }
                             open = false;
                         }
                     }

@@ -6,6 +6,7 @@
 //! Moduły rysują się przez `libluna-widgets::PaintCtx`, więc ten sam kod obsługuje
 //! podglądy headless (zrzuty do dokumentacji) i sesję na żywo.
 
+pub mod apps;
 pub mod notifications;
 pub mod osd;
 pub mod panel;

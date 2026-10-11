@@ -150,10 +150,12 @@ pub struct App {
     pub name: String,
     /// Krótki opis/kategoria (widok listy).
     pub category: String,
+    /// Polecenie uruchamiające (dla prawdziwych aplikacji z plików `.desktop`).
+    pub exec: Option<String>,
 }
 
 impl App {
-    /// Przykładowy zestaw ikon (podglądy).
+    /// Przykładowy zestaw ikon (podglądy, gdy brak `.desktop`).
     pub fn sample() -> Vec<App> {
         const APPS: [(IconName, &str, &str); 12] = [
             (IconName::Files, "Pliki", "System"),
@@ -174,6 +176,19 @@ impl App {
                 icon: *i,
                 name: (*n).to_owned(),
                 category: (*c).to_owned(),
+                exec: None,
+            })
+            .collect()
+    }
+
+    /// Buduje pozycje launchera z wykrytych aplikacji (plików `.desktop`).
+    pub fn from_desktop(list: &[crate::apps::DesktopApp]) -> Vec<App> {
+        list.iter()
+            .map(|d| App {
+                icon: crate::apps::icon_for(d),
+                name: d.name.clone(),
+                category: d.categories.first().cloned().unwrap_or_default(),
+                exec: Some(d.exec.clone()),
             })
             .collect()
     }

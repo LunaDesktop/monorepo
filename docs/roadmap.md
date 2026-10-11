@@ -177,7 +177,10 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   (**Lista / Siatka / Karuzela** z segmentowym przełącznikiem); render headless do
   `docs/images/luna-shell-{light,dark}.png` i `docs/images/luna-launcher-{list,grid,carousel}.png`.
   Dane (`PanelState`, `App`, `Launcher`) oddzielone od rysowania (`PaintCtx`) — ten sam kod do
-  podglądów i sesji na żywo. ✅ **`luna-shell`** (bin) uruchamia panel jako prawdziwą **powierzchnię
+  podglądów i sesji na żywo. ✅ **Prawdziwe aplikacje**: `apps.rs` skanuje pliki `.desktop`
+  (XDG), parsuje `[Desktop Entry]` z lokalizacją nazw i filtrowaniem `NoDisplay`/`Hidden`;
+  klik w pozycję uruchamia polecenie. Podgląd listy: `cargo run -p luna --bin luna-apps`.
+  ✅ **`luna-shell`** (bin) uruchamia panel jako prawdziwą **powierzchnię
   warstwową** (`wlr-layer-shell` po stronie klienta w `libluna-platform`); bez kompozytora
   kończy się czytelnym `NoCompositor`. ✅ **OSD** (`osd.rs`) i **powiadomienia** (`notifications.rs`)
   — pokazywane pod paskiem na powierzchni „chrome”. Dalej: usługa D-Bus
