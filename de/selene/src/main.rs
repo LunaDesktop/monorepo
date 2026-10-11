@@ -20,6 +20,7 @@ mod shell;
 mod shm;
 mod state;
 mod sync;
+mod workspace;
 
 use std::error::Error;
 use std::os::fd::{AsRawFd, BorrowedFd};
@@ -27,6 +28,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
 use libluna_core::Event;
+use wayland_protocols::ext::workspace::v1::server::ext_workspace_manager_v1::ExtWorkspaceManagerV1;
 use wayland_protocols::xdg::decoration::zv1::server::zxdg_decoration_manager_v1;
 use wayland_protocols::xdg::shell::server::xdg_wm_base;
 use wayland_protocols_wlr::foreign_toplevel::v1::server::zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1;
@@ -89,6 +91,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     handle.create_global::<State, wl_data_device_manager::WlDataDeviceManager, ()>(3, ());
     handle.create_global::<State, wl_seat::WlSeat, ()>(1, ());
     handle.create_global::<State, ZwlrForeignToplevelManagerV1, ()>(3, ());
+    handle.create_global::<State, ExtWorkspaceManagerV1, ()>(1, ());
 
     // Gniazdo nasłuchu: `wayland-0`, `wayland-1`, …
     ensure_runtime_dir()?;
@@ -108,13 +111,18 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Wyjście: realne DRM/KMS (gdy `SELENE_BACKEND=drm`) lub nested na nadrzędnym kompozytorze.
     if std::env::var("SELENE_BACKEND").as_deref() == Ok("drm") {
-        output::spawn_drm(Arc::clone(&state.windows), Arc::clone(&state.cursor));
+        output::spawn_drm(
+            Arc::clone(&state.windows),
+            Arc::clone(&state.cursor),
+            Arc::clone(&state.ws_current),
+        );
     } else {
         output::spawn(
             Arc::clone(&state.windows),
             Arc::clone(&state.outputs),
             Arc::clone(&events),
             wake_write,
+            Arc::clone(&state.ws_current),
             1280,
             800,
         );

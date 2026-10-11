@@ -321,6 +321,43 @@ pub fn toggle_at(
         .position(|r| r.contains(p))
 }
 
+/// Prostokąty kropek przestrzeni roboczych (spójne z `paint_panel`), w kolejności `state.workspaces`.
+pub fn workspace_rects(
+    bar: Rect,
+    theme: &Theme,
+    text: &TextEngine,
+    state: &PanelState,
+) -> Vec<Rect> {
+    let t = theme;
+    let cy = bar.center().y;
+    let d = 8.0;
+    let toggles = toggle_rects(bar, t, text, state);
+    let mut right = toggles
+        .last()
+        .map(|r| r.x() - t.spacing.sm)
+        .unwrap_or(bar.right() - t.spacing.md);
+    let mut rects = vec![Rect::ZERO; state.workspaces];
+    for i in (0..state.workspaces).rev() {
+        let dot = Rect::from_xywh(right - d, cy - d / 2.0, d, d);
+        rects[i] = dot;
+        right = dot.x() - t.spacing.sm;
+    }
+    rects
+}
+
+/// Indeks kropki przestrzeni roboczej pod punktem `p`.
+pub fn workspace_at(
+    bar: Rect,
+    theme: &Theme,
+    text: &TextEngine,
+    state: &PanelState,
+    p: Point,
+) -> Option<usize> {
+    workspace_rects(bar, theme, text, state)
+        .iter()
+        .position(|r| r.contains(p))
+}
+
 /// Prostokąt rozwijanego menu zasilania (pod przyciskiem, wyrównany do prawej).
 pub fn power_menu_rect(bar: Rect, theme: &Theme, items: usize) -> Rect {
     let p = power_rect(bar, theme);
@@ -562,27 +599,21 @@ pub fn paint_panel(panel: &PanelState, ctx: &mut PaintCtx, rect: Rect) {
     right -= uw + t.spacing.md;
     ctx.scene
         .fill_rect(Rect::from_xywh(right, cy - 8.0, 1.0, 16.0), t.colors.border);
-    right -= t.spacing.md;
 
     // Przełączniki szybkiego dostępu (pigułki).
     let toggles = toggle_rects(rect, t, ctx.text, panel);
     for (r, toggle) in toggles.iter().zip(panel.toggles.iter()) {
         paint_toggle_pill(ctx, *r, toggle);
     }
-    if let Some(last) = toggles.last() {
-        right = last.x() - t.spacing.sm;
-    }
 
-    for i in (0..panel.workspaces).rev() {
-        let d = 8.0;
-        let dot = Rect::from_xywh(right - d, cy - d / 2.0, d, d);
+    // Kropki przestrzeni roboczych (spójne z `workspace_rects`).
+    for (i, dot) in workspace_rects(rect, t, ctx.text, panel).iter().enumerate() {
         let color = if i == panel.current_ws {
             t.colors.accent
         } else {
             t.colors.dim_text
         };
-        ctx.scene.fill_rounded_rect(dot, d / 2.0, color);
-        right = dot.x() - t.spacing.sm;
+        ctx.scene.fill_rounded_rect(*dot, dot.height() / 2.0, color);
     }
 }
 
@@ -1095,6 +1126,24 @@ mod tests {
 
     fn area() -> Rect {
         Rect::from_xywh(100.0, 60.0, LAUNCHER_W, LAUNCHER_H)
+    }
+
+    #[test]
+    fn workspace_dots_hit_test_matches_layout() {
+        let theme = Theme::dark();
+        let text = TextEngine::none();
+        let bar = Rect::from_xywh(0.0, 0.0, 1280.0, THICKNESS);
+        let mut st = PanelState::sample();
+        st.workspaces = 4;
+        st.current_ws = 2;
+        let rects = workspace_rects(bar, &theme, &text, &st);
+        assert_eq!(rects.len(), 4);
+        for (i, r) in rects.iter().enumerate() {
+            assert_eq!(workspace_at(bar, &theme, &text, &st, r.center()), Some(i));
+        }
+        // Kropki idą w lewo (wyższy indeks bliżej prawej) i nie zachodzą na siebie.
+        assert!(rects[3].x() > rects[0].x());
+        assert!(rects[0].right() <= rects[1].x());
     }
 
     #[test]

@@ -33,8 +33,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .transparent(true);
 
     let mut state = PanelState::sample();
-    // Selene nie ma jeszcze przestrzeni roboczych — nie pokazuj fałszywych kropek.
-    state.workspaces = 0;
+    // Liczba/bieżąca przestrzeń ustawiane co klatkę z kompozytora (ext-workspace).
     // Prawdziwe aplikacje z plików `.desktop`; gdy brak (np. kontener) — zestaw demo.
     let desktop = luna::apps::scan();
     let apps = if desktop.is_empty() {
@@ -54,6 +53,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut bus_tried = false;
     // Lista okien z kompozytora (foreign-toplevel) — własne połączenie + wątek.
     let toplevels = luna::toplevels::Toplevels::spawn();
+    // Przestrzenie robocze z kompozytora (ext-workspace) — własne połączenie + wątek.
+    let workspaces = luna::workspaces::Workspaces::spawn();
     // Realny stan systemu (użytkownik, dźwięk, Wi-Fi, bateria) — odpytywany w tle.
     let system = luna::system::spawn();
     // Sygnatura stanu — przerysowujemy tylko, gdy coś się zmieniło.
@@ -93,6 +94,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         if let Ok(sys) = system.lock() {
             state.user = sys.user.clone();
             state.toggles = build_toggles(&sys);
+        }
+        // Przestrzenie robocze z kompozytora.
+        match &workspaces {
+            Some(ws) => {
+                let list = ws.list();
+                state.workspaces = list.len();
+                state.current_ws = list.iter().position(|w| w.active).unwrap_or(0);
+            }
+            None => {
+                state.workspaces = 0;
+                state.current_ws = 0;
+            }
         }
 
         let lw = LAUNCHER_W.min((size.width - 80.0).max(320.0));
@@ -162,6 +175,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                             }
                             ToggleAction::Volume => luna::system::toggle_mute(),
                             ToggleAction::None => {}
+                        }
+                    } else if let Some(i) =
+                        panel::workspace_at(bar, &frame.theme, text, &state, pe.position)
+                    {
+                        // Klik w kropkę przestrzeni — przełącz w kompozytorze.
+                        if let Some(ws) = &workspaces {
+                            ws.activate(i);
                         }
                     }
                 }
@@ -268,6 +288,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         th = th
             .wrapping_mul(1_099_511_628_211)
             .wrapping_add(state.user.len() as u64);
+        th = th
+            .wrapping_mul(1_099_511_628_211)
+            .wrapping_add(state.workspaces as u64 ^ ((state.current_ws as u64) << 8));
         let sig = (open, power_open, state.clock.clone(), th);
         let animating = osd.visible() || notes.visible();
         if !frame.events.is_empty() || animating || open || sig != last_sig {

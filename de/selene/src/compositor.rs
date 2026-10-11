@@ -324,6 +324,7 @@ fn upsert_window(
     image: std::sync::Arc<ImageData>,
 ) -> (usize, bool) {
     let mut slot = data.slot.lock_or_recover();
+    let ws = *state.ws_current.lock_or_recover();
     let mut windows = state.windows.lock_or_recover();
     let mut created = false;
     let idx = match *slot {
@@ -359,6 +360,7 @@ fn upsert_window(
                 popup,
                 layer,
                 mapped: true,
+                workspace: ws,
                 minimized: false,
                 maximized: false,
                 fullscreen: false,

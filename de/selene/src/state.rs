@@ -5,6 +5,10 @@ use std::time::Instant;
 
 use libluna_core::{Modifiers, Point, Rect};
 use libluna_render::ImageData;
+use wayland_protocols::ext::workspace::v1::server::{
+    ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1,
+    ext_workspace_handle_v1::ExtWorkspaceHandleV1, ext_workspace_manager_v1::ExtWorkspaceManagerV1,
+};
 use wayland_protocols_wlr::foreign_toplevel::v1::server::zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1;
 use wayland_server::protocol::wl_data_device::WlDataDevice;
 use wayland_server::protocol::wl_data_source::WlDataSource;
@@ -48,6 +52,8 @@ pub struct Window {
     pub layer: bool,
     /// Czy powierzchnia jest widoczna (popup znika po `popup_done`).
     pub mapped: bool,
+    /// Przestrzeń robocza, do której należy okno (panele/popupy są globalne).
+    pub workspace: usize,
     /// Zminimalizowane (ukryte przez kompozytor; przywracane skrótem).
     pub minimized: bool,
     /// Zmaksymalizowane do obszaru monitora.
@@ -61,6 +67,14 @@ pub struct Window {
 }
 
 impl Window {
+    /// Czy okno pokazuje się w danej przestrzeni roboczej.
+    ///
+    /// Powierzchnie warstwowe (pasek, tło, OSD) są globalne — należą do każdej
+    /// przestrzeni; zwykłe okna i popupy widoczne są tylko w swojej.
+    pub fn in_workspace(&self, ws: usize) -> bool {
+        self.layer || self.workspace == ws
+    }
+
     /// Wysokość dekoracji (zero dla popupów, paneli i pełnego ekranu).
     fn bar(&self) -> f64 {
         if self.popup || self.layer || self.fullscreen {
@@ -156,6 +170,9 @@ pub type WindowModel = Arc<Mutex<Vec<Window>>>;
 /// Współdzielona pozycja kursora (tryb DRM/evdev); `None` = nie rysujemy kursora.
 pub type CursorModel = Arc<Mutex<Option<Point>>>;
 
+/// Współdzielony numer bieżącej przestrzeni roboczej (kompozytor ↔ wątek wyjścia).
+pub type WorkspaceModel = Arc<Mutex<usize>>;
+
 /// Trwające przeciąganie okna.
 #[derive(Debug, Clone, Copy)]
 pub struct DragState {
@@ -202,6 +219,16 @@ pub struct State {
     /// Podłączeni menedżerowie `zwlr_foreign_toplevel` (paski/taskbary).
     pub toplevel_managers: Vec<ZwlrForeignToplevelManagerV1>,
 
+    // — Przestrzenie robocze (`ext_workspace_v1`) —
+    /// Liczba przestrzeni roboczych.
+    pub ws_count: usize,
+    /// Bieżąca przestrzeń robocza (współdzielona z wątkiem wyjścia).
+    pub ws_current: WorkspaceModel,
+    /// Podłączeni menedżerowie `ext_workspace` oraz ich grupy i uchwyty przestrzeni.
+    pub ws_managers: Vec<ExtWorkspaceManagerV1>,
+    pub ws_groups: Vec<ExtWorkspaceGroupHandleV1>,
+    pub ws_handles: Vec<ExtWorkspaceHandleV1>,
+
     // — Wejście —
     pub pointer: Option<WlPointer>,
     pub keyboard: Option<WlKeyboard>,
@@ -237,6 +264,11 @@ impl Default for State {
             z_counter: 1,
             outputs: Arc::new(Mutex::new(vec![OutputInfo::default()])),
             toplevel_managers: Vec::new(),
+            ws_count: 4,
+            ws_current: Arc::new(Mutex::new(0)),
+            ws_managers: Vec::new(),
+            ws_groups: Vec::new(),
+            ws_handles: Vec::new(),
             pointer: None,
             keyboard: None,
             pointer_focus: None,

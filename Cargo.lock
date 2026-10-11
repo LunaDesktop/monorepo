@@ -609,6 +609,7 @@ dependencies = [
  "libluna-render",
  "libluna-widgets",
  "wayland-client",
+ "wayland-protocols",
  "wayland-protocols-wlr",
  "zbus",
 ]

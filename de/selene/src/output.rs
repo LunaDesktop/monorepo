@@ -15,7 +15,7 @@ use libluna_render::{Scene, SoftwareRenderer, TextRun};
 use crate::drm::{DrmBackend, DrmError};
 use crate::input::{self, Events};
 use crate::monitors::Outputs;
-use crate::state::{CursorModel, Window, WindowModel};
+use crate::state::{CursorModel, Window, WindowModel, WorkspaceModel};
 use crate::sync::LockExt;
 
 /// Uruchamia wątek wyjścia (nested Wayland) o zadanym rozmiarze.
@@ -24,6 +24,7 @@ pub fn spawn(
     outputs: Outputs,
     events: Events,
     wake: UnixStream,
+    ws: WorkspaceModel,
     width: u32,
     height: u32,
 ) {
@@ -46,7 +47,8 @@ pub fn spawn(
             input::push(&events, &mut wake, frame.events);
             // Narysuj scenę.
             let size = frame.size;
-            build_scene(frame.scene, size, 0.0, 0.0, &model, None);
+            let cur_ws = *ws.lock_or_recover();
+            build_scene(frame.scene, size, 0.0, 0.0, &model, cur_ws, None);
             // Utrzymuj klatki — model okien zmienia się poza tą pętlą.
             frame.request_frame();
         });
@@ -89,7 +91,7 @@ fn open_drm_waiting() -> Result<DrmBackend, DrmError> {
 ///
 /// Wymaga bycia DRM masterem; jeśli inną sesję trzyma master, kończy bez efektu
 /// (wywołujący powinien wtedy użyć wyjścia nested).
-pub fn spawn_drm(model: WindowModel, cursor: CursorModel) {
+pub fn spawn_drm(model: WindowModel, cursor: CursorModel, ws: WorkspaceModel) {
     std::thread::spawn(move || {
         let mut backend = match open_drm_waiting() {
             Ok(backend) => backend,
@@ -168,10 +170,11 @@ pub fn spawn_drm(model: WindowModel, cursor: CursorModel) {
         let mut last_cur: Option<Point> = None;
         loop {
             let cur = *cursor.lock_or_recover();
+            let cur_ws = *ws.lock_or_recover();
 
             // Sygnatura sceny nie zależy od kursora, gdy rysuje go sprzęt — dzięki temu
             // samo przesunięcie myszy nie powoduje przemalowania sceny.
-            let sig = scene_signature(&model, if hw_cursor { None } else { cur });
+            let sig = scene_signature(&model, cur_ws, if hw_cursor { None } else { cur });
             let scene_changed = last_sig != Some(sig);
             let cur_changed = last_cur != cur;
             if !scene_changed && !cur_changed {
@@ -221,6 +224,7 @@ pub fn spawn_drm(model: WindowModel, cursor: CursorModel) {
                         ox,
                         oy,
                         &model,
+                        cur_ws,
                         if hw_cursor { None } else { cur },
                     );
                     renderers[i].draw(&scene, 1.0, bg);
@@ -278,13 +282,14 @@ fn cursor_image() -> (Vec<u8>, u32, u32) {
     (renderer.data().to_vec(), w, h)
 }
 
-/// Sygnatura sceny (okna + kursor) — do wykrywania, że nic się nie zmieniło.
-fn scene_signature(model: &WindowModel, cursor: Option<Point>) -> u64 {
+/// Sygnatura sceny (okna + kursor + przestrzeń) — do wykrywania, że nic się nie zmieniło.
+fn scene_signature(model: &WindowModel, current_ws: usize, cursor: Option<Point>) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let mut mix = |v: u64| {
         h ^= v;
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     };
+    mix(current_ws as u64);
     {
         let windows = model.lock_or_recover();
         mix(windows.len() as u64);
@@ -312,6 +317,7 @@ fn build_scene(
     ox: f64,
     oy: f64,
     model: &WindowModel,
+    current_ws: usize,
     cursor: Option<Point>,
 ) {
     let sh = |r: Rect| r.offset(-ox, -oy);
@@ -326,7 +332,7 @@ fn build_scene(
         let mut order: Vec<&Window> = windows.iter().collect();
         order.sort_by_key(|w| w.z);
         for w in order {
-            if !w.mapped || w.minimized {
+            if !w.mapped || w.minimized || !w.in_workspace(current_ws) {
                 continue;
             }
             // Tło treści tylko dla zwykłych okien — powierzchnie warstwowe (panele)
@@ -457,6 +463,7 @@ mod tests {
                 0.0,
                 0.0,
                 &model,
+                0,
                 Some(Point::new(100.0, 100.0)),
             );
             renderer.draw(&scene, 1.0, bg);
@@ -487,6 +494,7 @@ mod tests {
             popup: false,
             layer: true,
             mapped: true,
+            workspace: 0,
             minimized: false,
             maximized: false,
             fullscreen: false,
@@ -507,6 +515,7 @@ mod tests {
                 0.0,
                 0.0,
                 &model,
+                0,
                 Some(Point::new(100.0, 100.0)),
             );
             renderer.draw(&scene, 1.0, bg);

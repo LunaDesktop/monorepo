@@ -181,9 +181,10 @@ pub fn handle_input(state: &mut State, handle: &DisplayHandle, event: &Event) {
 /// Trafienie w okno (najwyższe wg `z`) i w którą jego część.
 fn hit(state: &State, pos: Point) -> Option<(usize, Part)> {
     let windows = state.windows.lock_or_recover();
+    let cur_ws = *state.ws_current.lock_or_recover();
     let mut best: Option<(usize, i32)> = None;
     for (i, w) in windows.iter().enumerate() {
-        if w.mapped && !w.minimized && w.outer().contains(pos) {
+        if w.mapped && !w.minimized && w.in_workspace(cur_ws) && w.outer().contains(pos) {
             match best {
                 Some((_, z)) if z >= w.z => {}
                 _ => best = Some((i, w.z)),
@@ -214,9 +215,10 @@ fn hit(state: &State, pos: Point) -> Option<(usize, Part)> {
 /// Najwyższe okno, którego **treść** zawiera punkt (do zdarzeń klienta).
 fn content_window(state: &State, pos: Point) -> Option<usize> {
     let windows = state.windows.lock_or_recover();
+    let cur_ws = *state.ws_current.lock_or_recover();
     let mut best: Option<(usize, i32)> = None;
     for (i, w) in windows.iter().enumerate() {
-        if w.mapped && !w.minimized && w.content().contains(pos) {
+        if w.mapped && !w.minimized && w.in_workspace(cur_ws) && w.content().contains(pos) {
             match best {
                 Some((_, z)) if z >= w.z => {}
                 _ => best = Some((i, w.z)),
@@ -799,7 +801,7 @@ fn window_shortcut(state: &mut State, keysym: u32, st: ButtonState) -> bool {
         // Zjedz także zwolnienia naszych klawiszy, by nie trafiły do klienta.
         return matches!(
             keysym,
-            0x006d | 0x0066 | 0x006c | 0x004c | 0xff52 | 0xff54 | 0xff09
+            0x006d | 0x0066 | 0x006c | 0x004c | 0xff52 | 0xff54 | 0xff09 | 0x0031..=0x0038
         );
     }
     let focused = state.keyboard_focus.as_ref().map(|(s, _)| *s);
@@ -841,6 +843,18 @@ fn window_shortcut(state: &mut State, keysym: u32, st: ButtonState) -> bool {
         0xff09 => {
             // Super+Tab — przełącz okna (przywraca zminimalizowane).
             cycle_windows(state);
+            true
+        }
+        // Super+1..8 — przełącz przestrzeń; Super+Shift+1..8 — przenieś okno.
+        0x0031..=0x0038 => {
+            let ws = (keysym - 0x0031) as usize;
+            if state.sent_mods.shift {
+                if let Some(s) = focused {
+                    move_window_to_workspace(state, s, ws);
+                }
+            } else {
+                switch_workspace(state, ws);
+            }
             true
         }
         _ => false,
@@ -888,6 +902,67 @@ fn cycle_windows(state: &mut State) {
         w.minimized = false;
     }
     raise_and_focus(state, next);
+}
+
+/// Najwyższe zwykłe okno w danej przestrzeni roboczej.
+fn top_window_in_ws(state: &State, ws: usize) -> Option<usize> {
+    let windows = state.windows.lock_or_recover();
+    windows
+        .iter()
+        .enumerate()
+        .filter(|(_, w)| w.mapped && !w.minimized && !w.popup && !w.layer && w.workspace == ws)
+        .max_by_key(|(_, w)| w.z)
+        .map(|(i, _)| i)
+}
+
+/// Przełącza bieżącą przestrzeń roboczą, przenosząc fokus na jej wierzchołek.
+pub fn switch_workspace(state: &mut State, ws: usize) {
+    let ws = ws.min(state.ws_count.saturating_sub(1));
+    {
+        let mut cur = state.ws_current.lock_or_recover();
+        if *cur == ws {
+            return;
+        }
+        *cur = ws;
+    }
+    // Zdejmij fokus z okna, którego nie ma już na ekranie.
+    let focused = state.keyboard_focus.as_ref().map(|(s, _)| *s);
+    let keep = focused
+        .and_then(|s| {
+            state
+                .windows
+                .lock_or_recover()
+                .get(s)
+                .map(|w| w.in_workspace(ws))
+        })
+        .unwrap_or(false);
+    if !keep {
+        set_keyboard_focus(state, usize::MAX);
+        if let Some(top) = top_window_in_ws(state, ws) {
+            raise_and_focus(state, top);
+        }
+    }
+    crate::workspace::broadcast_workspace_states(state);
+}
+
+/// Przenosi okno do zadanej przestrzeni roboczej (skrót Super+Shift+cyfra).
+fn move_window_to_workspace(state: &mut State, slot: usize, ws: usize) {
+    let ws = ws.min(state.ws_count.saturating_sub(1));
+    {
+        let mut windows = state.windows.lock_or_recover();
+        match windows.get_mut(slot) {
+            Some(w) if !w.layer && !w.popup => w.workspace = ws,
+            _ => return,
+        }
+    }
+    let cur = *state.ws_current.lock_or_recover();
+    if ws != cur && state.keyboard_focus.as_ref().map(|(s, _)| *s) == Some(slot) {
+        set_keyboard_focus(state, usize::MAX);
+        if let Some(top) = top_window_in_ws(state, cur) {
+            raise_and_focus(state, top);
+        }
+    }
+    crate::workspace::broadcast_workspace_states(state);
 }
 
 /// Wysyła wciśnięcia/zwolnienia klawiszy modyfikujących wynikające z bieżącego stanu.
@@ -1076,12 +1151,42 @@ mod tests {
             popup: false,
             layer: false,
             mapped: true,
+            workspace: 0,
             minimized: false,
             maximized: false,
             fullscreen: false,
             saved: None,
             data: Arc::new(ImageData::empty(200, 120)),
         }
+    }
+
+    #[test]
+    fn workspace_predicate_switch_and_move() {
+        let mut s = State::default();
+        let mut a = sample_window();
+        a.workspace = 0;
+        let mut b = sample_window();
+        b.workspace = 1;
+        {
+            let mut w = s.windows.lock_or_recover();
+            w.push(a);
+            w.push(b);
+        }
+        assert!(s.windows.lock_or_recover()[0].in_workspace(0));
+        assert!(!s.windows.lock_or_recover()[0].in_workspace(1));
+        // Powierzchnia warstwowa (panel) jest widoczna w każdej przestrzeni.
+        let mut panel = sample_window();
+        panel.layer = true;
+        panel.workspace = 3;
+        assert!(panel.in_workspace(0));
+
+        switch_workspace(&mut s, 1);
+        assert_eq!(*s.ws_current.lock_or_recover(), 1);
+        move_window_to_workspace(&mut s, 0, 2);
+        assert_eq!(s.windows.lock_or_recover()[0].workspace, 2);
+        // Numer przestrzeni jest klamrowany do zakresu.
+        switch_workspace(&mut s, 99);
+        assert_eq!(*s.ws_current.lock_or_recover(), s.ws_count - 1);
     }
 
     #[test]
