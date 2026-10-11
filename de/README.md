@@ -125,7 +125,8 @@ SELENE_BACKEND=drm XDG_RUNTIME_DIR="$PWD/.selene-runtime" cargo run -p selene
 ```
 
 Uwaga: tryb DRM przejmuje ekran (page-flip); gdy master trzyma Twoja sesja, Selene
-zgłasza to i **nie** rusza wyświetlaczy.
+zgłasza to i **nie** rusza wyświetlaczy. Gdy sesję startuje menedżer logowania, greeter
+potrafi jeszcze chwilę trzymać master — Selene czeka na niego do ~5 s, po czym się poddaje.
 
 Instalator środowiska (binarki + sesja „Luna” + tłumaczenia + motywy) — `scripts/install.sh`:
 

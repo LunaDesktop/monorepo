@@ -62,13 +62,34 @@ pub fn spawn(
     });
 }
 
+/// Otwiera backend DRM, czekając chwilę, gdy mastera trzyma jeszcze greeter LightDM.
+///
+/// LightDM potrafi wystartować sesję Wayland, **zanim ubije greeter** (Xorg), który
+/// trzyma master DRM. Bez ponowień Selene od razu widzi `MasterBusy` i zostawia czarny
+/// ekran. Czekamy do ~5 s, aż greeter zwolni mastera.
+fn open_drm_waiting() -> Result<DrmBackend, DrmError> {
+    match DrmBackend::open() {
+        Err(DrmError::MasterBusy) => {
+            for _ in 0..50 {
+                std::thread::sleep(Duration::from_millis(100));
+                match DrmBackend::open() {
+                    Err(DrmError::MasterBusy) => continue,
+                    other => return other,
+                }
+            }
+            Err(DrmError::MasterBusy)
+        }
+        other => other,
+    }
+}
+
 /// Uruchamia wątek wyjścia DRM/KMS — renderuje scenę do buforów i skanuje na monitorach.
 ///
 /// Wymaga bycia DRM masterem; jeśli inną sesję trzyma master, kończy bez efektu
 /// (wywołujący powinien wtedy użyć wyjścia nested).
 pub fn spawn_drm(model: WindowModel) {
     std::thread::spawn(move || {
-        let mut backend = match DrmBackend::open() {
+        let mut backend = match open_drm_waiting() {
             Ok(backend) => backend,
             Err(reason) => {
                 // Rozróżniamy powód — inaczej „brak mastera” maskuje błędy inicjalizacji.
