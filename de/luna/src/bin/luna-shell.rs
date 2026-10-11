@@ -44,6 +44,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut timer = 0.0f64;
     // Lista okien z kompozytora (foreign-toplevel) — własne połączenie + wątek.
     let toplevels = luna::toplevels::Toplevels::spawn();
+    // Sygnatura stanu — przerysowujemy tylko, gdy coś się zmieniło.
+    let mut last_sig: (bool, String, u64) = (false, String::new(), u64::MAX);
 
     run(cfg, move |frame: &mut Frame| {
         let dt = frame.delta_time();
@@ -206,7 +208,20 @@ fn main() -> Result<(), Box<dyn Error>> {
             Rect::from_xywh(0.0, THICKNESS + 8.0, size.width, size.height - THICKNESS),
         );
 
-        frame.request_frame();
+        // Przerysowujemy tylko, gdy coś się zmieniło — inaczej powłoka nie commituje
+        // bufora 1920x680 przy każdej klatce (mniej pracy dla kompozytora i CPU).
+        let mut th: u64 = state.tasks.len() as u64;
+        for t in &state.tasks {
+            th = th
+                .wrapping_mul(1_099_511_628_211)
+                .wrapping_add(u64::from(t.active) ^ t.title.len() as u64);
+        }
+        let sig = (open, state.clock.clone(), th);
+        let animating = osd.visible() || notes.visible();
+        if !frame.events.is_empty() || animating || open || sig != last_sig {
+            frame.request_frame();
+        }
+        last_sig = sig;
     })
 }
 

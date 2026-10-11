@@ -58,6 +58,11 @@ impl Notifications {
         Self::default()
     }
 
+    /// Czy stos powiadomień nie jest pusty (potrzebna animacja/przerysowanie).
+    pub fn visible(&self) -> bool {
+        !self.items.is_empty()
+    }
+
     /// Dodaje powiadomienie na wierzch stosu.
     pub fn push(&mut self, n: Notification) {
         self.items.push((n, 0.0));

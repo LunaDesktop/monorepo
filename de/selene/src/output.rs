@@ -139,11 +139,21 @@ pub fn spawn_drm(model: WindowModel, cursor: CursorModel) {
         let mut frames = 0u64;
         let (mut ms_render, mut ms_present, mut ms_wait) = (0.0f64, 0.0f64, 0.0f64);
         let mut report = std::time::Instant::now();
+        let mut last_sig: Option<u64> = None;
         loop {
+            // Przerysowujemy tylko, gdy coś się zmieniło (okna albo kursor). Inaczej
+            // śpimy — mniej CPU i brak zbędnych page-flipów, przy płynnym kursorze.
+            let cur = *cursor.lock_or_recover();
+            let sig = scene_signature(&model, cur);
+            if last_sig == Some(sig) {
+                std::thread::sleep(Duration::from_millis(4));
+                continue;
+            }
+            last_sig = Some(sig);
+
             for i in 0..sizes.len() {
                 let (w, h) = sizes[i];
                 let (ox, oy) = origins[i];
-                let cur = *cursor.lock_or_recover();
 
                 let t = std::time::Instant::now();
                 let mut scene = Scene::new();
@@ -159,7 +169,8 @@ pub fn spawn_drm(model: WindowModel, cursor: CursorModel) {
                 ms_render += t.elapsed().as_secs_f64() * 1000.0;
 
                 let t = std::time::Instant::now();
-                if !backend.present(i, renderers[i].data()) && !flip_error_logged {
+                let flipped = backend.present(i, renderers[i].data());
+                if !flipped && !flip_error_logged {
                     eprintln!(
                         "{}",
                         libluna_i18n::tr("DRM page-flip failed (screen may stay blank)")
@@ -168,14 +179,15 @@ pub fn spawn_drm(model: WindowModel, cursor: CursorModel) {
                 }
                 ms_present += t.elapsed().as_secs_f64() * 1000.0;
 
-                let t = std::time::Instant::now();
-                backend.wait_flip();
-                ms_wait += t.elapsed().as_secs_f64() * 1000.0;
+                // Czekamy na flip tylko, gdy został zakolejkowany (inaczej `read`
+                // mógłby zablokować się na zawsze).
+                if flipped {
+                    let t = std::time::Instant::now();
+                    backend.wait_flip();
+                    ms_wait += t.elapsed().as_secs_f64() * 1000.0;
+                }
             }
-            // `wait_flip` i tak synchronizuje z vblankiem, więc nie dosypujemy snu
-            // (wcześniejsze 16 ms samo ograniczało do ~20 fps).
             frames += 1;
-
             if stats && report.elapsed().as_secs_f64() >= 2.0 {
                 let secs = report.elapsed().as_secs_f64();
                 let per_frame = (frames * sizes.len() as u64).max(1) as f64;
@@ -194,6 +206,33 @@ pub fn spawn_drm(model: WindowModel, cursor: CursorModel) {
             }
         }
     });
+}
+
+/// Sygnatura sceny (okna + kursor) — do wykrywania, że nic się nie zmieniło.
+fn scene_signature(model: &WindowModel, cursor: Option<Point>) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut mix = |v: u64| {
+        h ^= v;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    };
+    {
+        let windows = model.lock_or_recover();
+        mix(windows.len() as u64);
+        for w in windows.iter() {
+            mix(w.x.to_bits());
+            mix(w.y.to_bits());
+            mix(w.z as u64);
+            mix(w.width as u64);
+            mix(w.height as u64);
+            mix(u64::from(w.mapped) | (u64::from(w.minimized) << 1) | (u64::from(w.layer) << 2));
+            mix(std::sync::Arc::as_ptr(&w.data) as u64);
+        }
+    }
+    if let Some(c) = cursor {
+        mix(c.x.to_bits());
+        mix(c.y.to_bits());
+    }
+    h
 }
 
 /// Buduje scenę okien w rozmiarze wyjścia, przesuniętą o `(ox, oy)` (origin monitora).
@@ -354,6 +393,56 @@ mod tests {
         }
         println!(
             "render 1920x1080: {:.2} ms/klatke",
+            t.elapsed().as_secs_f64() * 1000.0 / n as f64
+        );
+    }
+
+    #[test]
+    #[ignore = "benchmark reczny"]
+    fn bench_1080p_with_panel() {
+        use std::sync::{Arc, Mutex};
+        use std::time::Instant;
+        let data = Arc::new(libluna_render::ImageData::new(
+            1920,
+            680,
+            vec![128u8; 1920 * 680 * 4],
+        ));
+        let windows = vec![Window {
+            x: 0.0,
+            y: 0.0,
+            width: 1920,
+            height: 680,
+            z: 1_000_000,
+            title: String::new(),
+            popup: false,
+            layer: true,
+            mapped: true,
+            minimized: false,
+            maximized: false,
+            fullscreen: false,
+            saved: None,
+            data,
+        }];
+        let model: WindowModel = Arc::new(Mutex::new(windows));
+        let bg = Color::from_rgba8(0x1e, 0x20, 0x28, 0xff);
+        let mut renderer = SoftwareRenderer::new(1920, 1080);
+        let n = 20;
+        // Sam render sceny:
+        let t = Instant::now();
+        for _ in 0..n {
+            let mut scene = Scene::new();
+            build_scene(
+                &mut scene,
+                Size::new(1920.0, 1080.0),
+                0.0,
+                0.0,
+                &model,
+                Some(Point::new(100.0, 100.0)),
+            );
+            renderer.draw(&scene, 1.0, bg);
+        }
+        println!(
+            "render 1080p + panel 1920x680: {:.2} ms/klatke",
             t.elapsed().as_secs_f64() * 1000.0 / n as f64
         );
     }
