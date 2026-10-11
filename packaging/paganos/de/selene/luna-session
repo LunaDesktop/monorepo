@@ -40,4 +40,22 @@ if mkdir -p "$log_dir" 2>/dev/null; then
     exec >>"$log" 2>&1
 fi
 
-exec selene
+# Kompozytor w tle, a po nim powłoka Luna (panel/OSD). Czekamy na gniazdo Wayland.
+selene &
+selene_pid=$!
+
+# Poczekaj, aż Selene zbindowuje gniazdo (zwykle ułamek sekundy).
+i=0
+while [ ! -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wayland-0" ] && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+done
+
+# Powłoka Luna (panel, launcher, OSD) — o ile jest zainstalowana.
+if command -v luna-shell >/dev/null 2>&1; then
+    export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
+    luna-shell &
+fi
+
+# Sesja żyje, dopóki działa kompozytor.
+wait "$selene_pid"

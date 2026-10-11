@@ -15,7 +15,7 @@ use libluna_render::{Scene, SoftwareRenderer, TextRun};
 use crate::drm::{DrmBackend, DrmError};
 use crate::input::{self, Events};
 use crate::monitors::Outputs;
-use crate::state::{Window, WindowModel};
+use crate::state::{CursorModel, Window, WindowModel};
 use crate::sync::LockExt;
 
 /// Uruchamia wątek wyjścia (nested Wayland) o zadanym rozmiarze.
@@ -46,7 +46,7 @@ pub fn spawn(
             input::push(&events, &mut wake, frame.events);
             // Narysuj scenę.
             let size = frame.size;
-            build_scene(frame.scene, size, 0.0, 0.0, &model);
+            build_scene(frame.scene, size, 0.0, 0.0, &model, None);
             // Utrzymuj klatki — model okien zmienia się poza tą pętlą.
             frame.request_frame();
         });
@@ -87,7 +87,7 @@ fn open_drm_waiting() -> Result<DrmBackend, DrmError> {
 ///
 /// Wymaga bycia DRM masterem; jeśli inną sesję trzyma master, kończy bez efektu
 /// (wywołujący powinien wtedy użyć wyjścia nested).
-pub fn spawn_drm(model: WindowModel) {
+pub fn spawn_drm(model: WindowModel, cursor: CursorModel) {
     std::thread::spawn(move || {
         let mut backend = match open_drm_waiting() {
             Ok(backend) => backend,
@@ -137,8 +137,16 @@ pub fn spawn_drm(model: WindowModel) {
             for i in 0..sizes.len() {
                 let (w, h) = sizes[i];
                 let (ox, oy) = origins[i];
+                let cur = *cursor.lock_or_recover();
                 let mut scene = Scene::new();
-                build_scene(&mut scene, Size::new(w as f64, h as f64), ox, oy, &model);
+                build_scene(
+                    &mut scene,
+                    Size::new(w as f64, h as f64),
+                    ox,
+                    oy,
+                    &model,
+                    cur,
+                );
                 renderers[i].draw(&scene, 1.0, bg);
                 if !backend.present(i, renderers[i].data()) && !flip_error_logged {
                     eprintln!(
@@ -156,7 +164,14 @@ pub fn spawn_drm(model: WindowModel) {
 }
 
 /// Buduje scenę okien w rozmiarze wyjścia, przesuniętą o `(ox, oy)` (origin monitora).
-fn build_scene(scene: &mut Scene, size: Size, ox: f64, oy: f64, model: &WindowModel) {
+fn build_scene(
+    scene: &mut Scene,
+    size: Size,
+    ox: f64,
+    oy: f64,
+    model: &WindowModel,
+    cursor: Option<Point>,
+) {
     let sh = |r: Rect| r.offset(-ox, -oy);
     scene.clear();
     scene.fill_rect(
@@ -232,4 +247,50 @@ fn build_scene(scene: &mut Scene, size: Size, ox: f64, oy: f64, model: &WindowMo
         TextRun::new(Point::new(16.0, 28.0), "Selene — kompozytor Luna", 14.0)
             .with_color(Color::from_rgba8(0xdd, 0xdd, 0xdd, 0xff)),
     );
+
+    // Kursor rysuje ten monitor, na którym leży (tryb DRM — nikt go za nas nie narysuje).
+    if let Some(c) = cursor {
+        let (cx, cy) = (c.x - ox, c.y - oy);
+        if cx >= 0.0 && cy >= 0.0 && cx < size.width && cy < size.height {
+            draw_cursor(scene, Point::new(cx, cy));
+        }
+    }
+}
+
+/// Klasyczna strzałka kursora (biała z ciemnym obrysem).
+fn draw_cursor(scene: &mut Scene, p: Point) {
+    let arrow = [
+        Point::new(p.x, p.y),
+        Point::new(p.x, p.y + 17.0),
+        Point::new(p.x + 4.2, p.y + 12.6),
+        Point::new(p.x + 7.0, p.y + 18.5),
+        Point::new(p.x + 9.7, p.y + 17.2),
+        Point::new(p.x + 6.9, p.y + 11.4),
+        Point::new(p.x + 11.5, p.y + 11.4),
+    ];
+    let white = Color::from_rgba8(0xf5, 0xf5, 0xf5, 0xff);
+    let outline = Color::from_rgba8(0x10, 0x10, 0x10, 0xff);
+    scene.fill_polygon(&arrow, white);
+    let mut closed = arrow.to_vec();
+    closed.push(arrow[0]);
+    scene.stroke_polyline(&closed, 1.5, outline);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use libluna_render::SoftwareRenderer;
+
+    #[test]
+    fn draw_cursor_paints_pixels() {
+        let mut scene = Scene::new();
+        draw_cursor(&mut scene, Point::new(8.0, 8.0));
+        let mut renderer = SoftwareRenderer::new(48, 48);
+        renderer.draw(&scene, 1.0, Color::from_rgba8(0, 0, 0, 255));
+        let painted = renderer
+            .data()
+            .chunks_exact(4)
+            .any(|px| px[0] > 0 || px[1] > 0 || px[2] > 0);
+        assert!(painted, "kursor powinien zostawić niezerowe piksele");
+    }
 }

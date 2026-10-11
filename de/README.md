@@ -109,7 +109,9 @@ XDG_RUNTIME_DIR="$PWD/.selene-runtime" cargo run -p selene
 `XDG_RUNTIME_DIR` zwykle ustawia menedżer sesji. Gdy go brak (np. `pam_systemd` nie
 założył sesji), Selene wybiera katalog sam: najpierw `/run/user/<uid>`, a gdy ten nie
 istnieje — tworzy prywatny katalog `0700` pod `$TMPDIR`. Skrypt `luna-session` robi ten
-sam wybór wcześniej, żeby zmienną dziedziczyli także klienci.
+sam wybór wcześniej, żeby zmienną dziedziczyli także klienci. `luna-session` uruchamia
+także powłokę `luna-shell` (panel/OSD), o ile jest zainstalowana; w trybie DRM Selene
+rysuje własny kursor (strzałkę), bo nie ma nadrzędnego kompozytora.
 
 Log uruchomienia sesji trafia do stałego pliku `~/.local/state/luna/session.log`
 (LightDM trzyma tylko dwa pliki `.xsession-errors` i obraca je przy każdej sesji, więc

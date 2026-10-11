@@ -105,7 +105,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Wyjście: realne DRM/KMS (gdy `SELENE_BACKEND=drm`) lub nested na nadrzędnym kompozytorze.
     if std::env::var("SELENE_BACKEND").as_deref() == Ok("drm") {
-        output::spawn_drm(Arc::clone(&state.windows));
+        output::spawn_drm(Arc::clone(&state.windows), Arc::clone(&state.cursor));
     } else {
         output::spawn(
             Arc::clone(&state.windows),
@@ -172,6 +172,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .map(|o| (o.width as f64, o.height as f64))
                     .unwrap_or((1280.0, 800.0));
                 let batch = input.read_events(bounds);
+                *state.cursor.lock_or_recover() = Some(input.cursor());
                 for event in &batch {
                     seat::handle_input(&mut state, &handle, event);
                 }

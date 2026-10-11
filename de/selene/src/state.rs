@@ -152,6 +152,9 @@ impl Window {
 /// Współdzielony model okien (pisany przez wątek protokołu, czytany przez wyjście).
 pub type WindowModel = Arc<Mutex<Vec<Window>>>;
 
+/// Współdzielona pozycja kursora (tryb DRM/evdev); `None` = nie rysujemy kursora.
+pub type CursorModel = Arc<Mutex<Option<Point>>>;
+
 /// Trwające przeciąganie okna.
 #[derive(Debug, Clone, Copy)]
 pub struct DragState {
@@ -187,6 +190,8 @@ pub struct State {
     pub toplevels: u32,
     /// Model okien współdzielony z wątkiem wyjścia.
     pub windows: WindowModel,
+    /// Pozycja kursora do narysowania (tryb DRM/evdev), współdzielona z wątkiem wyjścia.
+    pub cursor: CursorModel,
     /// Powierzchnie okien (indeks = slot w [`State::windows`]).
     pub slots: Vec<WlSurface>,
     /// Licznik kolejności (z-order).
@@ -224,6 +229,7 @@ impl Default for State {
             surfaces: 0,
             toplevels: 0,
             windows: Arc::new(Mutex::new(Vec::new())),
+            cursor: Arc::new(Mutex::new(None)),
             slots: Vec::new(),
             z_counter: 1,
             outputs: Arc::new(Mutex::new(vec![OutputInfo::default()])),

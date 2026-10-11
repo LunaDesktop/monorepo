@@ -99,6 +99,11 @@ impl EvdevInput {
         self.devices.iter().map(|d| d.fd.as_raw_fd()).collect()
     }
 
+    /// Bieżąca pozycja wirtualnego kursora (współrzędne logiczne).
+    pub fn cursor(&self) -> Point {
+        self.cursor
+    }
+
     /// Czyta i tłumaczy wszystkie oczekujące zdarzenia.
     ///
     /// `bounds` to rozmiar monitora — kursor jest do niego ograniczany.
