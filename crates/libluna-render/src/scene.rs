@@ -95,6 +95,27 @@ pub enum DrawCommand {
         width: f64,
         color: Color,
     },
+    /// Wypełniony okrąg.
+    FillCircle {
+        center: Point,
+        radius: f64,
+        color: Color,
+    },
+    /// Obwód okręgu (linia o zadanej grubości).
+    StrokeCircle {
+        center: Point,
+        radius: f64,
+        width: f64,
+        color: Color,
+    },
+    /// Łamana (otwarta; powtórz pierwszy punkt, by zamknąć kontur).
+    StrokePolyline {
+        points: Vec<Point>,
+        width: f64,
+        color: Color,
+    },
+    /// Wypełniony wielokąt (domykany automatycznie).
+    FillPolygon { points: Vec<Point>, color: Color },
     /// Ogranicza kolejne polecenia do prostokąta (zastosowanie kumulacyjne).
     PushClip { rect: Rect },
     /// Zdejmuje ostatnie ograniczenie.
@@ -170,6 +191,52 @@ impl Scene {
             from,
             to,
             width,
+            color,
+        });
+        self
+    }
+
+    /// Wypełniony okrąg.
+    pub fn fill_circle(&mut self, center: Point, radius: f64, color: Color) -> &mut Self {
+        self.commands.push(DrawCommand::FillCircle {
+            center,
+            radius,
+            color,
+        });
+        self
+    }
+
+    /// Obwód okręgu.
+    pub fn stroke_circle(
+        &mut self,
+        center: Point,
+        radius: f64,
+        width: f64,
+        color: Color,
+    ) -> &mut Self {
+        self.commands.push(DrawCommand::StrokeCircle {
+            center,
+            radius,
+            width,
+            color,
+        });
+        self
+    }
+
+    /// Łamana (szkielet ikon); z zaokrąglonymi końcami i zgięciami.
+    pub fn stroke_polyline(&mut self, points: &[Point], width: f64, color: Color) -> &mut Self {
+        self.commands.push(DrawCommand::StrokePolyline {
+            points: points.to_vec(),
+            width,
+            color,
+        });
+        self
+    }
+
+    /// Wypełniony wielokąt (domykany automatycznie).
+    pub fn fill_polygon(&mut self, points: &[Point], color: Color) -> &mut Self {
+        self.commands.push(DrawCommand::FillPolygon {
+            points: points.to_vec(),
             color,
         });
         self

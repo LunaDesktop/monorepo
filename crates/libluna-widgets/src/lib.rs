@@ -172,6 +172,7 @@ pub use helpers::{
     BreakpointBin, ButtonContent, Clamp, ToolbarRects, ToolbarView, WindowHandle, WindowTitle,
     WindowTitleRects, WrapBox,
 };
+pub use icon::{paint_icon, IconName};
 pub use image::{Image, ImageIcon};
 pub use infobar::{InfoBar, InfoBarKind, InfoBarRects};
 pub use item_view::{Item, ItemKind, ItemView, ViewMode};

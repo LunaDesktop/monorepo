@@ -71,8 +71,9 @@ gnieździe nasłuchu i deskryptorze backendu. `libLuna` jest zwykłą zależnoś
 Selene.
 
 - `de/luna/src/panel.rs` — **panel górny** (sam przycisk burger, tytuł okna, zegar/data,
-  przełączniki, przestrzenie robocze, użytkownik) i **launcher** w trzech widokach:
+  przełączniki z ikonami, przestrzenie robocze, użytkownik) i **launcher** w trzech widokach:
   **Lista**, **Siatka**, **Karuzela** (segmentowy przełącznik w nagłówku).
+  Ikony z pakietu `libluna-widgets::icon` (`IconName`/`paint_icon`) — wektorowe, spójne ze stylem.
 - `luna-panel` (bin) — render headless: `docs/images/luna-shell-{light,dark}.png`
   oraz `docs/images/luna-launcher-{list,grid,carousel}.png`.
 - `luna-shell` (bin) — powierzchnia „chrome” na żywo: burger otwiera/zamyka launcher,

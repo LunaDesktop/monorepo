@@ -9,7 +9,7 @@
 use libluna_core::style::weight;
 use libluna_core::{Color, Point, Rect, Size, Theme};
 use libluna_render::TextEngine;
-use libluna_widgets::PaintCtx;
+use libluna_widgets::{paint_icon, IconName, PaintCtx};
 
 /// Wysokość panelu (piksele logiczne).
 pub const THICKNESS: f64 = 40.0;
@@ -24,12 +24,12 @@ const LIST_ROW_H: f64 = 52.0;
 const CARD_W: f64 = 168.0;
 const CARD_H: f64 = 200.0;
 
-/// Przełącznik szybkiego dostępu (Wi-Fi, dźwięk, jasność…).
+/// Przełącznik szybkiego dostępu (Wi-Fi, dźwięk, bateria…).
 #[derive(Debug, Clone)]
 pub struct Toggle {
     pub label: String,
-    /// Symbol rysowany fontem interfejsu (może być pusty).
-    pub glyph: String,
+    /// Ikona z pakietu Luny.
+    pub icon: IconName,
     pub active: bool,
 }
 
@@ -64,17 +64,17 @@ impl PanelState {
             toggles: vec![
                 Toggle {
                     label: "Wi-Fi".to_owned(),
-                    glyph: "▲".to_owned(),
+                    icon: IconName::Wifi,
                     active: true,
                 },
                 Toggle {
                     label: "Dźwięk".to_owned(),
-                    glyph: "◆".to_owned(),
+                    icon: IconName::Volume,
                     active: true,
                 },
                 Toggle {
                     label: "82%".to_owned(),
-                    glyph: "■".to_owned(),
+                    icon: IconName::Battery,
                     active: false,
                 },
             ],
@@ -143,8 +143,8 @@ impl Launcher {
 /// Pozycja w launcherze.
 #[derive(Debug, Clone)]
 pub struct App {
-    /// Symbol rysowany fontem interfejsu.
-    pub glyph: String,
+    /// Ikona z pakietu Luny.
+    pub icon: IconName,
     pub name: String,
     /// Krótki opis/kategoria (widok listy).
     pub category: String,
@@ -153,19 +153,19 @@ pub struct App {
 impl App {
     /// Przykładowy zestaw ikon (podglądy).
     pub fn sample() -> Vec<App> {
-        const APPS: [(&str, &str, &str); 8] = [
-            ("◆", "Pliki", "System"),
-            ("●", "Ustawienia", "System"),
-            ("▲", "Edytor", "Akcesoria"),
-            ("▶", "Odtwarzacz", "Multimedia"),
-            ("★", "Ulubione", "System"),
-            ("☀", "Zegar", "Akcesoria"),
-            ("■", "Terminal", "System"),
-            ("♥", "Sklep", "System"),
+        const APPS: [(IconName, &str, &str); 8] = [
+            (IconName::Files, "Pliki", "System"),
+            (IconName::Settings, "Ustawienia", "System"),
+            (IconName::Edit, "Edytor", "Akcesoria"),
+            (IconName::Music, "Odtwarzacz", "Multimedia"),
+            (IconName::Star, "Ulubione", "System"),
+            (IconName::Clock, "Zegar", "Akcesoria"),
+            (IconName::Terminal, "Terminal", "System"),
+            (IconName::Store, "Sklep", "System"),
         ];
         APPS.iter()
-            .map(|(g, n, c)| App {
-                glyph: (*g).to_owned(),
+            .map(|(i, n, c)| App {
+                icon: *i,
                 name: (*n).to_owned(),
                 category: (*c).to_owned(),
             })
@@ -192,16 +192,20 @@ pub fn paint_panel(panel: &PanelState, ctx: &mut PaintCtx, rect: Rect) {
         t.colors.border,
     );
 
-    // ── Lewa grupa: sam burger + separator + tytuł okna ──
+    // ── Lewa grupa: sam burger (ikona Menu) + separator + tytuł okna ──
     let burger = burger_rect(rect, t);
     ctx.scene
         .fill_rounded_rect(burger, t.radius.small, t.colors.shade);
-    ctx.label_center(
-        burger.center().x,
-        burger.center().y,
-        "☰",
-        body,
-        weight::BOLD,
+    let isz = burger.width() * 0.64;
+    paint_icon(
+        ctx,
+        IconName::Menu,
+        Rect::from_xywh(
+            burger.center().x - isz / 2.0,
+            burger.center().y - isz / 2.0,
+            isz,
+            isz,
+        ),
         t.colors.text,
     );
     let mut x = burger.right() + t.spacing.md;
@@ -232,15 +236,12 @@ pub fn paint_panel(panel: &PanelState, ctx: &mut PaintCtx, rect: Rect) {
     right -= t.spacing.md;
 
     for toggle in panel.toggles.iter().rev() {
-        let label = if toggle.glyph.is_empty() {
-            toggle.label.clone()
-        } else {
-            format!("{} {}", toggle.glyph, toggle.label)
-        };
         let cap = t.typography.caption.size;
-        let w = ctx.measure(&label, cap, weight::MEDIUM) + t.spacing.lg;
+        let lw = ctx.measure(&toggle.label, cap, weight::MEDIUM);
+        let icon = 13.0;
+        let w = t.spacing.sm * 2.0 + icon + t.spacing.xs + lw;
         let pill = Rect::from_xywh(right - w, cy - 12.0, w, 24.0);
-        paint_pill(ctx, pill, &label, toggle.active);
+        paint_toggle_pill(ctx, pill, toggle);
         right = pill.x() - t.spacing.sm;
     }
 
@@ -257,7 +258,43 @@ pub fn paint_panel(panel: &PanelState, ctx: &mut PaintCtx, rect: Rect) {
     }
 }
 
-/// Pigułka przełącznika (aktywna = akcent).
+/// Pigułka przełącznika szybkiego dostępu (ikona + etykieta).
+fn paint_toggle_pill(ctx: &mut PaintCtx, rect: Rect, toggle: &Toggle) {
+    let t = ctx.theme;
+    let bg = if toggle.active {
+        t.colors.accent
+    } else {
+        t.colors.card_bg
+    };
+    let fg = if toggle.active {
+        t.colors.accent_fg
+    } else {
+        t.colors.text
+    };
+    ctx.scene.fill_rounded_rect(rect, rect.height() / 2.0, bg);
+    if !toggle.active {
+        ctx.scene
+            .stroke_rounded_rect(rect, rect.height() / 2.0, 1.0, t.colors.border);
+    }
+    let isz = 13.0;
+    let ix = rect.x() + t.spacing.sm;
+    paint_icon(
+        ctx,
+        toggle.icon,
+        Rect::from_xywh(ix, rect.center().y - isz / 2.0, isz, isz),
+        fg,
+    );
+    ctx.label_left(
+        ix + isz + t.spacing.xs,
+        rect.center().y,
+        &toggle.label,
+        t.typography.caption.size,
+        weight::MEDIUM,
+        fg,
+    );
+}
+
+/// Pigułka segmentu (np. przełącznik widoku launchera).
 fn paint_pill(ctx: &mut PaintCtx, rect: Rect, label: &str, active: bool) {
     let t = ctx.theme;
     let bg = if active {
@@ -497,14 +534,8 @@ fn paint_grid_tile(app: &App, ctx: &mut PaintCtx, rect: Rect) {
     let icon = Rect::from_xywh(rect.center().x - 18.0, rect.y() + 12.0, 36.0, 36.0);
     ctx.scene
         .fill_rounded_rect(icon, t.radius.small, t.colors.accent.scale_alpha(0.16));
-    ctx.label_center(
-        icon.center().x,
-        icon.center().y,
-        &app.glyph,
-        18.0,
-        weight::MEDIUM,
-        t.colors.accent,
-    );
+    let inner = Rect::from_xywh(icon.x() + 9.0, icon.y() + 9.0, 18.0, 18.0);
+    paint_icon(ctx, app.icon, inner, t.colors.accent);
     ctx.label_center(
         rect.center().x,
         icon.bottom() + 12.0,
@@ -526,14 +557,8 @@ fn paint_list_row(app: &App, ctx: &mut PaintCtx, rect: Rect) {
     let icon = Rect::from_xywh(rect.x() + t.spacing.md, rect.center().y - 16.0, 32.0, 32.0);
     ctx.scene
         .fill_rounded_rect(icon, t.radius.small, t.colors.accent.scale_alpha(0.16));
-    ctx.label_center(
-        icon.center().x,
-        icon.center().y,
-        &app.glyph,
-        16.0,
-        weight::MEDIUM,
-        t.colors.accent,
-    );
+    let inner = Rect::from_xywh(icon.x() + 7.0, icon.y() + 7.0, 18.0, 18.0);
+    paint_icon(ctx, app.icon, inner, t.colors.accent);
     ctx.label_left(
         icon.right() + t.spacing.md,
         rect.center().y,
@@ -576,14 +601,8 @@ fn paint_carousel_card(app: &App, selected: bool, ctx: &mut PaintCtx, rect: Rect
     let icon = Rect::from_xywh(rect.center().x - 34.0, rect.y() + 36.0, 68.0, 68.0);
     ctx.scene
         .fill_rounded_rect(icon, t.radius.medium, t.colors.accent.scale_alpha(0.18));
-    ctx.label_center(
-        icon.center().x,
-        icon.center().y,
-        &app.glyph,
-        32.0,
-        weight::MEDIUM,
-        t.colors.accent,
-    );
+    let inner = Rect::from_xywh(icon.x() + 16.0, icon.y() + 16.0, 36.0, 36.0);
+    paint_icon(ctx, app.icon, inner, t.colors.accent);
     ctx.label_center(
         rect.center().x,
         icon.bottom() + 24.0,

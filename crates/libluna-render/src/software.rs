@@ -124,6 +124,39 @@ impl SoftwareRenderer {
                         }
                     }
                 }
+                DrawCommand::FillCircle {
+                    center,
+                    radius,
+                    color,
+                } => {
+                    if let Some(path) = circle_path(*center, *radius) {
+                        fill(pixmap, &path, *color, transform, mask.as_ref());
+                    }
+                }
+                DrawCommand::StrokeCircle {
+                    center,
+                    radius,
+                    width,
+                    color,
+                } => {
+                    if let Some(path) = circle_path(*center, *radius) {
+                        stroke(pixmap, &path, *width, *color, transform, mask.as_ref());
+                    }
+                }
+                DrawCommand::StrokePolyline {
+                    points,
+                    width,
+                    color,
+                } => {
+                    if let Some(path) = polyline_path(points) {
+                        stroke(pixmap, &path, *width, *color, transform, mask.as_ref());
+                    }
+                }
+                DrawCommand::FillPolygon { points, color } => {
+                    if let Some(path) = polygon_path(points) {
+                        fill(pixmap, &path, *color, transform, mask.as_ref());
+                    }
+                }
                 DrawCommand::PushClip { rect } => {
                     let effective = match clip_stack.last() {
                         Some(current) => current.intersection(rect).unwrap_or(Rect::ZERO),
@@ -214,6 +247,38 @@ fn rect_path(rect: Rect, radius: f64) -> Option<Path> {
     pb.finish()
 }
 
+fn circle_path(center: Point, radius: f64) -> Option<Path> {
+    if radius <= 0.0 {
+        return None;
+    }
+    PathBuilder::from_circle(center.x as f32, center.y as f32, radius as f32)
+}
+
+fn polyline_path(points: &[Point]) -> Option<Path> {
+    if points.len() < 2 {
+        return None;
+    }
+    let mut pb = PathBuilder::new();
+    pb.move_to(points[0].x as f32, points[0].y as f32);
+    for p in &points[1..] {
+        pb.line_to(p.x as f32, p.y as f32);
+    }
+    pb.finish()
+}
+
+fn polygon_path(points: &[Point]) -> Option<Path> {
+    if points.len() < 3 {
+        return None;
+    }
+    let mut pb = PathBuilder::new();
+    pb.move_to(points[0].x as f32, points[0].y as f32);
+    for p in &points[1..] {
+        pb.line_to(p.x as f32, p.y as f32);
+    }
+    pb.close();
+    pb.finish()
+}
+
 fn paint(color: Color) -> Paint<'static> {
     Paint {
         shader: Shader::SolidColor(ts_color(color)),
@@ -242,6 +307,8 @@ fn stroke(
     }
     let stroke = Stroke {
         width: width as f32,
+        line_cap: LineCap::Round,
+        line_join: LineJoin::Round,
         ..Default::default()
     };
     pixmap.stroke_path(path, &paint(color), &stroke, transform, mask);
@@ -274,6 +341,52 @@ mod tests {
         r.draw(&scene, 1.0, Color::WHITE);
         assert_eq!(pixel(&r, 0, 0), [255, 255, 255, 255]);
         assert_eq!(pixel(&r, 7, 7), [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn fill_circle_paints_center_only() {
+        let mut r = SoftwareRenderer::new(16, 16);
+        let mut s = Scene::new();
+        s.fill_circle(Point::new(8.0, 8.0), 4.0, Color::from_rgba8(255, 0, 0, 255));
+        r.draw(&s, 1.0, Color::WHITE);
+        assert_eq!(pixel(&r, 8, 8), [255, 0, 0, 255]);
+        assert_eq!(pixel(&r, 0, 0), [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn fill_polygon_covers_interior() {
+        let mut r = SoftwareRenderer::new(16, 16);
+        let mut s = Scene::new();
+        s.fill_polygon(
+            &[
+                Point::new(2.0, 2.0),
+                Point::new(14.0, 2.0),
+                Point::new(8.0, 14.0),
+            ],
+            Color::from_rgba8(0, 255, 0, 255),
+        );
+        r.draw(&s, 1.0, Color::WHITE);
+        assert_eq!(pixel(&r, 8, 6), [0, 255, 0, 255]);
+        assert_eq!(pixel(&r, 0, 0), [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn stroke_polyline_paints_segment() {
+        let mut r = SoftwareRenderer::new(16, 16);
+        let mut s = Scene::new();
+        s.stroke_polyline(
+            &[
+                Point::new(2.0, 8.0),
+                Point::new(8.0, 8.0),
+                Point::new(8.0, 14.0),
+            ],
+            3.0,
+            Color::from_rgba8(0, 0, 255, 255),
+        );
+        r.draw(&s, 1.0, Color::WHITE);
+        assert_eq!(pixel(&r, 5, 8), [0, 0, 255, 255]);
+        assert_eq!(pixel(&r, 8, 12), [0, 0, 255, 255]);
+        assert_eq!(pixel(&r, 14, 14), [255, 255, 255, 255]);
     }
 
     #[test]

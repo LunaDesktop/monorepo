@@ -216,3 +216,393 @@ pub fn burger(paint: &mut PaintCtx, color: Color, center: Point, size: f64, widt
         );
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Nazwany pakiet ikon symbolicznych — rysowany wektorowo, w stylu Luny.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Nazwa ikony z pakietu Luny.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IconName {
+    Menu,
+    Search,
+    Files,
+    Settings,
+    Terminal,
+    Music,
+    Star,
+    Clock,
+    Store,
+    Edit,
+    Wifi,
+    Volume,
+    Battery,
+    Power,
+    Grid,
+    List,
+    Carousel,
+    ChevronLeft,
+    ChevronRight,
+    Close,
+    Minimize,
+    Maximize,
+    Check,
+    Plus,
+    Home,
+    User,
+    Info,
+}
+
+/// Współrzędne w siatce 24×24 mapowane na prostokąt docelowy.
+struct Grid {
+    ox: f64,
+    oy: f64,
+    s: f64,
+}
+
+impl Grid {
+    fn new(rect: Rect) -> Self {
+        let side = rect.width().min(rect.height()).max(1.0);
+        let s = side / 24.0;
+        Self {
+            ox: rect.x() + (rect.width() - 24.0 * s) / 2.0,
+            oy: rect.y() + (rect.height() - 24.0 * s) / 2.0,
+            s,
+        }
+    }
+
+    fn p(&self, x: f64, y: f64) -> Point {
+        Point::new(self.ox + x * self.s, self.oy + y * self.s)
+    }
+
+    fn d(&self, v: f64) -> f64 {
+        v * self.s
+    }
+}
+
+/// Punkty łuku (środek `c`, promień `r`, kąty w stopniach, y w dół).
+fn arc(c: Point, r: f64, a0: f64, a1: f64, segs: usize) -> Vec<Point> {
+    (0..=segs)
+        .map(|i| {
+            let t = a0 + (a1 - a0) * i as f64 / segs as f64;
+            let a = t.to_radians();
+            Point::new(c.x + r * a.cos(), c.y + r * a.sin())
+        })
+        .collect()
+}
+
+/// Rysuje ikonę z pakietu w prostokącie `rect` w zadanym kolorze (styl symboliczny).
+pub fn paint_icon(paint: &mut PaintCtx, name: IconName, rect: Rect, color: Color) {
+    let g = Grid::new(rect);
+    let w = g.d(2.0);
+    let scene = &mut *paint.scene;
+
+    match name {
+        IconName::Menu => {
+            for y in [6.5, 12.0, 17.5] {
+                scene.stroke_line(g.p(4.0, y), g.p(20.0, y), w, color);
+            }
+        }
+        IconName::Search => {
+            scene.stroke_circle(g.p(10.5, 10.5), g.d(6.5), w, color);
+            scene.stroke_line(g.p(15.3, 15.3), g.p(20.5, 20.5), w, color);
+        }
+        IconName::Files => {
+            scene.fill_polygon(
+                &[
+                    g.p(3.0, 6.5),
+                    g.p(9.0, 6.5),
+                    g.p(11.0, 8.8),
+                    g.p(21.0, 8.8),
+                    g.p(21.0, 19.5),
+                    g.p(3.0, 19.5),
+                ],
+                color,
+            );
+        }
+        IconName::Settings => {
+            scene.stroke_circle(g.p(12.0, 12.0), g.d(3.4), w, color);
+            for k in 0..8 {
+                let a = (k as f64 * 45.0).to_radians();
+                let (c, s) = (a.cos(), a.sin());
+                scene.stroke_line(
+                    g.p(12.0 + 5.2 * c, 12.0 + 5.2 * s),
+                    g.p(12.0 + 8.4 * c, 12.0 + 8.4 * s),
+                    g.d(2.2),
+                    color,
+                );
+            }
+        }
+        IconName::Terminal => {
+            scene.stroke_rounded_rect(
+                Rect::from_xywh(g.p(3.0, 4.5).x, g.p(3.0, 4.5).y, g.d(18.0), g.d(15.0)),
+                g.d(2.5),
+                w,
+                color,
+            );
+            scene.stroke_polyline(&[g.p(7.0, 10.0), g.p(9.5, 12.0), g.p(7.0, 14.0)], w, color);
+            scene.stroke_line(g.p(12.0, 15.0), g.p(16.0, 15.0), w, color);
+        }
+        IconName::Music => {
+            scene.stroke_circle(g.p(9.5, 17.0), g.d(2.6), w, color);
+            scene.stroke_polyline(&[g.p(12.0, 17.0), g.p(12.0, 6.5), g.p(17.0, 8.0)], w, color);
+        }
+        IconName::Star => {
+            let pts: Vec<Point> = (0..10)
+                .map(|i| {
+                    let a = (-90.0 + i as f64 * 36.0).to_radians();
+                    let r = if i % 2 == 0 { 9.0 } else { 3.8 };
+                    g.p(12.0 + r * a.cos(), 12.5 + r * a.sin())
+                })
+                .collect();
+            scene.fill_polygon(&pts, color);
+        }
+        IconName::Clock => {
+            scene.stroke_circle(g.p(12.0, 12.0), g.d(8.0), w, color);
+            scene.stroke_polyline(&[g.p(12.0, 12.0), g.p(12.0, 7.5)], w, color);
+            scene.stroke_polyline(&[g.p(12.0, 12.0), g.p(16.0, 13.8)], w, color);
+        }
+        IconName::Store => {
+            scene.fill_polygon(
+                &[
+                    g.p(5.5, 8.0),
+                    g.p(18.5, 8.0),
+                    g.p(17.5, 20.0),
+                    g.p(6.5, 20.0),
+                ],
+                color,
+            );
+            scene.stroke_polyline(
+                &[g.p(9.0, 8.0), g.p(9.0, 6.0), g.p(15.0, 6.0), g.p(15.0, 8.0)],
+                g.d(1.8),
+                color,
+            );
+        }
+        IconName::Edit => {
+            scene.fill_polygon(
+                &[
+                    g.p(15.5, 3.5),
+                    g.p(20.5, 8.5),
+                    g.p(9.0, 20.0),
+                    g.p(4.0, 21.0),
+                    g.p(5.0, 16.0),
+                ],
+                color,
+            );
+        }
+        IconName::Wifi => {
+            scene.fill_circle(g.p(12.0, 18.0), g.d(1.4), color);
+            for r in [4.0, 7.5, 11.0] {
+                scene.stroke_polyline(
+                    &arc(g.p(12.0, 18.0), g.d(r), 200.0, 340.0, 10),
+                    g.d(1.9),
+                    color,
+                );
+            }
+        }
+        IconName::Volume => {
+            scene.fill_polygon(
+                &[
+                    g.p(3.0, 9.5),
+                    g.p(7.0, 9.5),
+                    g.p(11.0, 5.0),
+                    g.p(11.0, 19.0),
+                    g.p(7.0, 14.5),
+                    g.p(3.0, 14.5),
+                ],
+                color,
+            );
+            for r in [5.0, 8.0] {
+                scene.stroke_polyline(
+                    &arc(g.p(11.0, 12.0), g.d(r), -50.0, 50.0, 8),
+                    g.d(1.9),
+                    color,
+                );
+            }
+        }
+        IconName::Battery => {
+            scene.stroke_rounded_rect(
+                Rect::from_xywh(g.p(2.0, 7.0).x, g.p(2.0, 7.0).y, g.d(17.0), g.d(10.0)),
+                g.d(2.5),
+                w,
+                color,
+            );
+            scene.fill_rounded_rect(
+                Rect::from_xywh(g.p(19.5, 10.5).x, g.p(19.5, 10.5).y, g.d(2.5), g.d(3.0)),
+                g.d(1.0),
+                color,
+            );
+            scene.fill_rounded_rect(
+                Rect::from_xywh(g.p(4.5, 9.5).x, g.p(4.5, 9.5).y, g.d(9.5), g.d(5.0)),
+                g.d(1.2),
+                color,
+            );
+        }
+        IconName::Power => {
+            scene.stroke_polyline(&arc(g.p(12.0, 12.0), g.d(7.5), -60.0, 240.0, 28), w, color);
+            scene.stroke_line(g.p(12.0, 3.5), g.p(12.0, 12.0), w, color);
+        }
+        IconName::Grid => {
+            for (x, y) in [(4.0, 4.0), (13.5, 4.0), (4.0, 13.5), (13.5, 13.5)] {
+                scene.fill_rounded_rect(
+                    Rect::from_xywh(g.p(x, y).x, g.p(x, y).y, g.d(6.5), g.d(6.5)),
+                    g.d(1.6),
+                    color,
+                );
+            }
+        }
+        IconName::List => {
+            for y in [6.5, 12.0, 17.5] {
+                scene.fill_circle(g.p(5.5, y), g.d(1.4), color);
+                scene.stroke_line(g.p(9.5, y), g.p(19.5, y), g.d(1.8), color);
+            }
+        }
+        IconName::Carousel => {
+            scene.fill_rounded_rect(
+                Rect::from_xywh(g.p(3.0, 8.5).x, g.p(3.0, 8.5).y, g.d(3.2), g.d(7.0)),
+                g.d(1.2),
+                color,
+            );
+            scene.fill_rounded_rect(
+                Rect::from_xywh(g.p(17.8, 8.5).x, g.p(17.8, 8.5).y, g.d(3.2), g.d(7.0)),
+                g.d(1.2),
+                color,
+            );
+            scene.fill_rounded_rect(
+                Rect::from_xywh(g.p(8.0, 6.0).x, g.p(8.0, 6.0).y, g.d(8.0), g.d(12.0)),
+                g.d(1.6),
+                color,
+            );
+        }
+        IconName::ChevronLeft => {
+            scene.stroke_polyline(
+                &[g.p(14.5, 6.0), g.p(8.5, 12.0), g.p(14.5, 18.0)],
+                g.d(2.4),
+                color,
+            );
+        }
+        IconName::ChevronRight => {
+            scene.stroke_polyline(
+                &[g.p(9.5, 6.0), g.p(15.5, 12.0), g.p(9.5, 18.0)],
+                g.d(2.4),
+                color,
+            );
+        }
+        IconName::Close => {
+            scene.stroke_line(g.p(6.5, 6.5), g.p(17.5, 17.5), w, color);
+            scene.stroke_line(g.p(17.5, 6.5), g.p(6.5, 17.5), w, color);
+        }
+        IconName::Minimize => {
+            scene.stroke_line(g.p(5.0, 12.0), g.p(19.0, 12.0), w, color);
+        }
+        IconName::Maximize => {
+            scene.stroke_rounded_rect(
+                Rect::from_xywh(g.p(5.0, 5.0).x, g.p(5.0, 5.0).y, g.d(14.0), g.d(14.0)),
+                g.d(1.5),
+                w,
+                color,
+            );
+        }
+        IconName::Check => {
+            scene.stroke_polyline(
+                &[g.p(5.0, 12.5), g.p(10.0, 17.5), g.p(19.0, 6.5)],
+                g.d(2.2),
+                color,
+            );
+        }
+        IconName::Plus => {
+            scene.stroke_line(g.p(12.0, 5.0), g.p(12.0, 19.0), w, color);
+            scene.stroke_line(g.p(5.0, 12.0), g.p(19.0, 12.0), w, color);
+        }
+        IconName::Home => {
+            scene.fill_polygon(
+                &[
+                    g.p(12.0, 3.5),
+                    g.p(21.0, 11.5),
+                    g.p(18.5, 11.5),
+                    g.p(18.5, 20.0),
+                    g.p(13.5, 20.0),
+                    g.p(13.5, 15.0),
+                    g.p(10.5, 15.0),
+                    g.p(10.5, 20.0),
+                    g.p(5.5, 20.0),
+                    g.p(5.5, 11.5),
+                    g.p(3.0, 11.5),
+                ],
+                color,
+            );
+        }
+        IconName::User => {
+            scene.stroke_circle(g.p(12.0, 9.0), g.d(4.0), w, color);
+            scene.stroke_polyline(
+                &[
+                    g.p(5.5, 20.5),
+                    g.p(5.5, 18.5),
+                    g.p(8.5, 15.5),
+                    g.p(15.5, 15.5),
+                    g.p(18.5, 18.5),
+                    g.p(18.5, 20.5),
+                ],
+                w,
+                color,
+            );
+        }
+        IconName::Info => {
+            scene.stroke_circle(g.p(12.0, 12.0), g.d(8.0), w, color);
+            scene.fill_circle(g.p(12.0, 7.8), g.d(1.3), color);
+            scene.stroke_line(g.p(12.0, 11.0), g.p(12.0, 16.5), w, color);
+        }
+    }
+}
+
+#[cfg(test)]
+mod icon_tests {
+    use super::*;
+    use libluna_core::Theme;
+    use libluna_render::{Scene, TextEngine};
+
+    #[test]
+    fn every_icon_draws_without_panic() {
+        let theme = Theme::dark();
+        let text = TextEngine::none();
+        for name in [
+            IconName::Menu,
+            IconName::Search,
+            IconName::Files,
+            IconName::Settings,
+            IconName::Terminal,
+            IconName::Music,
+            IconName::Star,
+            IconName::Clock,
+            IconName::Store,
+            IconName::Edit,
+            IconName::Wifi,
+            IconName::Volume,
+            IconName::Battery,
+            IconName::Power,
+            IconName::Grid,
+            IconName::List,
+            IconName::Carousel,
+            IconName::ChevronLeft,
+            IconName::ChevronRight,
+            IconName::Close,
+            IconName::Minimize,
+            IconName::Maximize,
+            IconName::Check,
+            IconName::Plus,
+            IconName::Home,
+            IconName::User,
+            IconName::Info,
+        ] {
+            let mut scene = Scene::new();
+            let mut ctx = PaintCtx::new(&mut scene, &theme, &text);
+            paint_icon(
+                &mut ctx,
+                name,
+                Rect::from_xywh(0.0, 0.0, 24.0, 24.0),
+                theme.colors.text,
+            );
+            assert!(!scene.is_empty(), "ikona {name:?} nic nie rysuje");
+        }
+    }
+}

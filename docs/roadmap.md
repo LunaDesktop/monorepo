@@ -62,6 +62,11 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   Doszły odpowiedniki GTK4: `InfoBar` (4 rodzaje + zamknięcie), `Picture` (`ContentFit`:
   contain/cover/fill/fit-width/fit-height) i `MediaControls` (play/pauza + pasek postępu +
   czasy); podgląd: `cargo run -p luna-demo --bin new-widgets` → `docs/images/new-widgets.png`.
+- **Pakiet ikon symbolicznych** (`libluna-widgets::icon`): `IconName` + `paint_icon`,
+  ~27 ikon rysowanych wektorowo w naszym stylu (Menu/Search/Files/Settings/Terminal/Music/
+  Star/Clock/Store/Edit/Wifi/Volume/Battery/Power/Grid/List/Carousel/…). Renderer zyskał
+  prymitywy: `fill_circle`, `stroke_circle`, `stroke_polyline`, `fill_polygon` (z zaokrąglonymi
+  końcami). Ikony użyte w panelu i launcherze Luny (zamiast glifów fontu).
   Tokeny metryk kontenerów: `Theme::metrics.container`. Animacje: `libluna-core` `motion`
   (`Easing`, `lerp`, `Animation`), użyte w `Stack` (przejścia `StackTransition`), `Revealer`,
   `Toast`, `BottomSheet` i `Pager` (sterowane `advance(dt, …)`).
@@ -180,6 +185,8 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
 
 ## Później (poza MVP)
 - Dostępność AT-SPI, IME, schowek, drag & drop, animacje, backend GPU, mini-CSS dla motywów.
+- Renderer: **klip nie obejmuje tekstu** (`DrawCommand::Text` ignoruje maskę) — naprawić,
+  bo dotyczy `ScrollView` i innych przewijanych widoków.
 
 ## Inwentarz widgetów (z makiet → moduł docelowy)
 
