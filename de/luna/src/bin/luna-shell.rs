@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use libluna_core::{ButtonState, Event, PointerButton, Rect};
 use libluna_platform::{run, AppConfig, Frame, LayerConfig};
-use libluna_widgets::PaintCtx;
+use libluna_widgets::{IconName, PaintCtx};
 use luna::notifications::{Notification, Notifications};
 use luna::osd::Osd;
 use luna::panel::{self, App, Launcher, PanelState, LAUNCHER_H, LAUNCHER_W, THICKNESS};
@@ -39,7 +39,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     let mut launcher = Launcher::new();
     let mut open = false;
-    let mut osd = Osd::new("◆", "Głośność", 0.0);
+    let mut osd = Osd::new(IconName::Volume, "Głośność", 0.0);
     let mut notes = Notifications::new();
     let mut timer = 0.0f64;
 
@@ -88,10 +88,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             pe.position,
                         ) {
                             // Uruchom aplikację (jeśli ma polecenie).
-                            if let Some(exec) = apps.get(i).and_then(|a| a.exec.clone()) {
-                                let _ =
-                                    std::process::Command::new("sh").arg("-c").arg(exec).spawn();
-                            }
+                            launch(&apps, i);
                             open = false;
                         }
                     }
@@ -106,7 +103,41 @@ fn main() -> Result<(), Box<dyn Error>> {
                         launcher.scroll = (launcher.scroll - se.dy * 24.0).clamp(0.0, max);
                     }
                 }
-                Event::Key(ke) if ke.keysym == 0xff1b => open = false, // Escape
+                Event::Key(ke) if ke.state == ButtonState::Pressed && open => match ke.keysym {
+                    0xff1b => open = false, // Escape
+                    // Góra/dół: pionowa nawigacja.
+                    0xff52 | 0xff54 => {
+                        let dy = if ke.keysym == 0xff52 { -1 } else { 1 };
+                        launcher.navigate(apps.len(), 0, dy);
+                        panel::ensure_selection_visible(
+                            &apps,
+                            &mut launcher,
+                            larea,
+                            &frame.theme,
+                            text,
+                        );
+                    }
+                    // Lewo/prawo: pozioma nawigacja (kolumna w siatce, karta w karuzeli).
+                    0xff51 | 0xff53 => {
+                        let dx = if ke.keysym == 0xff51 { -1 } else { 1 };
+                        launcher.navigate(apps.len(), dx, 0);
+                        panel::ensure_selection_visible(
+                            &apps,
+                            &mut launcher,
+                            larea,
+                            &frame.theme,
+                            text,
+                        );
+                    }
+                    // Enter / Enter (numeryczny): uruchom zaznaczoną pozycję.
+                    0xff0d | 0xff8d => {
+                        if let Some(i) = launcher.selected_index(apps.len()) {
+                            launch(&apps, i);
+                            open = false;
+                        }
+                    }
+                    _ => {}
+                },
                 _ => {}
             }
         }
@@ -124,7 +155,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         if timer % 4.0 < dt {
             notes.push(
                 Notification::new("Pliki", "Kopiowanie zakończone", "12 plików → Dokumenty")
-                    .with_glyph("◆"),
+                    .with_icon(IconName::Files),
             );
         }
         osd.advance(dt);
@@ -150,6 +181,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         frame.request_frame();
     })
+}
+
+/// Uruchamia aplikację o indeksie `i` (jeśli ma polecenie).
+fn launch(apps: &[App], i: usize) {
+    if let Some(exec) = apps.get(i).and_then(|a| a.exec.clone()) {
+        let _ = std::process::Command::new("sh").arg("-c").arg(exec).spawn();
+    }
 }
 
 /// Bieżąca godzina i data w UTC — `("HH:MM", "DD.MM")`.

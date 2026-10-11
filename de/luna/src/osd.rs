@@ -4,7 +4,7 @@
 
 use libluna_core::style::weight;
 use libluna_core::Rect;
-use libluna_widgets::PaintCtx;
+use libluna_widgets::{paint_icon, IconName, PaintCtx};
 
 /// Czas wchodzenia (s).
 const FADE_IN: f64 = 0.18;
@@ -14,8 +14,8 @@ const FADE_OUT: f64 = 0.45;
 /// Wskaźnik OSD.
 #[derive(Debug, Clone)]
 pub struct Osd {
-    /// Symbol rysowany fontem interfejsu.
-    pub glyph: String,
+    /// Ikona z pakietu Luny.
+    pub icon: IconName,
     /// Etykieta (np. „Głośność”).
     pub label: String,
     /// Wartość 0..1 (poziom).
@@ -26,9 +26,9 @@ pub struct Osd {
 
 impl Osd {
     /// Tworzy wskaźnik i włącza jego wyświetlanie.
-    pub fn new(glyph: impl Into<String>, label: impl Into<String>, value: f64) -> Self {
+    pub fn new(icon: IconName, label: impl Into<String>, value: f64) -> Self {
         Self {
-            glyph: glyph.into(),
+            icon,
             label: label.into(),
             value: value.clamp(0.0, 1.0),
             age: 0.0,
@@ -80,14 +80,8 @@ impl Osd {
         let icon = Rect::from_xywh(rect.x() + pad, cy - 20.0, 40.0, 40.0);
         ctx.scene
             .fill_rounded_rect(icon, t.radius.small, t.colors.accent.scale_alpha(0.18 * a));
-        ctx.label_center(
-            icon.center().x,
-            icon.center().y,
-            &self.glyph,
-            20.0,
-            weight::MEDIUM,
-            t.colors.accent.scale_alpha(a),
-        );
+        let icon_inner = Rect::from_xywh(icon.x() + 10.0, icon.y() + 10.0, 20.0, 20.0);
+        paint_icon(ctx, self.icon, icon_inner, t.colors.accent.scale_alpha(a));
 
         // Etykieta i wartość procentowa.
         let text_x = icon.right() + t.spacing.md;
@@ -133,7 +127,7 @@ mod tests {
 
     #[test]
     fn fades_in_and_out() {
-        let mut osd = Osd::new("◆", "Głośność", 0.5);
+        let mut osd = Osd::new(IconName::Volume, "Głośność", 0.5);
         assert!(osd.visible());
         assert!(osd.opacity() < 0.05); // dopiero start
         osd.advance(0.3);
@@ -149,7 +143,7 @@ mod tests {
         let text = TextEngine::none();
         let mut scene = Scene::new();
         let mut ctx = PaintCtx::new(&mut scene, &theme, &text);
-        let mut osd = Osd::new("◆", "Głośność", 0.65);
+        let mut osd = Osd::new(IconName::Volume, "Głośność", 0.65);
         osd.advance(0.3);
         osd.paint(&mut ctx, Rect::from_xywh(0.0, 0.0, 320.0, 72.0));
         assert!(scene.len() > 5);

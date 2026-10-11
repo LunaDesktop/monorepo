@@ -127,6 +127,8 @@ impl LauncherView {
 pub struct Launcher {
     pub view: LauncherView,
     pub carousel: usize,
+    /// Zaznaczona pozycja (nawigacja klawiaturą); `None` = brak zaznaczenia.
+    pub selected: Option<usize>,
     /// Pionowe przewinięcie zawartości (Lista/Siatka), w pikselach.
     pub scroll: f64,
 }
@@ -139,6 +141,41 @@ impl Launcher {
     /// Przełącza na kolejny widok.
     pub fn next_view(&mut self) {
         self.view = self.view.next();
+    }
+
+    /// Bieżący indeks zaznaczenia (domyślnie 0, o ile są pozycje).
+    pub fn selected_index(&self, count: usize) -> Option<usize> {
+        if count == 0 {
+            None
+        } else {
+            Some(self.selected.unwrap_or(0).min(count - 1))
+        }
+    }
+
+    /// Przesuwa zaznaczenie o krok (`dx`, `dy`) zależnie od widoku.
+    ///
+    /// W siatce `dx`/`dy` to ruch odpowiednio w kolumnie/wierszu; w liście
+    /// i karuzeli używany jest tylko jeden z nich (`dy`/`dx`).
+    pub fn navigate(&mut self, count: usize, dx: i64, dy: i64) {
+        if count == 0 {
+            return;
+        }
+        let n = count as i64;
+        let cur = self.selected.unwrap_or(0).min(count - 1) as i64;
+        let next = match self.view {
+            LauncherView::Grid => {
+                let cols = GRID_COLS as i64;
+                let rows = (n + cols - 1) / cols;
+                let col = (cur % cols + dx).clamp(0, cols - 1);
+                let row = (cur / cols + dy).clamp(0, rows - 1);
+                (row * cols + col).min(n - 1)
+            }
+            _ => (cur + dx + dy).rem_euclid(n),
+        };
+        self.selected = Some(next as usize);
+        if self.view == LauncherView::Carousel {
+            self.carousel = next as usize;
+        }
     }
 }
 
@@ -502,6 +539,42 @@ pub fn launcher_scroll_max(
     (total - content.height()).max(0.0)
 }
 
+/// Dopasowuje przewinięcie tak, aby zaznaczona pozycja była widoczna.
+pub fn ensure_selection_visible(
+    apps: &[App],
+    launcher: &mut Launcher,
+    area: Rect,
+    theme: &Theme,
+    text: &TextEngine,
+) {
+    let Some(i) = launcher.selected else {
+        return;
+    };
+    if i >= apps.len() {
+        return;
+    }
+    let content = launcher_rects(area, theme, text).content;
+    let (top, bottom) = match launcher.view {
+        LauncherView::Grid => {
+            let t = grid_tile(content, i);
+            (t.y() - content.y(), t.bottom() - content.y())
+        }
+        LauncherView::List => {
+            let t = list_row(content, i);
+            (t.y() - content.y(), t.bottom() - content.y())
+        }
+        LauncherView::Carousel => return,
+    };
+    let view_h = content.height();
+    if top < launcher.scroll {
+        launcher.scroll = top;
+    } else if bottom > launcher.scroll + view_h {
+        launcher.scroll = bottom - view_h;
+    }
+    let max = launcher_scroll_max(apps, launcher, area, theme, text);
+    launcher.scroll = launcher.scroll.clamp(0.0, max);
+}
+
 /// Rysuje launcher w zadanym prostokącie.
 pub fn paint_launcher(apps: &[App], launcher: &Launcher, ctx: &mut PaintCtx, area: Rect) {
     let t = *ctx.theme;
@@ -549,6 +622,7 @@ pub fn paint_launcher(apps: &[App], launcher: &Launcher, ctx: &mut PaintCtx, are
                 let t = grid_tile(r.content, i);
                 paint_grid_tile(
                     app,
+                    launcher.selected_index(apps.len()) == Some(i),
                     ctx,
                     Rect::from_xywh(t.x(), t.y() - scroll, t.width(), t.height()),
                 );
@@ -559,6 +633,7 @@ pub fn paint_launcher(apps: &[App], launcher: &Launcher, ctx: &mut PaintCtx, are
                 let t = list_row(r.content, i);
                 paint_list_row(
                     app,
+                    launcher.selected_index(apps.len()) == Some(i),
                     ctx,
                     Rect::from_xywh(t.x(), t.y() - scroll, t.width(), t.height()),
                 );
@@ -578,13 +653,26 @@ pub fn paint_launcher(apps: &[App], launcher: &Launcher, ctx: &mut PaintCtx, are
     ctx.scene.pop_clip();
 }
 
-/// Kafelek siatki: ikona + nazwa.
-fn paint_grid_tile(app: &App, ctx: &mut PaintCtx, rect: Rect) {
+/// Kafelek siatki: ikona + nazwa; zaznaczony wyróżniony akcentem.
+fn paint_grid_tile(app: &App, selected: bool, ctx: &mut PaintCtx, rect: Rect) {
     let t = ctx.theme;
-    ctx.scene
-        .fill_rounded_rect(rect, t.radius.medium, t.colors.view_bg);
-    ctx.scene
-        .stroke_rounded_rect(rect, t.radius.medium, 1.0, t.colors.border);
+    let bg = if selected {
+        t.colors.accent.scale_alpha(0.12)
+    } else {
+        t.colors.view_bg
+    };
+    ctx.scene.fill_rounded_rect(rect, t.radius.medium, bg);
+    let border = if selected {
+        t.colors.accent
+    } else {
+        t.colors.border
+    };
+    ctx.scene.stroke_rounded_rect(
+        rect,
+        t.radius.medium,
+        if selected { 2.0 } else { 1.0 },
+        border,
+    );
 
     let icon = Rect::from_xywh(rect.center().x - 18.0, rect.y() + 12.0, 36.0, 36.0);
     ctx.scene
@@ -601,13 +689,26 @@ fn paint_grid_tile(app: &App, ctx: &mut PaintCtx, rect: Rect) {
     );
 }
 
-/// Wiersz listy: ikona + nazwa + kategoria.
-fn paint_list_row(app: &App, ctx: &mut PaintCtx, rect: Rect) {
+/// Wiersz listy: ikona + nazwa + kategoria; zaznaczony wyróżniony akcentem.
+fn paint_list_row(app: &App, selected: bool, ctx: &mut PaintCtx, rect: Rect) {
     let t = ctx.theme;
-    ctx.scene
-        .fill_rounded_rect(rect, t.radius.medium, t.colors.view_bg);
-    ctx.scene
-        .stroke_rounded_rect(rect, t.radius.medium, 1.0, t.colors.border);
+    let bg = if selected {
+        t.colors.accent.scale_alpha(0.12)
+    } else {
+        t.colors.view_bg
+    };
+    ctx.scene.fill_rounded_rect(rect, t.radius.medium, bg);
+    let border = if selected {
+        t.colors.accent
+    } else {
+        t.colors.border
+    };
+    ctx.scene.stroke_rounded_rect(
+        rect,
+        t.radius.medium,
+        if selected { 2.0 } else { 1.0 },
+        border,
+    );
 
     let icon = Rect::from_xywh(rect.x() + t.spacing.md, rect.center().y - 16.0, 32.0, 32.0);
     ctx.scene
@@ -739,6 +840,7 @@ mod tests {
         let launcher = Launcher {
             view,
             carousel: 2,
+            selected: None,
             scroll: 0.0,
         };
         paint_launcher(&App::sample(), &launcher, &mut ctx, area());
@@ -778,6 +880,7 @@ mod tests {
         let mut launcher = Launcher {
             view: LauncherView::List,
             carousel: 0,
+            selected: None,
             scroll: 0.0,
         };
         let max = launcher_scroll_max(&apps, &launcher, area(), &theme, &text);
@@ -809,6 +912,7 @@ mod tests {
             let launcher = Launcher {
                 view,
                 carousel: 2,
+                selected: None,
                 scroll: 0.0,
             };
             let r = launcher_rects(area(), &theme, &text);
@@ -825,5 +929,59 @@ mod tests {
                 "widok {view:?}"
             );
         }
+    }
+
+    #[test]
+    fn keyboard_navigation_moves_selection_per_view() {
+        // Lista: +1/-1 po indeksie, z zawijaniem.
+        let mut list = Launcher {
+            view: LauncherView::List,
+            ..Launcher::default()
+        };
+        assert_eq!(list.selected_index(0), None);
+        list.navigate(5, 0, 1);
+        assert_eq!(list.selected_index(5), Some(1));
+        list.navigate(5, 0, -1);
+        list.navigate(5, 0, -1);
+        assert_eq!(list.selected_index(5), Some(4)); // zawija
+
+        // Siatka: pion = ±GRID_COLS, poziom = ±1.
+        let mut grid = Launcher {
+            view: LauncherView::Grid,
+            ..Launcher::default()
+        };
+        grid.navigate(24, 0, 1);
+        assert_eq!(grid.selected_index(24), Some(GRID_COLS));
+        grid.navigate(24, 1, 0);
+        assert_eq!(grid.selected_index(24), Some(GRID_COLS + 1));
+        grid.navigate(24, 0, -5);
+        assert_eq!(grid.selected_index(24), Some(1)); // nie wychodzi nad wiersz 0
+
+        // Karuzela: steruje indeksem karty.
+        let mut car = Launcher {
+            view: LauncherView::Carousel,
+            ..Launcher::default()
+        };
+        car.navigate(6, 1, 0);
+        assert_eq!(car.selected_index(6), Some(1));
+        assert_eq!(car.carousel, 1);
+    }
+
+    #[test]
+    fn selection_scrolls_into_view() {
+        let theme = Theme::light();
+        let text = TextEngine::none();
+        let apps = App::sample();
+        let mut launcher = Launcher {
+            view: LauncherView::List,
+            ..Launcher::default()
+        };
+        // Wybierz ostatnią pozycję i upewnij się, że lista się przewinęła.
+        launcher.navigate(apps.len(), 0, -1);
+        ensure_selection_visible(&apps, &mut launcher, area(), &theme, &text);
+        assert!(
+            launcher.scroll > 0.0,
+            "zaznaczenie poza ekranem ma przewijać"
+        );
     }
 }

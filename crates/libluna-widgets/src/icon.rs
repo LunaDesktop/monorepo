@@ -254,6 +254,74 @@ pub enum IconName {
     App,
 }
 
+impl IconName {
+    /// Wszystkie ikony z pakietu (kolejność = kolejność w galerii).
+    pub const ALL: [IconName; 28] = [
+        IconName::Menu,
+        IconName::Search,
+        IconName::Files,
+        IconName::Settings,
+        IconName::Terminal,
+        IconName::Music,
+        IconName::Star,
+        IconName::Clock,
+        IconName::Store,
+        IconName::Edit,
+        IconName::Wifi,
+        IconName::Volume,
+        IconName::Battery,
+        IconName::Power,
+        IconName::Grid,
+        IconName::List,
+        IconName::Carousel,
+        IconName::ChevronLeft,
+        IconName::ChevronRight,
+        IconName::Close,
+        IconName::Minimize,
+        IconName::Maximize,
+        IconName::Check,
+        IconName::Plus,
+        IconName::Home,
+        IconName::User,
+        IconName::Info,
+        IconName::App,
+    ];
+
+    /// Nazwa ikony (do galerii/diagnostyki).
+    pub fn name(self) -> &'static str {
+        match self {
+            IconName::Menu => "Menu",
+            IconName::Search => "Search",
+            IconName::Files => "Files",
+            IconName::Settings => "Settings",
+            IconName::Terminal => "Terminal",
+            IconName::Music => "Music",
+            IconName::Star => "Star",
+            IconName::Clock => "Clock",
+            IconName::Store => "Store",
+            IconName::Edit => "Edit",
+            IconName::Wifi => "Wifi",
+            IconName::Volume => "Volume",
+            IconName::Battery => "Battery",
+            IconName::Power => "Power",
+            IconName::Grid => "Grid",
+            IconName::List => "List",
+            IconName::Carousel => "Carousel",
+            IconName::ChevronLeft => "ChevronLeft",
+            IconName::ChevronRight => "ChevronRight",
+            IconName::Close => "Close",
+            IconName::Minimize => "Minimize",
+            IconName::Maximize => "Maximize",
+            IconName::Check => "Check",
+            IconName::Plus => "Plus",
+            IconName::Home => "Home",
+            IconName::User => "User",
+            IconName::Info => "Info",
+            IconName::App => "App",
+        }
+    }
+}
+
 /// Współrzędne w siatce 24×24 mapowane na prostokąt docelowy.
 struct Grid {
     ox: f64,
@@ -579,36 +647,7 @@ mod icon_tests {
     fn every_icon_draws_without_panic() {
         let theme = Theme::dark();
         let text = TextEngine::none();
-        for name in [
-            IconName::Menu,
-            IconName::Search,
-            IconName::Files,
-            IconName::Settings,
-            IconName::Terminal,
-            IconName::Music,
-            IconName::Star,
-            IconName::Clock,
-            IconName::Store,
-            IconName::Edit,
-            IconName::Wifi,
-            IconName::Volume,
-            IconName::Battery,
-            IconName::Power,
-            IconName::Grid,
-            IconName::List,
-            IconName::Carousel,
-            IconName::ChevronLeft,
-            IconName::ChevronRight,
-            IconName::Close,
-            IconName::Minimize,
-            IconName::Maximize,
-            IconName::Check,
-            IconName::Plus,
-            IconName::Home,
-            IconName::User,
-            IconName::Info,
-            IconName::App,
-        ] {
+        for name in IconName::ALL {
             let mut scene = Scene::new();
             let mut ctx = PaintCtx::new(&mut scene, &theme, &text);
             paint_icon(

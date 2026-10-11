@@ -6,7 +6,7 @@
 
 use libluna_core::style::weight;
 use libluna_core::Rect;
-use libluna_widgets::PaintCtx;
+use libluna_widgets::{paint_icon, IconName, PaintCtx};
 
 /// Czas animacji wejścia/wyjścia (s).
 const SLIDE: f64 = 0.22;
@@ -24,8 +24,8 @@ pub struct Notification {
     pub app: String,
     pub title: String,
     pub body: String,
-    /// Symbol rysowany fontem interfejsu.
-    pub glyph: String,
+    /// Ikona z pakietu Luny.
+    pub icon: IconName,
     /// Czas życia (s); 0 = nie zamykaj automatycznie.
     pub timeout: f64,
 }
@@ -36,13 +36,13 @@ impl Notification {
             app: app.into(),
             title: title.into(),
             body: body.into(),
-            glyph: "●".to_owned(),
+            icon: IconName::Info,
             timeout: 5.0,
         }
     }
 
-    pub fn with_glyph(mut self, glyph: impl Into<String>) -> Self {
-        self.glyph = glyph.into();
+    pub fn with_icon(mut self, icon: IconName) -> Self {
+        self.icon = icon;
         self
     }
 }
@@ -118,14 +118,8 @@ impl Notifications {
                 t.radius.small,
                 t.colors.accent.scale_alpha(0.18 * a),
             );
-            ctx.label_center(
-                icon.center().x,
-                icon.center().y,
-                &n.glyph,
-                16.0,
-                weight::MEDIUM,
-                t.colors.accent.scale_alpha(a),
-            );
+            let inner = Rect::from_xywh(icon.x() + 7.0, icon.y() + 7.0, 18.0, 18.0);
+            paint_icon(ctx, n.icon, inner, t.colors.accent.scale_alpha(a));
 
             let tx = icon.right() + pad;
             ctx.label_left(
@@ -216,7 +210,7 @@ mod tests {
         let mut scene = Scene::new();
         let mut ctx = PaintCtx::new(&mut scene, &theme, &text);
         let mut n = Notifications::new();
-        n.push(Notification::new("Pliki", "Kopiowanie", "12 plików"));
+        n.push(Notification::new("Pliki", "Kopiowanie", "12 plików").with_icon(IconName::Files));
         n.advance(0.3);
         n.paint(&mut ctx, Rect::from_xywh(0.0, 40.0, 1280.0, 200.0));
         assert!(scene.len() > 5);

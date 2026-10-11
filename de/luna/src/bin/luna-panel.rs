@@ -8,7 +8,7 @@ use std::error::Error;
 
 use libluna_core::{Rect, Size, Theme};
 use libluna_render::{Scene, SoftwareRenderer, TextEngine};
-use libluna_widgets::PaintCtx;
+use libluna_widgets::{IconName, PaintCtx};
 use luna::notifications::{Notification, Notifications};
 use luna::osd::Osd;
 use luna::panel::{self, App, Launcher, LauncherView, PanelState};
@@ -29,11 +29,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         let launcher = Launcher {
             view: LauncherView::Grid,
             carousel: 0,
+            selected: None,
             scroll: 0.0,
         };
         panel::paint_desktop(&pstate, &apps, &launcher, &mut paint, size);
 
-        let mut osd = Osd::new("◆", "Głośność", 0.65);
+        let mut osd = Osd::new(IconName::Volume, "Głośność", 0.65);
         osd.advance(0.3);
         osd.paint(
             &mut paint,
@@ -43,9 +44,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut notes = Notifications::new();
         notes.push(
             Notification::new("Pliki", "Kopiowanie zakończone", "12 plików → Dokumenty")
-                .with_glyph("◆"),
+                .with_icon(IconName::Files),
         );
-        notes.push(Notification::new("System", "Bateria", "Pozostało 18%").with_glyph("■"));
+        notes.push(
+            Notification::new("System", "Bateria", "Pozostało 18%").with_icon(IconName::Battery),
+        );
         notes.advance(0.3);
         notes.paint(&mut paint, Rect::from_xywh(0.0, 56.0, W as f64, 240.0));
 
@@ -68,6 +71,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let launcher = Launcher {
             view,
             carousel: 2,
+            selected: None,
             scroll: if view == LauncherView::List {
                 140.0
             } else {
