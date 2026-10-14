@@ -174,8 +174,17 @@ pub type CursorModel = Arc<Mutex<Option<Point>>>;
 /// Współdzielony numer bieżącej przestrzeni roboczej (kompozytor ↔ wątek wyjścia).
 pub type WorkspaceModel = Arc<Mutex<usize>>;
 
+/// Stan podglądu okien/przestrzeni (współdzielony z wątkiem wyjścia).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Overview {
+    /// Czy podgląd jest włączony.
+    pub on: bool,
+    /// Przeciągane okno: `(slot, pozycja kursora)`.
+    pub drag: Option<(usize, (f64, f64))>,
+}
+
 /// Współdzielony tryb podglądu okien/przestrzeni (kompozytor ↔ wątek wyjścia).
-pub type OverviewModel = Arc<Mutex<bool>>;
+pub type OverviewModel = Arc<Mutex<Overview>>;
 
 /// Margines podglądu (od krawędzi ekranu).
 pub const OVERVIEW_PAD: f64 = 56.0;
@@ -358,7 +367,7 @@ impl Default for State {
             toplevel_managers: Vec::new(),
             ws_count: 4,
             ws_current: Arc::new(Mutex::new(0)),
-            overview: Arc::new(Mutex::new(false)),
+            overview: Arc::new(Mutex::new(Overview::default())),
             ws_managers: Vec::new(),
             ws_groups: Vec::new(),
             ws_handles: Vec::new(),
@@ -397,12 +406,29 @@ impl State {
 
     /// Czy trwa podgląd okien/przestrzeni.
     pub fn overview_on(&self) -> bool {
-        *self.overview.lock_or_recover()
+        self.overview.lock_or_recover().on
     }
 
-    /// Włącza/wyłącza podgląd okien/przestrzeni.
+    /// Włącza/wyłącza podgląd okien/przestrzeni (wyłączenie kończy przeciąganie).
     pub fn set_overview(&self, on: bool) {
-        *self.overview.lock_or_recover() = on;
+        let mut o = self.overview.lock_or_recover();
+        o.on = on;
+        if !on {
+            o.drag = None;
+        }
+    }
+
+    /// Ustawia przeciągane okno podglądu: `(slot, pozycja kursora)`.
+    pub fn set_overview_drag(&self, drag: Option<(usize, (f64, f64))>) {
+        self.overview.lock_or_recover().drag = drag;
+    }
+
+    /// Aktualizuje tylko pozycję przeciąganego okna (zachowując slot).
+    pub fn move_overview_drag(&self, pos: (f64, f64)) {
+        let mut o = self.overview.lock_or_recover();
+        if let Some((slot, _)) = o.drag {
+            o.drag = Some((slot, pos));
+        }
     }
 }
 

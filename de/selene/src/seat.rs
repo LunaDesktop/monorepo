@@ -292,6 +292,11 @@ fn content_local(state: &State, slot: usize, pos: Point) -> (f64, f64) {
 
 fn pointer_motion(state: &mut State, handle: &DisplayHandle, pos: Point) {
     state.pointer_pos = (pos.x, pos.y);
+    if state.overview_on() {
+        // W podglądzie ruch myszy tylko aktualizuje „ducha” przeciąganego okna.
+        state.move_overview_drag((pos.x, pos.y));
+        return;
+    }
     if state.resize.is_some() {
         do_resize(state, pos);
         return;
@@ -329,10 +334,34 @@ fn pointer_button(
     button: PointerButton,
     st: ButtonState,
 ) {
-    // W trybie podglądu klik wybiera kafelek/chip lub zamyka podgląd.
+    // W trybie podglądu: przeciąganie kafelka, wybór przestrzeni albo zamknięcie.
     if state.overview_on() {
-        if st == ButtonState::Pressed && button == PointerButton::Left {
-            overview_click(state, pos);
+        if button == PointerButton::Left {
+            match st {
+                ButtonState::Pressed => {
+                    if let Some(slot) = overview_tile_at(state, pos) {
+                        state.set_overview_drag(Some((slot, (pos.x, pos.y))));
+                    } else if let Some(i) = overview_chip_at(state, pos) {
+                        state.set_overview(false);
+                        switch_workspace(state, i);
+                    } else {
+                        state.set_overview(false);
+                    }
+                }
+                ButtonState::Released => {
+                    let drag = state.overview.lock_or_recover().drag;
+                    if let Some((slot, _)) = drag {
+                        if let Some(i) = overview_chip_at(state, pos) {
+                            // Upuszczenie na przestrzeni — przenieś okno.
+                            move_window_to_workspace(state, slot, i);
+                        } else {
+                            // Zwykły klik — aktywuj okno.
+                            raise_and_focus(state, slot);
+                        }
+                        state.set_overview(false);
+                    }
+                }
+            }
         }
         return;
     }
@@ -983,17 +1012,19 @@ fn move_window_to_workspace(state: &mut State, slot: usize, ws: usize) {
     crate::workspace::broadcast_workspace_states(state);
 }
 
-/// Klik w trybie podglądu: kafelek → fokus okna, chip → przestrzeń, poza → zamknij.
-fn overview_click(state: &mut State, pos: Point) {
-    // Znajdź monitor pod kursorem i lokalny układ podglądu na nim.
-    let (ox, oy, size) = {
-        let outs = state.outputs.lock_or_recover();
-        let idx = crate::monitors::output_at(&outs, pos.x, pos.y);
-        match outs.get(idx) {
-            Some(o) => (o.x as f64, o.y as f64, (o.width as f64, o.height as f64)),
-            None => (0.0, 0.0, (1280.0, 800.0)),
-        }
-    };
+/// Monitor pod punktem: `(origin_x, origin_y, (szerokość, wysokość))`.
+fn overview_output(state: &State, pos: Point) -> (f64, f64, (f64, f64)) {
+    let outs = state.outputs.lock_or_recover();
+    let idx = crate::monitors::output_at(&outs, pos.x, pos.y);
+    match outs.get(idx) {
+        Some(o) => (o.x as f64, o.y as f64, (o.width as f64, o.height as f64)),
+        None => (0.0, 0.0, (1280.0, 800.0)),
+    }
+}
+
+/// Slot okna pod punktem w podglądzie (na monitorze pod kursorem).
+fn overview_tile_at(state: &State, pos: Point) -> Option<usize> {
+    let (ox, oy, size) = overview_output(state, pos);
     let local = Point::new(pos.x - ox, pos.y - oy);
     let cur_ws = *state.ws_current.lock_or_recover();
     let slots = {
@@ -1001,21 +1032,19 @@ fn overview_click(state: &mut State, pos: Point) {
         crate::state::overview_slots_on(&w, cur_ws, ox, size.0)
     };
     let tiles = crate::state::overview_tiles(slots.len(), size);
-    if let Some(k) = tiles.iter().position(|r| r.contains(local)) {
-        if let Some(&slot) = slots.get(k) {
-            state.set_overview(false);
-            raise_and_focus(state, slot);
-            return;
-        }
-    }
-    let chips = crate::state::overview_ws_chips(state.ws_count, size);
-    if let Some(i) = chips.iter().position(|r| r.contains(local)) {
-        state.set_overview(false);
-        switch_workspace(state, i);
-        return;
-    }
-    // Klik poza kafelkami — zamknij podgląd.
-    state.set_overview(false);
+    tiles
+        .iter()
+        .position(|r| r.contains(local))
+        .and_then(|k| slots.get(k).copied())
+}
+
+/// Indeks „chipa” przestrzeni pod punktem.
+fn overview_chip_at(state: &State, pos: Point) -> Option<usize> {
+    let (ox, oy, size) = overview_output(state, pos);
+    let local = Point::new(pos.x - ox, pos.y - oy);
+    crate::state::overview_ws_chips(state.ws_count, size)
+        .iter()
+        .position(|r| r.contains(local))
 }
 
 /// Wysyła wciśnięcia/zwolnienia klawiszy modyfikujących wynikające z bieżącego stanu.

@@ -15,7 +15,7 @@ use libluna_render::{Scene, SoftwareRenderer, TextRun};
 use crate::drm::{DrmBackend, DrmError};
 use crate::input::{self, Events};
 use crate::monitors::Outputs;
-use crate::state::{CursorModel, OverviewModel, Window, WindowModel, WorkspaceModel};
+use crate::state::{CursorModel, Overview, OverviewModel, Window, WindowModel, WorkspaceModel};
 use crate::sync::LockExt;
 
 /// Uruchamia wątek wyjścia (nested Wayland) o zadanym rozmiarze.
@@ -310,7 +310,7 @@ fn cursor_image() -> (Vec<u8>, u32, u32) {
 fn scene_signature(
     model: &WindowModel,
     current_ws: usize,
-    overview: bool,
+    overview: Overview,
     cursor: Option<Point>,
 ) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -319,7 +319,12 @@ fn scene_signature(
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     };
     mix(current_ws as u64);
-    mix(u64::from(overview));
+    mix(u64::from(overview.on));
+    if let Some((slot, (px, py))) = overview.drag {
+        mix(slot as u64);
+        mix(px.to_bits());
+        mix(py.to_bits());
+    }
     {
         let windows = model.lock_or_recover();
         mix(windows.len() as u64);
@@ -350,7 +355,7 @@ fn build_scene(
     model: &WindowModel,
     current_ws: usize,
     ws_count: usize,
-    overview: bool,
+    overview: Overview,
     _is_primary: bool,
     cursor: Option<Point>,
 ) {
@@ -432,8 +437,17 @@ fn build_scene(
     }
 
     // Podgląd okien i przestrzeni (Super+Tab) — na każdym monitorze (jego okna).
-    if overview {
-        draw_overview(scene, size, ox, oy, model, current_ws, ws_count);
+    if overview.on {
+        draw_overview(
+            scene,
+            size,
+            ox,
+            oy,
+            model,
+            current_ws,
+            ws_count,
+            overview.drag,
+        );
     }
 
     // Kursor rysuje ten monitor, na którym leży (tryb DRM — nikt go za nas nie narysuje).
@@ -460,14 +474,16 @@ fn fill_vgradient(scene: &mut Scene, rect: Rect, top: Color, bottom: Color) {
 }
 
 /// Rysuje podgląd okien i przestrzeni — kafelki z podglądem treści + pasek przestrzeni.
+#[allow(clippy::too_many_arguments)]
 fn draw_overview(
     scene: &mut Scene,
     size: Size,
     ox: f64,
-    _oy: f64,
+    oy: f64,
     model: &WindowModel,
     current_ws: usize,
     ws_count: usize,
+    drag: Option<(usize, (f64, f64))>,
 ) {
     // Przygaszenie tła.
     scene.fill_rect(
@@ -518,6 +534,19 @@ fn draw_overview(
             )
             .with_color(Color::from_rgba8(0xf5, 0xf5, 0xf5, 0xff)),
         );
+    }
+    // „Duch” przeciąganego okna pod kursorem.
+    if let Some((slot, (px, py))) = drag {
+        let local = Point::new(px - ox, py - oy);
+        let g = Rect::from_xywh(local.x - 90.0, local.y - 60.0, 180.0, 120.0);
+        scene.fill_rounded_rect(g, 8.0, Color::from_rgba8(0x5b, 0x8d, 0xef, 0xcc));
+        scene.stroke_rounded_rect(g, 8.0, 2.0, Color::from_rgba8(0xff, 0xff, 0xff, 0xdd));
+        if let Some(w) = windows.get(slot) {
+            scene.text(
+                TextRun::new(Point::new(g.x() + 10.0, g.y() + 20.0), &w.title, 13.0)
+                    .with_color(Color::from_rgba8(0xff, 0xff, 0xff, 0xff)),
+            );
+        }
     }
 }
 
@@ -578,7 +607,7 @@ mod tests {
                 &model,
                 0,
                 1,
-                false,
+                Overview::default(),
                 true,
                 Some(Point::new(100.0, 100.0)),
             );
@@ -633,7 +662,7 @@ mod tests {
                 &model,
                 0,
                 1,
-                false,
+                Overview::default(),
                 true,
                 Some(Point::new(100.0, 100.0)),
             );
