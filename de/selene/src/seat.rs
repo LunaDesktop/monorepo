@@ -284,8 +284,14 @@ fn window_geometry(state: &State, slot: usize) -> Option<(f64, f64, f64, f64)> {
 }
 
 fn content_local(state: &State, slot: usize, pos: Point) -> (f64, f64) {
-    match window_geometry(state, slot) {
-        Some((x, y, _, _)) => (pos.x - x, pos.y - (y + TITLEBAR)),
+    // Używamy `content()` — dla paneli/popupów pasek tytułu ma wysokość 0, więc
+    // współrzędne nie są przesunięte (wcześniej odejmowano `TITLEBAR` zawsze).
+    let windows = state.windows.lock_or_recover();
+    match windows.get(slot) {
+        Some(w) => {
+            let c = w.content();
+            (pos.x - c.x(), pos.y - c.y())
+        }
         None => (pos.x, pos.y),
     }
 }
@@ -1240,6 +1246,28 @@ mod tests {
             saved: None,
             data: Arc::new(ImageData::empty(200, 120)),
         }
+    }
+
+    #[test]
+    fn content_local_does_not_offset_layer_surfaces() {
+        // Panel (powierzchnia warstwowa) nie ma paska tytułu — współrzędne bez przesunięcia.
+        let mut s = State::default();
+        let mut w = sample_window();
+        w.layer = true;
+        w.x = 0.0;
+        w.y = 0.0;
+        s.windows.lock_or_recover().push(w);
+        assert_eq!(content_local(&s, 0, Point::new(50.0, 20.0)), (50.0, 20.0));
+    }
+
+    #[test]
+    fn content_local_offsets_titlebar_for_windows() {
+        let mut s = State::default();
+        s.windows.lock_or_recover().push(sample_window()); // x=100, y=50
+        assert_eq!(
+            content_local(&s, 0, Point::new(120.0, 80.0)),
+            (20.0, 80.0 - (50.0 + TITLEBAR))
+        );
     }
 
     #[test]

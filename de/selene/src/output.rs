@@ -167,8 +167,9 @@ pub fn spawn_drm(
         let (cursor_rgba, cw, ch) = cursor_image();
         let mut hw_cursor = true;
         for i in 0..sizes.len() {
-            // Próba ustawienia obrazu (potem chowamy); gdy sterownik nie umie — kursor programowy.
-            if !backend.set_cursor_image(i, &cursor_rgba, cw, ch, 0, 0) || !backend.hide_cursor(i) {
+            // Obraz startowy poza ekranem (nie mruga, nie chowamy osobno ioctlem);
+            // gdy sterownik nie umie kursora sprzętowego — zostaje programowy.
+            if !backend.set_cursor_image(i, &cursor_rgba, cw, ch, -1000, -1000) {
                 hw_cursor = false;
             }
         }
@@ -178,7 +179,8 @@ pub fn spawn_drm(
                 libluna_i18n::tr("DRM hardware cursor unavailable; using software cursor")
             );
         }
-        let mut cursor_shown = vec![false; sizes.len()];
+        // Obraz ustawiony → ruchy realizujemy samym `MOVE`.
+        let mut cursor_shown = vec![hw_cursor; sizes.len()];
 
         // Diagnostyka (SELENE_STATS=1): fps i rozbicie czasu na render/present/wait_flip.
         let stats = std::env::var("SELENE_STATS").is_ok();

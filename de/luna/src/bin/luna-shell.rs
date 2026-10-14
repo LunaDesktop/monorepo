@@ -363,7 +363,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             .wrapping_add(state.workspaces as u64 ^ ((state.current_ws as u64) << 8));
         let sig = (open, power_open, state.clock.clone(), th);
         let animating = osd.visible() || notes.visible();
-        if !frame.events.is_empty() || animating || open || sig != last_sig {
+        // Ruch myszy nad panelem NIE wymusza przerysowania (brak hoverów) — to było
+        // głównym źródłem „5 FPS”: każde zdarzenie ruchu odświeżało bufor 1920×680.
+        let interactive = frame
+            .events
+            .iter()
+            .any(|e| !matches!(e, Event::PointerMotion { .. }));
+        if interactive || animating || open || sig != last_sig {
             frame.request_frame();
         }
         last_sig = sig;
