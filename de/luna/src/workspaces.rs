@@ -90,6 +90,12 @@ impl Dispatch<mgr::ExtWorkspaceManagerV1, ()> for DispatchState {
             );
         }
     }
+
+    // Eventy `new_id` (uchwyt grupy i uchwyty przestrzeni) muszą mieć dane.
+    wayland_client::event_created_child!(DispatchState, mgr::ExtWorkspaceManagerV1, [
+        0 => (group::ExtWorkspaceGroupHandleV1, ()),
+        1 => (ws::ExtWorkspaceHandleV1, ()),
+    ]);
 }
 
 impl Dispatch<ws::ExtWorkspaceHandleV1, ()> for DispatchState {

@@ -96,6 +96,11 @@ impl Dispatch<mgr::ZwlrForeignToplevelManagerV1, ()> for DispatchState {
             );
         }
     }
+
+    // Event `new_id` (uchwyt okna) musi mieć dane.
+    wayland_client::event_created_child!(DispatchState, mgr::ZwlrForeignToplevelManagerV1, [
+        0 => (hdl::ZwlrForeignToplevelHandleV1, ()),
+    ]);
 }
 
 impl Dispatch<hdl::ZwlrForeignToplevelHandleV1, ()> for DispatchState {
