@@ -2,6 +2,7 @@
 
 use std::sync::Mutex;
 
+use libluna_core::Rect;
 use libluna_render::ImageData;
 use wayland_protocols::xdg::shell::server::{xdg_popup, xdg_surface, xdg_toplevel};
 use wayland_protocols_wlr::layer_shell::v1::server::zwlr_layer_surface_v1;
@@ -30,6 +31,8 @@ pub struct SurfaceData {
     pub layer: Mutex<Option<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1>>,
     /// Uchwyty `zwlr_foreign_toplevel` (gdy to okno najwyższego poziomu).
     pub toplevel: Mutex<Option<crate::foreign_toplevel::ToplevelInfo>>,
+    /// Region wejścia (`wl_surface.set_input_region`); `None` = cała powierzchnia.
+    pub input: Mutex<Option<Vec<Rect>>>,
 }
 
 impl SurfaceData {
@@ -41,6 +44,7 @@ impl SurfaceData {
             slot: Mutex::new(None),
             layer: Mutex::new(None),
             toplevel: Mutex::new(None),
+            input: Mutex::new(None),
         }
     }
 }
@@ -80,23 +84,44 @@ impl Dispatch<wl_compositor::WlCompositor, ()> for State {
                 state.surfaces += 1;
             }
             wl_compositor::Request::CreateRegion { id } => {
-                data_init.init(id, ());
+                data_init.init(id, RegionRects::default());
             }
             _ => {}
         }
     }
 }
 
-impl Dispatch<wl_region::WlRegion, ()> for State {
+/// Prostokąty regionu `wl_region` (współdzielone; klient może je zmieniać).
+pub type RegionRects = std::sync::Arc<Mutex<Vec<Rect>>>;
+
+impl Dispatch<wl_region::WlRegion, RegionRects> for State {
     fn request(
         _state: &mut Self,
         _client: &Client,
         _resource: &wl_region::WlRegion,
-        _request: wl_region::Request,
-        _data: &(),
+        request: wl_region::Request,
+        rects: &RegionRects,
         _handle: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {
+        let mut r = rects.lock_or_recover();
+        match request {
+            wl_region::Request::Add {
+                x,
+                y,
+                width,
+                height,
+            } => r.push(Rect::from_xywh(
+                x as f64,
+                y as f64,
+                width as f64,
+                height as f64,
+            )),
+            // `subtract` upraszczamy (rzadkie w regionach wejścia).
+            wl_region::Request::Subtract { .. } => {}
+            wl_region::Request::Destroy => r.clear(),
+            _ => {}
+        }
     }
 }
 
@@ -141,6 +166,12 @@ impl Dispatch<wl_surface::WlSurface, SurfaceData> for State {
             }
             wl_surface::Request::Attach { buffer, .. } => {
                 *data.buffer.lock_or_recover() = buffer;
+            }
+            wl_surface::Request::SetInputRegion { region } => {
+                // `None` = cała powierzchnia; inaczej migawka prostokątów regionu.
+                *data.input.lock_or_recover() = region
+                    .as_ref()
+                    .and_then(|r| r.data::<RegionRects>().map(|m| m.lock_or_recover().clone()));
             }
             wl_surface::Request::Commit => {
                 // Wywołaj oczekujące frame-callbacki.
@@ -275,10 +306,13 @@ fn composite_layer(
         return;
     };
     let image = std::sync::Arc::new(ImageData::new(w as u32, h as u32, rgba));
+    // Region wejścia wyprowadzony z przezroczystości: pasek (nieprzezroczysty) łapie
+    // kliki, a przezroczysty obszar chromu przepuszcza je do okien pod spodem.
+    let input_rects = opaque_input_rects(&image);
     let st = *ld.state.lock_or_recover();
     let (rx, ry) = st.position(out_w, out_h, w as f64, h as f64);
     let z = crate::layer::layer_z(st.layer);
-    let (_, created) = upsert_window(
+    let (slot, created) = upsert_window(
         state,
         surface,
         data,
@@ -293,6 +327,15 @@ fn composite_layer(
         true,
         image,
     );
+    {
+        let mut windows = state.windows.lock_or_recover();
+        if let Some(win) = windows.get_mut(slot) {
+            // Region klienta ma priorytet; inaczej nasz z alfy.
+            if win.input.is_none() {
+                win.input = Some(input_rects);
+            }
+        }
+    }
     if debug && created {
         eprintln!(
             "selene/layer: okno utworzone {}x{} @ ({:.0},{:.0}), z={}",
@@ -304,6 +347,86 @@ fn composite_layer(
         );
     }
     let _ = buffer.send_event(wl_buffer::Event::Release);
+}
+
+/// Region wejścia z kanału alfa: nieprzezroczyste bloki scalane poziomo w prostokąty.
+fn opaque_input_rects(image: &ImageData) -> Vec<Rect> {
+    const BLOCK: usize = 16;
+    const ALPHA_THRESHOLD: u8 = 8;
+    let iw = image.width as usize;
+    let ih = image.height as usize;
+    if iw == 0 || ih == 0 || image.rgba.len() < iw * ih * 4 {
+        return Vec::new();
+    }
+    let bw = iw.div_ceil(BLOCK);
+    let bh = ih.div_ceil(BLOCK);
+    let mut rects = Vec::new();
+    for by in 0..bh {
+        let y0 = by * BLOCK;
+        let y1 = (y0 + BLOCK).min(ih);
+        let mut run: Option<usize> = None;
+        for bx in 0..bw {
+            let x0 = bx * BLOCK;
+            let x1 = (x0 + BLOCK).min(iw);
+            let mut opaque = false;
+            'scan: for y in y0..y1 {
+                let row = y * iw * 4;
+                for x in x0..x1 {
+                    if image.rgba[row + x * 4 + 3] > ALPHA_THRESHOLD {
+                        opaque = true;
+                        break 'scan;
+                    }
+                }
+            }
+            match (run, opaque) {
+                (None, true) => run = Some(bx),
+                (Some(s), false) => {
+                    rects.push(block_run(s, bx, by, BLOCK, iw, ih));
+                    run = None;
+                }
+                _ => {}
+            }
+        }
+        if let Some(s) = run {
+            rects.push(block_run(s, bw, by, BLOCK, iw, ih));
+        }
+    }
+    rects
+}
+
+/// Prostokąt dla ciągu bloków `[bx0, bx1)` w rzędzie `by`.
+fn block_run(bx0: usize, bx1: usize, by: usize, block: usize, iw: usize, ih: usize) -> Rect {
+    let x = bx0 * block;
+    let y = by * block;
+    let w = (bx1 * block).min(iw).saturating_sub(x);
+    let h = (y + block).min(ih) - y;
+    Rect::from_xywh(x as f64, y as f64, w as f64, h as f64)
+}
+
+#[cfg(test)]
+mod input_region_tests {
+    use super::*;
+
+    #[test]
+    fn opaque_rects_track_alpha() {
+        // 32×32, nieprzezroczysta tylko lewa połowa (blok 16 px).
+        let mut rgba = vec![0u8; 32 * 32 * 4];
+        for y in 0..32 {
+            for x in 0..16 {
+                rgba[(y * 32 + x) * 4 + 3] = 255;
+            }
+        }
+        let rects = opaque_input_rects(&ImageData::new(32, 32, rgba));
+        assert!(!rects.is_empty());
+        assert!(rects.iter().all(|r| r.x() < 16.0));
+        assert!(rects.iter().all(|r| r.x() + r.width() <= 16.001));
+    }
+
+    #[test]
+    fn fully_transparent_yields_no_rects() {
+        let rects = opaque_input_rects(&ImageData::new(40, 40, vec![0u8; 40 * 40 * 4]));
+        assert!(rects.is_empty());
+    }
 }
 
 /// Dodaje nowe okno lub aktualizuje istniejące (slot trzymany w [`SurfaceData`]).
@@ -325,6 +448,7 @@ fn upsert_window(
 ) -> (usize, bool) {
     let mut slot = data.slot.lock_or_recover();
     let ws = *state.ws_current.lock_or_recover();
+    let input = data.input.lock_or_recover().clone();
     let mut windows = state.windows.lock_or_recover();
     let mut created = false;
     let idx = match *slot {
@@ -344,6 +468,7 @@ fn upsert_window(
                 if !title.is_empty() {
                     win.title = title.to_owned();
                 }
+                win.input = input.clone();
                 win.data = image;
             }
             i
@@ -361,6 +486,7 @@ fn upsert_window(
                 layer,
                 mapped: true,
                 workspace: ws,
+                input,
                 minimized: false,
                 maximized: false,
                 fullscreen: false,

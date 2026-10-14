@@ -323,6 +323,7 @@ mod tests {
             layer: false,
             mapped: true,
             workspace: 0,
+            input: None,
             minimized: true,
             maximized: true,
             fullscreen: false,

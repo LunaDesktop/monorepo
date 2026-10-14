@@ -184,7 +184,11 @@ fn hit(state: &State, pos: Point) -> Option<(usize, Part)> {
     let cur_ws = *state.ws_current.lock_or_recover();
     let mut best: Option<(usize, i32)> = None;
     for (i, w) in windows.iter().enumerate() {
-        if w.mapped && !w.minimized && w.in_workspace(cur_ws) && w.outer().contains(pos) {
+        let inside = match input_region_hit(w, pos) {
+            Some(h) => h,
+            None => w.outer().contains(pos),
+        };
+        if w.mapped && !w.minimized && w.in_workspace(cur_ws) && inside {
             match best {
                 Some((_, z)) if z >= w.z => {}
                 _ => best = Some((i, w.z)),
@@ -218,7 +222,11 @@ fn content_window(state: &State, pos: Point) -> Option<usize> {
     let cur_ws = *state.ws_current.lock_or_recover();
     let mut best: Option<(usize, i32)> = None;
     for (i, w) in windows.iter().enumerate() {
-        if w.mapped && !w.minimized && w.in_workspace(cur_ws) && w.content().contains(pos) {
+        let inside = match input_region_hit(w, pos) {
+            Some(h) => h,
+            None => w.content().contains(pos),
+        };
+        if w.mapped && !w.minimized && w.in_workspace(cur_ws) && inside {
             match best {
                 Some((_, z)) if z >= w.z => {}
                 _ => best = Some((i, w.z)),
@@ -274,6 +282,16 @@ fn dismiss_popups(state: &mut State, pos: Point) {
 /// Okno docelowe dla punktu (publiczne dla drag & drop).
 pub(crate) fn window_at(state: &State, pos: (f64, f64)) -> Option<usize> {
     content_window(state, Point::new(pos.0, pos.1))
+}
+
+/// Trafienie w region wejścia powierzchni warstwowej; `None` = brak regionu (cała).
+fn input_region_hit(w: &crate::state::Window, pos: Point) -> Option<bool> {
+    if !w.layer {
+        return None;
+    }
+    w.input
+        .as_ref()
+        .map(|rects| rects.iter().any(|r| r.offset(w.x, w.y).contains(pos)))
 }
 
 fn window_geometry(state: &State, slot: usize) -> Option<(f64, f64, f64, f64)> {
@@ -1240,6 +1258,7 @@ mod tests {
             layer: false,
             mapped: true,
             workspace: 0,
+            input: None,
             minimized: false,
             maximized: false,
             fullscreen: false,

@@ -55,6 +55,8 @@ pub struct Window {
     pub mapped: bool,
     /// Przestrzeń robocza, do której należy okno (panele/popupy są globalne).
     pub workspace: usize,
+    /// Region wejścia powierzchni (`wl_surface.set_input_region`); `None` = cała.
+    pub input: Option<Vec<Rect>>,
     /// Zminimalizowane (ukryte przez kompozytor; przywracane skrótem).
     pub minimized: bool,
     /// Zmaksymalizowane do obszaru monitora.
@@ -465,6 +467,7 @@ mod tests {
             layer: false,
             mapped: true,
             workspace: ws,
+            input: None,
             minimized: false,
             maximized: false,
             fullscreen: false,
