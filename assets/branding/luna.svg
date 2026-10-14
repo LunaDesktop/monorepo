@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Ikona środowiska Luna (sesja w menedżerze logowania).
+     Motyw: półksiężyc na akcentowym tle (Luna = Księżyc).
+     Plik źródłowy — instaluje go `scripts/install.sh` do hicolor/scalable/apps. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4a97ec"/>
+      <stop offset="1" stop-color="#2b6fc4"/>
+    </linearGradient>
+    <mask id="crescent">
+      <rect x="0" y="0" width="128" height="128" fill="#000000"/>
+      <circle cx="60" cy="70" r="38" fill="#ffffff"/>
+      <circle cx="82" cy="52" r="33" fill="#000000"/>
+    </mask>
+  </defs>
+
+  <!-- Tło: zaokrąglony kwadrat w akcencie Luny. -->
+  <rect x="4" y="4" width="120" height="120" rx="28" ry="28" fill="url(#bg)"/>
+
+  <!-- Półksiężyc. -->
+  <rect x="0" y="0" width="128" height="128" fill="#ffffff" mask="url(#crescent)"/>
+
+  <!-- Gwiazda (iskra) w prawym górnym rogu. -->
+  <path d="M99 25 l3.2 7.8 7.8 3.2 -7.8 3.2 -3.2 7.8 -3.2 -7.8 -7.8 -3.2 7.8 -3.2 z"
+        fill="#ffffff" opacity="0.92"/>
+</svg>

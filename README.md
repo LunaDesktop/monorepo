@@ -150,7 +150,7 @@ cargo test -p luna-demo --test interaction       # te same interakcje jako aserc
 
 `scripts/install.sh` buduje binarki w trybie release i instaluje **środowisko Luna**
 (kompozytor `selene`, powłoka `luna-shell`, sesja `luna-session`, demo, tłumaczenia, motywy,
-wpis sesji Wayland):
+wpis sesji Wayland i **ikonę sesji**):
 
 ```bash
 # instalacja testowa do katalogu (bez ruszania systemu) — nic nie wymaga uprawnień
@@ -166,7 +166,9 @@ sudo ./scripts/install.sh --prefix /usr
 sudo ./scripts/install.sh --prefix /usr --uninstall
 ```
 
-Po instalacji sesja „Luna” pojawia się w menedżerze logowania (`share/wayland-sessions/selene.desktop`).
+Po instalacji sesja „Luna” pojawia się w menedżerze logowania (`share/wayland-sessions/selene.desktop`),
+z ikoną Luna (`share/icons/hicolor/.../apps/luna.svg` + PNG w kilku rozmiarach oraz `pixmaps/luna.png`,
+rysowanymi z `assets/branding/luna.svg`).
 Na sprzęcie Selene przejmuje ekran przez DRM/KMS — trzeba **wylogować bieżący pulpit** (wolny
 master DRM) i mieć dostęp do `/dev/input` (grupa `input`) dla wejścia. Testowo, obok działającej
 sesji, można uruchomić `SELENE_BACKEND=nested selene` (okno na obecnym pulpicie) i podłączyć

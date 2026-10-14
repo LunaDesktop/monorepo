@@ -4,6 +4,9 @@
 # Buduje binarki w trybie release i instaluje je do prefiksu (domyślnie /usr/local):
 #   bin/selene, bin/luna-shell, bin/luna-demo, bin/luna-session
 #   share/wayland-sessions/selene.desktop   (sesja „Luna” w menedżerze logowania)
+#   share/icons/hicolor/scalable/apps/luna.svg   (ikona sesji)
+#   share/icons/hicolor/<N>x<N>/apps/luna.png     (rastrowe, dla greeterów bez SVG)
+#   share/pixmaps/luna.png
 #   share/luna/i18n/*.lang, share/luna/themes/*.theme
 #   share/licenses/luna/LICENSE
 #
@@ -90,6 +93,7 @@ files() {
     printf '%s|%s|%s\n' "$lib/gallery"         "$dest/bin/luna-gallery"    "755"
     printf '%s|%s|%s\n' "$root/de/session/luna-session"  "$dest/bin/luna-session" "755"
     printf '%s|%s|%s\n' "$root/de/session/selene.desktop" "$dest/share/wayland-sessions/selene.desktop" "644"
+    printf '%s|%s|%s\n' "$root/assets/branding/luna.svg" "$dest/share/icons/hicolor/scalable/apps/luna.svg" "644"
     printf '%s|%s|%s\n' "$root/LICENSE"        "$dest/share/licenses/luna/LICENSE" "644"
     local f
     for f in "$root"/crates/libluna-i18n/i18n/*.lang; do
@@ -100,15 +104,27 @@ files() {
     done
 }
 
+# Rozmiary rastrowej ikony sesji (greeter bez wsparcia SVG użyje którejś z nich).
+icon_sizes="16 24 32 48 64 128 256"
+
 if [ "$uninstall" = 1 ]; then
     step "Odinstalowywanie Luna z $dest"
     while IFS='|' read -r _ dst _; do
         do_cmd rm -f "$dst"
     done < <(files)
+    # Rastrowa ikona sesji (generowana w trakcie instalacji).
+    for s in $icon_sizes; do
+        do_cmd rm -f "$dest/share/icons/hicolor/${s}x${s}/apps/luna.png"
+    done
+    do_cmd rm -f "$dest/share/pixmaps/luna.png"
     # Puste katalogi po naszych plikach.
     for d in "$dest/share/luna/i18n" "$dest/share/luna/themes" "$dest/share/luna" \
-             "$dest/share/wayland-sessions" "$dest/share/licenses/luna"; do
+             "$dest/share/wayland-sessions" "$dest/share/licenses/luna" \
+             "$dest/share/icons/hicolor/scalable/apps"; do
         do_cmd rmdir "$d" 2>/dev/null || true
+    done
+    for s in $icon_sizes; do
+        do_cmd rmdir "$dest/share/icons/hicolor/${s}x${s}/apps" 2>/dev/null || true
     done
     say "Gotowe."
     exit 0
@@ -143,6 +159,24 @@ while IFS='|' read -r src dst mode; do
     fi
     do_cmd install -D -m "$mode" "$src" "$dst"
 done < <(files)
+
+# Ikona sesji w rozmiarach rastrowych — dla greeterów bez rsvg.
+step "Ikona sesji (rastrowa)"
+if command -v rsvg-convert >/dev/null 2>&1; then
+    for s in $icon_sizes; do
+        dir="$dest/share/icons/hicolor/${s}x${s}/apps"
+        do_cmd install -d "$dir"
+        do_cmd rsvg-convert -w "$s" -h "$s" "$root/assets/branding/luna.svg" -o "$dir/luna.png"
+    done
+    do_cmd install -d "$dest/share/pixmaps"
+    do_cmd rsvg-convert -w 256 -h 256 "$root/assets/branding/luna.svg" -o "$dest/share/pixmaps/luna.png"
+    # Odświeżenie cache ikon tylko w instalacji systemowej (bez DESTDIR).
+    if [ "$destdir" = "" ] && command -v gtk-update-icon-cache >/dev/null 2>&1; then
+        do_cmd gtk-update-icon-cache -q -t -f "$dest/share/icons/hicolor" || true
+    fi
+else
+    say "  (pomijam PNG — brak rsvg-convert; greeter użyje SVG)"
+fi
 
 step "Gotowe"
 say "Zainstalowano w: $dest"

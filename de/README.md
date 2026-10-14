@@ -146,7 +146,9 @@ sudo ./scripts/install.sh --prefix /usr                        # instalacja syst
 ```
 
 Pliki sesji: `de/session/luna-session` (launcher) i `de/session/selene.desktop`
-(`share/wayland-sessions`).
+(`share/wayland-sessions`). Ikona sesji (`Icon=luna`) to `assets/branding/luna.svg` — instalator kładzie
+go w `share/icons/hicolor/scalable/apps` oraz rasteryzuje (rsvg-convert) do PNG w rozmiarach
+16–256 i `share/pixmaps`, więc greeter pokaże go nawet bez obsługi SVG.
 
 Klienta podłączysz ustawiając `WAYLAND_DISPLAY=wayland-0` (`XDG_RUNTIME_DIR` klient wybierze
 awaryjnie sam, tak jak Selene — patrz `libluna_core::runtime`). Renderowanie pojawi się, gdy
