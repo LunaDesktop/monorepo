@@ -227,13 +227,23 @@ fn main() -> Result<(), Box<dyn Error>> {
                             size.width,
                             size.height - THICKNESS,
                         );
-                        if let Some(i) = notes.hit(area, pe.position) {
-                            if let Some(n) = notes.get(i) {
-                                if let Some(bus) = &bus {
-                                    if let Some(key) = n.actions.first() {
+                        if let Some((item, ak)) =
+                            notes.action_at(area, pe.position, &frame.theme, text)
+                        {
+                            // Klik w przycisk akcji: wywołaj akcję i zamknij toast.
+                            if let Some(bus) = &bus {
+                                if let Some(n) = notes.get(item) {
+                                    if let Some((key, _)) = n.actions.get(ak) {
                                         bus.signal_action(n.id, key);
                                     }
-                                    // 2 = zamknięte przez użytkownika.
+                                    bus.signal_closed(n.id, 2);
+                                }
+                            }
+                            notes.remove(item);
+                        } else if let Some(i) = notes.hit(area, pe.position) {
+                            // Klik w treść toasta: zamknij (2 = przez użytkownika).
+                            if let Some(n) = notes.get(i) {
+                                if let Some(bus) = &bus {
                                     bus.signal_closed(n.id, 2);
                                 }
                             }

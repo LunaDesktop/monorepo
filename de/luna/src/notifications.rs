@@ -5,7 +5,8 @@
 //! `org.freedesktop.Notifications` to kolejny krok (patrz roadmapa).
 
 use libluna_core::style::weight;
-use libluna_core::{Point, Rect};
+use libluna_core::{Point, Rect, Theme};
+use libluna_render::TextEngine;
 use libluna_widgets::{paint_icon, IconName, PaintCtx};
 
 /// Czas animacji wejścia/wyjścia (s).
@@ -13,9 +14,15 @@ const SLIDE: f64 = 0.22;
 /// Szerokość pojedynczego powiadomienia.
 pub const WIDTH: f64 = 340.0;
 /// Wysokość pojedynczego powiadomienia.
-pub const HEIGHT: f64 = 76.0;
+pub const HEIGHT: f64 = 96.0;
 /// Odstęp pionowy między powiadomieniami.
 const GAP: f64 = 10.0;
+/// Wysokość przycisku akcji.
+const ACTION_H: f64 = 24.0;
+/// Margines przycisków akcji od krawędzi.
+const ACTION_PAD: f64 = 12.0;
+/// Odstęp między przyciskami akcji.
+const ACTION_GAP: f64 = 8.0;
 
 /// Pojedyncze powiadomienie.
 #[derive(Debug, Clone)]
@@ -30,8 +37,8 @@ pub struct Notification {
     pub timeout: f64,
     /// Identyfikator z magistrali D‑Bus (0 = powiadomienie lokalne).
     pub id: u32,
-    /// Klucze akcji (`ActionInvoked`); puste, gdy brak akcji.
-    pub actions: Vec<String>,
+    /// Klucze i etykiety akcji (`ActionInvoked`); puste, gdy brak akcji.
+    pub actions: Vec<(String, String)>,
 }
 
 impl Notification {
@@ -58,8 +65,8 @@ impl Notification {
         self
     }
 
-    /// Ustawia klucze akcji (do wysłania `ActionInvoked`).
-    pub fn with_actions(mut self, actions: Vec<String>) -> Self {
+    /// Ustawia akcje jako pary `(klucz, etykieta)` (do wysłania `ActionInvoked`).
+    pub fn with_actions(mut self, actions: Vec<(String, String)>) -> Self {
         self.actions = actions;
         self
     }
@@ -133,6 +140,54 @@ impl Notifications {
         )
     }
 
+    /// Prostokąty przycisków akcji toasta `i` (od prawej do lewej, u dołu).
+    pub fn action_rects(
+        &self,
+        area: Rect,
+        i: usize,
+        theme: &Theme,
+        text: &TextEngine,
+    ) -> Vec<Rect> {
+        let Some((n, _)) = self.items.get(i) else {
+            return Vec::new();
+        };
+        if n.actions.is_empty() {
+            return Vec::new();
+        }
+        let rect = Self::rect_in(area, i);
+        let cap = theme.typography.caption.size;
+        let y = rect.bottom() - ACTION_PAD - ACTION_H;
+        let mut right = rect.right() - ACTION_PAD;
+        let mut out = vec![Rect::ZERO; n.actions.len()];
+        for (k, (_, label)) in n.actions.iter().enumerate().rev() {
+            let w = text.measure(label, cap, weight::MEDIUM).width + 2.0 * theme.spacing.sm;
+            let r = Rect::from_xywh(right - w, y, w, ACTION_H);
+            out[k] = r;
+            right = r.x() - ACTION_GAP;
+        }
+        out
+    }
+
+    /// Trafienie przycisku akcji: `(indeks toasta, indeks akcji)`.
+    pub fn action_at(
+        &self,
+        area: Rect,
+        p: Point,
+        theme: &Theme,
+        text: &TextEngine,
+    ) -> Option<(usize, usize)> {
+        for i in (0..self.items.len()).rev() {
+            if let Some(k) = self
+                .action_rects(area, i, theme, text)
+                .iter()
+                .position(|r| r.contains(p))
+            {
+                return Some((i, k));
+            }
+        }
+        None
+    }
+
     /// Rysuje stos powiadomień w obszarze `area` (od góry, do prawej).
     pub fn paint(&self, ctx: &mut PaintCtx, area: Rect) {
         let t = ctx.theme;
@@ -189,8 +244,29 @@ impl Notifications {
                 t.colors.dim_text.scale_alpha(a),
             );
 
-            // Pasek czasu (kurczy się).
-            if n.timeout > 0.0 {
+            // Przyciski akcji (np. „Otwórz”, „Odpisz”).
+            if !n.actions.is_empty() {
+                let mut acts = self.action_rects(area, i, t, ctx.text);
+                for ((_, label), r) in n.actions.iter().zip(acts.iter_mut()) {
+                    *r = Rect::from_xywh(r.x() + slide, r.y(), r.width(), r.height());
+                    ctx.scene.fill_rounded_rect(
+                        *r,
+                        r.height() / 2.0,
+                        t.colors.accent.scale_alpha(a),
+                    );
+                    ctx.label_center(
+                        r.center().x,
+                        r.center().y,
+                        label,
+                        t.typography.caption.size,
+                        weight::MEDIUM,
+                        t.colors.accent_fg.scale_alpha(a),
+                    );
+                }
+            }
+
+            // Pasek czasu (kurczy się) — tylko gdy nie ma akcji.
+            if n.timeout > 0.0 && n.actions.is_empty() {
                 let frac = (1.0 - (*age / n.timeout)).clamp(0.0, 1.0);
                 let track = Rect::from_xywh(
                     rect.x() + pad,
@@ -251,7 +327,7 @@ mod tests {
         n.push(
             Notification::new("A", "t", "b")
                 .with_id(7)
-                .with_actions(vec!["default".to_owned()]),
+                .with_actions(vec![("default".to_owned(), "Otwórz".to_owned())]),
         );
         n.advance(0.3);
         let area = Rect::from_xywh(0.0, 40.0, 1280.0, 200.0);
@@ -260,9 +336,45 @@ mod tests {
         assert_eq!(n.hit(area, Point::new(-10.0, -10.0)), None);
         let n0 = n.get(0).unwrap();
         assert_eq!(n0.id, 7);
-        assert_eq!(n0.actions, vec!["default".to_owned()]);
+        assert_eq!(
+            n0.actions,
+            vec![("default".to_owned(), "Otwórz".to_owned())]
+        );
         n.remove(0);
         assert!(n.is_empty());
+    }
+
+    #[test]
+    fn action_buttons_hit_test() {
+        let theme = Theme::dark();
+        let text = TextEngine::none();
+        let area = Rect::from_xywh(0.0, 40.0, 1280.0, 300.0);
+        let mut n = Notifications::new();
+        n.push(Notification::new("A", "t", "b").with_actions(vec![
+            ("open".to_owned(), "Otwórz".to_owned()),
+            ("dismiss".to_owned(), "Zamknij".to_owned()),
+        ]));
+        n.advance(0.3);
+        let rects = n.action_rects(area, 0, &theme, &text);
+        assert_eq!(rects.len(), 2);
+        assert_eq!(
+            n.action_at(area, rects[0].center(), &theme, &text),
+            Some((0, 0))
+        );
+        assert_eq!(
+            n.action_at(area, rects[1].center(), &theme, &text),
+            Some((0, 1))
+        );
+        // Środek toasta (poza przyciskami) nie jest trafieniem akcji.
+        assert_eq!(
+            n.action_at(
+                area,
+                Notifications::rect_in(area, 0).center(),
+                &theme,
+                &text
+            ),
+            None
+        );
     }
 
     #[test]

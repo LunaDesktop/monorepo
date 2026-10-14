@@ -28,8 +28,8 @@ pub struct Incoming {
     pub body: String,
     /// Czas życia w ms: `-1` = domyślny serwera, `0` = trwałe, `> 0` = jawny.
     pub expire_ms: i32,
-    /// Klucze akcji (bez etykiet) do `ActionInvoked`.
-    pub actions: Vec<String>,
+    /// Pary `(klucz, etykieta)` akcji do `ActionInvoked`.
+    pub actions: Vec<(String, String)>,
 }
 
 impl Incoming {
@@ -70,7 +70,10 @@ impl Server {
         _hints: HashMap<String, OwnedValue>,
         expire_ms: i32,
     ) -> u32 {
-        let keys: Vec<String> = actions.chunks_exact(2).map(|c| c[0].clone()).collect();
+        let acts: Vec<(String, String)> = actions
+            .chunks_exact(2)
+            .map(|c| (c[0].clone(), c[1].clone()))
+            .collect();
         let id = {
             let mut q = self.queue.lock().unwrap_or_else(|e| e.into_inner());
             let id = q.iter().map(|i| i.id).max().unwrap_or(0) + 1;
@@ -80,7 +83,7 @@ impl Server {
                 summary,
                 body,
                 expire_ms,
-                actions: keys,
+                actions: acts,
             });
             id
         };
