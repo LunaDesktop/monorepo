@@ -351,7 +351,7 @@ fn build_scene(
     current_ws: usize,
     ws_count: usize,
     overview: bool,
-    is_primary: bool,
+    _is_primary: bool,
     cursor: Option<Point>,
 ) {
     let sh = |r: Rect| r.offset(-ox, -oy);
@@ -431,9 +431,9 @@ fn build_scene(
         }
     }
 
-    // Podgląd okien i przestrzeni (Super+Tab) — rysowany na głównym monitorze.
-    if overview && is_primary {
-        draw_overview(scene, size, model, current_ws, ws_count);
+    // Podgląd okien i przestrzeni (Super+Tab) — na każdym monitorze (jego okna).
+    if overview {
+        draw_overview(scene, size, ox, oy, model, current_ws, ws_count);
     }
 
     // Kursor rysuje ten monitor, na którym leży (tryb DRM — nikt go za nas nie narysuje).
@@ -463,6 +463,8 @@ fn fill_vgradient(scene: &mut Scene, rect: Rect, top: Color, bottom: Color) {
 fn draw_overview(
     scene: &mut Scene,
     size: Size,
+    ox: f64,
+    _oy: f64,
     model: &WindowModel,
     current_ws: usize,
     ws_count: usize,
@@ -474,7 +476,7 @@ fn draw_overview(
     );
     let slots = {
         let w = model.lock_or_recover();
-        crate::state::overview_slots(&w, current_ws)
+        crate::state::overview_slots_on(&w, current_ws, ox, size.width)
     };
     let tiles = crate::state::overview_tiles(slots.len(), (size.width, size.height));
     let windows = model.lock_or_recover();

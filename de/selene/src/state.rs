@@ -187,12 +187,31 @@ pub const OVERVIEW_STRIP_H: f64 = 56.0;
 pub const OVERVIEW_TITLE: f64 = 26.0;
 
 /// Sloty okien bieżącej przestrzeni (bez paneli/popupów), w kolejności z-order.
+#[allow(dead_code)]
 pub fn overview_slots(windows: &[Window], current_ws: usize) -> Vec<usize> {
     let mut v: Vec<(usize, i32)> = windows
         .iter()
         .enumerate()
         .filter(|(_, w)| {
             w.mapped && !w.minimized && !w.popup && !w.layer && w.workspace == current_ws
+        })
+        .map(|(i, w)| (i, w.z))
+        .collect();
+    v.sort_by_key(|&(_, z)| z);
+    v.into_iter().map(|(i, _)| i).collect()
+}
+
+/// Sloty okien bieżącej przestrzeni, których **środek** leży na wyjściu `[ox, ox+w)`.
+pub fn overview_slots_on(windows: &[Window], current_ws: usize, ox: f64, w: f64) -> Vec<usize> {
+    let mut v: Vec<(usize, i32)> = windows
+        .iter()
+        .enumerate()
+        .filter(|(_, win)| {
+            win.mapped && !win.minimized && !win.popup && !win.layer && win.workspace == current_ws
+        })
+        .filter(|(_, win)| {
+            let cx = win.x + win.width as f64 / 2.0;
+            cx >= ox && cx < ox + w
         })
         .map(|(i, w)| (i, w.z))
         .collect();
@@ -441,6 +460,20 @@ mod tests {
         // Tylko okna bieżącej przestrzeni, bez panelu, w kolejności z.
         assert_eq!(overview_slots(&ws, 0), vec![2, 0]);
         assert_eq!(overview_slots(&ws, 1), vec![1]);
+    }
+
+    #[test]
+    fn overview_slots_split_by_output() {
+        let mut a = window_at_ws(0, 1);
+        a.x = 100.0;
+        a.width = 200; // środek 200 → monitor 0
+        let mut b = window_at_ws(0, 2);
+        b.x = 2000.0;
+        b.width = 100; // środek 2050 → monitor 1
+        let ws = vec![a, b];
+        assert_eq!(overview_slots_on(&ws, 0, 0.0, 1920.0), vec![0]);
+        assert_eq!(overview_slots_on(&ws, 0, 1920.0, 1280.0), vec![1]);
+        assert!(overview_slots_on(&ws, 1, 0.0, 1920.0).is_empty());
     }
 
     #[test]

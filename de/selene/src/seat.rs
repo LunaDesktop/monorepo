@@ -983,25 +983,25 @@ fn move_window_to_workspace(state: &mut State, slot: usize, ws: usize) {
     crate::workspace::broadcast_workspace_states(state);
 }
 
-/// Rozmiar głównego monitora — obszar układu podglądu.
-fn primary_size(state: &State) -> (f64, f64) {
-    state
-        .outputs
-        .lock_or_recover()
-        .first()
-        .map(|o| (o.width as f64, o.height as f64))
-        .unwrap_or((1280.0, 800.0))
-}
-
 /// Klik w trybie podglądu: kafelek → fokus okna, chip → przestrzeń, poza → zamknij.
 fn overview_click(state: &mut State, pos: Point) {
-    let size = primary_size(state);
+    // Znajdź monitor pod kursorem i lokalny układ podglądu na nim.
+    let (ox, oy, size) = {
+        let outs = state.outputs.lock_or_recover();
+        let idx = crate::monitors::output_at(&outs, pos.x, pos.y);
+        match outs.get(idx) {
+            Some(o) => (o.x as f64, o.y as f64, (o.width as f64, o.height as f64)),
+            None => (0.0, 0.0, (1280.0, 800.0)),
+        }
+    };
+    let local = Point::new(pos.x - ox, pos.y - oy);
+    let cur_ws = *state.ws_current.lock_or_recover();
     let slots = {
         let w = state.windows.lock_or_recover();
-        crate::state::overview_slots(&w, *state.ws_current.lock_or_recover())
+        crate::state::overview_slots_on(&w, cur_ws, ox, size.0)
     };
     let tiles = crate::state::overview_tiles(slots.len(), size);
-    if let Some(k) = tiles.iter().position(|r| r.contains(pos)) {
+    if let Some(k) = tiles.iter().position(|r| r.contains(local)) {
         if let Some(&slot) = slots.get(k) {
             state.set_overview(false);
             raise_and_focus(state, slot);
@@ -1009,7 +1009,7 @@ fn overview_click(state: &mut State, pos: Point) {
         }
     }
     let chips = crate::state::overview_ws_chips(state.ws_count, size);
-    if let Some(i) = chips.iter().position(|r| r.contains(pos)) {
+    if let Some(i) = chips.iter().position(|r| r.contains(local)) {
         state.set_overview(false);
         switch_workspace(state, i);
         return;
