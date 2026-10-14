@@ -356,9 +356,12 @@ fn build_scene(
 ) {
     let sh = |r: Rect| r.offset(-ox, -oy);
     scene.clear();
-    scene.fill_rect(
+    // Tło pulpitu: pionowy gradient (płaskie tło wyglądało jak demo).
+    fill_vgradient(
+        scene,
         Rect::from_size(size),
-        Color::from_rgba8(0x1e, 0x20, 0x28, 0xff),
+        Color::from_rgba8(0x23, 0x28, 0x3a, 0xff),
+        Color::from_rgba8(0x0f, 0x11, 0x18, 0xff),
     );
 
     {
@@ -428,11 +431,6 @@ fn build_scene(
         }
     }
 
-    scene.text(
-        TextRun::new(Point::new(16.0, 28.0), "Selene — kompozytor Luna", 14.0)
-            .with_color(Color::from_rgba8(0xdd, 0xdd, 0xdd, 0xff)),
-    );
-
     // Podgląd okien i przestrzeni (Super+Tab) — rysowany na głównym monitorze.
     if overview && is_primary {
         draw_overview(scene, size, model, current_ws, ws_count);
@@ -444,6 +442,20 @@ fn build_scene(
         if cx >= 0.0 && cy >= 0.0 && cx < size.width && cy < size.height {
             draw_cursor(scene, Point::new(cx, cy));
         }
+    }
+}
+
+/// Wypełnia prostokąt pionowym gradientem (pasami — tanie, a tło nie jest płaskie).
+fn fill_vgradient(scene: &mut Scene, rect: Rect, top: Color, bottom: Color) {
+    const BANDS: usize = 64;
+    let h = rect.height() / BANDS as f64;
+    for i in 0..BANDS {
+        let t = i as f32 / (BANDS - 1) as f32;
+        let c = top.lerp(bottom, t);
+        scene.fill_rect(
+            Rect::from_xywh(rect.x(), rect.y() + i as f64 * h, rect.width(), h + 1.0),
+            c,
+        );
     }
 }
 
