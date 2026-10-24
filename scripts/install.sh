@@ -92,6 +92,14 @@ files() {
     printf '%s|%s|%s\n' "$lib/luna-keyring"    "$dest/bin/luna-keyring"    "755"
     printf '%s|%s|%s\n' "$lib/luna-polkit"     "$dest/bin/luna-polkit"     "755"
     printf '%s|%s|%s\n' "$lib/luna-demo"       "$dest/bin/luna-demo"       "755"
+    # Menedżer plików Luna Files (+ alias `gaminedes`).
+    if [ -f "$lib/luna-files" ]; then
+        printf '%s|%s|%s\n' "$lib/luna-files" "$dest/bin/luna-files" "755"
+        printf '%s|%s|%s\n' "$root/de/session/eu.luna.Files.desktop" "$dest/share/applications/eu.luna.Files.desktop" "644"
+    fi
+    if [ -f "$lib/gaminedes" ]; then
+        printf '%s|%s|%s\n' "$lib/gaminedes" "$dest/bin/gaminedes" "755"
+    fi
     if [ -f "$lib/gallery" ]; then
         printf '%s|%s|%s\n' "$lib/gallery"     "$dest/bin/luna-gallery"    "755"
     fi

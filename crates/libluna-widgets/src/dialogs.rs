@@ -156,6 +156,12 @@ impl AlertDialog {
         self
     }
 
+    /// Szerokość okna (np. gdy jest więcej przycisków).
+    pub fn width(mut self, width: f64) -> Self {
+        self.dialog.width = width;
+        self
+    }
+
     fn height(&self, theme: &Theme) -> f64 {
         let pad = theme.spacing.lg;
         let header = theme.metrics.sheet.header;

@@ -9,7 +9,7 @@ use libluna_core::style::weight;
 use libluna_core::{Color, Point, Rect, Theme};
 
 use crate::ctx::PaintCtx;
-use crate::icon;
+use crate::icon::{self, IconName};
 
 /// Rodzaj elementu (wpływa na ikonę).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -17,6 +17,13 @@ pub enum ItemKind {
     Folder,
     #[default]
     File,
+    Image,
+    Audio,
+    Video,
+    Archive,
+    Document,
+    Code,
+    Text,
 }
 
 /// Pojedynczy element (plik/katalog).
@@ -69,7 +76,10 @@ pub enum ViewMode {
 pub struct ItemView {
     items: Vec<Item>,
     mode: ViewMode,
+    /// Zaznaczenie „główne” (kotwica dla Shift+klik i klawiatury).
     selected: Option<usize>,
+    /// Wszystkie zaznaczone elementy (rosnąco, bez duplikatów).
+    selected_set: Vec<usize>,
     hovered: Option<usize>,
     scroll: f64,
 }
@@ -89,6 +99,7 @@ impl ItemView {
     pub fn set_items(&mut self, items: Vec<Item>) {
         self.items = items;
         self.selected = None;
+        self.selected_set.clear();
         self.scroll = 0.0;
     }
 
@@ -119,12 +130,58 @@ impl ItemView {
         self.selected
     }
 
+    /// Wszystkie zaznaczone indeksy (rosnąco).
+    pub fn selected_indices(&self) -> &[usize] {
+        &self.selected_set
+    }
+
+    pub fn is_selected(&self, i: usize) -> bool {
+        self.selected_set.binary_search(&i).is_ok()
+    }
+
     pub fn set_selected(&mut self, selected: Option<usize>) {
         self.selected = selected;
+        self.selected_set.clear();
+        if let Some(i) = selected {
+            self.selected_set.push(i);
+        }
+    }
+
+    /// Dodaje/usuwa element z zaznaczenia (Ctrl+klik); staje się kotwicą.
+    pub fn toggle_selected(&mut self, i: usize) {
+        match self.selected_set.binary_search(&i) {
+            Ok(pos) => {
+                self.selected_set.remove(pos);
+            }
+            Err(pos) => self.selected_set.insert(pos, i),
+        }
+        self.selected = Some(i);
+    }
+
+    /// Zaznacza zakres od kotwicy do `to` (Shift+klik).
+    pub fn select_range(&mut self, to: usize) {
+        let from = self.selected.unwrap_or(to);
+        let (a, b) = if from <= to { (from, to) } else { (to, from) };
+        self.selected_set = (a..=b).collect();
+        self.selected = Some(to);
+    }
+
+    pub fn select_all(&mut self) {
+        self.selected_set = (0..self.items.len()).collect();
+        self.selected = self.items.len().checked_sub(1);
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selected = None;
+        self.selected_set.clear();
     }
 
     pub fn set_hovered(&mut self, hovered: Option<usize>) {
         self.hovered = hovered;
+    }
+
+    pub fn hovered(&self) -> Option<usize> {
+        self.hovered
     }
 
     pub fn scroll(&self) -> f64 {
@@ -205,7 +262,7 @@ impl ItemView {
     /// Zaznacza element pod punktem `p`; zwraca jego indeks.
     pub fn click_at(&mut self, rect: Rect, p: Point, theme: &Theme) -> Option<usize> {
         let i = self.index_at(rect, p, theme)?;
-        self.selected = Some(i);
+        self.set_selected(Some(i));
         Some(i)
     }
 
@@ -219,7 +276,12 @@ impl ItemView {
         ctx.scene.push_clip(rect);
         for (i, item) in self.items.iter().enumerate() {
             let s = self.slot_rect(rect, i, &theme);
-            let selected = self.selected == Some(i);
+            // Wirtualizacja: elementy poza widokiem nie generują komend rysowania.
+            // Bez tego katalog z tysiącami plików zamulał każdą klatkę.
+            if s.bottom() <= rect.y() || s.y() >= rect.bottom() {
+                continue;
+            }
+            let selected = self.is_selected(i);
             if selected {
                 ctx.scene
                     .fill_rounded_rect(s, theme.radius.small, colors.shade.scale_alpha(1.8));
@@ -286,6 +348,13 @@ fn draw_icon(ctx: &mut PaintCtx, kind: ItemKind, box_: Rect, folder: Color, file
     match kind {
         ItemKind::Folder => icon::folder(ctx, folder, box_),
         ItemKind::File => icon::file(ctx, file, box_),
+        ItemKind::Image => icon::paint_icon(ctx, IconName::Image, box_, file),
+        ItemKind::Audio => icon::paint_icon(ctx, IconName::Music, box_, file),
+        ItemKind::Video => icon::paint_icon(ctx, IconName::Video, box_, file),
+        ItemKind::Archive => icon::paint_icon(ctx, IconName::Archive, box_, file),
+        ItemKind::Document => icon::paint_icon(ctx, IconName::Document, box_, file),
+        ItemKind::Code => icon::paint_icon(ctx, IconName::Code, box_, file),
+        ItemKind::Text => icon::paint_icon(ctx, IconName::Document, box_, file),
     }
 }
 
@@ -318,6 +387,24 @@ mod tests {
         assert!(b.x() > a.x());
         let d = v.slot_rect(rect(), 3, &theme); // 4. element → 2. rząd
         assert!(d.y() > a.y());
+    }
+
+    #[test]
+    fn multi_selection_toggle_range_and_all() {
+        let mut v = ItemView::new(items());
+        v.set_selected(Some(1));
+        assert!(v.is_selected(1));
+        v.toggle_selected(3);
+        assert_eq!(v.selected_indices(), &[1, 3]);
+        v.toggle_selected(1);
+        assert_eq!(v.selected_indices(), &[3]);
+        v.set_selected(Some(1));
+        v.select_range(3);
+        assert_eq!(v.selected_indices(), &[1, 2, 3]);
+        v.select_all();
+        assert_eq!(v.selected_indices().len(), 4);
+        v.clear_selection();
+        assert!(v.selected_indices().is_empty());
     }
 
     #[test]

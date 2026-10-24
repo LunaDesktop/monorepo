@@ -1,0 +1,17 @@
+[package]
+name = "luna-files"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Luna Files — menedżer plików środowiska Luna (libLuna, bez GTK): nawigacja, kosz XDG, urządzenia, operacje w tle."
+
+[dependencies]
+libluna-core.workspace = true
+libluna-i18n.workspace = true
+libluna-render.workspace = true
+libluna-platform.workspace = true
+libluna-widgets.workspace = true
+rustix = { version = "0.38", features = ["fs"] }
+libc = "0.2"

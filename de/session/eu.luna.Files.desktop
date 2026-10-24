@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=Files
+Name[pl]=Pliki
+Name[de]=Dateien
+Comment=Browse and manage files
+Comment[pl]=Przeglądaj i zarządzaj plikami
+Comment[de]=Dateien durchsuchen und verwalten
+Exec=luna-files
+Icon=system-file-manager
+Terminal=false
+Categories=System;FileManager;
+Keywords=files;folders;manager;
+Keywords[pl]=pliki;foldery;menedżer;
+Keywords[de]=Dateien;Ordner;Dateimanager;
