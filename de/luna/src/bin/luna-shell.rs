@@ -1733,6 +1733,34 @@ fn force_x11_env(cmd: &mut std::process::Command) {
     apply_display(cmd);
 }
 
+/// Backend X11 dla **terminala**, ale z zachowanym `WAYLAND_DISPLAY`.
+///
+/// Terminal ma działać na X11 (spójny pasek tytułu), a uruchamiane w nim
+/// aplikacje Waylanda muszą widzieć gniazdo Selene.
+fn force_x11_terminal_env(cmd: &mut std::process::Command) {
+    cmd.env("GDK_BACKEND", "x11")
+        .env("QT_QPA_PLATFORM", "xcb")
+        .env("SDL_VIDEODRIVER", "x11")
+        .env("CLUTTER_BACKEND", "x11")
+        .env("MOZ_ENABLE_WAYLAND", "0");
+    // Gniazdo: z bieżącego środowiska albo z markera sesji.
+    let socket = std::env::var("WAYLAND_DISPLAY")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| {
+            std::env::var_os("XDG_RUNTIME_DIR")
+                .and_then(|rt| {
+                    std::fs::read_to_string(std::path::Path::new(&rt).join("luna-wayland")).ok()
+                })
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+        });
+    if let Some(socket) = socket {
+        cmd.env("WAYLAND_DISPLAY", socket);
+    }
+    apply_display(cmd);
+}
+
 /// `DISPLAY` dla uruchamianych aplikacji.
 ///
 /// Sesja startuje powłokę **od razu** po gnieździe Waylanda, zanim Xwayland zdąży
@@ -1816,7 +1844,14 @@ fn launch_direct(exec: &str, terminal: bool, force_x11: bool) {
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null());
     if force_x11 {
-        force_x11_env(&mut cmd);
+        if terminal {
+            // Terminal działa przez X11 (nasz SSD), ale jego **dzieci** mają dostać
+            // Wayland — inaczej `luna-files`/inne aplikacje Waylanda kończą się
+            // `NoCompositor`, a GTK po cichu spada na X11.
+            force_x11_terminal_env(&mut cmd);
+        } else {
+            force_x11_env(&mut cmd);
+        }
     } else {
         apply_display(&mut cmd);
     }

@@ -404,6 +404,47 @@ impl Frame<'_> {
 /// odświeżenia (start, zmiana rozmiaru/skali, zdarzenia wejścia, zmiana motywu).
 ///
 /// Funkcja wraca, gdy okno zostanie zamknięte (przez użytkownika lub `Escape`).
+/// Ustawia `WAYLAND_DISPLAY`, gdy go brak (terminal uruchomiony w sesji X11).
+///
+/// Kolejność: zmienna → marker Selene (`luna-wayland`) → `wayland-0`/`wayland-1`.
+/// Dzięki temu `luna-files`, `luna-demo` i inne aplikacje libLuny działają także
+/// z terminala odziedziczonego po X11, gdzie `WAYLAND_DISPLAY` nie jest ustawione.
+fn ensure_wayland_display() -> Result<(), Box<dyn Error>> {
+    if std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty()) {
+        return Ok(());
+    }
+    let rt = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .ok_or("brak XDG_RUNTIME_DIR i WAYLAND_DISPLAY — uruchom aplikację w sesji Luny")?;
+
+    let mut names: Vec<String> = Vec::new();
+    if let Ok(name) = std::fs::read_to_string(rt.join("luna-wayland")) {
+        let name = name.trim().to_owned();
+        if !name.is_empty() {
+            names.push(name);
+        }
+    }
+    names.push("wayland-0".to_owned());
+    names.push("wayland-1".to_owned());
+
+    for name in names {
+        let path = if name.starts_with('/') {
+            std::path::PathBuf::from(&name)
+        } else {
+            rt.join(&name)
+        };
+        if path.exists() {
+            std::env::set_var("WAYLAND_DISPLAY", &name);
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "Nie znaleziono kompozytora Wayland (brak WAYLAND_DISPLAY i gniazda w {}). Uruchom aplikację w sesji Luny.",
+        rt.display()
+    )
+    .into())
+}
+
 pub fn run<F>(config: AppConfig, render: F) -> Result<(), Box<dyn Error>>
 where
     F: for<'a> FnMut(&mut Frame<'a>) + 'static,
@@ -414,6 +455,10 @@ where
     if let Ok(Some(dir)) = libluna_core::runtime::ensure_runtime_dir() {
         eprintln!("libLuna: XDG_RUNTIME_DIR not set, using {}", dir.display());
     }
+    // `wayland-client` **nie** zgaduje nazwy gniazda: bez `WAYLAND_DISPLAY` kończy
+    // się `NoCompositor`. Terminale uruchamiane przez powłokę dostają czyste
+    // środowisko X11, więc odnajdujemy gniazdo Selene po markerze / `wayland-0`.
+    ensure_wayland_display()?;
     let conn = Connection::connect_to_env()?;
     let (globals, event_queue) = registry_queue_init(&conn)?;
     let qh = event_queue.handle();
