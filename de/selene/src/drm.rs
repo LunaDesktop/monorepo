@@ -21,7 +21,10 @@ use crate::monitors::{layout_horizontal, OutputInfo};
 const DRM_IOCTL_MODE_GETRESOURCES: u32 = 0xC040_64A0;
 const DRM_IOCTL_MODE_GETCONNECTOR: u32 = 0xC050_64A7;
 const DRM_IOCTL_MODE_GETENCODER: u32 = 0xC014_64A6;
+const DRM_IOCTL_MODE_GETCRTC: u32 = 0xC068_64A1;
 const DRM_IOCTL_MODE_SETCRTC: u32 = 0xC068_64A2;
+/// `drm_mode_crtc_lut` (`sizeof` = 32 = 0x20).
+const DRM_IOCTL_MODE_SETGAMMA: u32 = 0xC020_64A4;
 const DRM_IOCTL_MODE_CREATE_DUMB: u32 = 0xC020_64B2;
 const DRM_IOCTL_MODE_MAP_DUMB: u32 = 0xC010_64B3;
 const DRM_IOCTL_MODE_ADDFB2: u32 = 0xC068_64B8;
@@ -40,6 +43,9 @@ const DRM_MODE_TYPE_PREFERRED: u32 = 1 << 3;
 const DRM_MODE_PAGE_FLIP_EVENT: u32 = 1;
 /// Cztery znaki `XRGB8888` (kolejność bajtów B,G,R,X).
 const DRM_FORMAT_XRGB8888: u32 = 0x3432_5258;
+/// Cztery znaki `XBGR8888` (kolejność bajtów R,G,B,X) — **taka sama jak wyjście
+/// tiny-skia**, więc klatkę można skopiować bez przepisywania kanałów.
+const DRM_FORMAT_XBGR8888: u32 = 0x3432_4258;
 /// Cztery znaki `ARGB8888` (kolejność bajtów B,G,R,A) — format kursora.
 const DRM_FORMAT_ARGB8888: u32 = 0x3432_5241;
 /// `DRM_MODE_CURSOR_BO` — ustaw obraz kursora (albo wyłącz, gdy `handle` = 0).
@@ -134,6 +140,17 @@ struct ModeCrtc {
     gamma_size: u32,
     mode_valid: u32,
     mode: ModeInfo,
+}
+
+/// `struct drm_mode_crtc_lut` — tablica korekcji gamma (night light).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ModeCrtcLut {
+    crtc_id: u32,
+    gamma_size: u32,
+    red: u64,
+    green: u64,
+    blue: u64,
 }
 
 /// `struct drm_mode_create_dumb`.
@@ -254,21 +271,6 @@ fn ioctl_none<const OP: u32, F: AsFd>(fd: F) -> rustix::io::Result<()> {
     unsafe { rustix::ioctl::ioctl(fd, NoArg::<OP>) }
 }
 
-/// Diagnostyka: sprawdza, czy można przejąć mastera DRM **bez zmiany trybu**.
-/// Zwraca ścieżkę karty, jeśli master jest wolny (i od razu go zwalnia).
-pub fn check_master() -> Option<PathBuf> {
-    for card in card_paths() {
-        let Ok(fd) = rustix::fs::open(&card, OFlags::RDWR | OFlags::CLOEXEC, Mode::empty()) else {
-            continue;
-        };
-        if ioctl_none::<DRM_IOCTL_SET_MASTER, _>(&fd).is_ok() {
-            let _ = ioctl_none::<DRM_IOCTL_DROP_MASTER, _>(&fd);
-            return Some(card);
-        }
-    }
-    None
-}
-
 /// Lista ścieżek kart DRM (`/dev/dri/card*`), posortowana.
 fn card_paths() -> Vec<PathBuf> {
     let mut cards: Vec<PathBuf> = std::fs::read_dir("/dev/dri")
@@ -286,20 +288,160 @@ fn card_paths() -> Vec<PathBuf> {
     cards
 }
 
-/// Wykrywa monitory. `None` oznacza, że DRM/KMS nie jest dostępne (użyj wyjścia nested).
-pub fn discover() -> Option<Vec<OutputInfo>> {
+/// Szczegółowy raport wykrywania (`SELENE_DRM_PROBE=1`).
+///
+/// Nie zmienia trybu i nie wymaga bycia DRM masterem — wypisuje wszystkie karty,
+/// konektory i tryby zgłoszone przez EDID, razem z tym, który Selene by wybrał.
+pub fn probe_report() -> String {
+    let mut out = String::new();
+    let mut used = false;
     for card in card_paths() {
         let Ok(fd) = rustix::fs::open(&card, OFlags::RDWR | OFlags::CLOEXEC, Mode::empty()) else {
             continue;
         };
-        if let Some(mut outs) = probe_card(fd.as_fd()) {
-            if !outs.is_empty() {
-                layout_horizontal(&mut outs);
-                return Some(outs);
+        let master = ioctl_none::<DRM_IOCTL_SET_MASTER, _>(&fd).is_ok();
+        if master {
+            let _ = ioctl_none::<DRM_IOCTL_DROP_MASTER, _>(&fd);
+        }
+        let Some(res) = fetch_resources(fd.as_fd()) else {
+            out.push_str(&format!(
+                "{}: master={} (nie można odczytać zasobów)\n",
+                card.display(),
+                master
+            ));
+            continue;
+        };
+        let mut connected = 0usize;
+        let mut report = String::new();
+        for id in &res.connectors {
+            let Some((c, modes)) = read_connector(fd.as_fd(), *id) else {
+                continue;
+            };
+            let name = connector_name(c.connector_type, c.connector_type_id);
+            if c.connection != DRM_MODE_CONNECTED {
+                report.push_str(&format!("  {name}: disconnected\n"));
+                continue;
+            }
+            connected += 1;
+            report.push_str(&format!(
+                "  {name}: connected, {}x{} mm, tryby={}\n",
+                c.mm_width,
+                c.mm_height,
+                modes.len()
+            ));
+            for m in &modes {
+                let preferred = m.type_ & DRM_MODE_TYPE_PREFERRED != 0;
+                report.push_str(&format!(
+                    "    {}x{}@{} Hz{}\n",
+                    m.hdisplay,
+                    m.vdisplay,
+                    m.vrefresh,
+                    if preferred { "  [PREFERRED]" } else { "" }
+                ));
+            }
+            if let Some(best) = pick_best_mode(&modes) {
+                report.push_str(&format!(
+                    "    → wybrany: {}x{}@{} Hz{}\n",
+                    best.hdisplay,
+                    best.vdisplay,
+                    best.vrefresh,
+                    if best.type_ & DRM_MODE_TYPE_PREFERRED != 0 {
+                        " [PREFERRED]"
+                    } else {
+                        ""
+                    }
+                ));
             }
         }
+        out.push_str(&format!(
+            "{}: master={} konektory={} podłączone={}{}\n",
+            card.display(),
+            master,
+            res.connectors.len(),
+            connected,
+            if !used && connected > 0 {
+                "  ← discover() użyje tej karty"
+            } else {
+                ""
+            }
+        ));
+        out.push_str(&report);
+        if connected > 0 {
+            used = true;
+        }
     }
-    None
+    if out.is_empty() {
+        out.push_str("brak kart DRM w /dev/dri\n");
+    }
+    out
+}
+
+/// Odczytuje konektor wraz z pełną listą trybów (bez zmiany trybu).
+fn read_connector(fd: BorrowedFd, id: u32) -> Option<(ModeGetConnector, Vec<ModeInfo>)> {
+    let c = ioctl_rw::<ModeGetConnector, DRM_IOCTL_MODE_GETCONNECTOR, _>(
+        fd,
+        ModeGetConnector {
+            connector_id: id,
+            ..ModeGetConnector::default()
+        },
+    )
+    .ok()?;
+    let count = c.count_modes as usize;
+    if c.connection != DRM_MODE_CONNECTED || count == 0 {
+        return Some((c, Vec::new()));
+    }
+    let mut modes = vec![ModeInfo::default(); count];
+    let c = ioctl_rw::<ModeGetConnector, DRM_IOCTL_MODE_GETCONNECTOR, _>(
+        fd,
+        ModeGetConnector {
+            connector_id: id,
+            count_modes: count as u32,
+            modes_ptr: modes.as_mut_ptr() as u64,
+            ..ModeGetConnector::default()
+        },
+    )
+    .ok()?;
+    Some((c, modes))
+}
+
+/// Wykrywa monitory. `None` oznacza, że DRM/KMS nie jest dostępne (użyj wyjścia nested).
+///
+/// Preferujemy kartę, na której **można zostać masterem** — dokładnie tę samą, którą
+/// wybierze [`DrmBackend::open`]. Wcześniej braliśmy pierwszą kartę z podłączonymi
+/// monitorami, więc na maszynie z dwoma GPU model wyjść mógł pochodzić z innej karty
+/// niż faktyczny scanout.
+pub fn discover() -> Option<Vec<OutputInfo>> {
+    let stats = std::env::var("SELENE_STATS").is_ok();
+    let mut fallback: Option<Vec<OutputInfo>> = None;
+    for card in card_paths() {
+        let Ok(fd) = rustix::fs::open(&card, OFlags::RDWR | OFlags::CLOEXEC, Mode::empty()) else {
+            continue;
+        };
+        let master = ioctl_none::<DRM_IOCTL_SET_MASTER, _>(&fd).is_ok();
+        if master {
+            let _ = ioctl_none::<DRM_IOCTL_DROP_MASTER, _>(&fd);
+        }
+        let Some(mut outs) = probe_card(fd.as_fd()) else {
+            continue;
+        };
+        if outs.is_empty() {
+            continue;
+        }
+        layout_horizontal(&mut outs);
+        if stats {
+            eprintln!(
+                "selene/drm: {} master={} wyjścia={}",
+                card.display(),
+                master,
+                outs.len()
+            );
+        }
+        if master {
+            return Some(outs);
+        }
+        fallback.get_or_insert(outs);
+    }
+    fallback
 }
 
 /// Odpytuje jedną kartę DRM o podłączone konektory.
@@ -363,20 +505,25 @@ fn probe_connector(fd: BorrowedFd, id: u32) -> Option<OutputInfo> {
         name: connector_name(c.connector_type, c.connector_type_id),
         width: mode.hdisplay as i32,
         height: mode.vdisplay as i32,
+        refresh_hz: mode.vrefresh as i32,
         scale: 1,
         x: 0,
         y: 0,
     })
 }
 
-/// Wybiera najlepszy tryb monitora: **największa rozdzielczość**, potem **najwyższy
-/// `vrefresh`**; przy remisie preferuje tryb natywny (`PREFERRED`).
+/// Wybiera tryb monitora: **najpierw tryb natywny z EDID** (`PREFERRED`), a dopiero
+/// potem największa rozdzielczość i najwyższy `vrefresh`.
+///
+/// Wcześniej kolejność była odwrotna („największa rozdzielczość, potem PREFERRED”),
+/// więc monitor o natywnym 1600×900, który dodatkowo zgłasza 1920×1080, dostawał
+/// 1920×1080 — obraz był skalowany przez monitor i wyglądał na rozmyty.
 fn pick_best_mode(modes: &[ModeInfo]) -> Option<&ModeInfo> {
     modes.iter().max_by_key(|m| {
         let area = m.hdisplay as u64 * m.vdisplay as u64;
         let hz = m.vrefresh as u64;
         let preferred = u64::from(m.type_ & DRM_MODE_TYPE_PREFERRED != 0);
-        (area, hz, preferred)
+        (preferred, area, hz)
     })
 }
 
@@ -471,11 +618,15 @@ impl Drop for DumbBuffer {
 struct DrmOutput {
     name: String,
     crtc_id: u32,
+    /// Rozmiar sprzętowej tablicy gamma (0 = brak wsparcia dla night lightu).
+    gamma_size: u32,
     width: u32,
     height: u32,
     hz: u32,
     buffers: [DumbBuffer; 2],
     front: usize,
+    /// Czy `present` musi przepisywać kanały (bufor `XRGB8888` zamiast `XBGR8888`).
+    swizzle: bool,
     /// Bufor obrazu kursora sprzętowego (tworzony leniwie).
     cursor: Option<DumbBuffer>,
 }
@@ -524,10 +675,22 @@ impl DrmBackend {
                 continue;
             };
             let mut outputs = Vec::new();
+            let mut used_crtcs = Vec::new();
+            let mut skipped = 0usize;
             for &conn in &res.connectors {
-                if let Some(out) = setup_output(fd.as_fd(), conn, &res) {
+                if let Some(out) = setup_output(fd.as_fd(), conn, &res, &mut used_crtcs) {
                     outputs.push(out);
+                } else {
+                    skipped += 1;
                 }
+            }
+            if std::env::var("SELENE_STATS").is_ok() {
+                eprintln!(
+                    "selene/drm: skonfigurowano {} wyjść (pominięto {} z {} złączy)",
+                    outputs.len(),
+                    skipped,
+                    res.connectors.len()
+                );
             }
             if outputs.is_empty() {
                 let _ = ioctl_none::<DRM_IOCTL_DROP_MASTER, _>(&fd);
@@ -547,6 +710,29 @@ impl DrmBackend {
             .collect()
     }
 
+    /// Czy którykolwiek CRTC ma sprzętową tablicę gamma (night light).
+    pub fn supports_night_light(&self) -> bool {
+        self.outputs.iter().any(|o| o.gamma_size > 0)
+    }
+
+    /// Ustawia ciepłą korektę gamma na wszystkich wyjściach.
+    ///
+    /// `percent` = 0 przywraca neutralną rampę, 100 to najcieplejszy wariant.
+    /// Zwraca `true`, jeśli udało się ustawić LUT na przynajmniej jednym CRTC.
+    pub fn set_night_light(&self, percent: u8) -> bool {
+        let strength = percent.min(100) as f64 / 100.0;
+        let mut any = false;
+        for out in &self.outputs {
+            if out.gamma_size == 0 {
+                continue;
+            }
+            if set_gamma_lut(self.fd.as_fd(), out.crtc_id, out.gamma_size, strength) {
+                any = true;
+            }
+        }
+        any
+    }
+
     /// Wypycha klatkę (RGBA, wymiary = rozmiar wyjścia) i kolejkuje page-flip.
     /// Po wywołaniu należy poczekać na [`DrmBackend::wait_flip`].
     pub fn present(&mut self, idx: usize, rgba: &[u8]) -> bool {
@@ -555,13 +741,23 @@ impl DrmBackend {
             return false;
         };
         let back = (out.front + 1) & 1;
-        swizzle_into(
-            out.buffers[back].ptr,
-            out.buffers[back].pitch,
-            rgba,
-            out.width as usize,
-            out.height as usize,
-        );
+        if out.swizzle {
+            swizzle_into(
+                out.buffers[back].ptr,
+                out.buffers[back].pitch,
+                rgba,
+                out.width as usize,
+                out.height as usize,
+            );
+        } else {
+            copy_rows_into(
+                out.buffers[back].ptr,
+                out.buffers[back].pitch,
+                rgba,
+                out.width as usize,
+                out.height as usize,
+            );
+        }
         let req = ModePageFlip {
             crtc_id: out.crtc_id,
             fb_id: out.buffers[back].fb_id,
@@ -661,7 +857,12 @@ impl DrmBackend {
 }
 
 /// Konfiguruje jedno wyjście: tryb, bufor dumb, framebuffer i `SETCRTC`.
-fn setup_output(fd: BorrowedFd, conn_id: u32, res: &Resources) -> Option<DrmOutput> {
+fn setup_output(
+    fd: BorrowedFd,
+    conn_id: u32,
+    res: &Resources,
+    used_crtcs: &mut Vec<u32>,
+) -> Option<DrmOutput> {
     let c = ioctl_rw::<ModeGetConnector, DRM_IOCTL_MODE_GETCONNECTOR, _>(
         fd,
         ModeGetConnector {
@@ -690,7 +891,10 @@ fn setup_output(fd: BorrowedFd, conn_id: u32, res: &Resources) -> Option<DrmOutp
     .ok()?;
     let mode = *pick_best_mode(&modes)?;
 
-    // Enkoder → CRTC (lub pierwszy możliwy).
+    // Enkoder → CRTC. Po przejęciu ekranu CRTC po poprzedniej sesji bywa jeszcze
+    // zajęty (`set_crtc` kończy się `-EBUSY`) — dlatego próbujemy **kolejnych**
+    // kandydatów. Wcześniej poddawaliśmy się po pierwszej nieudanej próbie i losowo
+    // brakowało jednego monitora („działa tylko jeden ekran”).
     let enc = ioctl_rw::<ModeGetEncoder, DRM_IOCTL_MODE_GETENCODER, _>(
         fd,
         ModeGetEncoder {
@@ -699,35 +903,72 @@ fn setup_output(fd: BorrowedFd, conn_id: u32, res: &Resources) -> Option<DrmOutp
         },
     )
     .ok()?;
-    let crtc_id = if enc.crtc_id != 0 {
-        enc.crtc_id
-    } else {
-        let idx = enc.possible_crtcs.trailing_zeros() as usize;
-        *res.crtcs.get(idx).or_else(|| res.crtcs.first())?
-    };
+
+    // Kolejność kandydatów: obecny CRTC enkodera → wg maski `possible_crtcs` → reszta karty.
+    let mut candidates: Vec<u32> = Vec::new();
+    if enc.crtc_id != 0 {
+        candidates.push(enc.crtc_id);
+    }
+    for (idx, &crtc) in res.crtcs.iter().enumerate() {
+        if (enc.possible_crtcs & (1 << idx)) != 0 {
+            candidates.push(crtc);
+        }
+    }
+    candidates.extend(res.crtcs.iter().copied());
 
     let width = mode.hdisplay as u32;
     let height = mode.vdisplay as u32;
-    let b0 = create_dumb(fd, width, height)?;
-    let b1 = create_dumb(fd, width, height)?;
-    if !set_crtc(fd, crtc_id, b0.fb_id, conn_id, &mode) {
-        return None;
+    // Preferujemy `XBGR8888`: pamięć to R,G,B,X, czyli dokładnie wyjście tiny-skia.
+    // `present` kopiuje wtedy wiersze bez przepisywania kanałów (oszczędność ~1–2 ms
+    // na klatkę 1080p). Gdy sterownik nie wspiera formatu — wracamy do `XRGB8888`.
+    let mut swizzle = false;
+    let make_pair = |fmt: u32| -> Option<(DumbBuffer, DumbBuffer)> {
+        Some((
+            create_dumb(fd, width, height, fmt)?,
+            create_dumb(fd, width, height, fmt)?,
+        ))
+    };
+    let (b0, b1) = match make_pair(DRM_FORMAT_XBGR8888) {
+        Some(pair) => pair,
+        None => {
+            swizzle = true;
+            make_pair(DRM_FORMAT_XRGB8888)?
+        }
+    };
+
+    let mut crtc_id = None;
+    for cand in candidates {
+        if used_crtcs.contains(&cand) {
+            continue;
+        }
+        if set_crtc(fd, cand, b0.fb_id, conn_id, &mode) {
+            crtc_id = Some(cand);
+            break;
+        }
+        if std::env::var("SELENE_STATS").is_ok() {
+            eprintln!("selene/drm: CRTC {cand} zajęty — próbuję następny");
+        }
     }
+    let crtc_id = crtc_id?;
+    // CRTC oznaczamy jako użyty **dopiero po udanym** `set_crtc`.
+    used_crtcs.push(crtc_id);
     Some(DrmOutput {
         name: connector_name(c.connector_type, c.connector_type_id),
         crtc_id,
+        gamma_size: gamma_size(fd, crtc_id),
         width,
         height,
         hz: mode.vrefresh,
         buffers: [b0, b1],
         front: 0,
+        swizzle,
         cursor: None,
     })
 }
 
 /// Tworzy bufor dumb, mapuje go i rejestruje jako framebuffer (scanout).
-fn create_dumb(fd: BorrowedFd, width: u32, height: u32) -> Option<DumbBuffer> {
-    create_dumb_fmt(fd, width, height, DRM_FORMAT_XRGB8888, true)
+fn create_dumb(fd: BorrowedFd, width: u32, height: u32, format: u32) -> Option<DumbBuffer> {
+    create_dumb_fmt(fd, width, height, format, true)
 }
 
 /// Tworzy bufor dumb w zadanym formacie; `register_fb` dodaje też framebuffer
@@ -794,6 +1035,58 @@ fn create_dumb_fmt(
     })
 }
 
+/// Odczytuje rozmiar sprzętowej tablicy gamma CRTC (0 = brak wsparcia).
+fn gamma_size(fd: BorrowedFd, crtc_id: u32) -> u32 {
+    ioctl_rw::<ModeCrtc, DRM_IOCTL_MODE_GETCRTC, _>(
+        fd,
+        ModeCrtc {
+            crtc_id,
+            ..ModeCrtc::default()
+        },
+    )
+    .map(|c| c.gamma_size)
+    .unwrap_or(0)
+}
+
+/// Buduje neutralną lub ciepłą rampę gamma.
+///
+/// `strength` = 0 daje idealną przekątną (brak zmiany kolorów), a 1 najmocniej
+/// tłumi kanał niebieski. Wartości mają pełny zakres 16 bitów na kanał.
+fn gamma_ramp(size: u32, strength: f64) -> (Vec<u16>, Vec<u16>, Vec<u16>) {
+    let n = size as usize;
+    let mut red = vec![0u16; n];
+    let mut green = vec![0u16; n];
+    let mut blue = vec![0u16; n];
+    if n == 0 {
+        return (red, green, blue);
+    }
+    let strength = strength.clamp(0.0, 1.0);
+    let last = (n - 1).max(1) as f64;
+    for i in 0..n {
+        let level = i as f64 / last * 65535.0;
+        red[i] = level.round() as u16;
+        green[i] = (level * (1.0 - 0.10 * strength)).round() as u16;
+        blue[i] = (level * (1.0 - 0.38 * strength)).round() as u16;
+    }
+    (red, green, blue)
+}
+
+/// Wgrywa tablicę gamma na CRTC (`SETGAMMA`).
+fn set_gamma_lut(fd: BorrowedFd, crtc_id: u32, size: u32, strength: f64) -> bool {
+    if size == 0 {
+        return false;
+    }
+    let (red, green, blue) = gamma_ramp(size, strength);
+    let lut = ModeCrtcLut {
+        crtc_id,
+        gamma_size: size,
+        red: red.as_ptr() as u64,
+        green: green.as_ptr() as u64,
+        blue: blue.as_ptr() as u64,
+    };
+    ioctl_rw::<ModeCrtcLut, DRM_IOCTL_MODE_SETGAMMA, _>(fd, lut).is_ok()
+}
+
 /// Ustawia tryb na CRTC (`SETCRTC`).
 fn set_crtc(fd: BorrowedFd, crtc_id: u32, fb_id: u32, connector_id: u32, mode: &ModeInfo) -> bool {
     let mut connectors = [connector_id];
@@ -838,14 +1131,31 @@ fn swizzle_into(dst: *mut u8, pitch: usize, rgba: &[u8], width: usize, height: u
     unsafe {
         for y in 0..height {
             let src = &rgba[y * width * 4..(y + 1) * width * 4];
-            let row = dst.add(y * pitch);
-            for x in 0..width {
-                let s = &src[x * 4..x * 4 + 4];
-                let d = row.add(x * 4);
-                *d = s[2];
-                *d.add(1) = s[1];
-                *d.add(2) = s[0];
-                *d.add(3) = 0xff;
+            let row_dst = std::slice::from_raw_parts_mut(dst.add(y * pitch) as *mut u32, width);
+            for (d, s) in row_dst.iter_mut().zip(src.chunks_exact(4)) {
+                *d = u32::from_ne_bytes([s[2], s[1], s[0], 0xff]);
+            }
+        }
+    }
+}
+
+/// Kopiuje klatkę RGBA do bufora `XBGR8888` (ta sama kolejność bajtów w pamięci)
+/// wiersz po wierszu. Gdy `pitch` zgadza się z szerokością, to jeden `memcpy`.
+fn copy_rows_into(dst: *mut u8, pitch: usize, rgba: &[u8], width: usize, height: usize) {
+    if dst.is_null() || rgba.len() < width * height * 4 {
+        return;
+    }
+    let row_bytes = width * 4;
+    unsafe {
+        if pitch == row_bytes {
+            std::ptr::copy_nonoverlapping(rgba.as_ptr(), dst, row_bytes * height);
+        } else {
+            for y in 0..height {
+                std::ptr::copy_nonoverlapping(
+                    rgba.as_ptr().add(y * row_bytes),
+                    dst.add(y * pitch),
+                    row_bytes,
+                );
             }
         }
     }
@@ -879,11 +1189,69 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "benchmark reczny"]
+    fn bench_present_copy() {
+        let (w, h) = (1920usize, 1080usize);
+        let src = vec![7u8; w * h * 4];
+        let mut dst = vec![0u8; w * h * 4];
+        let n = 20;
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            copy_rows_into(
+                std::hint::black_box(dst.as_mut_ptr()),
+                w * 4,
+                std::hint::black_box(&src),
+                w,
+                h,
+            );
+        }
+        let _ = std::hint::black_box(dst[12345]);
+        println!(
+            "copy_rows_into (XBGR8888): {:.2} ms/klatke",
+            t.elapsed().as_secs_f64() * 1000.0 / n as f64
+        );
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            swizzle_into(
+                std::hint::black_box(dst.as_mut_ptr()),
+                w * 4,
+                std::hint::black_box(&src),
+                w,
+                h,
+            );
+        }
+        let _ = std::hint::black_box(dst[12345]);
+        println!(
+            "swizzle_into (XRGB8888):  {:.2} ms/klatke",
+            t.elapsed().as_secs_f64() * 1000.0 / n as f64
+        );
+    }
+
+    #[test]
     fn xrgb8888_fourcc_is_little_endian_bgrx() {
         // 'X','R','2','4' — kontroluje kolejność bajtów przy przepisywaniu klatki.
         assert_eq!(DRM_FORMAT_XRGB8888.to_le_bytes(), *b"XR24");
         // 'A','R','2','4' — format kursora (z kanałem alfa).
         assert_eq!(DRM_FORMAT_ARGB8888.to_le_bytes(), *b"AR24");
+        // 'X','B','2','4' — w pamięci R,G,B,X, czyli wprost wyjście tiny-skia.
+        assert_eq!(DRM_FORMAT_XBGR8888.to_le_bytes(), *b"XB24");
+    }
+
+    #[test]
+    fn copy_rows_matches_rgba_layout() {
+        // 2×2 RGBA → bufor XBGR8888: bajty bez zmian, tylko wiersze wg `pitch`.
+        let src: Vec<u8> = (0..16).collect();
+        let mut dst = vec![0u8; 16];
+        copy_rows_into(dst.as_mut_ptr(), 8, &src, 2, 2);
+        assert_eq!(dst, src);
+
+        // Większy `pitch` (padding w wierszu) — kopiowane tylko 8 bajtów na wiersz.
+        let mut dst = vec![0xAAu8; 24];
+        copy_rows_into(dst.as_mut_ptr(), 12, &src, 2, 2);
+        assert_eq!(&dst[0..8], &src[0..8]);
+        assert_eq!(&dst[12..20], &src[8..16]);
+        // Padding pozostaje nietknięty.
+        assert!(dst[8..12].iter().all(|&b| b == 0xAA));
     }
 
     fn mode(w: u16, h: u16, hz: u32, preferred: bool) -> ModeInfo {
@@ -915,8 +1283,58 @@ mod tests {
     }
 
     #[test]
+    fn native_mode_wins_over_larger_scale() {
+        // Monitor o natywnym 1600x900, który dodatkowo zgłasza 1920x1080 — bierzemy natywny.
+        let modes = [
+            mode(1920, 1080, 60, false),
+            mode(1600, 900, 60, true),
+            mode(1280, 720, 60, false),
+        ];
+        let best = pick_best_mode(&modes).unwrap();
+        assert_eq!((best.hdisplay, best.vdisplay), (1600, 900));
+    }
+
+    #[test]
+    fn fallback_ignores_missing_preferred_flag() {
+        // Gdy EDID nie oznacza żadnego trybu jako natywny — bierzemy największy.
+        let modes = [mode(1280, 720, 60, false), mode(1920, 1080, 60, false)];
+        assert_eq!(pick_best_mode(&modes).unwrap().hdisplay, 1920);
+    }
+
+    #[test]
     fn preferred_mode_breaks_ties() {
         let modes = [mode(1920, 1080, 60, false), mode(1920, 1080, 60, true)];
         assert!(pick_best_mode(&modes).unwrap().type_ & DRM_MODE_TYPE_PREFERRED != 0);
+    }
+
+    #[test]
+    fn drm_gamma_structs_match_kernel_abi() {
+        assert_eq!(std::mem::size_of::<ModeCrtcLut>(), 32);
+        assert_eq!(std::mem::size_of::<ModeCrtc>(), 104);
+        assert_eq!(DRM_IOCTL_MODE_GETCRTC, 0xC068_64A1);
+        assert_eq!(DRM_IOCTL_MODE_SETGAMMA, 0xC020_64A4);
+    }
+
+    #[test]
+    fn neutral_gamma_is_identity() {
+        let (r, g, b) = gamma_ramp(256, 0.0);
+        assert_eq!(r, g);
+        assert_eq!(g, b);
+        assert_eq!(r[0], 0);
+        assert_eq!(r[255], 65535);
+    }
+
+    #[test]
+    fn warm_gamma_reduces_blue_most() {
+        let (r, g, b) = gamma_ramp(256, 0.6);
+        assert_eq!(r[0], 0);
+        assert_eq!(r[255], 65535);
+        assert!(b[128] < g[128], "niebieski powinien być najciemniejszy");
+        assert!(
+            g[128] <= r[128],
+            "zielony nie powinien przebijać czerwonego"
+        );
+        // Biały punkt staje się cieplejszy — niebieski nie dobija do pełnej skali.
+        assert!(b[255] < 65535);
     }
 }

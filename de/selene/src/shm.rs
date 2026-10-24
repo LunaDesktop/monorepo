@@ -159,24 +159,77 @@ impl BufferData {
             return None;
         }
         let base = map.ptr as *const u8;
-        let xrgb = self.format == wl_shm::Format::Xrgb8888;
+        let swizzle = matches!(
+            self.format,
+            wl_shm::Format::Argb8888 | wl_shm::Format::Xrgb8888
+        );
+        // `Abgr8888`/`Xbgr8888` mają w pamięci kolejność RGBA — dokładnie taką, jakiej
+        // używa renderer, więc wystarczy `memcpy` (bez podmiany R↔B).
+        let direct = matches!(
+            self.format,
+            wl_shm::Format::Abgr8888 | wl_shm::Format::Xbgr8888
+        );
+        if !swizzle && !direct {
+            return None;
+        }
+        let force_alpha = matches!(
+            self.format,
+            wl_shm::Format::Xrgb8888 | wl_shm::Format::Xbgr8888
+        );
         let mut out = vec![0u8; out_len];
-        for y in 0..h {
-            let row = self.offset + y * stride;
-            for x in 0..w {
-                let i = row + x * 4;
-                let o = (y * w + x) * 4;
-                // SAFETY: `i + 3 < end <= map.size`, a mapa obejmuje `map.size` bajtów.
-                // Odczyt przez `read_volatile` — klient może pisać równolegle.
-                unsafe {
-                    out[o] = std::ptr::read_volatile(base.add(i + 2));
-                    out[o + 1] = std::ptr::read_volatile(base.add(i + 1));
-                    out[o + 2] = std::ptr::read_volatile(base.add(i));
-                    out[o + 3] = if xrgb {
-                        255
-                    } else {
-                        std::ptr::read_volatile(base.add(i + 3))
-                    };
+        #[cfg(target_endian = "little")]
+        {
+            // Piksele przetwarzamy po cztery bajty naraz (u32). Podmiana R↔B to kilka
+            // operacji bitowych — wcześniejszy pętla bajt-po-bajcie na buforze
+            // 1920×1080 zajmowała kilka milisekund **w wątku protokołu**, opóźniając
+            // obsługę wejścia (kliknięcia i ruch kursora).
+            for y in 0..h {
+                let row = self.offset + y * stride;
+                let row_dst = &mut out[y * w * 4..(y + 1) * w * 4];
+                let row_src = unsafe { std::slice::from_raw_parts(base.add(row), w * 4) };
+                if direct {
+                    row_dst.copy_from_slice(row_src);
+                    if force_alpha {
+                        for px in row_dst.chunks_exact_mut(4) {
+                            px[3] = 255;
+                        }
+                    }
+                    continue;
+                }
+                let dst32 =
+                    unsafe { std::slice::from_raw_parts_mut(row_dst.as_mut_ptr() as *mut u32, w) };
+                let src32 =
+                    unsafe { std::slice::from_raw_parts(row_src.as_ptr() as *const u32, w) };
+                for (d, &s) in dst32.iter_mut().zip(src32.iter()) {
+                    let mut v =
+                        (s & 0xFF00_FF00) | ((s & 0x00FF_0000) >> 16) | ((s & 0x0000_00FF) << 16);
+                    if force_alpha {
+                        v |= 0xFF00_0000;
+                    }
+                    *d = v;
+                }
+            }
+        }
+        #[cfg(not(target_endian = "little"))]
+        {
+            for y in 0..h {
+                let row = self.offset + y * stride;
+                let row_dst = &mut out[y * w * 4..(y + 1) * w * 4];
+                let row_src = unsafe { std::slice::from_raw_parts(base.add(row), w * 4) };
+                if direct {
+                    row_dst.copy_from_slice(row_src);
+                    if force_alpha {
+                        for px in row_dst.chunks_exact_mut(4) {
+                            px[3] = 255;
+                        }
+                    }
+                    continue;
+                }
+                for (d, s) in row_dst.chunks_exact_mut(4).zip(row_src.chunks_exact(4)) {
+                    d[0] = s[2];
+                    d[1] = s[1];
+                    d[2] = s[0];
+                    d[3] = if force_alpha { 255 } else { s[3] };
                 }
             }
         }
@@ -194,10 +247,20 @@ impl GlobalDispatch<wl_shm::WlShm, ()> for State {
         data_init: &mut DataInit<'_, Self>,
     ) {
         let shm = data_init.init(resource, ());
-        // Zadeklaruj obsługiwany format (klienci muszą znać choć jeden).
-        let _ = shm.send_event(wl_shm::Event::Format {
-            format: wayland_server::WEnum::Value(wl_shm::Format::Argb8888),
-        });
+        // Ogłaszamy **wszystkie** formaty, które realnie obsługujemy. Część toolkitów (Qt,
+        // część aplikacji GTK/Electron) domyślnie tworzy bufor `Xrgb8888` i bez niego w ogóle
+        // nie dochodzi do `commit`. `Abgr8888`/`Xbgr8888` mają w pamięci kolejność RGBA
+        // (natywną dla naszego renderera), więc klient unika podmiany R↔B co klatkę.
+        for format in [
+            wl_shm::Format::Argb8888,
+            wl_shm::Format::Xrgb8888,
+            wl_shm::Format::Abgr8888,
+            wl_shm::Format::Xbgr8888,
+        ] {
+            let _ = shm.send_event(wl_shm::Event::Format {
+                format: wayland_server::WEnum::Value(format),
+            });
+        }
     }
 }
 
@@ -309,6 +372,20 @@ mod tests {
         let mut b = buffer(pool(&[1, 2, 3, 0]), 1, 1, 4);
         b.format = wl_shm::Format::Xrgb8888;
         assert_eq!(b.to_rgba().unwrap(), vec![3, 2, 1, 255]);
+    }
+
+    #[test]
+    fn abgr_is_copied_without_swizzle() {
+        let mut b = buffer(pool(&[10, 20, 30, 40]), 1, 1, 4);
+        b.format = wl_shm::Format::Abgr8888;
+        assert_eq!(b.to_rgba().unwrap(), vec![10, 20, 30, 40]);
+    }
+
+    #[test]
+    fn xbgr_forces_opaque_alpha_without_swizzle() {
+        let mut b = buffer(pool(&[1, 2, 3, 0]), 1, 1, 4);
+        b.format = wl_shm::Format::Xbgr8888;
+        assert_eq!(b.to_rgba().unwrap(), vec![1, 2, 3, 255]);
     }
 
     #[test]

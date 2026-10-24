@@ -253,11 +253,30 @@ pub enum IconName {
     Info,
     App,
     Brightness,
+    // Ikony aplikacji (taskbar/launcher) — spójny zestaw wektorowy Luny.
+    Globe,
+    Mail,
+    Chat,
+    Code,
+    Image,
+    Video,
+    Document,
+    Calculator,
+    Game,
+    Archive,
+    Printer,
+    Bluetooth,
+    Monitor,
+    Screenshot,
+    Sliders,
+    Play,
+    Pause,
+    Moon,
 }
 
 impl IconName {
     /// Wszystkie ikony z pakietu (kolejność = kolejność w galerii).
-    pub const ALL: [IconName; 29] = [
+    pub const ALL: [IconName; 47] = [
         IconName::Menu,
         IconName::Search,
         IconName::Files,
@@ -287,6 +306,24 @@ impl IconName {
         IconName::Info,
         IconName::App,
         IconName::Brightness,
+        IconName::Globe,
+        IconName::Mail,
+        IconName::Chat,
+        IconName::Code,
+        IconName::Image,
+        IconName::Video,
+        IconName::Document,
+        IconName::Calculator,
+        IconName::Game,
+        IconName::Archive,
+        IconName::Printer,
+        IconName::Bluetooth,
+        IconName::Monitor,
+        IconName::Screenshot,
+        IconName::Sliders,
+        IconName::Play,
+        IconName::Pause,
+        IconName::Moon,
     ];
 
     /// Nazwa ikony (do galerii/diagnostyki).
@@ -321,6 +358,24 @@ impl IconName {
             IconName::Info => "Info",
             IconName::App => "App",
             IconName::Brightness => "Brightness",
+            IconName::Globe => "Globe",
+            IconName::Mail => "Mail",
+            IconName::Chat => "Chat",
+            IconName::Code => "Code",
+            IconName::Image => "Image",
+            IconName::Video => "Video",
+            IconName::Document => "Document",
+            IconName::Calculator => "Calculator",
+            IconName::Game => "Game",
+            IconName::Archive => "Archive",
+            IconName::Printer => "Printer",
+            IconName::Bluetooth => "Bluetooth",
+            IconName::Monitor => "Monitor",
+            IconName::Screenshot => "Screenshot",
+            IconName::Sliders => "Sliders",
+            IconName::Play => "Play",
+            IconName::Pause => "Pause",
+            IconName::Moon => "Moon",
         }
     }
 }
@@ -649,6 +704,249 @@ pub fn paint_icon(paint: &mut PaintCtx, name: IconName, rect: Rect, color: Color
                     color,
                 );
             }
+        }
+        // ── Ikony aplikacji (taskbar/launcher) — ten sam grid i grubość kreski ──
+        IconName::Globe => {
+            scene.stroke_circle(g.p(12.0, 12.0), g.d(8.0), w, color);
+            scene.stroke_line(g.p(4.0, 12.0), g.p(20.0, 12.0), g.d(1.6), color);
+            scene.stroke_line(g.p(12.0, 4.0), g.p(12.0, 20.0), g.d(1.6), color);
+            for sign in [-1.0_f64, 1.0] {
+                let pts: Vec<Point> = (0..=8)
+                    .map(|i| {
+                        let a =
+                            -std::f64::consts::FRAC_PI_2 + i as f64 * std::f64::consts::PI / 8.0;
+                        g.p(12.0 + sign * 4.0 * a.cos(), 12.0 + 8.0 * a.sin())
+                    })
+                    .collect();
+                scene.stroke_polyline(&pts, g.d(1.4), color);
+            }
+        }
+        IconName::Mail => {
+            scene.stroke_rounded_rect(
+                Rect::from_xywh(g.p(3.0, 5.0).x, g.p(3.0, 5.0).y, g.d(18.0), g.d(14.0)),
+                g.d(2.0),
+                w,
+                color,
+            );
+            scene.stroke_polyline(
+                &[g.p(4.5, 7.0), g.p(12.0, 12.5), g.p(19.5, 7.0)],
+                g.d(1.6),
+                color,
+            );
+        }
+        IconName::Chat => {
+            scene.fill_rounded_rect(
+                Rect::from_xywh(g.p(3.0, 4.0).x, g.p(3.0, 4.0).y, g.d(18.0), g.d(13.0)),
+                g.d(4.0),
+                color,
+            );
+            scene.fill_polygon(&[g.p(7.5, 16.5), g.p(6.0, 21.0), g.p(11.5, 16.5)], color);
+        }
+        IconName::Code => {
+            scene.stroke_polyline(&[g.p(9.0, 7.0), g.p(4.0, 12.0), g.p(9.0, 17.0)], w, color);
+            scene.stroke_polyline(
+                &[g.p(15.0, 7.0), g.p(20.0, 12.0), g.p(15.0, 17.0)],
+                w,
+                color,
+            );
+            scene.stroke_line(g.p(13.5, 5.0), g.p(10.5, 19.0), g.d(1.6), color);
+        }
+        IconName::Image => {
+            scene.stroke_rounded_rect(
+                Rect::from_xywh(g.p(3.0, 4.5).x, g.p(3.0, 4.5).y, g.d(18.0), g.d(15.0)),
+                g.d(2.0),
+                w,
+                color,
+            );
+            scene.fill_circle(g.p(8.5, 9.5), g.d(1.8), color);
+            scene.fill_polygon(
+                &[
+                    g.p(5.0, 17.5),
+                    g.p(9.5, 11.5),
+                    g.p(13.0, 15.0),
+                    g.p(15.5, 12.5),
+                    g.p(19.0, 17.5),
+                ],
+                color,
+            );
+        }
+        IconName::Video => {
+            scene.stroke_rounded_rect(
+                Rect::from_xywh(g.p(3.0, 5.5).x, g.p(3.0, 5.5).y, g.d(18.0), g.d(13.0)),
+                g.d(2.0),
+                w,
+                color,
+            );
+            scene.fill_polygon(&[g.p(10.0, 9.0), g.p(16.0, 12.0), g.p(10.0, 15.0)], color);
+        }
+        IconName::Document => {
+            scene.stroke_polyline(
+                &[
+                    g.p(6.0, 3.0),
+                    g.p(14.0, 3.0),
+                    g.p(19.0, 8.0),
+                    g.p(19.0, 21.0),
+                    g.p(6.0, 21.0),
+                    g.p(6.0, 3.0),
+                ],
+                w,
+                color,
+            );
+            scene.stroke_polyline(
+                &[g.p(14.0, 3.0), g.p(14.0, 8.0), g.p(19.0, 8.0)],
+                g.d(1.6),
+                color,
+            );
+            for y in [12.0, 16.0] {
+                scene.stroke_line(g.p(9.0, y), g.p(16.0, y), g.d(1.6), color);
+            }
+        }
+        IconName::Calculator => {
+            scene.stroke_rounded_rect(
+                Rect::from_xywh(g.p(5.0, 3.0).x, g.p(5.0, 3.0).y, g.d(14.0), g.d(18.0)),
+                g.d(2.5),
+                w,
+                color,
+            );
+            scene.fill_rounded_rect(
+                Rect::from_xywh(g.p(7.0, 5.5).x, g.p(7.0, 5.5).y, g.d(10.0), g.d(4.0)),
+                g.d(1.0),
+                color,
+            );
+            for (x, y) in [
+                (8.5, 13.0),
+                (12.0, 13.0),
+                (15.5, 13.0),
+                (8.5, 16.5),
+                (12.0, 16.5),
+                (15.5, 16.5),
+            ] {
+                scene.fill_circle(g.p(x, y), g.d(1.1), color);
+            }
+        }
+        IconName::Game => {
+            scene.stroke_rounded_rect(
+                Rect::from_xywh(g.p(2.5, 8.0).x, g.p(2.5, 8.0).y, g.d(19.0), g.d(10.5)),
+                g.d(5.0),
+                w,
+                color,
+            );
+            scene.stroke_line(g.p(7.0, 11.5), g.p(7.0, 15.5), g.d(1.8), color);
+            scene.stroke_line(g.p(5.0, 13.5), g.p(9.0, 13.5), g.d(1.8), color);
+            scene.fill_circle(g.p(16.5, 12.5), g.d(1.3), color);
+            scene.fill_circle(g.p(18.8, 14.8), g.d(1.3), color);
+        }
+        IconName::Archive => {
+            scene.stroke_rounded_rect(
+                Rect::from_xywh(g.p(3.0, 5.0).x, g.p(3.0, 5.0).y, g.d(18.0), g.d(15.0)),
+                g.d(2.0),
+                w,
+                color,
+            );
+            scene.stroke_line(g.p(3.0, 9.5), g.p(21.0, 9.5), g.d(1.6), color);
+            scene.fill_rounded_rect(
+                Rect::from_xywh(g.p(9.0, 3.0).x, g.p(9.0, 3.0).y, g.d(6.0), g.d(4.5)),
+                g.d(1.0),
+                color,
+            );
+        }
+        IconName::Printer => {
+            scene.fill_rect(
+                Rect::from_xywh(g.p(7.0, 4.0).x, g.p(7.0, 4.0).y, g.d(10.0), g.d(5.0)),
+                color,
+            );
+            scene.stroke_rounded_rect(
+                Rect::from_xywh(g.p(3.0, 9.0).x, g.p(3.0, 9.0).y, g.d(18.0), g.d(9.0)),
+                g.d(2.0),
+                w,
+                color,
+            );
+            scene.fill_rect(
+                Rect::from_xywh(g.p(7.0, 15.0).x, g.p(7.0, 15.0).y, g.d(10.0), g.d(5.0)),
+                color,
+            );
+        }
+        IconName::Bluetooth => {
+            scene.stroke_polyline(
+                &[
+                    g.p(8.0, 7.5),
+                    g.p(16.0, 16.5),
+                    g.p(12.0, 21.0),
+                    g.p(12.0, 3.0),
+                    g.p(16.0, 7.5),
+                    g.p(8.0, 16.5),
+                ],
+                g.d(1.8),
+                color,
+            );
+        }
+        IconName::Monitor => {
+            scene.stroke_rounded_rect(
+                Rect::from_xywh(g.p(3.0, 4.5).x, g.p(3.0, 4.5).y, g.d(18.0), g.d(12.0)),
+                g.d(2.0),
+                w,
+                color,
+            );
+            scene.stroke_line(g.p(12.0, 16.5), g.p(12.0, 19.5), g.d(1.8), color);
+            scene.stroke_line(g.p(8.0, 20.5), g.p(16.0, 20.5), g.d(1.8), color);
+            scene.stroke_polyline(
+                &[
+                    g.p(6.0, 11.0),
+                    g.p(9.0, 11.0),
+                    g.p(10.5, 8.0),
+                    g.p(12.5, 14.0),
+                    g.p(14.0, 11.0),
+                    g.p(18.0, 11.0),
+                ],
+                g.d(1.6),
+                color,
+            );
+        }
+        IconName::Screenshot => {
+            scene.stroke_rounded_rect(
+                Rect::from_xywh(g.p(3.0, 7.0).x, g.p(3.0, 7.0).y, g.d(18.0), g.d(12.0)),
+                g.d(2.0),
+                w,
+                color,
+            );
+            scene.stroke_circle(g.p(12.0, 13.0), g.d(3.4), g.d(1.8), color);
+            scene.fill_rounded_rect(
+                Rect::from_xywh(g.p(9.0, 4.5).x, g.p(9.0, 4.5).y, g.d(6.0), g.d(3.5)),
+                g.d(1.2),
+                color,
+            );
+        }
+        IconName::Sliders => {
+            for (y, knob_x) in [(7.0, 15.0), (12.0, 9.0), (17.0, 13.5)] {
+                scene.stroke_line(g.p(4.0, y), g.p(20.0, y), g.d(1.8), color);
+                scene.fill_circle(g.p(knob_x, y), g.d(2.4), color);
+            }
+        }
+        IconName::Play => {
+            scene.fill_polygon(&[g.p(8.0, 5.0), g.p(19.0, 12.0), g.p(8.0, 19.0)], color);
+        }
+        IconName::Pause => {
+            scene.fill_rounded_rect(
+                Rect::from_xywh(g.p(7.5, 5.5).x, g.p(7.5, 5.5).y, g.d(3.2), g.d(13.0)),
+                g.d(1.0),
+                color,
+            );
+            scene.fill_rounded_rect(
+                Rect::from_xywh(g.p(13.3, 5.5).x, g.p(13.3, 5.5).y, g.d(3.2), g.d(13.0)),
+                g.d(1.0),
+                color,
+            );
+        }
+        IconName::Moon => {
+            scene.stroke_circle(g.p(12.0, 12.0), g.d(7.5), w, color);
+            // Wewnętrzny łuk — sierp księżyca / ikona motywu ciemnego.
+            let pts: Vec<Point> = (0..=12)
+                .map(|i| {
+                    let a = -std::f64::consts::FRAC_PI_2 + i as f64 * std::f64::consts::PI / 12.0;
+                    g.p(15.0 + 4.5 * a.cos(), 12.0 + 6.5 * a.sin())
+                })
+                .collect();
+            scene.stroke_polyline(&pts, g.d(1.6), color);
         }
     }
 }

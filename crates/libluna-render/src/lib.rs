@@ -16,6 +16,7 @@
 pub mod scene;
 pub mod software;
 pub mod text;
+pub mod wallpaper;
 
 pub use scene::{DrawCommand, ImageData, Scene, TextRun};
 pub use software::SoftwareRenderer;

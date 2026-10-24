@@ -7,19 +7,27 @@
 
 use std::io::{Seek, Write};
 use std::os::fd::{AsFd, OwnedFd};
+use std::time::{Duration, Instant};
 
-use libluna_core::{ButtonState, Event, Modifiers, Point, PointerButton};
+use libluna_core::{ButtonState, Event, Modifiers, Point, PointerButton, Rect};
 use wayland_protocols::xdg::shell::server::{xdg_popup, xdg_surface, xdg_toplevel};
-use wayland_server::protocol::{wl_keyboard, wl_pointer, wl_seat, wl_touch};
+use wayland_server::protocol::{wl_keyboard, wl_pointer, wl_seat, wl_surface, wl_touch};
 use wayland_server::{
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource, WEnum,
 };
 
 use crate::compositor::SurfaceData;
 use crate::data;
-use crate::shell::XdgSurfaceData;
+use crate::shell::{XdgSurfaceData, XdgToplevelData};
 use crate::state::{DragState, ResizeState, SavedGeom, State, TITLEBAR};
 use crate::sync::LockExt;
+
+/// Ile pikseli powierzchni odpowiada jednemu „ząbkowi” kółka myszy (`REL_WHEEL`).
+///
+/// `wl_pointer.axis` przenosi wartości w jednostkach powierzchni, a evdev daje ±1 na
+/// obrót — dlatego mnożymy. Wartość dobrana tak, by jeden obrót przewijał ~1 wiersz
+/// listy (~60 px) po uwzględnieniu mnożnika w powłoce.
+const WHEEL_STEP_PX: f64 = 20.0;
 
 /// Buduje tekst mapy klawiszy XKB dla danego układu (i opcjonalnego wariantu).
 ///
@@ -33,9 +41,11 @@ fn keymap_text_for(layout: &str, variant: Option<&str>) -> String {
         layout
     };
     let variant = variant.map(sanitize_xkb).filter(|v| !v.is_empty());
+    // `level3(ralt_switch)` sprawia, że prawy Alt jest AltGr (poziom 3) — bez tego
+    // na układzie polskim nie da się wpisać ą, ć, ę, ł, ń, ó, ś, ź, ż.
     let symbols = match variant {
-        Some(v) => format!("pc+{layout}({v})+inet(evdev)"),
-        None => format!("pc+{layout}+inet(evdev)"),
+        Some(v) => format!("pc+{layout}({v})+inet(evdev)+level3(ralt_switch)"),
+        None => format!("pc+{layout}+inet(evdev)+level3(ralt_switch)"),
     };
     format!(
         "xkb_keymap {{\n    xkb_keycodes {{ include \"evdev+aliases(qwerty)\" }};\n    xkb_types {{ include \"complete\" }};\n    xkb_compat {{ include \"complete\" }};\n    xkb_symbols {{ include \"{symbols}\" }};\n    xkb_geometry {{ include \"pc(pc105)\" }};\n}};\n"
@@ -43,10 +53,92 @@ fn keymap_text_for(layout: &str, variant: Option<&str>) -> String {
 }
 
 /// Bieżący układ z otoczenia (`LUNA_KEYBOARD_LAYOUT` / `LUNA_KEYBOARD_VARIANT`).
-fn keymap_text() -> String {
-    let layout = std::env::var("LUNA_KEYBOARD_LAYOUT").unwrap_or_else(|_| "us".to_owned());
-    let variant = std::env::var("LUNA_KEYBOARD_VARIANT").ok();
+///
+/// Najpierw próbujemy **skompilować** mapę do postaci bez `include`. Klienty z własnym
+/// `libxkbcommon` bez ścieżek wyszukiwania (np. Zed) inaczej nie potrafią jej sparsować
+/// („Couldn't find file keycodes/evdev”, „There are no include paths to search”).
+pub(crate) fn keymap_text() -> String {
+    let (layout, variant) = keymap_layout();
+    if let Some(km) = compiled_keymap(&layout, variant.as_deref()) {
+        return km;
+    }
     keymap_text_for(&layout, variant.as_deref())
+}
+
+/// Kompiluje RMLVO do pełnej mapy XKB (bez dyrektyw `include`).
+fn compiled_keymap(layout: &str, variant: Option<&str>) -> Option<String> {
+    use xkbcommon::xkb;
+    let layout = sanitize_xkb(layout);
+    let layout = if layout.is_empty() {
+        "us".to_owned()
+    } else {
+        layout
+    };
+    let variant = variant.map(sanitize_xkb).unwrap_or_default();
+    let ctx = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+    let keymap = xkb::Keymap::new_from_names(
+        &ctx,
+        "",
+        "",
+        layout.as_str(),
+        variant.as_str(),
+        // W RMLVO opcje podaje się jako `nazwa:wartość`, a nie jako dyrektywę
+        // `include` — `level3(ralt_switch)` było ignorowane z błędem XKB-595
+        // (i AltGr nie wpisywał ą/ć/ę…).
+        Some("lv3:ralt_switch".to_owned()),
+        xkb::KEYMAP_COMPILE_NO_FLAGS,
+    )?;
+    Some(keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1))
+}
+
+/// Ustala układ klawiatury: jawny override → standard Wayland → locale → `us`.
+///
+/// Wcześniej był tu na sztywno `us`, więc w launcherze (i w każdym innym polu
+/// tekstowym) wpisywało się co innego, niż użytkownik ma na klawiaturze.
+fn keymap_layout() -> (String, Option<String>) {
+    let layout = std::env::var("LUNA_KEYBOARD_LAYOUT")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            std::env::var("XKB_DEFAULT_LAYOUT")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
+        .or_else(layout_from_locale)
+        .unwrap_or_else(|| "us".to_owned());
+    let variant = std::env::var("LUNA_KEYBOARD_VARIANT")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            std::env::var("XKB_DEFAULT_VARIANT")
+                .ok()
+                .filter(|s| !s.is_empty())
+        });
+    (layout, variant)
+}
+
+/// Zgaduje układ XKB z locale (`pl_PL.UTF-8` → `pl`).
+fn layout_from_locale() -> Option<String> {
+    let raw = ["LC_ALL", "LC_CTYPE", "LANG"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok().filter(|s| !s.is_empty()))?;
+    locale_to_layout(&raw)
+}
+
+/// Zamienia locale (`pl_PL.UTF-8`, `en_GB`, `C`) na nazwę układu XKB.
+fn locale_to_layout(raw: &str) -> Option<String> {
+    let lang = raw.split(['.', '@']).next().unwrap_or("");
+    let mut parts = lang.split('_');
+    let language = parts.next().unwrap_or("").to_ascii_lowercase();
+    let country = parts.next().unwrap_or("").to_ascii_uppercase();
+    if language.is_empty() || language == "c" || language == "posix" {
+        return None;
+    }
+    // Brytyjski angielski to osobny układ w XKB (`gb`), nie `en`.
+    if language == "en" && country == "GB" {
+        return Some("gb".to_owned());
+    }
+    Some(language)
 }
 
 /// Dopuszcza tylko znaki legalne w nazwie układu XKB.
@@ -61,9 +153,17 @@ const EDGE_TOP: u8 = 1;
 const EDGE_BOTTOM: u8 = 2;
 const EDGE_LEFT: u8 = 4;
 const EDGE_RIGHT: u8 = 8;
+
 /// Minimalny rozmiar treści okna przy przeskalowaniu.
 const MIN_W: f64 = 120.0;
 const MIN_H: f64 = 80.0;
+
+/// Ile pikseli okna musi zostać widoczne, żeby dało się je złapać z powrotem.
+/// Tyle samo trzymamy w pionie: pasek tytułu nigdy nie chowa się pod panelem.
+const MIN_VISIBLE: f64 = 96.0;
+
+/// Odległość od krawędzi monitora, przy której upuszczenie okna przyciąga je do strefy.
+const SNAP_EDGE: f64 = 12.0;
 
 impl GlobalDispatch<wl_seat::WlSeat, ()> for State {
     fn bind(
@@ -94,7 +194,8 @@ impl Dispatch<wl_seat::WlSeat, ()> for State {
     ) {
         match request {
             wl_seat::Request::GetPointer { id } => {
-                state.pointer = Some(data_init.init(id, ()));
+                state.pointers.retain(|p| p.is_alive());
+                state.pointers.push(data_init.init(id, ()));
             }
             wl_seat::Request::GetKeyboard { id } => {
                 let kb = data_init.init(id, ());
@@ -105,12 +206,18 @@ impl Dispatch<wl_seat::WlSeat, ()> for State {
                         size,
                     });
                 }
-                // Powtarzanie klawiszy: 25/s po 600 ms.
-                let _ = kb.send_event(wl_keyboard::Event::RepeatInfo {
-                    rate: 25,
-                    delay: 600,
-                });
-                state.keyboard = Some(kb);
+                // Powtarzanie klawiszy: 25/s po 600 ms. `repeat_info` istnieje dopiero
+                // od wersji 4 `wl_keyboard` — wysłanie go do klienta, który związał
+                // starszą wersję, kończy klienta twardym przerwaniem (brak funkcji
+                // obsługi zdarzenia).
+                if kb.version() >= 4 {
+                    let _ = kb.send_event(wl_keyboard::Event::RepeatInfo {
+                        rate: 25,
+                        delay: 600,
+                    });
+                }
+                state.keyboards.retain(|k| k.is_alive());
+                state.keyboards.push(kb);
             }
             wl_seat::Request::GetTouch { id } => {
                 data_init.init(id, ());
@@ -173,7 +280,7 @@ pub fn handle_input(state: &mut State, handle: &DisplayHandle, event: &Event) {
         Event::PointerButton(pe) => pointer_button(state, handle, pe.position, pe.button, pe.state),
         Event::PointerLeave => pointer_leave(state),
         Event::Scroll(se) => pointer_axis(state, se.dx, se.dy),
-        Event::Key(ke) => keyboard_key(state, ke.keysym, ke.state),
+        Event::Key(ke) => keyboard_key(state, ke.keysym, ke.keycode, ke.state),
         _ => {}
     }
 }
@@ -294,6 +401,17 @@ fn input_region_hit(w: &crate::state::Window, pos: Point) -> Option<bool> {
         .map(|rects| rects.iter().any(|r| r.offset(w.x, w.y).contains(pos)))
 }
 
+/// Slot powierzchni warstwowej przechwytującej kliknięcia, gdy punkt leży **poza**
+/// jej widoczną treścią. Używane, gdy powłoka ma otwarty popup/launcher: klik gdzieś
+/// indziej (pulpit, drugi monitor, dolna część ekranu) ma zamknąć popup, a nie
+/// aktywować okno pod spodem.
+fn capturing_layer_outside(state: &State, pos: Point) -> Option<usize> {
+    let windows = state.windows.lock_or_recover();
+    windows
+        .iter()
+        .position(|w| w.layer && w.mapped && w.input_capture && !w.outer().contains(pos))
+}
+
 fn window_geometry(state: &State, slot: usize) -> Option<(f64, f64, f64, f64)> {
     let windows = state.windows.lock_or_recover();
     windows
@@ -301,17 +419,129 @@ fn window_geometry(state: &State, slot: usize) -> Option<(f64, f64, f64, f64)> {
         .map(|w| (w.x, w.y, w.width as f64, w.height as f64))
 }
 
+/// Bitmaska krawędzi z żądania `xdg_toplevel.resize` (bity Waylanda pokrywają się
+/// z naszymi `EDGE_*`: 1=góra, 2=dół, 4=lewo, 8=prawo).
+fn resize_edge_bits(edge: WEnum<xdg_toplevel::ResizeEdge>) -> u8 {
+    match edge {
+        WEnum::Unknown(v) => (v & 0xf) as u8,
+        WEnum::Value(e) => match e {
+            xdg_toplevel::ResizeEdge::Top => EDGE_TOP,
+            xdg_toplevel::ResizeEdge::Bottom => EDGE_BOTTOM,
+            xdg_toplevel::ResizeEdge::Left => EDGE_LEFT,
+            xdg_toplevel::ResizeEdge::Right => EDGE_RIGHT,
+            xdg_toplevel::ResizeEdge::TopLeft => EDGE_TOP | EDGE_LEFT,
+            xdg_toplevel::ResizeEdge::TopRight => EDGE_TOP | EDGE_RIGHT,
+            xdg_toplevel::ResizeEdge::BottomLeft => EDGE_BOTTOM | EDGE_LEFT,
+            xdg_toplevel::ResizeEdge::BottomRight => EDGE_BOTTOM | EDGE_RIGHT,
+            _ => 0,
+        },
+    }
+}
+
+/// Zaczyna przesuwanie okna na żądanie `xdg_toplevel.move` (okna CSD proszą kompozytor
+/// o przesuwanie w trakcie przeciągania własnego paska tytułu).
+pub fn interactive_move_from_toplevel(state: &mut State, data: &XdgToplevelData) {
+    // Żądanie `move` może dotrzeć już po zwolnieniu przycisku (szybki klik).
+    // Bez tej straży zostawał aktywny `drag`, który przy następnym ruchu myszy
+    // przesuwał okno mimo puszczonego przycisku.
+    if !state.left_down {
+        return;
+    }
+    let Some(slot) = toplevel_slot(data) else {
+        if std::env::var("SELENE_STATS").is_ok() {
+            eprintln!("selene/win: move bez slotu");
+        }
+        return;
+    };
+    if std::env::var("SELENE_STATS").is_ok() {
+        eprintln!("selene/win: move slot={slot} pos={:?}", state.pointer_pos);
+    }
+    // Pozycja wskaźnika aktualizowana przy każdym ruchu (`pointer_motion`) — działa też
+    // w trybie nested, gdzie nie ma pętli evdev.
+    let pos = Point::new(state.pointer_pos.0, state.pointer_pos.1);
+    if window_geometry(state, slot).is_some() {
+        raise_and_focus(state, slot);
+        begin_drag(state, slot, pos);
+    }
+}
+
+/// Zaczyna zmianę rozmiaru na żądanie `xdg_toplevel.resize`.
+pub fn interactive_resize_from_toplevel(
+    state: &mut State,
+    data: &XdgToplevelData,
+    edges: WEnum<xdg_toplevel::ResizeEdge>,
+) {
+    if !state.left_down {
+        return;
+    }
+    let Some(slot) = toplevel_slot(data) else {
+        return;
+    };
+    let pos = Point::new(state.pointer_pos.0, state.pointer_pos.1);
+    let bits = resize_edge_bits(edges);
+    if bits == 0 {
+        return;
+    }
+    if let Some((x, y, w, h)) = window_geometry(state, slot) {
+        state.resize = Some(ResizeState {
+            slot,
+            edges: bits,
+            start_x: x,
+            start_y: y,
+            start_w: w,
+            start_h: h,
+            start_px: pos.x,
+            start_py: pos.y,
+        });
+    }
+}
+
+/// Slot okna dla danych `xdg_toplevel` (przez powiązaną `wl_surface`).
+pub(crate) fn toplevel_slot(data: &XdgToplevelData) -> Option<usize> {
+    let sd = data.surface.data::<SurfaceData>()?;
+    *sd.slot.lock_or_recover()
+}
+
 fn content_local(state: &State, slot: usize, pos: Point) -> (f64, f64) {
     // Używamy `content()` — dla paneli/popupów pasek tytułu ma wysokość 0, więc
     // współrzędne nie są przesunięte (wcześniej odejmowano `TITLEBAR` zawsze).
+    // Bufor okien CSD jest większy od widocznego okna o cienie — klient liczy
+    // współrzędne od początku **bufora**, więc dodajemy `image_offset`.
     let windows = state.windows.lock_or_recover();
     match windows.get(slot) {
         Some(w) => {
             let c = w.content();
-            (pos.x - c.x(), pos.y - c.y())
+            (
+                pos.x - c.x() + w.image_offset.0,
+                pos.y - c.y() + w.image_offset.1,
+            )
         }
         None => (pos.x, pos.y),
     }
+}
+
+/// Klawiatura klienta, do którego należy `surface`.
+///
+/// **Nie wolno** wysyłać zdarzeń klawiatury z powierzchnią innego klienta — protokół
+/// (i `wayland-backend`) reaguje na to paniką. Dlatego każde zdarzenie szuka zasobu
+/// należącego do tego samego klienta, co okno docelowe.
+fn keyboard_for(state: &State, surface: &wl_surface::WlSurface) -> Option<wl_keyboard::WlKeyboard> {
+    let client = surface.client()?;
+    state
+        .keyboards
+        .iter()
+        .find(|kb| kb.is_alive() && kb.client().as_ref() == Some(&client))
+        .cloned()
+}
+
+/// Wskaźnik klienta, do którego należy `surface` (patrz [`keyboard_for`]).
+fn pointer_for(state: &State, surface: &wl_surface::WlSurface) -> Option<wl_pointer::WlPointer> {
+    let client = surface.client()?;
+    state
+        .pointers
+        .iter()
+        .find(|p| p.is_alive() && p.client().as_ref() == Some(&client))
+        .cloned()
 }
 
 fn pointer_motion(state: &mut State, handle: &DisplayHandle, pos: Point) {
@@ -326,27 +556,46 @@ fn pointer_motion(state: &mut State, handle: &DisplayHandle, pos: Point) {
         return;
     }
     if let Some(drag) = state.drag {
-        let mut windows = state.windows.lock_or_recover();
-        if let Some(w) = windows.get_mut(drag.slot) {
-            w.x = pos.x - drag.off_x;
-            w.y = pos.y - drag.off_y;
+        let width = state
+            .windows
+            .lock_or_recover()
+            .get(drag.slot)
+            .map(|w| w.width as f64)
+            .unwrap_or(MIN_W);
+        let area = output_rect_at(state, pos);
+        let (x, y) = clamp_drag_pos(
+            area,
+            inset_at(state, pos),
+            width,
+            pos.x - drag.off_x,
+            pos.y - drag.off_y,
+        );
+        {
+            let mut windows = state.windows.lock_or_recover();
+            if let Some(w) = windows.get_mut(drag.slot) {
+                w.x = x;
+                w.y = y;
+            }
         }
+        // Okno X11 musi znać nową pozycję — inaczej jego menu i podpowiedzi
+        // pojawiają się względem starego miejsca.
+        sync_x11_geometry(state, drag.slot);
     }
     // Przeciąganie danych (drag & drop) aktualizuje cel.
     if state.dnd.is_some() {
         data::dnd_motion(state, handle, (pos.x, pos.y));
     }
     update_pointer_focus(state, pos);
-    if let Some((slot, _)) = state.pointer_focus.clone() {
-        let ptr = state.pointer.clone();
+    if let Some((slot, surface)) = state.pointer_focus.clone() {
         let (lx, ly) = content_local(state, slot, pos);
         let time = state.time_ms();
-        if let Some(ptr) = ptr {
+        if let Some(ptr) = pointer_for(state, &surface) {
             let _ = ptr.send_event(wl_pointer::Event::Motion {
                 time,
                 surface_x: lx,
                 surface_y: ly,
             });
+            pointer_frame(&ptr);
         }
     }
 }
@@ -358,6 +607,9 @@ fn pointer_button(
     button: PointerButton,
     st: ButtonState,
 ) {
+    if button == PointerButton::Left {
+        state.left_down = st == ButtonState::Pressed;
+    }
     // W trybie podglądu: przeciąganie kafelka, wybór przestrzeni albo zamknięcie.
     if state.overview_on() {
         if button == PointerButton::Left {
@@ -389,8 +641,48 @@ fn pointer_button(
         }
         return;
     }
+    // Otwarty popup powłoki przechwytuje kliknięcia: klik poza jej widoczną treścią
+    // (pulpit, drugi monitor, dolna część ekranu) ma ją zamknąć, a nie aktywować
+    // okno pod spodem. Wysyłamy powłoce `enter` + `button` we współrzędnych lokalnych.
+    if st == ButtonState::Pressed {
+        if let Some(slot) = capturing_layer_outside(state, pos) {
+            if let Some(surface) = state.slots.get(slot).cloned() {
+                pointer_leave(state);
+                state.pointer_focus = Some((slot, surface.clone()));
+                if let Some(ptr) = pointer_for(state, &surface) {
+                    let (lx, ly) = content_local(state, slot, pos);
+                    let enter_serial = state.next_serial();
+                    let _ = ptr.send_event(wl_pointer::Event::Enter {
+                        serial: enter_serial,
+                        surface: surface.clone(),
+                        surface_x: lx,
+                        surface_y: ly,
+                    });
+                    let serial = state.next_serial();
+                    let time = state.time_ms();
+                    let _ = ptr.send_event(wl_pointer::Event::Button {
+                        serial,
+                        time,
+                        button: button_code(button),
+                        state: WEnum::Value(wl_pointer::ButtonState::Pressed),
+                    });
+                    pointer_frame(&ptr);
+                }
+            }
+            return;
+        }
+    }
+
     if st == ButtonState::Released {
-        state.drag = None;
+        if let Some(drag) = state.drag.take() {
+            // Upuszczenie przy krawędzi/narożniku: połowa ekranu, ćwiartka albo
+            // maksymalizacja („Aero Snap” / kafelkowanie). Zwykły klik bez ruchu
+            // (np. na pasku tytułu przy krawędzi) nie może niczego przyciągać.
+            let moved = (pos.x - drag.start_px).abs() + (pos.y - drag.start_py).abs() > 6.0;
+            if moved {
+                apply_drag_snap(state, drag.slot, pos, drag.origin);
+            }
+        }
         state.resize = None;
         // Zakończ przeciąganie danych, jeśli trwało.
         if state.dnd.is_some() {
@@ -403,37 +695,96 @@ fn pointer_button(
 
     // Obsłuż dekorację/okno pod kursorem.
     if let Some((slot, part)) = hit(state, pos) {
+        if st == ButtonState::Pressed && std::env::var("SELENE_STATS").is_ok() {
+            let (lx, ly) = content_local(state, slot, pos);
+            eprintln!("selene/input: klik slot={slot} part={part:?} lokalne=({lx:.0},{ly:.0})");
+        }
         if st == ButtonState::Pressed {
             raise_and_focus(state, slot);
+
+            // Alt+Drag lub Super+Drag: przesuwanie (LPM) i skalowanie (PPM) okna z dowolnego punktu
+            let is_normal_win = state
+                .windows
+                .lock_or_recover()
+                .get(slot)
+                .map(|w| !w.layer && !w.popup)
+                .unwrap_or(false);
+            if is_normal_win && (state.sent_mods.alt || state.sent_mods.logo) {
+                pointer_leave(state);
+                if button == PointerButton::Left {
+                    begin_drag(state, slot, pos);
+                    return;
+                } else if button == PointerButton::Right {
+                    if let Some((x, y, w, h)) = window_geometry(state, slot) {
+                        state.resize = Some(ResizeState {
+                            slot,
+                            edges: EDGE_RIGHT | EDGE_BOTTOM,
+                            start_x: x,
+                            start_y: y,
+                            start_w: w,
+                            start_h: h,
+                            start_px: pos.x,
+                            start_py: pos.y,
+                        });
+                    }
+                    return;
+                }
+            }
             match part {
                 Part::Close => {
                     pointer_leave(state);
+                    debug_part(state, slot, "close");
                     send_close(state, slot);
                     return;
                 }
                 Part::Minimize => {
                     pointer_leave(state);
+                    debug_part(state, slot, "minimize");
                     toggle_minimize(state, slot);
                     return;
                 }
                 Part::Maximize => {
                     pointer_leave(state);
+                    debug_part(state, slot, "maximize");
                     toggle_maximize(state, slot);
                     return;
                 }
                 Part::Title => {
                     pointer_leave(state);
-                    if let Some((ox, oy, _, _)) = window_geometry(state, slot) {
-                        state.drag = Some(DragState {
-                            slot,
-                            off_x: pos.x - ox,
-                            off_y: pos.y - oy,
-                        });
+                    // Podwójny klik na pasku tytułu: maksymalizacja / powrót do domyślnego
+                    // rozmiaru (standardowe zachowanie pulpitów).
+                    if button == PointerButton::Left {
+                        let now = Instant::now();
+                        let double = state
+                            .last_title_click
+                            .map(|(s, t)| {
+                                s == slot && now.duration_since(t) < Duration::from_millis(400)
+                            })
+                            .unwrap_or(false);
+                        if double {
+                            state.last_title_click = None;
+                            toggle_maximize(state, slot);
+                            return;
+                        }
+                        state.last_title_click = Some((slot, now));
                     }
+                    begin_drag(state, slot, pos);
                     return;
                 }
                 Part::Resize(edges) => {
                     pointer_leave(state);
+                    // Zmaxymalizowane/pełnoekranowe okno najpierw wraca do rozmiaru
+                    // domyślnego — inaczej „ciągnięcie za krawędź” zaczynałoby od
+                    // geometrii całego ekranu.
+                    let special = state
+                        .windows
+                        .lock_or_recover()
+                        .get(slot)
+                        .map(|w| w.maximized || w.fullscreen)
+                        .unwrap_or(false);
+                    if special {
+                        restore_window(state, slot);
+                    }
                     if let Some((x, y, w, h)) = window_geometry(state, slot) {
                         state.resize = Some(ResizeState {
                             slot,
@@ -461,54 +812,105 @@ fn pointer_button(
     }
 
     // Zdarzenie przycisku do klienta — tylko gdy kursor nad treścią okna.
-    let focused = state.pointer_focus.clone();
-    let ptr = state.pointer.clone();
-    if let (Some(_), Some(ptr)) = (focused, ptr) {
-        let serial = state.next_serial();
-        let time = state.time_ms();
-        let wl_state = match st {
-            ButtonState::Pressed => WEnum::Value(wl_pointer::ButtonState::Pressed),
-            ButtonState::Released => WEnum::Value(wl_pointer::ButtonState::Released),
-        };
-        let _ = ptr.send_event(wl_pointer::Event::Button {
-            serial,
-            time,
-            button: button_code(button),
-            state: wl_state,
-        });
+    if let Some((_, surface)) = state.pointer_focus.clone() {
+        if let Some(ptr) = pointer_for(state, &surface) {
+            let serial = state.next_serial();
+            let time = state.time_ms();
+            let wl_state = match st {
+                ButtonState::Pressed => WEnum::Value(wl_pointer::ButtonState::Pressed),
+                ButtonState::Released => WEnum::Value(wl_pointer::ButtonState::Released),
+            };
+            let _ = ptr.send_event(wl_pointer::Event::Button {
+                serial,
+                time,
+                button: button_code(button),
+                state: wl_state,
+            });
+            pointer_frame(&ptr);
+        }
     }
 }
 
+/// Diagnostyka (`SELENE_STATS=1`): który element dekoracji został kliknięty.
+fn debug_part(state: &State, slot: usize, what: &str) {
+    if std::env::var("SELENE_STATS").is_err() {
+        return;
+    }
+    let geometry = state
+        .windows
+        .lock_or_recover()
+        .get(slot)
+        .map(|w| (w.x, w.y, w.width, w.height, w.ssd, w.maximized, w.minimized));
+    eprintln!("selene/win: klik {what} slot={slot} {geometry:?}");
+}
+
 fn pointer_leave(state: &mut State) {
-    let ptr = state.pointer.clone();
-    if let (Some((_, surface)), Some(ptr)) = (state.pointer_focus.clone(), ptr) {
-        let serial = state.next_serial();
-        let _ = ptr.send_event(wl_pointer::Event::Leave { serial, surface });
+    if let Some((_, surface)) = state.pointer_focus.clone() {
+        if let Some(ptr) = pointer_for(state, &surface) {
+            let serial = state.next_serial();
+            let _ = ptr.send_event(wl_pointer::Event::Leave { serial, surface });
+            pointer_frame(&ptr);
+        }
     }
     state.pointer_focus = None;
 }
 
+/// Zamyka grupę zdarzeń wskaźnika (`wl_pointer.frame`, protokół ≥ 5).
+///
+/// Klienty takie jak GPUI (Zed) czekają z przetworzeniem ruchu/scrolla na `frame`;
+/// bez tego zdarzenia są gromadzone i nigdy nie trafiają do aplikacji.
+fn pointer_frame(ptr: &wl_pointer::WlPointer) {
+    if ptr.version() >= 5 {
+        let _ = ptr.send_event(wl_pointer::Event::Frame);
+    }
+}
+
 fn pointer_axis(state: &mut State, dx: f64, dy: f64) {
-    let ptr = state.pointer.clone();
-    if state.pointer_focus.is_some() {
-        if let Some(ptr) = ptr {
-            let time = state.time_ms();
-            if dy != 0.0 {
-                let _ = ptr.send_event(wl_pointer::Event::Axis {
-                    time,
-                    axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
-                    value: dy,
-                });
-            }
-            if dx != 0.0 {
-                let _ = ptr.send_event(wl_pointer::Event::Axis {
-                    time,
-                    axis: WEnum::Value(wl_pointer::Axis::HorizontalScroll),
-                    value: dx,
-                });
-            }
+    let Some((_, surface)) = state.pointer_focus.clone() else {
+        return;
+    };
+    let Some(ptr) = pointer_for(state, &surface) else {
+        return;
+    };
+    let time = state.time_ms();
+    // `wl_pointer.axis` oczekuje wartości w **jednostkach powierzchni** (pikselach),
+    // a evdev daje „ząbki” (±1). Skalujemy więc ząbek do [`WHEEL_STEP_PX`] px —
+    // inaczej klienci (a nasza powłoka) przewijaliby 1 px na obrót kółka.
+    //
+    // Od wersji 5 protokołu wysyłamy też `axis_source` i `axis_discrete`: GPUI
+    // (Zed) ignoruje `axis` przy źródle „wheel” i przewija na podstawie `discrete`.
+    if ptr.version() >= 5 {
+        let _ = ptr.send_event(wl_pointer::Event::AxisSource {
+            axis_source: WEnum::Value(wl_pointer::AxisSource::Wheel),
+        });
+    }
+    if dy != 0.0 {
+        let _ = ptr.send_event(wl_pointer::Event::Axis {
+            time,
+            axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
+            value: dy * WHEEL_STEP_PX,
+        });
+        if ptr.version() >= 5 {
+            let _ = ptr.send_event(wl_pointer::Event::AxisDiscrete {
+                axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
+                discrete: dy.round() as i32,
+            });
         }
     }
+    if dx != 0.0 {
+        let _ = ptr.send_event(wl_pointer::Event::Axis {
+            time,
+            axis: WEnum::Value(wl_pointer::Axis::HorizontalScroll),
+            value: dx * WHEEL_STEP_PX,
+        });
+        if ptr.version() >= 5 {
+            let _ = ptr.send_event(wl_pointer::Event::AxisDiscrete {
+                axis: WEnum::Value(wl_pointer::Axis::HorizontalScroll),
+                discrete: dx.round() as i32,
+            });
+        }
+    }
+    pointer_frame(&ptr);
 }
 
 fn update_pointer_focus(state: &mut State, pos: Point) {
@@ -517,23 +919,26 @@ fn update_pointer_focus(state: &mut State, pos: Point) {
     if same {
         return;
     }
-    let ptr = state.pointer.clone();
-    if let (Some((_, surface)), Some(ptr)) = (state.pointer_focus.clone(), ptr.clone()) {
-        let serial = state.next_serial();
-        let _ = ptr.send_event(wl_pointer::Event::Leave { serial, surface });
+    if let Some((_, surface)) = state.pointer_focus.clone() {
+        if let Some(ptr) = pointer_for(state, &surface) {
+            let serial = state.next_serial();
+            let _ = ptr.send_event(wl_pointer::Event::Leave { serial, surface });
+            pointer_frame(&ptr);
+        }
     }
     state.pointer_focus = None;
     if let Some(slot) = target {
         if let Some(surface) = state.slots.get(slot).cloned() {
             let serial = state.next_serial();
             let (lx, ly) = content_local(state, slot, pos);
-            if let Some(ptr) = ptr {
+            if let Some(ptr) = pointer_for(state, &surface) {
                 let _ = ptr.send_event(wl_pointer::Event::Enter {
                     serial,
                     surface: surface.clone(),
                     surface_x: lx,
                     surface_y: ly,
                 });
+                pointer_frame(&ptr);
             }
             state.pointer_focus = Some((slot, surface));
         }
@@ -541,28 +946,57 @@ fn update_pointer_focus(state: &mut State, pos: Point) {
 }
 
 /// Przeskalowanie okna w trakcie przeciągania krawędzi/narożnika; wysyła `xdg_toplevel.configure`.
+///
+/// Okno nie może wyjść za monitor ani schować paska tytułu pod górnym panelem —
+/// przyciągamy krawędź do obszaru roboczego i przeliczamy rozmiar tak, by przeciwna
+/// krawędź została w miejscu (zachowanie „gumki”).
 fn do_resize(state: &mut State, pos: Point) {
     let Some(rs) = state.resize else {
         return;
     };
+    let (ox, oy, ow, oh) = window_output_rect(state, rs.slot);
+    let top = window_inset(state, rs.slot);
+    let bar = state
+        .windows
+        .lock_or_recover()
+        .get(rs.slot)
+        .map(|w| w.bar())
+        .unwrap_or(0.0);
+    let right = ox + ow;
+    let work_top = oy + top;
+    let bottom = oy + oh;
+
     let dx = pos.x - rs.start_px;
     let dy = pos.y - rs.start_py;
     let mut x = rs.start_x;
     let mut y = rs.start_y;
     let mut w = rs.start_w;
     let mut h = rs.start_h;
+
     if rs.edges & EDGE_LEFT != 0 {
         w = (rs.start_w - dx).max(MIN_W);
         x = rs.start_x + (rs.start_w - w);
+        if x < ox {
+            x = ox;
+            w = (rs.start_x + rs.start_w - x).max(MIN_W);
+        }
     } else if rs.edges & EDGE_RIGHT != 0 {
-        w = (rs.start_w + dx).max(MIN_W);
+        w = (rs.start_w + dx).max(MIN_W).min((right - x).max(MIN_W));
     }
+
     if rs.edges & EDGE_TOP != 0 {
         h = (rs.start_h - dy).max(MIN_H);
         y = rs.start_y + (rs.start_h - h);
+        // Pasek tytułu nigdy pod panelem — dolna krawędź zostaje w miejscu.
+        if y < work_top {
+            y = work_top;
+            h = (rs.start_y + rs.start_h - y).max(MIN_H);
+        }
     } else if rs.edges & EDGE_BOTTOM != 0 {
         h = (rs.start_h + dy).max(MIN_H);
+        h = h.min((bottom - y - bar).max(MIN_H));
     }
+
     {
         let mut windows = state.windows.lock_or_recover();
         if let Some(w2) = windows.get_mut(rs.slot) {
@@ -573,10 +1007,12 @@ fn do_resize(state: &mut State, pos: Point) {
         }
     }
     send_configure(state, rs.slot, w, h);
+    // Okno X11: bez tego klient nie wie o nowym rozmiarze (i nie przerysuje treści).
+    sync_x11_geometry(state, rs.slot);
 }
 
 /// Wysyła konfigurację rozmiaru i stanów (`xdg_surface.configure` + `xdg_toplevel.configure`).
-fn send_configure(state: &mut State, slot: usize, w: f64, h: f64) {
+pub(crate) fn send_configure(state: &mut State, slot: usize, w: f64, h: f64) {
     let Some(surface) = state.slots.get(slot).cloned() else {
         return;
     };
@@ -587,8 +1023,15 @@ fn send_configure(state: &mut State, slot: usize, w: f64, h: f64) {
         return;
     };
     let states = window_states(state, slot);
+    if std::env::var("SELENE_STATS").is_ok() {
+        eprintln!("selene/win: send_configure slot={slot} {w}x{h}");
+    }
     let serial = state.next_serial();
-    let _ = xs.send_event(xdg_surface::Event::Configure { serial });
+    // Kolejność ma znaczenie: `xdg_toplevel.configure` **przed** `xdg_surface.configure`.
+    // `xdg_surface.configure` kończy sekwencję konfiguracji — klient zatwierdza wtedy
+    // ostatni stan toplevela. Odwrotna kolejność (surface → toplevel) sprawiała, że
+    // klient aplikował **poprzedni** rozmiar, a nowy zostawał w kolejce na zawsze
+    // (maksymalizacja „nie działała”, okno zostawało 1200×1028).
     if let Some(xd) = xs.data::<XdgSurfaceData>() {
         if let Some(tl) = xd.toplevel.lock_or_recover().as_ref() {
             let _ = tl.send_event(xdg_toplevel::Event::Configure {
@@ -598,62 +1041,232 @@ fn send_configure(state: &mut State, slot: usize, w: f64, h: f64) {
             });
         }
     }
+    let _ = xs.send_event(xdg_surface::Event::Configure { serial });
 }
 
 /// Stany `xdg_toplevel` dla okna (ACTIVATED + ewentualnie MAXIMIZED/FULLSCREEN).
+///
+/// Protokół przesyła je jako tablicę **u32** (`array` uint), a binding Waylanda
+/// wystawia ją jako `Vec<u8>` — trzeba więc zapisać każdy stan jako 4 bajty.
+/// Wcześniej wysyłaliśmy pojedyncze bajty i klient (SCTK/GTK) widział pustą listę:
+/// okno nigdy nie było „zmaksymalizowane”, więc jego przycisk max/min/close
+/// zachowywał się losowo.
 fn window_states(state: &State, slot: usize) -> Vec<u8> {
-    let mut states = vec![4u8]; // ACTIVATED
+    let mut list = vec![4u32]; // ACTIVATED
     if let Some(w) = state.windows.lock_or_recover().get(slot) {
         if w.maximized {
-            states.push(1); // MAXIMIZED
+            list.push(1); // MAXIMIZED
         }
         if w.fullscreen {
-            states.push(2); // FULLSCREEN
+            list.push(2); // FULLSCREEN
         }
     }
-    states
+    encode_states(&list)
 }
 
-/// Prostokąt monitora, na którym leży okno (x, y, szerokość, wysokość).
-fn window_output_rect(state: &State, slot: usize) -> (f64, f64, f64, f64) {
-    let (cx, cy) = state
-        .windows
-        .lock_or_recover()
-        .get(slot)
-        .map(|w| {
-            let c = w.content().center();
-            (c.x, c.y)
-        })
-        .unwrap_or((0.0, 0.0));
+/// Koduje stany `xdg_toplevel` w tablicę bajtów oczekiwaną przez protokół.
+fn encode_states(list: &[u32]) -> Vec<u8> {
+    list.iter().flat_map(|s| s.to_ne_bytes()).collect()
+}
+
+/// Prostokąt monitora pod punktem (x, y, szerokość, wysokość).
+fn output_rect_at(state: &State, pos: Point) -> (f64, f64, f64, f64) {
     let outs = state.outputs.lock_or_recover();
-    let idx = crate::monitors::output_at(&outs, cx, cy);
+    let idx = crate::monitors::output_at(&outs, pos.x, pos.y);
     match outs.get(idx).or_else(|| outs.first()) {
         Some(o) => (o.x as f64, o.y as f64, o.width as f64, o.height as f64),
         None => (0.0, 0.0, 1280.0, 800.0),
     }
 }
 
-/// Przełącza minimalizację (ukrycie przez kompozytor).
-fn toggle_minimize(state: &mut State, slot: usize) {
-    let minimized = {
+/// Prostokąt monitora, na którym leży okno (x, y, szerokość, wysokość).
+fn window_output_rect(state: &State, slot: usize) -> (f64, f64, f64, f64) {
+    let center = state
+        .windows
+        .lock_or_recover()
+        .get(slot)
+        .map(|w| w.content().center())
+        .unwrap_or(Point::new(0.0, 0.0));
+    output_rect_at(state, center)
+}
+
+/// Indeks monitora, na którym leży okno.
+fn window_output_index(state: &State, slot: usize) -> usize {
+    let center = state
+        .windows
+        .lock_or_recover()
+        .get(slot)
+        .map(|w| w.content().center())
+        .unwrap_or(Point::new(0.0, 0.0));
+    let outs = state.outputs.lock_or_recover();
+    crate::monitors::output_at(&outs, center.x, center.y)
+}
+
+/// Górna strefa wyłączna panelu na danym monitorze (0 = brak panelu).
+fn inset_for_output(state: &State, idx: usize) -> f64 {
+    state.top_insets.get(&idx).copied().unwrap_or(0.0)
+}
+
+/// Górna strefa wyłączna panelu na monitorze, na którym leży okno.
+fn window_inset(state: &State, slot: usize) -> f64 {
+    inset_for_output(state, window_output_index(state, slot))
+}
+
+/// Górna strefa wyłączna panelu na monitorze pod punktem.
+fn inset_at(state: &State, pos: Point) -> f64 {
+    let idx = {
+        let outs = state.outputs.lock_or_recover();
+        crate::monitors::output_at(&outs, pos.x, pos.y)
+    };
+    inset_for_output(state, idx)
+}
+
+/// Ogranicza pozycję przeciąganego okna do obszaru roboczego.
+///
+/// Pionowo: pasek tytułu nigdy nie chowa się pod górnym panelem (`top_inset`) ani nie
+/// wyjeżdża tak daleko, by nie dało się go złapać. Poziomo: co najmniej
+/// [`MIN_VISIBLE`] pikseli okna zostaje na monitorze.
+fn clamp_drag_pos(
+    area: (f64, f64, f64, f64),
+    top_inset: f64,
+    width: f64,
+    x: f64,
+    y: f64,
+) -> (f64, f64) {
+    let (ox, oy, ow, oh) = area;
+    let min_y = oy + top_inset;
+    let max_y = (oy + oh - MIN_VISIBLE).max(min_y);
+    let y = y.clamp(min_y, max_y);
+    let min_x = ox - (width - MIN_VISIBLE).max(0.0);
+    let max_x = (ox + ow - MIN_VISIBLE).max(min_x);
+    let x = x.clamp(min_x, max_x);
+    (x, y)
+}
+
+/// Zaczyna przeciąganie okna.
+///
+/// Zmaxymalizowane/pełnoekranowe okno najpierw wraca do rozmiaru domyślnego — kursor
+/// zostaje w tym samym miejscu względem szerokości (typowe zachowanie pulpitów).
+fn begin_drag(state: &mut State, slot: usize, pos: Point) {
+    let info = {
+        let windows = state.windows.lock_or_recover();
+        let Some(w) = windows.get(slot) else {
+            return;
+        };
+        (
+            w.maximized,
+            w.fullscreen,
+            w.x,
+            w.y,
+            w.width as f64,
+            w.height as f64,
+        )
+    };
+    if info.0 || info.1 {
+        let fx = if info.4 > 0.0 {
+            ((pos.x - info.2) / info.4).clamp(0.0, 1.0)
+        } else {
+            0.5
+        };
+        restore_window(state, slot);
+        if let Some((nx, ny, nw, nh)) = window_geometry(state, slot) {
+            state.drag = Some(DragState {
+                slot,
+                off_x: fx * nw,
+                // Chwytamy pasek tytułu, nawet jeśli kursor był wyżej (np. na kliencie CSD).
+                off_y: (pos.y - ny).clamp(0.0, (TITLEBAR - 1.0).max(0.0)),
+                start_px: pos.x,
+                start_py: pos.y,
+                origin: SavedGeom {
+                    x: nx,
+                    y: ny,
+                    width: nw as i32,
+                    height: nh as i32,
+                },
+            });
+        }
+        return;
+    }
+    state.drag = Some(DragState {
+        slot,
+        off_x: pos.x - info.2,
+        off_y: pos.y - info.3,
+        start_px: pos.x,
+        start_py: pos.y,
+        origin: SavedGeom {
+            x: info.2,
+            y: info.3,
+            width: info.4 as i32,
+            height: info.5 as i32,
+        },
+    });
+}
+
+/// Ustawia minimalizację okna (ukrycie / przywrócenie).
+pub fn set_minimized(state: &mut State, slot: usize, minimized: bool) {
+    let changed = {
         let mut windows = state.windows.lock_or_recover();
         match windows.get_mut(slot) {
-            Some(w) if !w.popup && !w.layer => {
-                w.minimized = !w.minimized;
-                w.minimized
+            Some(w) if !w.popup && !w.layer && w.minimized != minimized => {
+                w.minimized = minimized;
+                true
             }
-            _ => return,
+            _ => false,
         }
     };
-    if minimized {
-        clear_focus_if(state, slot);
+    if changed {
+        if minimized {
+            clear_focus_if(state, slot);
+        } else {
+            raise_and_focus(state, slot);
+        }
+        crate::foreign_toplevel::broadcast_states(state);
     }
-    crate::foreign_toplevel::broadcast_states(state);
+}
+
+/// Przełącza minimalizację (ukrycie przez kompozytor).
+fn toggle_minimize(state: &mut State, slot: usize) {
+    let cur = state
+        .windows
+        .lock_or_recover()
+        .get(slot)
+        .map(|w| w.minimized)
+        .unwrap_or(false);
+    set_minimized(state, slot, !cur);
+}
+
+/// Ustawia stan maksymalizacji okna.
+pub fn set_maximized(state: &mut State, slot: usize, maximized: bool) {
+    let cur = state
+        .windows
+        .lock_or_recover()
+        .get(slot)
+        .map(|w| w.maximized);
+    if std::env::var("SELENE_STATS").is_ok() {
+        eprintln!("selene/win: set_maximized slot={slot} cur={cur:?} want={maximized}");
+    }
+    if cur != Some(maximized) {
+        toggle_maximize(state, slot);
+    }
+}
+
+/// Ustawia stan pełnego ekranu okna.
+pub fn set_fullscreen(state: &mut State, slot: usize, fullscreen: bool) {
+    let cur = state
+        .windows
+        .lock_or_recover()
+        .get(slot)
+        .map(|w| w.fullscreen);
+    if cur != Some(fullscreen) {
+        toggle_fullscreen(state, slot);
+    }
 }
 
 /// Przełącza maksymalizację (zapamiętuje/odtwarza geometrię).
 fn toggle_maximize(state: &mut State, slot: usize) {
     let (ox, oy, ow, oh) = window_output_rect(state, slot);
+    // Górny panel rezerwuje miejsce **tylko na swoim monitorze**.
+    let top = window_inset(state, slot);
     {
         let mut windows = state.windows.lock_or_recover();
         let Some(w) = windows.get_mut(slot) else {
@@ -671,7 +1284,10 @@ fn toggle_maximize(state: &mut State, slot: usize) {
             }
             w.maximized = false;
         } else {
-            if !w.fullscreen {
+            // Zapamiętujemy **tylko** pierwszy rozmiar „normalny”. Po przyciągnięciu do
+            // połowy/ćwiartki `saved` już jest ustawione i maksymalizacja nie może go
+            // nadpisać — inaczej powrót z pełnego ekranu gubił rozmiar domyślny.
+            if !w.fullscreen && w.saved.is_none() {
                 w.saved = Some(SavedGeom {
                     x: w.x,
                     y: w.y,
@@ -682,22 +1298,44 @@ fn toggle_maximize(state: &mut State, slot: usize) {
             w.maximized = true;
             w.fullscreen = false;
             w.minimized = false;
+            // Okna CSD (GTK/libadwaita, X11) nie mają naszego paska tytułu — nie
+            // rezerwujemy dla niego wysokości paska, bo zostawałaby pusta szrama u dołu.
+            let bar = if w.ssd { TITLEBAR } else { 0.0 };
             w.x = ox;
-            w.y = oy;
+            w.y = oy + top;
             w.width = ow as i32;
-            w.height = (oh - TITLEBAR).max(MIN_H) as i32;
+            w.height = (oh - top - bar).max(MIN_H) as i32;
         }
     }
     let (nw, nh) = window_geometry(state, slot)
         .map(|(_, _, w, h)| (w, h))
         .unwrap_or((ow, oh));
     send_configure(state, slot, nw, nh);
+    // Okno X11: powiadom klienta o stanie maksymalizacji (EWMH `_NET_WM_STATE`)
+    // i przekaż mu nową geometrię — X11 nie zna `xdg_toplevel.configure`.
+    let maximized = state
+        .windows
+        .lock_or_recover()
+        .get(slot)
+        .map(|w| w.maximized)
+        .unwrap_or(false);
+    if let Some(xwm) = crate::xwm::global() {
+        if let Some(win) = x11_window(state, slot) {
+            xwm.set_maximized(win, maximized);
+        }
+    }
+    sync_x11_geometry(state, slot);
     crate::foreign_toplevel::broadcast_states(state);
 }
 
 /// Przełącza pełny ekran (ukrywa dekorację).
 fn toggle_fullscreen(state: &mut State, slot: usize) {
     let (ox, oy, ow, oh) = window_output_rect(state, slot);
+    // Panel górny jest zawsze widoczny na swoim monitorze — pełny ekran zajmuje
+    // **obszar roboczy tylko tam**. Na monitorze bez panelu okno dostaje całą wysokość.
+    let top = window_inset(state, slot);
+    // Nowa kolejność dla wejścia i wyjścia — okno wraca nad pozostałe.
+    let raise_z = state.next_z();
     {
         let mut windows = state.windows.lock_or_recover();
         let Some(w) = windows.get_mut(slot) else {
@@ -714,8 +1352,9 @@ fn toggle_fullscreen(state: &mut State, slot: usize) {
                 w.height = sv.height;
             }
             w.fullscreen = false;
+            w.z = raise_z;
         } else {
-            if !w.maximized {
+            if !w.maximized && w.saved.is_none() {
                 w.saved = Some(SavedGeom {
                     x: w.x,
                     y: w.y,
@@ -727,25 +1366,76 @@ fn toggle_fullscreen(state: &mut State, slot: usize) {
             w.maximized = false;
             w.minimized = false;
             w.x = ox;
-            w.y = oy;
+            w.y = oy + top;
             w.width = ow as i32;
-            w.height = oh as i32;
+            w.height = (oh - top).max(MIN_H) as i32;
+            w.z = raise_z;
         }
     }
     let (nw, nh) = window_geometry(state, slot)
         .map(|(_, _, w, h)| (w, h))
         .unwrap_or((ow, oh));
     send_configure(state, slot, nw, nh);
+    // Okno X11: powiadom klienta o stanie (EWMH `_NET_WM_STATE`) i geometrii pełnego ekranu.
+    let (fullscreen, maximized) = state
+        .windows
+        .lock_or_recover()
+        .get(slot)
+        .map(|w| (w.fullscreen, w.maximized))
+        .unwrap_or((false, false));
+    if let Some(xwm) = crate::xwm::global() {
+        if let Some(win) = x11_window(state, slot) {
+            xwm.set_maximized(win, maximized);
+            xwm.set_fullscreen(win, fullscreen);
+        }
+    }
+    sync_x11_geometry(state, slot);
     crate::foreign_toplevel::broadcast_states(state);
+}
+
+/// Przekazuje oknu X11 bieżącą geometrię treści (pozycję i rozmiar).
+///
+/// X11 nie dostaje `xdg_toplevel.configure`, więc każda zmiana położenia
+/// (przeciąganie, maksymalizacja, pełny ekran) musi iść osobnym `ConfigureWindow`.
+fn sync_x11_geometry(state: &State, slot: usize) {
+    let Some((x, y, w, h)) = window_geometry(state, slot) else {
+        return;
+    };
+    // `Window.x/y` to lewy-górny róg **całego** okna (z naszym paskiem). Treść X11
+    // zaczyna się `bar` pikseli niżej — bez tego klient rysowałby pod dekoracją.
+    let bar = state
+        .windows
+        .lock_or_recover()
+        .get(slot)
+        .map(|w| w.bar())
+        .unwrap_or(0.0);
+    let Some(xwm) = crate::xwm::global() else {
+        return;
+    };
+    if let Some(win) = x11_window(state, slot) {
+        xwm.set_geometry(win, x as i32, (y + bar) as i32, w as u32, h as u32);
+    }
+}
+
+/// Okno X11 odpowiadające slotowi (jeśli to nie okno X11 — `None`).
+fn x11_window(state: &State, slot: usize) -> Option<u32> {
+    let surface = state.slots.get(slot)?;
+    let sd = surface.data::<SurfaceData>()?;
+    if !*sd.xwayland.lock_or_recover() {
+        return None;
+    }
+    let serial = *sd.x11_serial.lock_or_recover();
+    crate::xwm::global()?.window_for_serial(serial)
 }
 
 /// Zdejmuje fokus klawiatury/wskaźnika z okna (np. po minimalizacji).
 fn clear_focus_if(state: &mut State, slot: usize) {
     if state.keyboard_focus.as_ref().map(|(s, _)| *s) == Some(slot) {
-        let kb = state.keyboard.clone();
-        if let (Some((_, surface)), Some(kb)) = (state.keyboard_focus.clone(), kb) {
-            let serial = state.next_serial();
-            let _ = kb.send_event(wl_keyboard::Event::Leave { serial, surface });
+        if let Some((_, surface)) = state.keyboard_focus.clone() {
+            if let Some(kb) = keyboard_for(state, &surface) {
+                let serial = state.next_serial();
+                let _ = kb.send_event(wl_keyboard::Event::Leave { serial, surface });
+            }
         }
         state.keyboard_focus = None;
     }
@@ -763,6 +1453,16 @@ fn send_close(state: &mut State, slot: usize) {
     let Some(sd) = surface.data::<SurfaceData>() else {
         return;
     };
+    // Okno X11 nie ma `xdg_toplevel` — zamykamy je przez XWM (`WM_DELETE_WINDOW`).
+    if *sd.xwayland.lock_or_recover() {
+        let serial = *sd.x11_serial.lock_or_recover();
+        if let Some(xwm) = crate::xwm::global() {
+            if let Some(win) = xwm.window_for_serial(serial) {
+                xwm.close(win);
+            }
+        }
+        return;
+    }
     let Some(xs) = sd.xdg_surface.lock_or_recover().clone() else {
         return;
     };
@@ -789,7 +1489,17 @@ fn raise_and_focus(state: &mut State, slot: usize) {
 }
 
 /// Aktywuje okno o podanym slocie (z `zwlr_foreign_toplevel_handle_v1.activate`).
+/// Zminimalizowane okno zostaje przywrócone — inaczej klik w pasek nie pokazywał okna.
 pub fn activate_slot(state: &mut State, slot: usize) {
+    let minimized = state
+        .windows
+        .lock_or_recover()
+        .get(slot)
+        .map(|w| w.minimized)
+        .unwrap_or(false);
+    if minimized {
+        set_minimized(state, slot, false);
+    }
     raise_and_focus(state, slot);
 }
 
@@ -806,14 +1516,15 @@ fn set_keyboard_focus(state: &mut State, slot: usize) {
     if state.keyboard_focus.as_ref().map(|(s, _)| *s) == Some(slot) {
         return;
     }
-    let kb = state.keyboard.clone();
-    if let (Some((_, surface)), Some(kb)) = (state.keyboard_focus.clone(), kb.clone()) {
-        let serial = state.next_serial();
-        let _ = kb.send_event(wl_keyboard::Event::Leave { serial, surface });
+    if let Some((_, surface)) = state.keyboard_focus.clone() {
+        if let Some(kb) = keyboard_for(state, &surface) {
+            let serial = state.next_serial();
+            let _ = kb.send_event(wl_keyboard::Event::Leave { serial, surface });
+        }
     }
     state.keyboard_focus = None;
     if let Some(surface) = state.slots.get(slot).cloned() {
-        if let Some(kb) = kb {
+        if let Some(kb) = keyboard_for(state, &surface) {
             let serial = state.next_serial();
             let _ = kb.send_event(wl_keyboard::Event::Enter {
                 serial,
@@ -822,14 +1533,41 @@ fn set_keyboard_focus(state: &mut State, slot: usize) {
             });
         }
         state.keyboard_focus = Some((slot, surface));
+        // X11: powiadom XWM, które okno jest aktywne (`_NET_ACTIVE_WINDOW`).
+        notify_xwm_focus(state, slot);
     }
 }
 
-fn keyboard_key(state: &mut State, keysym: u32, st: ButtonState) {
-    let kb = state.keyboard.clone();
-    let Some(kb) = kb else { return };
-    sync_modifiers(state, &kb, keysym, st);
-    if is_modifier_keysym(keysym) {
+/// Informuje XWM o aktywnym oknie (jeśli to okno X11).
+fn notify_xwm_focus(state: &State, slot: usize) {
+    let Some(xwm) = crate::xwm::global() else {
+        return;
+    };
+    let Some(surface) = state.slots.get(slot) else {
+        return;
+    };
+    let Some(sd) = surface.data::<SurfaceData>() else {
+        return;
+    };
+    if *sd.xwayland.lock_or_recover() {
+        let serial = *sd.x11_serial.lock_or_recover();
+        xwm.set_active(xwm.window_for_serial(serial));
+    }
+}
+
+/// Zgłasza żądanie zrzutu ekranu (realizuje je wątek wyjścia).
+fn request_screenshot(state: &mut State) {
+    state
+        .screenshot
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    if std::env::var("SELENE_STATS").is_ok() {
+        eprintln!("selene: żądanie zrzutu ekranu");
+    }
+}
+
+fn keyboard_key(state: &mut State, keysym: u32, keycode: u32, st: ButtonState) {
+    sync_modifiers(state, keysym, st);
+    if is_modifier_keysym(keysym) || is_lock_keysym(keysym) {
         return;
     }
     // Escape zamyka podgląd (Super+Tab) i nie trafia do klienta.
@@ -837,14 +1575,67 @@ fn keyboard_key(state: &mut State, keysym: u32, st: ButtonState) {
         state.set_overview(false);
         return;
     }
+    // `Print` — zrzut ekranu bez modyfikatora (alternatywa dla Super+F12).
+    if keysym == 0xff61 {
+        if st == ButtonState::Pressed {
+            request_screenshot(state);
+        }
+        return;
+    }
+    // Alt+Tab — przełącz okna (klasyczny skrót pulpitu)
+    if state.sent_mods.alt && keysym == 0xff09 && st == ButtonState::Pressed {
+        cycle_windows(state);
+        return;
+    }
+    // Alt+F4 — zamknij aktywne okno
+    if state.sent_mods.alt && keysym == 0xffbe && st == ButtonState::Pressed {
+        if let Some((s, _)) = state.keyboard_focus {
+            send_close(state, s);
+        }
+        return;
+    }
+    // Klawisze multimedialne (dźwięk/głośność)
+    match keysym {
+        0x1008ff13 => {
+            if st == ButtonState::Pressed {
+                let _ = std::process::Command::new("wpctl")
+                    .args(["set-volume", "@DEFAULT_AUDIO_SINK@", "5%+"])
+                    .spawn();
+            }
+            return;
+        }
+        0x1008ff11 => {
+            if st == ButtonState::Pressed {
+                let _ = std::process::Command::new("wpctl")
+                    .args(["set-volume", "@DEFAULT_AUDIO_SINK@", "5%-"])
+                    .spawn();
+            }
+            return;
+        }
+        0x1008ff12 => {
+            if st == ButtonState::Pressed {
+                let _ = std::process::Command::new("wpctl")
+                    .args(["set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"])
+                    .spawn();
+            }
+            return;
+        }
+        _ => {}
+    }
     // Skróty menedżera okien (Super + …) przechwytujemy przed klientem.
     if state.sent_mods.logo && window_shortcut(state, keysym, st) {
         return;
     }
-    if state.keyboard_focus.is_none() {
+    // Klawiatura klienta okna z fokusem — nie wolno pisać do zasobu innego klienta.
+    let Some((_, surface)) = state.keyboard_focus.clone() else {
         return;
-    }
-    if let Some(key) = keysym_to_keycode(keysym) {
+    };
+    let Some(kb) = keyboard_for(state, &surface) else {
+        return;
+    };
+    // Do klienta trafia **fizyczny kod klawisza** (evdev), a nie kod X11 ani keysym —
+    // klient liczy z niego znak według mapy klawiszy, którą mu wysłaliśmy.
+    if keycode != 0 {
         let serial = state.next_serial();
         let time = state.time_ms();
         let wl_state = match st {
@@ -854,7 +1645,7 @@ fn keyboard_key(state: &mut State, keysym: u32, st: ButtonState) {
         let _ = kb.send_event(wl_keyboard::Event::Key {
             serial,
             time,
-            key,
+            key: keycode,
             state: wl_state,
         });
     }
@@ -866,11 +1657,38 @@ fn window_shortcut(state: &mut State, keysym: u32, st: ButtonState) -> bool {
         // Zjedz także zwolnienia naszych klawiszy, by nie trafiły do klienta.
         return matches!(
             keysym,
-            0x006d | 0x0066 | 0x006c | 0x004c | 0xff52 | 0xff54 | 0xff09 | 0x0060 | 0x0031..=0x0038
+            0x006d | 0x0066 | 0x006c | 0x004c | 0xff52 | 0xff54 | 0xff09 | 0x0060 | 0x0031
+                ..=0x0038 | 0xff51 | 0xff53 | 0x0071 | 0xffc9
         );
     }
     let focused = state.keyboard_focus.as_ref().map(|(s, _)| *s);
     match keysym {
+        0xffc9 => {
+            // Super+F12 — zrzut ekranu. Realizuje go wątek wyjścia (ma gotowe klatki).
+            request_screenshot(state);
+            true
+        }
+        0x0071 => {
+            // Super+Q — zamknij okno.
+            if let Some(s) = focused {
+                send_close(state, s);
+            }
+            true
+        }
+        0xff51 => {
+            // Super+Left — kafelkuj do lewej połowy ekranu (snap).
+            if let Some(s) = focused {
+                snap_window(state, s, true);
+            }
+            true
+        }
+        0xff53 => {
+            // Super+Right — kafelkuj do prawej połowy ekranu (snap).
+            if let Some(s) = focused {
+                snap_window(state, s, false);
+            }
+            true
+        }
         0x006d => {
             // Super+M — minimalizuj/przywróć.
             if let Some(s) = focused {
@@ -932,12 +1750,162 @@ fn window_shortcut(state: &mut State, keysym: u32, st: ButtonState) -> bool {
     }
 }
 
-/// Przywraca okno z minimalizacji/maksymalizacji/fullscreenu.
-fn restore_window(state: &mut State, slot: usize) {
-    let (min, max, full) = {
+/// Strefa przyciągania okna po upuszczeniu przy krawędzi/narożniku monitora.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnapZone {
+    Left,
+    Right,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+    Maximize,
+}
+
+/// Wykrywa strefę na podstawie pozycji kursora w obszarze roboczym.
+fn snap_zone(pos: Point, area: Rect) -> Option<SnapZone> {
+    let left = pos.x <= area.x() + SNAP_EDGE;
+    let right = pos.x >= area.right() - SNAP_EDGE;
+    let top = pos.y <= area.y() + SNAP_EDGE;
+    let bottom = pos.y >= area.bottom() - SNAP_EDGE;
+    match (left, top, bottom, right) {
+        // Narożniki mają pierwszeństwo — dają ćwiartki.
+        (true, true, _, _) => Some(SnapZone::TopLeft),
+        (true, _, true, _) => Some(SnapZone::BottomLeft),
+        (_, true, _, true) => Some(SnapZone::TopRight),
+        (_, _, true, true) => Some(SnapZone::BottomRight),
+        // Krawędzie — połowy; góra (środek) — maksymalizacja.
+        (true, _, _, _) => Some(SnapZone::Left),
+        (_, _, _, true) => Some(SnapZone::Right),
+        (_, true, _, _) => Some(SnapZone::Maximize),
+        _ => None,
+    }
+}
+
+/// Geometria **treści** okna dla strefy: `(x, y, szerokość, wysokość)`.
+///
+/// `bar` to wysokość naszego paska tytułu (0 dla CSD) — dzięki temu zewnętrzna
+/// krawędź okna dokładnie pokrywa się z krawędzią połowy/ćwiartki monitora.
+fn snap_rect(zone: SnapZone, area: Rect, bar: f64) -> (f64, f64, f64, f64) {
+    let half_w = (area.width() / 2.0).round().max(MIN_W);
+    let right_w = (area.width() - half_w).max(MIN_W);
+    let half_outer_h = (area.height() / 2.0).round();
+    let quarter_h = (half_outer_h - bar).max(MIN_H);
+    let full_h = (area.height() - bar).max(MIN_H);
+    let bottom_y = area.y() + half_outer_h;
+    match zone {
+        SnapZone::Maximize => (area.x(), area.y(), area.width(), full_h),
+        SnapZone::Left => (area.x(), area.y(), half_w, full_h),
+        SnapZone::Right => (area.x() + half_w, area.y(), right_w, full_h),
+        SnapZone::TopLeft => (area.x(), area.y(), half_w, quarter_h),
+        SnapZone::TopRight => (area.x() + half_w, area.y(), right_w, quarter_h),
+        SnapZone::BottomLeft => (area.x(), bottom_y, half_w, quarter_h),
+        SnapZone::BottomRight => (area.x() + half_w, bottom_y, right_w, quarter_h),
+    }
+}
+
+/// Obszar roboczy monitora pod kursorem (bez górnego panelu — jeśli tam jest).
+fn workarea_at(state: &State, pos: Point) -> Rect {
+    let (ox, oy, ow, oh) = output_rect_at(state, pos);
+    let top = inset_at(state, pos).min(oh - MIN_H);
+    Rect::from_xywh(ox, oy + top, ow, (oh - top).max(MIN_H))
+}
+
+/// Po upuszczeniu przeciąganego okna: przyciągnij je, jeśli kursor jest przy krawędzi.
+fn apply_drag_snap(state: &mut State, slot: usize, pos: Point, origin: SavedGeom) {
+    if let Some(zone) = snap_zone(pos, workarea_at(state, pos)) {
+        snap_to_zone(state, slot, zone, Some(origin));
+    }
+}
+
+/// Ustawia geometrię treści okna (bez ruszania zapamiętanego rozmiaru).
+fn place_window(state: &mut State, slot: usize, x: f64, y: f64, w: f64, h: f64) {
+    {
+        let mut windows = state.windows.lock_or_recover();
+        let Some(win) = windows.get_mut(slot) else {
+            return;
+        };
+        if win.popup || win.layer {
+            return;
+        }
+        win.x = x;
+        win.y = y;
+        win.width = w as i32;
+        win.height = h as i32;
+    }
+    send_configure(state, slot, w, h);
+    sync_x11_geometry(state, slot);
+    crate::foreign_toplevel::broadcast_states(state);
+}
+
+/// Przyciąga okno do strefy: połowa, ćwiartka albo maksymalizacja.
+///
+/// `remember` to geometria sprzed przeciągania — wraca jako rozmiar domyślny
+/// (Super+Down / podwójny klik po wyjściu ze stanu).
+fn snap_to_zone(state: &mut State, slot: usize, zone: SnapZone, remember: Option<SavedGeom>) {
+    if zone == SnapZone::Maximize {
+        set_maximized(state, slot, true);
+        return;
+    }
+    let (ox, oy, ow, oh) = window_output_rect(state, slot);
+    let top = window_inset(state, slot).min(oh - MIN_H);
+    let work = Rect::from_xywh(ox, oy + top, ow, (oh - top).max(MIN_H));
+    let bar = {
         let windows = state.windows.lock_or_recover();
         match windows.get(slot) {
-            Some(w) => (w.minimized, w.maximized, w.fullscreen),
+            Some(w) if !w.popup && !w.layer => {
+                if w.ssd {
+                    TITLEBAR
+                } else {
+                    0.0
+                }
+            }
+            _ => return,
+        }
+    };
+    let (x, y, w, h) = snap_rect(zone, work, bar);
+    {
+        let mut windows = state.windows.lock_or_recover();
+        let Some(win) = windows.get_mut(slot) else {
+            return;
+        };
+        // Pierwszy „normalny” rozmiar jest punktem powrotu dla maksymalizacji i
+        // pełnego ekranu; kolejne przyciągnięcia go nie nadpisują.
+        if win.saved.is_none() {
+            win.saved = remember.or(Some(SavedGeom {
+                x: win.x,
+                y: win.y,
+                width: win.width,
+                height: win.height,
+            }));
+        }
+        win.maximized = false;
+        win.fullscreen = false;
+        win.minimized = false;
+    }
+    place_window(state, slot, x, y, w, h);
+}
+
+/// Kafelkuje okno do lewej lub prawej połowy ekranu (skrót klawiszowy).
+fn snap_window(state: &mut State, slot: usize, left: bool) {
+    snap_to_zone(
+        state,
+        slot,
+        if left {
+            SnapZone::Left
+        } else {
+            SnapZone::Right
+        },
+        None,
+    );
+}
+
+/// Przywraca okno z minimalizacji/maksymalizacji/fullscreenu/przyciągnięcia.
+fn restore_window(state: &mut State, slot: usize) {
+    let (min, max, full, saved) = {
+        let windows = state.windows.lock_or_recover();
+        match windows.get(slot) {
+            Some(w) => (w.minimized, w.maximized, w.fullscreen, w.saved),
             None => return,
         }
     };
@@ -947,6 +1915,12 @@ fn restore_window(state: &mut State, slot: usize) {
         toggle_fullscreen(state, slot);
     } else if max {
         toggle_maximize(state, slot);
+    } else if let Some(sv) = saved {
+        // Okno przyciągnięte do połowy/ćwiartki — wróć do rozmiaru domyślnego.
+        if let Some(w) = state.windows.lock_or_recover().get_mut(slot) {
+            w.saved = None;
+        }
+        place_window(state, slot, sv.x, sv.y, sv.width as f64, sv.height as f64);
     }
 }
 
@@ -1016,6 +1990,45 @@ pub fn switch_workspace(state: &mut State, ws: usize) {
     crate::workspace::broadcast_workspace_states(state);
 }
 
+/// Przenosi okno o podanym tytule na przestrzeń `ws` (polecenie z powłoki, PPM w taskbarze).
+///
+/// Preferujemy okno z fokusem (jeśli tytuł pasuje), potem pierwsze o dokładnie takim
+/// tytule. Tytuły są tym, co widzi użytkownik w taskbarze — nie potrzebujemy wewnętrznych
+/// identyfikatorów kompozytora.
+pub fn move_window_by_title(state: &mut State, title: &str, ws: usize) {
+    if title.is_empty() || ws >= state.ws_count {
+        return;
+    }
+    let slot = {
+        let windows = state.windows.lock_or_recover();
+        let matches = |s: usize| {
+            windows
+                .get(s)
+                .map(|w| !w.layer && !w.popup && w.title == title)
+                .unwrap_or(false)
+        };
+        state
+            .keyboard_focus
+            .as_ref()
+            .map(|(s, _)| *s)
+            .filter(|s| matches(*s))
+            .or_else(|| (0..windows.len()).find(|s| matches(*s)))
+    };
+    match slot {
+        Some(slot) => {
+            move_window_to_workspace(state, slot, ws);
+            if std::env::var("SELENE_STATS").is_ok() {
+                eprintln!("selene/control: przeniesiono {title:?} → przestrzeń {ws}");
+            }
+        }
+        None => {
+            if std::env::var("SELENE_STATS").is_ok() {
+                eprintln!("selene/control: nie znaleziono okna {title:?}");
+            }
+        }
+    }
+}
+
 /// Przenosi okno do zadanej przestrzeni roboczej (skrót Super+Shift+cyfra).
 fn move_window_to_workspace(state: &mut State, slot: usize, ws: usize) {
     let ws = ws.min(state.ws_count.saturating_sub(1));
@@ -1072,7 +2085,7 @@ fn overview_chip_at(state: &State, pos: Point) -> Option<usize> {
 }
 
 /// Wysyła wciśnięcia/zwolnienia klawiszy modyfikujących wynikające z bieżącego stanu.
-fn sync_modifiers(state: &mut State, kb: &wl_keyboard::WlKeyboard, keysym: u32, st: ButtonState) {
+fn sync_modifiers(state: &mut State, keysym: u32, st: ButtonState) {
     let mut mods = state.sent_mods;
     if let Some(field) = modifier_for_keysym(keysym) {
         match st {
@@ -1080,38 +2093,71 @@ fn sync_modifiers(state: &mut State, kb: &wl_keyboard::WlKeyboard, keysym: u32, 
             ButtonState::Released => *field(&mut mods) = false,
         }
     }
-    for (before, now, code) in [
-        (state.sent_mods.shift, mods.shift, 50u32),
-        (state.sent_mods.ctrl, mods.ctrl, 37),
-        (state.sent_mods.alt, mods.alt, 64),
-        (state.sent_mods.logo, mods.logo, 133),
-    ] {
-        if before != now {
-            let serial = state.next_serial();
-            let time = state.time_ms();
-            let ks = if now {
-                WEnum::Value(wl_keyboard::KeyState::Pressed)
-            } else {
-                WEnum::Value(wl_keyboard::KeyState::Released)
-            };
-            let _ = kb.send_event(wl_keyboard::Event::Key {
-                serial,
-                time,
-                key: code,
-                state: ks,
-            });
+    // CapsLock/NumLock to **blokady**, nie modyfikatory wciśnięte. Klient nie dostaje
+    // ich jako zwykłego klawisza (inaczej przełączyłby stan drugi raz); dostaje
+    // wyłącznie `wl_keyboard.modifiers` z `mods_locked`.
+    let mut locked_changed = false;
+    if st == ButtonState::Pressed {
+        match keysym {
+            0xffe5 => {
+                state.caps_lock = !state.caps_lock;
+                locked_changed = true;
+            }
+            0xff7f => {
+                state.num_lock = !state.num_lock;
+                locked_changed = true;
+            }
+            _ => {}
         }
     }
-    if mods != state.sent_mods {
+    // Stan modyfikatorów jest globalny, więc rozgłaszamy go do klawiatur wszystkich
+    // klientów (każdy ma własny zasób `wl_keyboard`).
+    let keyboards: Vec<wl_keyboard::WlKeyboard> = state
+        .keyboards
+        .iter()
+        .filter(|k| k.is_alive())
+        .cloned()
+        .collect();
+    for kb in &keyboards {
+        for (before, now, code) in [
+            // Kody **evdev** klawiszy modyfikujących (protokół Wayland używa evdev, nie X11).
+            (state.sent_mods.shift, mods.shift, 42u32), // KEY_LEFTSHIFT
+            (state.sent_mods.ctrl, mods.ctrl, 29),      // KEY_LEFTCTRL
+            (state.sent_mods.alt, mods.alt, 56),        // KEY_LEFTALT
+            (state.sent_mods.logo, mods.logo, 125),     // KEY_LEFTMETA
+            (state.sent_mods.level3, mods.level3, 100), // KEY_RIGHTALT (AltGr)
+        ] {
+            if before != now {
+                let serial = state.next_serial();
+                let time = state.time_ms();
+                let ks = if now {
+                    WEnum::Value(wl_keyboard::KeyState::Pressed)
+                } else {
+                    WEnum::Value(wl_keyboard::KeyState::Released)
+                };
+                let _ = kb.send_event(wl_keyboard::Event::Key {
+                    serial,
+                    time,
+                    key: code,
+                    state: ks,
+                });
+            }
+        }
+    }
+    if mods != state.sent_mods || locked_changed {
         state.sent_mods = mods;
-        let serial = state.next_serial();
-        let _ = kb.send_event(wl_keyboard::Event::Modifiers {
-            serial,
-            mods_depressed: modifier_mask(mods),
-            mods_latched: 0,
-            mods_locked: 0,
-            group: 0,
-        });
+        // Lock = bit 1, Mod2 (NumLock) = bit 4 — tak samo jak w masce XKB.
+        let locked = (u32::from(state.caps_lock) << 1) | (u32::from(state.num_lock) << 4);
+        for kb in &keyboards {
+            let serial = state.next_serial();
+            let _ = kb.send_event(wl_keyboard::Event::Modifiers {
+                serial,
+                mods_depressed: modifier_mask(mods),
+                mods_latched: 0,
+                mods_locked: locked,
+                group: 0,
+            });
+        }
     }
 }
 
@@ -1121,6 +2167,7 @@ fn modifier_for_keysym(keysym: u32) -> Option<fn(&mut Modifiers) -> &mut bool> {
         0xffe3 | 0xffe4 => Some(|m| &mut m.ctrl),  // Control_L / Control_R
         0xffe9 | 0xffea => Some(|m| &mut m.alt),   // Alt_L / Alt_R
         0xffeb | 0xffec => Some(|m| &mut m.logo),  // Super_L / Super_R
+        0xfe03 => Some(|m| &mut m.level3),         // ISO_Level3_Shift (AltGr)
         _ => None,
     }
 }
@@ -1129,8 +2176,18 @@ fn is_modifier_keysym(keysym: u32) -> bool {
     modifier_for_keysym(keysym).is_some()
 }
 
+/// CapsLock/NumLock — blokady obsługiwane przez `mods_locked` (nie przez zwykły klawisz).
+fn is_lock_keysym(keysym: u32) -> bool {
+    matches!(keysym, 0xffe5 | 0xff7f)
+}
+
 fn modifier_mask(m: Modifiers) -> u32 {
-    (m.shift as u32) | ((m.ctrl as u32) << 2) | ((m.alt as u32) << 3) | ((m.logo as u32) << 6)
+    (m.shift as u32)
+        | ((m.ctrl as u32) << 2)
+        | ((m.alt as u32) << 3)
+        | ((m.logo as u32) << 6)
+        // Poziom 3 (AltGr) w XKB to zwykle Mod5 → bit 7.
+        | ((m.level3 as u32) << 7)
 }
 
 fn button_code(button: PointerButton) -> u32 {
@@ -1144,90 +2201,12 @@ fn button_code(button: PointerButton) -> u32 {
     }
 }
 
-/// Keysym → kod klawisza XKB (evdev + 8) dla typowych klawiszy.
-fn keysym_to_keycode(keysym: u32) -> Option<u32> {
-    let code = match keysym {
-        0x0020 => 65,  // space
-        0xff0d => 36,  // Return
-        0xff1b => 9,   // Escape
-        0xff08 => 22,  // BackSpace
-        0xff09 => 23,  // Tab
-        0xffff => 119, // Delete
-        0xff50 => 110, // Home
-        0xff57 => 115, // End
-        0xff51 => 113, // Left
-        0xff52 => 111, // Up
-        0xff53 => 114, // Right
-        0xff54 => 116, // Down
-        // litery (małe)
-        0x0061 => 38,
-        0x0062 => 56,
-        0x0063 => 54,
-        0x0064 => 40,
-        0x0065 => 26,
-        0x0066 => 41,
-        0x0067 => 42,
-        0x0068 => 43,
-        0x0069 => 31,
-        0x006a => 44,
-        0x006b => 45,
-        0x006c => 46,
-        0x006d => 58,
-        0x006e => 57,
-        0x006f => 32,
-        0x0070 => 33,
-        0x0071 => 24,
-        0x0072 => 27,
-        0x0073 => 39,
-        0x0074 => 28,
-        0x0075 => 30,
-        0x0076 => 55,
-        0x0077 => 25,
-        0x0078 => 53,
-        0x0079 => 29,
-        0x007a => 52,
-        // cyfry
-        0x0031 => 10,
-        0x0032 => 11,
-        0x0033 => 12,
-        0x0034 => 13,
-        0x0035 => 14,
-        0x0036 => 15,
-        0x0037 => 16,
-        0x0038 => 17,
-        0x0039 => 18,
-        0x0030 => 19,
-        // interpunkcja
-        0x002d => 20,
-        0x003d => 21,
-        0x005b => 34,
-        0x005d => 35,
-        0x003b => 47,
-        0x0027 => 48,
-        0x0060 => 49,
-        0x002c => 59,
-        0x002e => 60,
-        0x002f => 61,
-        0x005c => 51,
-        _ => return None,
-    };
-    Some(code)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::Window;
+    use crate::state::{Window, BUTTON_W};
     use libluna_render::ImageData;
     use std::sync::Arc;
-
-    #[test]
-    fn maps_common_keys() {
-        assert_eq!(keysym_to_keycode(0x0061), Some(38)); // a
-        assert_eq!(keysym_to_keycode(0xff0d), Some(36)); // Enter
-        assert_eq!(keysym_to_keycode(0xff1b), Some(9)); // Escape
-        assert_eq!(keysym_to_keycode(0x9999), None);
-    }
 
     #[test]
     fn modifier_mask_matches_xkb() {
@@ -1236,6 +2215,7 @@ mod tests {
             ctrl: true,
             alt: false,
             logo: true,
+            level3: false,
         };
         assert_eq!(modifier_mask(m), 1 | 4 | 64);
     }
@@ -1246,12 +2226,70 @@ mod tests {
         assert!(!is_modifier_keysym(0x0061));
     }
 
+    #[test]
+    fn lock_keys_use_locked_state() {
+        // CapsLock/NumLock nie są „wciśniętymi” modyfikatorami — idą przez `mods_locked`.
+        assert!(is_lock_keysym(0xffe5)); // Caps_Lock
+        assert!(is_lock_keysym(0xff7f)); // Num_Lock
+        assert!(!is_modifier_keysym(0xffe5));
+    }
+
+    #[test]
+    fn locale_maps_to_xkb_layout() {
+        assert_eq!(locale_to_layout("pl_PL.UTF-8"), Some("pl".to_owned()));
+        assert_eq!(locale_to_layout("pl"), Some("pl".to_owned()));
+        assert_eq!(locale_to_layout("de_DE@euro"), Some("de".to_owned()));
+        assert_eq!(locale_to_layout("en_GB.UTF-8"), Some("gb".to_owned()));
+        assert_eq!(locale_to_layout("en_US.UTF-8"), Some("en".to_owned()));
+        // Bez języka nie ma czego zgadywać — zostaje domyślny `us`.
+        assert_eq!(locale_to_layout("C"), None);
+        assert_eq!(locale_to_layout("POSIX"), None);
+        assert_eq!(locale_to_layout(""), None);
+    }
+
+    #[test]
+    fn keymap_includes_locale_layout() {
+        let text = keymap_text_for("pl", None);
+        assert!(text.contains("pc+pl+inet(evdev)+level3(ralt_switch)"));
+        let with_variant = keymap_text_for("pl", Some("legacy"));
+        assert!(with_variant.contains("pc+pl(legacy)+inet(evdev)+level3(ralt_switch)"));
+    }
+
+    #[test]
+    fn compiled_keymap_keeps_altgr() {
+        // Kompilujemy RMLVO — opcja musi być w formacie `lv3:ralt_switch`.
+        // Wcześniej `level3(ralt_switch)` było odrzucane przez xkbcommon (XKB-595)
+        // i AltGr nie dawał poziomu 3 (ą, ć, ę, ł, ń, ó, ś, ź, ż).
+        if let Some(km) = compiled_keymap("pl", None) {
+            assert!(
+                km.contains("level3(ralt_switch)"),
+                "brak opcji level3 w skompilowanej mapie"
+            );
+            assert!(
+                km.contains("0xfe03"),
+                "AltGr (ISO_Level3_Shift) nieobecny w skompilowanej mapie"
+            );
+        }
+    }
+
+    #[test]
+    fn altgr_is_level3_and_super_is_logo() {
+        assert!(matches!(modifier_for_keysym(0xfe03), Some(_)));
+        let mut m = Modifiers::NONE;
+        if let Some(f) = modifier_for_keysym(0xfe03) {
+            *f(&mut m) = true;
+        }
+        assert!(m.level3);
+        assert_eq!(modifier_mask(m), 1 << 7);
+    }
+
     fn sample_window() -> Window {
         Window {
             x: 100.0,
             y: 50.0,
             width: 200,
             height: 120,
+            image_offset: (0.0, 0.0),
             z: 1,
             title: "Test".to_owned(),
             popup: false,
@@ -1259,9 +2297,11 @@ mod tests {
             mapped: true,
             workspace: 0,
             input: None,
+            input_capture: false,
             minimized: false,
             maximized: false,
             fullscreen: false,
+            ssd: true,
             saved: None,
             data: Arc::new(ImageData::empty(200, 120)),
         }
@@ -1270,7 +2310,7 @@ mod tests {
     #[test]
     fn content_local_does_not_offset_layer_surfaces() {
         // Panel (powierzchnia warstwowa) nie ma paska tytułu — współrzędne bez przesunięcia.
-        let mut s = State::default();
+        let s = State::default();
         let mut w = sample_window();
         w.layer = true;
         w.x = 0.0;
@@ -1281,12 +2321,47 @@ mod tests {
 
     #[test]
     fn content_local_offsets_titlebar_for_windows() {
-        let mut s = State::default();
+        let s = State::default();
         s.windows.lock_or_recover().push(sample_window()); // x=100, y=50
         assert_eq!(
             content_local(&s, 0, Point::new(120.0, 80.0)),
             (20.0, 80.0 - (50.0 + TITLEBAR))
         );
+    }
+
+    #[test]
+    fn content_local_adds_csd_shadow_offset() {
+        // Okno CSD: punkt ekranu (240,150) leży 40x50 od widocznego rogu, ale bufor
+        // zaczyna się 14x12 wcześniej — klient musi dostać (54,62), inaczej jego
+        // własne przyciski ✕/□ są „obok” kursora i klik nic nie robi.
+        let s = State::default();
+        let mut w = sample_window();
+        w.ssd = false;
+        w.image_offset = (14.0, 12.0);
+        s.windows.lock_or_recover().push(w); // x=100, y=50
+        assert_eq!(content_local(&s, 0, Point::new(140.0, 100.0)), (54.0, 62.0));
+    }
+
+    #[test]
+    fn capturing_layer_only_outside_its_content() {
+        // Powłoka z otwartym popupem ma `input_capture`; klik poza jej widoczną
+        // treścią (np. dolna część ekranu) ma do niej trafić i zamknąć popup.
+        let s = State::default();
+        let mut w = sample_window();
+        w.layer = true;
+        w.input_capture = true;
+        w.x = 0.0;
+        w.y = 0.0;
+        w.width = 1920;
+        w.height = 680;
+        s.windows.lock_or_recover().push(w);
+        assert_eq!(capturing_layer_outside(&s, Point::new(900.0, 300.0)), None);
+        assert_eq!(
+            capturing_layer_outside(&s, Point::new(900.0, 900.0)),
+            Some(0)
+        );
+        s.windows.lock_or_recover()[0].input_capture = false;
+        assert_eq!(capturing_layer_outside(&s, Point::new(900.0, 900.0)), None);
     }
 
     #[test]
@@ -1324,9 +2399,12 @@ mod tests {
         // Pasek tytułu na górze, treść pod nim.
         assert_eq!(w.titlebar().bottom(), w.y + TITLEBAR);
         assert_eq!(w.content().y(), w.y + TITLEBAR);
-        // Zamknij w prawym górnym narożniku.
+        // Zamknij po prawej, wyśrodkowane w pionie, 6 px od krawędzi (układ HeaderBar).
         let c = w.close_rect();
-        assert!(c.contains(Point::new(w.x + 200.0 - 1.0, w.y + 1.0)));
+        assert_eq!((c.width(), c.height()), (BUTTON_W, BUTTON_W));
+        assert!((c.center().y - (w.y + TITLEBAR / 2.0)).abs() < 0.01);
+        assert!((w.x + 200.0 - c.right() - 6.0).abs() < 0.01);
+        assert!(c.contains(c.center()));
         // Maksymalizuj po lewej od zamknij, minimalizuj po lewej od maksymalizuj.
         let m = w.maximize_rect();
         let n = w.minimize_rect();
@@ -1361,6 +2439,142 @@ mod tests {
     }
 
     #[test]
+    fn minimize_and_restore_via_activation() {
+        // Żądanie `xdg_toplevel.set_minimized` musi naprawdę ukryć okno, a aktywacja
+        // (pasek/przełącznik) — przywrócić je. Wcześniej oba żądania były ignorowane.
+        let mut s = State::default();
+        s.windows.lock_or_recover().push(sample_window());
+        set_minimized(&mut s, 0, true);
+        assert!(s.windows.lock_or_recover()[0].minimized);
+        activate_slot(&mut s, 0);
+        assert!(!s.windows.lock_or_recover()[0].minimized);
+    }
+
+    #[test]
+    fn maximize_and_restore_geometry() {
+        let mut s = State::default();
+        s.windows.lock_or_recover().push(sample_window());
+        let before = {
+            let windows = s.windows.lock_or_recover();
+            let w = &windows[0];
+            (w.x, w.y, w.width, w.height)
+        };
+        set_maximized(&mut s, 0, true);
+        {
+            let windows = s.windows.lock_or_recover();
+            let w = &windows[0];
+            assert!(w.maximized);
+            assert!(w.saved.is_some());
+        }
+        set_maximized(&mut s, 0, false);
+        {
+            let windows = s.windows.lock_or_recover();
+            let w = &windows[0];
+            assert!(!w.maximized);
+            assert_eq!((w.x, w.y, w.width, w.height), before);
+        }
+    }
+
+    /// Dwa monitory obok siebie; panel rezerwuje 40 px **tylko na lewym**.
+    fn two_output_state() -> State {
+        let mut s = State::default();
+        {
+            let mut outs = s.outputs.lock_or_recover();
+            *outs = vec![
+                crate::monitors::OutputInfo {
+                    name: "left".to_owned(),
+                    width: 1920,
+                    height: 1080,
+                    refresh_hz: 60,
+                    scale: 1,
+                    x: 0,
+                    y: 0,
+                },
+                crate::monitors::OutputInfo {
+                    name: "right".to_owned(),
+                    width: 1600,
+                    height: 900,
+                    refresh_hz: 60,
+                    scale: 1,
+                    x: 1920,
+                    y: 0,
+                },
+            ];
+        }
+        s.top_insets.insert(0, 40.0);
+        s
+    }
+
+    #[test]
+    fn maximize_below_panel_only_on_panel_output() {
+        let mut s = two_output_state();
+        s.windows.lock_or_recover().push(sample_window());
+        set_maximized(&mut s, 0, true);
+        let (y, h) = {
+            let ws = s.windows.lock_or_recover();
+            (ws[0].y, ws[0].height)
+        };
+        assert_eq!(y, 40.0);
+        assert_eq!(h, 1080 - 40 - TITLEBAR as i32);
+    }
+
+    #[test]
+    fn maximize_uses_full_height_on_output_without_panel() {
+        let mut s = two_output_state();
+        let mut w = sample_window();
+        w.x = 2000.0;
+        w.y = 100.0;
+        s.windows.lock_or_recover().push(w);
+        set_maximized(&mut s, 0, true);
+        let (x, y, width, height) = {
+            let ws = s.windows.lock_or_recover();
+            (ws[0].x, ws[0].y, ws[0].width, ws[0].height)
+        };
+        assert_eq!((x, y), (1920.0, 0.0));
+        assert_eq!(width, 1600);
+        assert_eq!(height, 900 - TITLEBAR as i32);
+    }
+
+    #[test]
+    fn fullscreen_drops_panel_gap_only_on_output_without_panel() {
+        let mut s = two_output_state();
+        let mut w = sample_window();
+        w.x = 2000.0;
+        w.y = 100.0;
+        s.windows.lock_or_recover().push(w);
+        set_fullscreen(&mut s, 0, true);
+        let (x, y, width, height) = {
+            let ws = s.windows.lock_or_recover();
+            (ws[0].x, ws[0].y, ws[0].width, ws[0].height)
+        };
+        assert_eq!((x, y, width, height), (1920.0, 0.0, 1600, 900));
+    }
+
+    #[test]
+    fn fullscreen_keeps_panel_gap_on_panel_output() {
+        let mut s = two_output_state();
+        s.windows.lock_or_recover().push(sample_window());
+        set_fullscreen(&mut s, 0, true);
+        let (y, height) = {
+            let ws = s.windows.lock_or_recover();
+            (ws[0].y, ws[0].height)
+        };
+        assert_eq!(y, 40.0);
+        assert_eq!(height, 1080 - 40);
+    }
+
+    #[test]
+    fn xdg_toplevel_states_are_encoded_as_u32_array() {
+        let bytes = encode_states(&[4, 1]);
+        assert_eq!(bytes.len(), 8, "każdy stan to 4 bajty (uint), nie 1");
+        let decoded: Vec<u32> = bytes
+            .chunks_exact(4)
+            .map(|c| u32::from_ne_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(decoded, vec![4, 1]);
+    }
+
+    #[test]
     fn keymap_defaults_to_us_layout() {
         let km = keymap_text_for("us", None);
         assert!(km.contains("xkb_keymap"));
@@ -1377,5 +2591,69 @@ mod tests {
     #[test]
     fn empty_layout_falls_back_to_us() {
         assert!(keymap_text_for("!!!", None).contains("pc+us+inet(evdev)"));
+    }
+
+    #[test]
+    fn snap_zones_cover_edges_and_corners() {
+        let area = Rect::from_xywh(0.0, 48.0, 1920.0, 1032.0);
+        assert_eq!(
+            snap_zone(Point::new(2.0, 500.0), area),
+            Some(SnapZone::Left)
+        );
+        assert_eq!(
+            snap_zone(Point::new(1918.0, 500.0), area),
+            Some(SnapZone::Right)
+        );
+        assert_eq!(
+            snap_zone(Point::new(960.0, 50.0), area),
+            Some(SnapZone::Maximize)
+        );
+        assert_eq!(
+            snap_zone(Point::new(2.0, 50.0), area),
+            Some(SnapZone::TopLeft)
+        );
+        assert_eq!(
+            snap_zone(Point::new(1918.0, 50.0), area),
+            Some(SnapZone::TopRight)
+        );
+        assert_eq!(
+            snap_zone(Point::new(2.0, 1078.0), area),
+            Some(SnapZone::BottomLeft)
+        );
+        assert_eq!(
+            snap_zone(Point::new(1918.0, 1078.0), area),
+            Some(SnapZone::BottomRight)
+        );
+        // Środek ekranu nie przyciąga.
+        assert_eq!(snap_zone(Point::new(960.0, 500.0), area), None);
+    }
+
+    #[test]
+    fn snap_rect_fills_halves_and_quarters() {
+        let area = Rect::from_xywh(0.0, 48.0, 1920.0, 1032.0);
+        let bar = TITLEBAR;
+        let (x, y, w, h) = snap_rect(SnapZone::Left, area, bar);
+        assert_eq!((x, y, w), (0.0, 48.0, 960.0));
+        assert_eq!(y + bar + h, area.bottom());
+        let (x, y, w, h) = snap_rect(SnapZone::TopRight, area, bar);
+        assert_eq!((x, y, w), (960.0, 48.0, 960.0));
+        assert_eq!(h, 1032.0 / 2.0 - TITLEBAR);
+        let (x, y, w, h) = snap_rect(SnapZone::BottomLeft, area, bar);
+        assert_eq!((x, y, w), (0.0, 48.0 + 516.0, 960.0));
+        assert_eq!(y + bar + h, area.bottom());
+        // Prawa połowa dokładnie dopełnia lewą.
+        let (rx, _, rw, _) = snap_rect(SnapZone::Right, area, bar);
+        assert_eq!(rx, 960.0);
+        assert_eq!(rw, 960.0);
+    }
+
+    #[test]
+    fn drag_clamp_keeps_titlebar_below_panel() {
+        let area = (0.0, 0.0, 1920.0, 1080.0);
+        let (x, y) = clamp_drag_pos(area, 48.0, 800.0, 100.0, -200.0);
+        assert_eq!((x, y), (100.0, 48.0));
+        // Nie da się wywieźć okna całkowicie za prawą krawędź.
+        let (x2, _) = clamp_drag_pos(area, 48.0, 800.0, 5000.0, 200.0);
+        assert_eq!(x2, 1920.0 - MIN_VISIBLE);
     }
 }

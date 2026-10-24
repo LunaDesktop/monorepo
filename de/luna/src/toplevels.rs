@@ -28,6 +28,8 @@ pub struct Task {
     pub title: String,
     pub app_id: String,
     pub active: bool,
+    /// Czy okno jest zminimalizowane (wtedy menu pokazuje „Pokaż” zamiast „Schowaj”).
+    pub minimized: bool,
 }
 
 #[derive(Default)]
@@ -48,6 +50,15 @@ struct Shared {
 
 struct DispatchState {
     shared: Arc<Mutex<Shared>>,
+    waker: Option<libluna_platform::WakeHandle>,
+}
+
+impl DispatchState {
+    fn wake(&self) {
+        if let Some(w) = &self.waker {
+            w.wake();
+        }
+    }
 }
 
 impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for DispatchState {
@@ -94,6 +105,8 @@ impl Dispatch<mgr::ZwlrForeignToplevelManagerV1, ()> for DispatchState {
                     ..Default::default()
                 },
             );
+            drop(s);
+            state.wake();
         }
     }
 
@@ -124,6 +137,8 @@ impl Dispatch<hdl::ZwlrForeignToplevelHandleV1, ()> for DispatchState {
             hdl::Event::Closed => e.closed = true,
             _ => {}
         }
+        drop(s);
+        state.wake();
     }
 }
 
@@ -136,7 +151,11 @@ pub struct Toplevels {
 impl Toplevels {
     /// Łączy się z kompozytorem i uruchamia wątek śledzący okna.
     /// `None`, gdy nie ma kompozytora albo brakuje protokołu.
-    pub fn spawn() -> Option<Self> {
+    ///
+    /// `waker` (opcjonalny) budzi pętlę rysowania, gdy lista okien się zmieni —
+    /// bez tego panel nie odświeżał się po otwarciu programu i jego przycisk
+    /// w pasku zadań pojawiał się dopiero przy następnej zmianie zegara.
+    pub fn spawn(waker: Option<libluna_platform::WakeHandle>) -> Option<Self> {
         // Klient musi mieć `XDG_RUNTIME_DIR`, żeby znaleźć gniazdo kompozytora
         // (menedżer sesji zwykle je ustawia; gdy brak — wybieramy je jak kompozytor).
         let _ = libluna_core::runtime::ensure_runtime_dir();
@@ -147,6 +166,7 @@ impl Toplevels {
         let shared = Arc::new(Mutex::new(Shared::default()));
         let mut state = DispatchState {
             shared: Arc::clone(&shared),
+            waker,
         };
 
         let _manager = globals
@@ -165,28 +185,77 @@ impl Toplevels {
         Some(Self { shared, conn })
     }
 
+    fn live_ids(s: &Shared) -> Vec<u64> {
+        s.order
+            .iter()
+            .copied()
+            .filter(|id| s.map.get(id).map(|e| !e.closed).unwrap_or(false))
+            .collect()
+    }
+
     /// Bieżąca lista okien (kolejność jak w kompozytorze).
     pub fn tasks(&self) -> Vec<Task> {
         let s = self.shared.lock().unwrap();
-        s.order
+        Self::live_ids(&s)
             .iter()
             .filter_map(|id| s.map.get(id))
-            .filter(|e| !e.closed)
             .map(|e| Task {
                 title: e.title.clone(),
                 app_id: e.app_id.clone(),
                 active: e.states.contains(&ST_ACTIVATED),
+                minimized: e.states.contains(&ST_MINIMIZED),
             })
             .collect()
     }
 
     /// Prosi kompozytor o aktywowanie okna o indeksie `index`.
+    /// Jeśli okno jest już aktywne — minimalizuje je (klasyczne zachowanie paska zadań).
     pub fn activate(&self, index: usize) {
         {
             let s = self.shared.lock().unwrap();
-            if let (Some(id), Some(seat)) = (s.order.get(index), s.seat.as_ref()) {
+            let live = Self::live_ids(&s);
+            if let (Some(id), Some(seat)) = (live.get(index), s.seat.as_ref()) {
+                if let Some(entry) = s.map.get(id) {
+                    if let Some(h) = entry.proxy.as_ref() {
+                        if entry.states.contains(&ST_ACTIVATED) {
+                            let _ = h.set_minimized();
+                        } else {
+                            let _ = h.activate(seat);
+                        }
+                    }
+                }
+            }
+        }
+        let _ = self.conn.flush();
+    }
+
+    /// Prosi kompozytor o zminimalizowanie okna o indeksie `index`.
+    pub fn minimize(&self, index: usize) {
+        {
+            let s = self.shared.lock().unwrap();
+            let live = Self::live_ids(&s);
+            if let Some(id) = live.get(index) {
                 if let Some(h) = s.map.get(id).and_then(|e| e.proxy.as_ref()) {
-                    let _ = h.activate(seat);
+                    let _ = h.set_minimized();
+                }
+            }
+        }
+        let _ = self.conn.flush();
+    }
+
+    /// Pokazuje okno: zdejmuje minimalizację i aktywuje (bez ukrywania, gdy już aktywne).
+    pub fn show(&self, index: usize) {
+        {
+            let s = self.shared.lock().unwrap();
+            let live = Self::live_ids(&s);
+            if let (Some(id), Some(seat)) = (live.get(index), s.seat.as_ref()) {
+                if let Some(entry) = s.map.get(id) {
+                    if let Some(h) = entry.proxy.as_ref() {
+                        if entry.states.contains(&ST_MINIMIZED) {
+                            let _ = h.unset_minimized();
+                        }
+                        let _ = h.activate(seat);
+                    }
                 }
             }
         }
@@ -197,7 +266,8 @@ impl Toplevels {
     pub fn close(&self, index: usize) {
         {
             let s = self.shared.lock().unwrap();
-            if let Some(id) = s.order.get(index) {
+            let live = Self::live_ids(&s);
+            if let Some(id) = live.get(index) {
                 if let Some(h) = s.map.get(id).and_then(|e| e.proxy.as_ref()) {
                     let _ = h.close();
                 }

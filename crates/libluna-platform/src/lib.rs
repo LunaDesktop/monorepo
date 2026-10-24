@@ -12,7 +12,7 @@
 
 pub mod window;
 
-pub use window::{run, AppConfig, Frame, LayerConfig, WakeHandle};
+pub use window::{run, AppConfig, Frame, InputRegion, LayerConfig, WakeHandle};
 
 /// Warstwy powierzchni (`wlr-layer-shell`) — reeksport dla wygody odbiorców.
 pub use smithay_client_toolkit::shell::wlr_layer::{Anchor, Layer};

@@ -14,6 +14,10 @@ pub struct ImageData {
     pub height: u32,
     /// Piksele premultiplied RGBA8, dokładnie `width * height * 4` bajtów.
     pub rgba: Vec<u8>,
+    /// Czy obraz jest **rzadki** (dużo w pełni przezroczystych pikseli).
+    /// Renderer używa wtedy blitowania z pomijaniem `alpha == 0` zamiast
+    /// blendowania całego prostokąta — panele i popupy mają >50% pustych pikseli.
+    pub sparse: bool,
 }
 
 impl ImageData {
@@ -22,7 +26,14 @@ impl ImageData {
             width,
             height,
             rgba,
+            sparse: false,
         }
+    }
+
+    /// Oznacza obraz jako rzadki (patrz [`ImageData::sparse`]).
+    pub fn with_sparse(mut self, sparse: bool) -> Self {
+        self.sparse = sparse;
+        self
     }
 
     /// Pusty (przezroczysty) obraz o zadanym rozmiarze.
@@ -31,6 +42,7 @@ impl ImageData {
             width,
             height,
             rgba: vec![0; width as usize * height as usize * 4],
+            sparse: true,
         }
     }
 }
@@ -124,6 +136,9 @@ pub enum DrawCommand {
     Text(TextRun),
     /// Obraz (np. bufor okna) wpisany w prostokąt docelowy.
     Image { rect: Rect, data: Arc<ImageData> },
+    /// Tło pulpitu: pełnoekranowy, **nieprzezroczysty** obraz. Renderer kopiuje piksele
+    /// wprost — mieszanie 2 mln pikseli co klatkę kosztowało ~10 ms na 1080p.
+    Background { data: Arc<ImageData> },
 }
 
 /// Uporządkowana lista poleceń rysowania.
@@ -262,6 +277,12 @@ impl Scene {
         self.commands.push(DrawCommand::Image { rect, data });
         self
     }
+
+    /// Ustawia tło pulpitu (pełnoekranowy, nieprzezroczysty obraz).
+    pub fn background(&mut self, data: Arc<ImageData>) -> &mut Self {
+        self.commands.push(DrawCommand::Background { data });
+        self
+    }
 }
 
 #[cfg(test)]
@@ -278,5 +299,21 @@ mod tests {
         assert!(matches!(s.commands()[0], DrawCommand::FillRect { .. }));
         assert!(matches!(s.commands()[1], DrawCommand::PushClip { .. }));
         assert!(matches!(s.commands()[2], DrawCommand::PopClip));
+    }
+
+    /// Scena jest buforem wielokrotnego użytku: **bez `clear()` komendy sumują się**
+    /// z klatki na klatkę, przez co renderer rysuje coraz więcej i aplikacja zwalnia
+    /// z każdą sekundą. Platforma czyści scenę przed każdym wywołaniem domknięcia;
+    /// ten test pilnuje samego kontraktu, na którym to polega.
+    #[test]
+    fn reused_scene_accumulates_until_cleared() {
+        let mut s = Scene::new();
+        let rect = Rect::from_xywh(0.0, 0.0, 4.0, 4.0);
+        for _ in 0..100 {
+            s.fill_rect(rect, Color::BLACK);
+        }
+        assert_eq!(s.len(), 100, "bez clear() komendy sumują się");
+        s.clear();
+        assert!(s.is_empty(), "clear() opróżnia scenę do reużycia");
     }
 }

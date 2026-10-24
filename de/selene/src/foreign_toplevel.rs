@@ -109,10 +109,39 @@ impl Dispatch<handle::ZwlrForeignToplevelHandleV1, ToplevelHandleData> for State
             handle::Request::Close => {
                 seat::close_surface(state, &data.surface);
             }
+            handle::Request::SetMinimized => {
+                if let Some(slot) = slot_of(&data.surface) {
+                    seat::set_minimized(state, slot, true);
+                }
+            }
+            handle::Request::UnsetMinimized => {
+                if let Some(slot) = slot_of(&data.surface) {
+                    seat::set_minimized(state, slot, false);
+                }
+            }
+            handle::Request::SetMaximized => {
+                if let Some(slot) = slot_of(&data.surface) {
+                    seat::set_maximized(state, slot, true);
+                }
+            }
+            handle::Request::UnsetMaximized => {
+                if let Some(slot) = slot_of(&data.surface) {
+                    seat::set_maximized(state, slot, false);
+                }
+            }
+            handle::Request::SetFullscreen { .. } => {
+                if let Some(slot) = slot_of(&data.surface) {
+                    seat::set_fullscreen(state, slot, true);
+                }
+            }
+            handle::Request::UnsetFullscreen => {
+                if let Some(slot) = slot_of(&data.surface) {
+                    seat::set_fullscreen(state, slot, false);
+                }
+            }
             handle::Request::Destroy => {
                 forget_handle(&data.surface, resource.id());
             }
-            // Maksymalizacja/minimalizacja/fullscreen/rect: poza zakresem bieżącego kroku.
             _ => {}
         }
     }
@@ -227,6 +256,17 @@ pub fn announce_closed(surface: &WlSurface) {
     }
 }
 
+/// Jak [`announce_closed`], ale działa wprost na danych powierzchni — używane przy
+/// zniknięciu powierzchni (`Dispatch::destroyed`), gdy zasób jest już niszczony i nie
+/// wolno się do niego odwoływać.
+pub fn close_for_data(data: &SurfaceData) {
+    if let Some(mut info) = data.toplevel.lock_or_recover().take() {
+        for h in info.handles.drain(..) {
+            let _ = h.send_event(handle::Event::Closed);
+        }
+    }
+}
+
 /// Pełny stan okna wysyłany nowemu uchwytowi (title + app_id + stan + `done`).
 fn send_full(state: &State, surface: &WlSurface, handle: &handle::ZwlrForeignToplevelHandleV1) {
     let (title, app_id) = toplevel_text(surface);
@@ -317,6 +357,7 @@ mod tests {
             y: 0.0,
             width: 10,
             height: 10,
+            image_offset: (0.0, 0.0),
             z: 1,
             title: "t".into(),
             popup: false,
@@ -324,9 +365,11 @@ mod tests {
             mapped: true,
             workspace: 0,
             input: None,
+            input_capture: false,
             minimized: true,
             maximized: true,
             fullscreen: false,
+            ssd: false,
             saved: None,
             data: std::sync::Arc::new(libluna_render::ImageData::new(1, 1, vec![0, 0, 0, 0])),
         });

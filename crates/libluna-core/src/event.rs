@@ -30,6 +30,8 @@ pub struct Modifiers {
     pub alt: bool,
     pub shift: bool,
     pub logo: bool,
+    /// AltGr / `ISO_Level3_Shift` — poziom 3 układu (m.in. polskie ą, ć, ę, ł, ń, ó, ś, ź, ż).
+    pub level3: bool,
 }
 
 impl Modifiers {
@@ -38,6 +40,7 @@ impl Modifiers {
         alt: false,
         shift: false,
         logo: false,
+        level3: false,
     };
 }
 
@@ -63,6 +66,11 @@ pub struct ScrollEvent {
 pub struct KeyEvent {
     /// Keysym w rozumieniu XKB.
     pub keysym: u32,
+    /// Fizyczny kod klawisza (Linux input `KEY_*`, protokół Wayland `wl_keyboard.key`).
+    ///
+    /// Protokół przekazuje **kod fizyczny**, a klient sam liczy z niego znak według
+    /// swojej mapy klawiszy — dlatego nie wolno tu wstawiać kodu X11 (`evdev + 8`).
+    pub keycode: u32,
     /// Tekst wygenerowany przez klawisz (jeśli dotyczy).
     pub text: Option<String>,
     pub state: ButtonState,

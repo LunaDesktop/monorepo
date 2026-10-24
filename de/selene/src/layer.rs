@@ -8,7 +8,6 @@ use std::sync::Mutex;
 use wayland_protocols_wlr::layer_shell::v1::server::{
     zwlr_layer_shell_v1 as layer_shell, zwlr_layer_surface_v1 as layer_surface,
 };
-use wayland_server::protocol::wl_surface::WlSurface;
 use wayland_server::{
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource, WEnum,
 };
@@ -93,26 +92,26 @@ impl LayerState {
 
 /// Dane powierzchni warstwowej.
 pub struct LayerData {
-    /// Powiązana powierzchnia `wl_surface`.
-    pub surface: WlSurface,
-    /// Monitor, na którym kotwiczymy (indeks w [`crate::monitors::Outputs`]); `None` = pierwszy.
+    /// Monitor, na którym kotwiczymy (indeks w [`crate::monitors::Outputs`]); `None` = wszystkie.
     pub output: Option<usize>,
     /// Właściwości (aktualizowane przez `set_*`).
     pub state: Mutex<LayerState>,
     /// Czy wysłano już `configure`.
     pub configured: Mutex<bool>,
+    /// Slot okna na każdym monitorze (`output=None` → jedno okno na wyjście).
+    pub slots: Mutex<Vec<Option<usize>>>,
 }
 
 impl LayerData {
-    pub fn new(surface: WlSurface, layer: u32, output: Option<usize>) -> Self {
+    pub fn new(layer: u32, output: Option<usize>) -> Self {
         Self {
-            surface,
             output,
             state: Mutex::new(LayerState {
                 layer,
                 ..LayerState::default()
             }),
             configured: Mutex::new(false),
+            slots: Mutex::new(Vec::new()),
         }
     }
 }
@@ -174,7 +173,7 @@ impl Dispatch<layer_shell::ZwlrLayerShellV1, ()> for State {
             if std::env::var("SELENE_STATS").is_ok() {
                 eprintln!("selene/layer: get_layer_surface (layer={layer}, output={output:?})");
             }
-            let ls = data_init.init(id, LayerData::new(surface.clone(), layer, output));
+            let ls = data_init.init(id, LayerData::new(layer, output));
             // Zapamiętaj powiązanie po stronie `wl_surface` (potrzebne przy `commit`).
             if let Some(sd) = surface.data::<SurfaceData>() {
                 *sd.layer.lock_or_recover() = Some(ls);
@@ -231,13 +230,20 @@ impl Dispatch<layer_surface::ZwlrLayerSurfaceV1, LayerData> for State {
                 };
             }
             layer_surface::Request::Destroy => {
-                // Zdejmij powierzchnię z widoku.
+                // Panel znika — jego rezerwacja miejsca też (per monitor).
+                if st.layer == 2
+                    && st.anchor & crate::layer::ANCHOR_TOP != 0
+                    && st.exclusive_zone > 0
+                {
+                    state.top_insets.remove(&data.output.unwrap_or(0));
+                }
+                // Zdejmij powierzchnię z widoku (na wszystkich monitorach).
                 drop(st);
-                if let Some(sd) = data.surface.data::<SurfaceData>() {
-                    if let Some(slot) = *sd.slot.lock_or_recover() {
-                        if let Some(w) = state.windows.lock_or_recover().get_mut(slot) {
-                            w.mapped = false;
-                        }
+                let slots = data.slots.lock_or_recover().clone();
+                let mut windows = state.windows.lock_or_recover();
+                for slot in slots.into_iter().flatten() {
+                    if let Some(w) = windows.get_mut(slot) {
+                        w.mapped = false;
                     }
                 }
                 let _ = resource;

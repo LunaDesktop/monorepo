@@ -23,6 +23,6 @@ radius.small = 5
 radius.medium = 8
 radius.large = 11
 
-metrics.headerbar.height = 48
+metrics.headerbar.height = 38
 metrics.button.height = 36
 metrics.card.header = 42

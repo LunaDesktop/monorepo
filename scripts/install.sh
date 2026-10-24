@@ -89,9 +89,21 @@ do_cmd() { if [ "$dry_run" = 1 ]; then say "  [dry-run] $*"; else "$@"; fi; }
 files() {
     printf '%s|%s|%s\n' "$lib/selene"          "$dest/bin/selene"          "755"
     printf '%s|%s|%s\n' "$lib/luna-shell"      "$dest/bin/luna-shell"      "755"
+    printf '%s|%s|%s\n' "$lib/luna-keyring"    "$dest/bin/luna-keyring"    "755"
+    printf '%s|%s|%s\n' "$lib/luna-polkit"     "$dest/bin/luna-polkit"     "755"
     printf '%s|%s|%s\n' "$lib/luna-demo"       "$dest/bin/luna-demo"       "755"
-    printf '%s|%s|%s\n' "$lib/gallery"         "$dest/bin/luna-gallery"    "755"
+    if [ -f "$lib/gallery" ]; then
+        printf '%s|%s|%s\n' "$lib/gallery"     "$dest/bin/luna-gallery"    "755"
+    fi
+    # Demo libLuny: prawdziwe okno + widgety (binarka `showcase` z luna-demo).
+    if [ -f "$lib/showcase" ]; then
+        printf '%s|%s|%s\n' "$lib/showcase"    "$dest/bin/luna-showcase"    "755"
+        printf '%s|%s|%s\n' "$root/de/session/luna-showcase.desktop" "$dest/share/applications/luna-showcase.desktop" "644"
+    fi
     printf '%s|%s|%s\n' "$root/de/session/luna-session"  "$dest/bin/luna-session" "755"
+    # Backend portali XDG dla Luny — bez tego `xdg-desktop-portal` nie wybiera backendu
+    # (aplikacje flatpak/żądania portalu kończą się timeoutem).
+    printf '%s|%s|%s\n' "$root/de/session/luna-portals.conf" "$dest/share/xdg-desktop-portal/luna-portals.conf" "644"
     printf '%s|%s|%s\n' "$root/de/session/selene.desktop" "$dest/share/wayland-sessions/selene.desktop" "644"
     printf '%s|%s|%s\n' "$root/assets/branding/luna.svg" "$dest/share/icons/hicolor/scalable/apps/luna.svg" "644"
     printf '%s|%s|%s\n' "$root/LICENSE"        "$dest/share/licenses/luna/LICENSE" "644"
@@ -143,7 +155,7 @@ EOF
         exit 1
     fi
     say "używam: $cargo"
-    ( cd "$root" && do_cmd "$cargo" build --release --locked -p selene -p luna -p luna-demo )
+    ( cd "$root" && do_cmd "$cargo" build --release --locked -p selene -p luna -p luna-demo --bins )
 fi
 
 # Brak binarek przy --no-build to błąd.
@@ -159,6 +171,37 @@ while IFS='|' read -r src dst mode; do
     fi
     do_cmd install -D -m "$mode" "$src" "$dst"
 done < <(files)
+
+# Pomocnik PAM polkit musi być setuid root. W niektórych instalacjach PaganOS bit
+# jest zgubiony — wtedy **żaden** agent (także luna-polkit) nie zweryfikuje hasła,
+# a okno autoryzacji kończy się błędem. Przywracamy wyłącznie brakujący bit.
+if [ "$destdir" = "" ] && [ "$(id -u)" -eq 0 ]; then
+    for helper in /usr/lib/polkit-1/polkit-agent-helper-1 \
+                  /usr/libexec/polkit-agent-helper-1 \
+                  /usr/lib64/polkit-1/polkit-agent-helper-1; do
+        if [ -f "$helper" ] && [ ! -u "$helper" ]; then
+            say "polkit: przywracam setuid na $helper (wymagane do logowania hasłem)"
+            do_cmd chmod 4755 "$helper"
+        fi
+    done
+fi
+
+# Podsumowanie: co **naprawdę** leży teraz w prefiksie i skąd. Bez tego łatwo
+# pomyśleć, że „instalacja nic nie zrobiła”, a problemem jest stary build albo
+# nierestrygowana sesja (podmiana pliku nie restartuje działającego `selene`).
+step "Zainstalowane binarki"
+for name in selene luna-shell luna-keyring luna-polkit luna-demo luna-session; do
+    s="$lib/$name"
+    [ -f "$s" ] || s="$root/de/session/$name"
+    d="$dest/bin/$name"
+    [ -f "$d" ] || continue
+    say "  $name"
+    say "    źródło:     $(stat -c %y "$s" 2>/dev/null | cut -d. -f1)  ($s)"
+    say "    zainstal.:  $(stat -c %y "$d" 2>/dev/null | cut -d. -f1)  ($d)"
+done
+say ""
+say "Uwaga: działająca sesja ma w pamięci STARE procesy — wyloguj się i zaloguj ponownie,"
+say "żeby nowy selene/luna-shell faktycznie wystartował."
 
 # Ikona sesji w rozmiarach rastrowych — dla greeterów bez rsvg.
 step "Ikona sesji (rastrowa)"

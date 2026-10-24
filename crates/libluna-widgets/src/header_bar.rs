@@ -5,7 +5,7 @@
 //! wypełnia zwrócony `content` własnymi widgetami (np. przełącznik paska bocznego, menu).
 
 use libluna_core::style::weight;
-use libluna_core::{Insets, Point, Rect, Theme};
+use libluna_core::{Color, Insets, Point, Rect, Theme};
 
 use crate::ctx::PaintCtx;
 use crate::icon;
@@ -51,6 +51,8 @@ pub struct HeaderBar {
     title: Option<String>,
     title_align: TitleAlign,
     controls: ControlsSide,
+    /// Opcjonalne barwy dobrane do okna: `(tło, tekst/ikony)`.
+    tint: Option<(Color, Color)>,
 }
 
 impl HeaderBar {
@@ -59,7 +61,14 @@ impl HeaderBar {
             title: None,
             title_align: TitleAlign::Center,
             controls: ControlsSide::Right,
+            tint: None,
         }
+    }
+
+    /// Nadpisuje barwy paska (np. kolorem dobranym do treści okna).
+    pub fn tinted(mut self, bg: Color, fg: Color) -> Self {
+        self.tint = Some((bg, fg));
+        self
     }
 
     pub fn title(mut self, title: impl Into<String>) -> Self {
@@ -156,11 +165,17 @@ impl HeaderBar {
         let theme = *ctx.theme;
         let colors = theme.colors;
         let layout = self.controls_layout(rect, &theme);
+        let (bg, fg_default) = self.tint.unwrap_or((colors.headerbar_bg, colors.text));
 
-        ctx.scene.fill_rect(rect, colors.headerbar_bg);
+        ctx.scene.fill_rect(rect, bg);
+        let border = if self.tint.is_some() {
+            fg_default.scale_alpha(0.18)
+        } else {
+            colors.border
+        };
         ctx.scene.fill_rect(
             Rect::from_xywh(rect.x(), rect.bottom() - 1.0, rect.width(), 1.0),
-            colors.border,
+            border,
         );
 
         for (control, hit) in [
@@ -174,14 +189,14 @@ impl HeaderBar {
                 let bg = if control == WindowControl::Close {
                     colors.error
                 } else {
-                    colors.shade.scale_alpha(1.8)
+                    fg_default.scale_alpha(0.15)
                 };
                 ctx.scene.fill_rounded_rect(box_, theme.radius.small, bg);
             }
             let fg = if active && control == WindowControl::Close {
                 colors.accent_fg
             } else {
-                colors.text
+                fg_default
             };
             match control {
                 WindowControl::Minimize => icon::minimize(ctx, fg, box_, 5.0),
@@ -199,11 +214,11 @@ impl HeaderBar {
                     title,
                     size,
                     weight::BOLD,
-                    colors.text,
+                    fg_default,
                 ),
                 TitleAlign::Start => {
                     let x = layout.content.x();
-                    ctx.label_left(x, rect.center().y, title, size, weight::BOLD, colors.text)
+                    ctx.label_left(x, rect.center().y, title, size, weight::BOLD, fg_default)
                 }
             }
         }

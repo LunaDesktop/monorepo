@@ -54,6 +54,28 @@ fn clicking_accent_dot_sets_accent() {
 }
 
 #[test]
+fn widgets_entry_opens_gallery_and_appearance_returns() {
+    let mut settings = ThemeSettings::default();
+    let mut demo = Demo::default();
+    let theme = settings.resolve_themed(false);
+    let area = layout(&settings, &demo).sidebar;
+    let rows = ui::make_nav().rows(area, &theme);
+
+    let widgets = rows
+        .iter()
+        .find(|r| r.entry == ui::WIDGETS_NAV && r.selectable)
+        .expect("pozycja Widgety");
+    click(&mut settings, &mut demo, widgets.rect.center());
+    assert_eq!(demo.nav_selected, Some(ui::WIDGETS_NAV));
+    assert!(ui::is_gallery(&demo));
+
+    let appearance = rows.iter().find(|r| r.entry == 2).expect("pozycja Wygląd");
+    click(&mut settings, &mut demo, appearance.rect.center());
+    assert_eq!(demo.nav_selected, Some(2));
+    assert!(!ui::is_gallery(&demo));
+}
+
+#[test]
 fn clicking_nav_item_selects_it() {
     let mut settings = ThemeSettings::default();
     let mut demo = Demo::default();
@@ -125,6 +147,7 @@ fn search_entry_focus_and_typing() {
     let text = TextEngine::system();
     let key = Event::Key(KeyEvent {
         keysym: 0x61,
+        keycode: 30,
         text: Some("a".to_owned()),
         state: ButtonState::Pressed,
         modifiers: Modifiers::NONE,
@@ -399,6 +422,7 @@ fn sheet_entry_focus_and_typing() {
 
     let key = Event::Key(KeyEvent {
         keysym: 0x41,
+        keycode: 30,
         text: Some("A".to_owned()),
         state: ButtonState::Pressed,
         modifiers: Modifiers::NONE,
@@ -465,6 +489,7 @@ fn choosing_style_from_menu_sets_style() {
 fn key(keysym: u32, text: Option<String>, modifiers: Modifiers) -> Event {
     Event::Key(KeyEvent {
         keysym,
+        keycode: 0,
         text,
         state: ButtonState::Pressed,
         modifiers,

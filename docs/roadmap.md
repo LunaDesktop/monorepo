@@ -178,7 +178,8 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   (sam **burger** — bez etykiety, który otwiera launcher; tytuł okna, zegar/data,
   przełączniki, przestrzenie, użytkownik) i **launcher** w trzech widokach
   (**Lista / Siatka / Karuzela** z segmentowym przełącznikiem); render headless do
-  `docs/images/luna-shell-{light,dark}.png` i `docs/images/luna-launcher-{list,grid,carousel}.png`.
+  `docs/images/luna-panel-idle.png`, `docs/images/luna-launcher-{list,grid,carousel}.png`
+  i `docs/images/luna-popup-*.png` (`cargo run -p luna --bin luna-panel`).
   Dane (`PanelState`, `App`, `Launcher`) oddzielone od rysowania (`PaintCtx`) — ten sam kod do
   podglądów i sesji na żywo. ✅ **Prawdziwe aplikacje**: `apps.rs` skanuje pliki `.desktop`
   (XDG), parsuje `[Desktop Entry]` z lokalizacją nazw i filtrowaniem `NoDisplay`/`Hidden`;
@@ -233,6 +234,11 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
 | Spinner / Tooltip | `libluna-widgets` | obie |
 | StatusBar / bottom info | `libluna-widgets` | obie |
 | StatusPage (pusty stan) | `libluna-widgets` | Files |
+
+## Kompozytor (Selene)
+
+Status protokołów Waylanda (co działa, czego brakuje i w jakiej kolejności dodajemy)
+opisuje **[`docs/compositor.md`](compositor.md)**.
 
 ## Kryterium „gotowca” (Definition of Done dla MVP)
 Odtworzenie **obu makiet** (Settings i Files) wyłącznie na libLunie, bez GTK4, z jasnym i

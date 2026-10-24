@@ -6,6 +6,7 @@
 //! idą przez `libluna-platform` + `libluna-render`.
 
 mod compositor;
+mod control;
 mod data;
 mod decoration;
 mod drm;
@@ -15,12 +16,17 @@ mod input;
 mod layer;
 mod monitors;
 mod output;
+mod popup;
 mod seat;
 mod shell;
 mod shm;
 mod state;
+mod subsurface;
 mod sync;
+mod test_input;
 mod workspace;
+mod xwayland;
+mod xwm;
 
 use std::error::Error;
 use std::os::fd::{AsRawFd, BorrowedFd};
@@ -31,9 +37,12 @@ use libluna_core::Event;
 use wayland_protocols::ext::workspace::v1::server::ext_workspace_manager_v1::ExtWorkspaceManagerV1;
 use wayland_protocols::xdg::decoration::zv1::server::zxdg_decoration_manager_v1;
 use wayland_protocols::xdg::shell::server::xdg_wm_base;
+use wayland_protocols::xwayland::shell::v1::server::xwayland_shell_v1::XwaylandShellV1;
 use wayland_protocols_wlr::foreign_toplevel::v1::server::zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1;
 use wayland_protocols_wlr::layer_shell::v1::server::zwlr_layer_shell_v1;
-use wayland_server::protocol::{wl_compositor, wl_data_device_manager, wl_output, wl_seat, wl_shm};
+use wayland_server::protocol::{
+    wl_compositor, wl_data_device_manager, wl_output, wl_seat, wl_shm, wl_subcompositor,
+};
 use wayland_server::{Display, ListeningSocket};
 
 use crate::sync::LockExt;
@@ -46,21 +55,30 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Krótszy, jednoznaczny log panik — bez zasypywania sesji pełnym backtrace'em.
     // Paniki klientów są łapane niżej (`catch_unwind`), więc sesja żyje dalej.
-    std::panic::set_hook(Box::new(|info| eprintln!("Selene panic: {info}")));
+    // Z `RUST_BACKTRACE=1` dopisujemy ślad — bez niego komunikat „objects from wrong
+    // client” nie mówi, która ścieżka wysłała zdarzenie.
+    std::panic::set_hook(Box::new(|info| {
+        eprintln!("Selene panic: {info}");
+        let bt = std::env::var("RUST_BACKTRACE").unwrap_or_default();
+        if !bt.is_empty() && bt != "0" {
+            eprintln!("{}", std::backtrace::Backtrace::force_capture());
+        }
+    }));
 
     let mut display: Display<State> = Display::new()?;
     let mut handle = display.handle();
 
-    // Diagnostyka DRM: `SELENE_DRM_PROBE=1` sprawdza dostępność mastera bez zmiany trybu.
+    // Diagnostyka DRM: `SELENE_DRM_PROBE=1` wypisuje karty, konektory i tryby EDID
+    // (bez zmiany trybu — nie trzeba być DRM masterem).
     if std::env::var("SELENE_DRM_PROBE").as_deref() == Ok("1") {
-        match drm::check_master() {
-            Some(card) => println!("DRM master available: {}", card.display()),
-            None => println!("DRM master unavailable (held by another session)"),
-        }
+        print!("{}", drm::probe_report());
         return Ok(());
     }
 
     let mut state = State::default();
+    // Diagnostyka: skryptowane wejście (`SELENE_INPUT_SCRIPT`) — używane w testach
+    // izolowanej sesji, aby odtworzyć kliknięcia bez fizycznej myszy.
+    let mut script_input = test_input::ScriptInput::open();
 
     // Wykrywanie monitorów: DRM/KMS, a gdy niedostępne — pojedyncze wyjście nested.
     if let Some(outs) = drm::discover() {
@@ -69,7 +87,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 "{}: {}",
                 libluna_i18n::tr("Detected outputs"),
                 outs.iter()
-                    .map(|o| format!("{} {}x{}", o.name, o.width, o.height))
+                    .map(|o| format!("{} {}x{}@{}", o.name, o.width, o.height, o.refresh_hz))
                     .collect::<Vec<_>>()
                     .join(", ")
             );
@@ -81,31 +99,70 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Globalne interfejsy protokołu.
     handle.create_global::<State, wl_compositor::WlCompositor, ()>(4, ());
+    handle.create_global::<State, wl_subcompositor::WlSubcompositor, ()>(1, ());
     handle.create_global::<State, wl_shm::WlShm, ()>(1, ());
     // Jeden global `wl_output` na monitor.
     for index in 0..output_count {
         handle.create_global::<State, wl_output::WlOutput, usize>(4, index);
     }
+    state.output_globals = output_count;
     handle.create_global::<State, xdg_wm_base::XdgWmBase, ()>(1, ());
     handle.create_global::<State, zxdg_decoration_manager_v1::ZxdgDecorationManagerV1, ()>(1, ());
     handle.create_global::<State, zwlr_layer_shell_v1::ZwlrLayerShellV1, ()>(4, ());
     handle.create_global::<State, wl_data_device_manager::WlDataDeviceManager, ()>(3, ());
-    handle.create_global::<State, wl_seat::WlSeat, ()>(1, ());
+    // Wersja 4 to minimum dla `wl_keyboard.repeat_info`; wersja 1 kończyła klienta
+    // twardym przerwaniem, gdy wysyłaliśmy zdarzenie ponad zadeklarowaną wersję obiektu.
+    handle.create_global::<State, wl_seat::WlSeat, ()>(5, ());
     handle.create_global::<State, ZwlrForeignToplevelManagerV1, ()>(3, ());
     handle.create_global::<State, ExtWorkspaceManagerV1, ()>(1, ());
+    // X11 (XWayland): bez tego globalu Xwayland nie przypisze okien X11 do powierzchni.
+    handle.create_global::<State, XwaylandShellV1, ()>(1, ());
 
     // Gniazdo nasłuchu: `wayland-0`, `wayland-1`, …
     ensure_runtime_dir()?;
     let socket =
         ListeningSocket::bind_auto("wayland", 0..33).map_err(|e| format!("bind socket: {e:?}"))?;
+    let socket_name = socket
+        .socket_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
     println!(
-        "{} ({})",
-        libluna_i18n::tr("Selene compositor started"),
-        socket
-            .socket_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default()
+        "{} ({socket_name})",
+        libluna_i18n::tr("Selene compositor started")
     );
+
+    // Marker gotowości dla menedżera sesji: nazwa gniazda, na którym **naprawdę**
+    // słuchamy. Bez tego sesja musi zgadywać `wayland-0` — a jeśli po poprzedniej
+    // sesji został martwy plik gniazda, połączyłaby się z nikim.
+    if let Ok(rt) = std::env::var("XDG_RUNTIME_DIR") {
+        let path = std::path::Path::new(&rt).join("luna-wayland");
+        let _ = std::fs::write(&path, socket_name.as_bytes());
+        // Liczba monitorów dla menedżera sesji: tyle instancji powłoki uruchomi —
+        // jedną na każdy wyświetlacz (każda wiąże swoje `wl_output`).
+        let outs = std::path::Path::new(&rt).join("luna-outputs");
+        let _ = std::fs::write(&outs, output_count.to_string());
+    }
+
+    // Aplikacje X11: uruchamiamy Xwayland i zapisujemy numer ekranu dla menedżera sesji.
+    // Brak Xwaylanda nie może przewrócić sesji Wayland — dlatego wszystko jest opcjonalne.
+    if std::env::var("SELENE_NO_XWAYLAND").is_err() {
+        // Marker z poprzedniej sesji mógłby dać sesji `DISPLAY` na martwy ekran.
+        xwayland::clear_display_marker();
+        match xwayland::spawn(&socket_name) {
+            Some(display) => {
+                // XWM startuje w tle (Xwayland potrzebuje chwili, zanim zacznie
+                // przyjmować połączenia) i sam rejestruje się, gdy będzie gotowy.
+                xwm::spawn(display);
+            }
+            None => {
+                if std::env::var("SELENE_STATS").is_ok() {
+                    eprintln!(
+                        "selene/xwayland: nie udało się uruchomić Xwayland (aplikacje X11 nie ruszą)"
+                    );
+                }
+            }
+        }
+    }
 
     // Magistrala wejścia (wątek wyjścia → wątek protokołu) z parą gniazd do wybudzania.
     let (events, mut wake_read, wake_write) = input::channel();
@@ -117,6 +174,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             Arc::clone(&state.cursor),
             Arc::clone(&state.ws_current),
             Arc::clone(&state.overview),
+            Arc::clone(&state.screenshot),
+            Arc::clone(&state.night_light),
+            Arc::clone(&state.power_saver),
+            Arc::clone(&state.outputs),
             ws_count,
         );
     } else {
@@ -150,6 +211,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     } else {
         None
     };
+    // Blokady (NumLock/CapsLock) mogły być włączone jeszcze przed startem sesji —
+    // bez tego numpad dawał nawigację zamiast cyfr, dopóki nie przełączysz NumLock.
+    if let Some(input) = &evdev_input {
+        let (num_lock, caps_lock) = input.locks();
+        state.num_lock = num_lock;
+        state.caps_lock = caps_lock;
+    }
+    // Sterowanie z powłoki (PPM w taskbarze → „przenieś na przestrzeń”).
+    let control = control::Control::spawn();
 
     // Diagnostyka (SELENE_STATS=1): częstość aktualizacji kursora (tempo wejścia evdev).
     let stats = std::env::var("SELENE_STATS").is_ok();
@@ -157,6 +227,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut stats_report = std::time::Instant::now();
 
     loop {
+        // Skryptowane wejście (testy izolowanej sesji).
+        if let Some(script) = script_input.as_mut() {
+            script.poll(&mut state, &handle);
+        }
         let backend_fd = display.backend().poll_fd().as_raw_fd();
         let wake_fd = wake_read.as_raw_fd();
 
@@ -177,7 +251,24 @@ fn main() -> Result<(), Box<dyn Error>> {
         for fd in &input_fds {
             fds.push(rustix::event::PollFd::new(fd, rustix::event::PollFlags::IN));
         }
-        rustix::event::poll(&mut fds, -1)?;
+        // Gniazdo sterowania powłoki (opcjonalne — brak nie może zatrzymać sesji).
+        let control_fd = control
+            .as_ref()
+            .map(|c| unsafe { BorrowedFd::borrow_raw(c.fd()) });
+        if let Some(fd) = &control_fd {
+            fds.push(rustix::event::PollFd::new(fd, rustix::event::PollFlags::IN));
+        }
+        // Przy skrypcie wejścia budzimy się co ~16 ms, żeby zauważyć dopisane polecenia.
+        let poll_timeout = if script_input.is_some() { 16 } else { -1 };
+        rustix::event::poll(&mut fds, poll_timeout)?;
+
+        // Sterowanie z powłoki (np. przeniesienie okna na inną przestrzeń).
+        if let (Some(c), Some(_)) = (&control, &control_fd) {
+            let idx = 3 + input_fds.len();
+            if fds[idx].revents().contains(rustix::event::PollFlags::IN) {
+                c.accept(&mut state);
+            }
+        }
 
         // Wejście evdev → trasowanie (jak z magistrali).
         if input_fds
@@ -186,12 +277,22 @@ fn main() -> Result<(), Box<dyn Error>> {
             .any(|(i, _)| fds[3 + i].revents().contains(rustix::event::PollFlags::IN))
         {
             if let Some(input) = evdev_input.as_mut() {
-                let bounds = state
-                    .outputs
-                    .lock_or_recover()
-                    .first()
-                    .map(|o| (o.width as f64, o.height as f64))
-                    .unwrap_or((1280.0, 800.0));
+                let bounds = {
+                    let outs = state.outputs.lock_or_recover();
+                    if outs.is_empty() {
+                        (1280.0, 800.0)
+                    } else {
+                        let total_w = outs
+                            .iter()
+                            .map(|o| (o.x + o.width) as f64)
+                            .fold(0.0, f64::max);
+                        let total_h = outs
+                            .iter()
+                            .map(|o| (o.y + o.height) as f64)
+                            .fold(0.0, f64::max);
+                        (total_w, total_h)
+                    }
+                };
                 let batch = input.read_events(bounds);
                 *state.cursor.lock_or_recover() = Some(input.cursor());
                 cursor_updates += 1;
@@ -236,14 +337,27 @@ fn main() -> Result<(), Box<dyn Error>> {
             Err(_) => eprintln!("{}", libluna_i18n::tr("client request panicked; ignoring")),
         }
 
+        // X11: tytuły okien i życzenia stanu od klientów (XWM działa w osobnym wątku).
+        xwm::sync(&mut state);
+        // Faktyczny modeset DRM mógł poprawić rozmiar/odświeżanie — wyślij klientom
+        // świeże `wl_output` (inaczej panel i okna zostają przy wczesnym probe).
+        monitors::refresh_bound(&mut state);
+        // Gdy DRM wykrył więcej monitorów niż wczesny probe, dołóż brakujące globale.
+        let want_outputs = state.outputs.lock_or_recover().len();
+        while state.output_globals < want_outputs {
+            handle.create_global::<State, wl_output::WlOutput, usize>(4, state.output_globals);
+            state.output_globals += 1;
+        }
+
         if stats && stats_report.elapsed().as_secs_f64() >= 2.0 {
             let secs = stats_report.elapsed().as_secs_f64();
             let windows = state.windows.lock_or_recover().len();
             eprintln!(
-                "selene/input: {:.0} aktualizacji kursora/s | klienci={} okna={}",
+                "selene/input: {:.0} aktualizacji kursora/s | klienci={} okna={} | x11(wm)={}",
                 cursor_updates as f64 / secs,
                 state.clients,
-                windows
+                windows,
+                xwm::global().map(|x| x.is_wm()).unwrap_or(false)
             );
             cursor_updates = 0;
             stats_report = std::time::Instant::now();

@@ -16,8 +16,18 @@ libluna-core.workspace = true
 libluna-render.workspace = true
 libluna-i18n.workspace = true
 libluna-platform.workspace = true
+libluna-widgets.workspace = true
 
 wayland-server = "0.31"
 wayland-protocols = { version = "0.32", features = ["server", "unstable", "staging"] }
 wayland-protocols-wlr = { version = "0.3", features = ["server"] }
 rustix = { version = "0.38", features = ["event", "fs", "time", "mm"] }
+x11rb = { version = "0.14.0", features = ["composite"] }
+xkbcommon = { version = "0.7", default-features = false }
+
+[dev-dependencies]
+# Klient Waylanda używany wyłącznie przez `examples/subsurface-probe.rs` —
+# integracyjny test `wl_subcompositor` bez zewnętrznych aplikacji.
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client"] }
+smithay-client-toolkit = "0.19"

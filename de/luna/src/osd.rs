@@ -25,13 +25,17 @@ pub struct Osd {
 }
 
 impl Osd {
-    /// Tworzy wskaźnik i włącza jego wyświetlanie.
+    /// Tworzy wskaźnik **ukryty** — pokaże się dopiero po wywołaniu [`Osd::show`].
+    ///
+    /// Wcześniej OSD było widoczne od razu po starcie, więc powłoka witała użytkownika
+    /// dwusekundowym toastem „Głośność 0%” (i przez ten czas nie mogła odpocząć,
+    /// bo animacja bez przerwy prosiła o kolejne klatki).
     pub fn new(icon: IconName, label: impl Into<String>, value: f64) -> Self {
         Self {
             icon,
             label: label.into(),
             value: value.clamp(0.0, 1.0),
-            age: 0.0,
+            age: 2.0,
             lifetime: 2.0,
         }
     }
@@ -128,6 +132,9 @@ mod tests {
     #[test]
     fn fades_in_and_out() {
         let mut osd = Osd::new(IconName::Volume, "Głośność", 0.5);
+        // Nowy wskaźnik jest ukryty — dopiero `show` go wyświetli.
+        assert!(!osd.visible());
+        osd.show("Głośność", 0.5);
         assert!(osd.visible());
         assert!(osd.opacity() < 0.05); // dopiero start
         osd.advance(0.3);
@@ -144,6 +151,7 @@ mod tests {
         let mut scene = Scene::new();
         let mut ctx = PaintCtx::new(&mut scene, &theme, &text);
         let mut osd = Osd::new(IconName::Volume, "Głośność", 0.65);
+        osd.show("Głośność", 0.65);
         osd.advance(0.3);
         osd.paint(&mut ctx, Rect::from_xywh(0.0, 0.0, 320.0, 72.0));
         assert!(scene.len() > 5);

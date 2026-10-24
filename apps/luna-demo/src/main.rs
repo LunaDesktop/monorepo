@@ -1,103 +1,12 @@
-//! Demo aplikacji środowiska Luna — interaktywne okno z HeaderBar-em (CSD),
-//! panelem wyglądu i i18n. Zbudowane na libLunie.
+//! Demo aplikacji środowiska Luna — pełne, interaktywne okno Ustawień z
+//! HeaderBar-em (CSD), sidebarem, motywami, akcentami, i18n, zakładkami,
+//! widokiem plików, popoverami, powiadomieniem i dolnym panelem.
+//!
+//! Uruchom: `cargo run -p luna-demo --bin luna-demo`
+//! To samo demo instaluje się jako `luna-showcase` („Luna — widgety”).
 
 use std::error::Error;
 
-use libluna_core::ThemeSettings;
-use libluna_i18n::{set_locale, Locale};
-use libluna_platform::{run, AppConfig, Frame};
-use luna_demo::ui::{self, Demo};
-
 fn main() -> Result<(), Box<dyn Error>> {
-    set_locale(Locale::from_env());
-    // Doładuj języki ze standardowych katalogów (nadpisują wbudowane).
-    libluna_i18n::load_catalogs_from_dirs();
-
-    // Ustawienia wyglądu wczytane z dysku (jeśli są).
-    let settings = ThemeSettings::load();
-    // Tryb systemowy: prosty przełącznik przez zmienną środowiskową (docelowo portal).
-    let system_dark = std::env::var("LUNA_SYSTEM_DARK")
-        .map(|v| !v.is_empty() && v != "0")
-        .unwrap_or(false);
-
-    let config = AppConfig::new("Aplikacja")
-        .app_id("eu.paganlinux.Luna.Settings")
-        .initial_size(900, 1028)
-        .settings(settings)
-        .system_dark(system_dark);
-
-    let mut demo = Demo::default();
-
-    run(config, move |frame: &mut Frame| {
-        let mut settings = frame.settings();
-
-        // Motyw (z ewentualnym stylem z pliku) do obsługi zdarzeń.
-        let theme = settings.resolve_themed(frame.system_dark());
-        ui::handle_events(
-            &mut settings,
-            frame.events,
-            frame.size,
-            &theme,
-            frame.text,
-            &mut demo,
-        );
-
-        // Akcje okna zgłoszone przez HeaderBar (kontrolki).
-        if demo.pending_close {
-            frame.close();
-            demo.pending_close = false;
-        }
-        if demo.pending_minimize {
-            frame.minimize();
-            demo.pending_minimize = false;
-        }
-        if demo.pending_maximize {
-            frame.toggle_maximize();
-            demo.pending_maximize = false;
-        }
-
-        if settings.preference() != frame.preference() {
-            frame.set_preference(settings.preference());
-        }
-        if settings.accent() != frame.accent() {
-            frame.set_accent(settings.accent());
-        }
-        if settings.style() != frame.style() {
-            frame.set_style(settings.style().map(str::to_owned));
-        }
-
-        // Animacja powiadomienia: krok i prośba o kolejną klatkę, dopóki trwa.
-        if demo.toast.is_animating() {
-            demo.toast.advance(frame.delta_time(), 0.3);
-            frame.request_frame();
-        }
-
-        // Animacja przejścia zakładek (`Stack` slide).
-        if demo.tab_stack.is_animating() {
-            demo.tab_stack.advance(frame.delta_time(), 0.25);
-            frame.request_frame();
-        }
-
-        // Animacja dolnego panelu (wysuwanie) i przyciągania karuzeli.
-        if demo.sheet.is_animating() {
-            demo.sheet.advance(frame.delta_time(), 0.3);
-            frame.request_frame();
-        }
-        if demo.pager.is_animating() {
-            demo.pager.advance(frame.delta_time(), 0.3);
-            frame.request_frame();
-        }
-
-        // Motyw po zmianach (np. wybór stylu) — klatka od razu poprawna.
-        let theme = settings.resolve_themed(frame.system_dark());
-        ui::build_scene(
-            frame.scene,
-            &theme,
-            frame.text,
-            frame.size,
-            &demo,
-            settings.preference(),
-            settings.accent(),
-        );
-    })
+    luna_demo::app::run()
 }

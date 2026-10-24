@@ -198,6 +198,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     for ch in ['A', 'd', 'a'] {
         let key = Event::Key(KeyEvent {
             keysym: ch as u32,
+            keycode: 0,
             text: Some(ch.to_string()),
             state: ButtonState::Pressed,
             modifiers: Modifiers::NONE,
@@ -274,6 +275,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     for ch in ['x', 'y', 'z'] {
         let key = Event::Key(KeyEvent {
             keysym: ch as u32,
+            keycode: 0,
             text: Some(ch.to_string()),
             state: ButtonState::Pressed,
             modifiers: Modifiers::NONE,

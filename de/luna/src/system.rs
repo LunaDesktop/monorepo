@@ -1,9 +1,22 @@
 //! Realny stan systemu dla paska: użytkownik, dźwięk (PipeWire/`wpctl`), Wi-Fi (`nmcli`),
-//! bateria (`/sys/class/power_supply`). Wartości są odpytywane w tle i podawane UI.
+//! Bluetooth (`bluetoothctl`), bateria (`/sys/class/power_supply`). Wartości są
+//! odpytywane w tle i podawane UI.
 
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// Stan baterii.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatteryStatus {
+    /// Poziom naładowania w procentach.
+    pub percent: u8,
+    /// Czy bateria się ładuje (albo jest pełna).
+    pub charging: bool,
+    /// Szacowany czas pracy na baterii (minuty); `None` gdy ładowanie/brak danych.
+    pub minutes: Option<u32>,
+}
 
 /// Migawka stanu systemu (to, co pasek pokazuje naprawdę).
 #[derive(Debug, Clone, Default)]
@@ -11,10 +24,18 @@ pub struct SystemStatus {
     pub user: String,
     /// `(procent, wyciszone)`.
     pub volume: Option<(u8, bool)>,
+    /// Opis domyślnego wyjścia audio (`node.description` z PipeWire).
+    pub audio_sink: Option<String>,
     /// `(włączone, SSID gdy połączone)`.
     pub wifi: Option<(bool, Option<String>)>,
-    /// `(procent, ładuje)`.
-    pub battery: Option<(u8, bool)>,
+    /// Dostępne sieci Wi-Fi (skanowane w tle).
+    pub wifi_networks: Vec<WifiNetwork>,
+    /// `(włączony, liczba podłączonych urządzeń)`; `None` = brak adaptera.
+    pub bluetooth: Option<(bool, usize)>,
+    /// Aktywny profil zasilania z `power-profiles-daemon` (gdy działa).
+    pub power_profile: Option<String>,
+    /// Stan baterii; `None` = brak baterii (np. komputer stacjonarny).
+    pub battery: Option<BatteryStatus>,
     /// Jasność ekranu (procent), gdy jest podświetlenie (`/sys/class/backlight`).
     pub brightness: Option<u8>,
 }
@@ -25,7 +46,11 @@ impl SystemStatus {
         Self {
             user: user_name(),
             volume: read_volume(),
+            audio_sink: audio_sink(),
             wifi: wifi(),
+            wifi_networks: Vec::new(),
+            bluetooth: bluetooth(),
+            power_profile: power_profile(),
             battery: battery(),
             brightness: read_brightness(),
         }
@@ -94,18 +119,68 @@ pub fn next_brightness_level(current: u8) -> u8 {
 /// Współdzielony stan, aktualizowany w tle.
 pub type Shared = Arc<Mutex<SystemStatus>>;
 
-/// Startuje wątek odpytywania (co ~2 s) i zwraca współdzielony stan.
+/// Startuje wątek odpytywania (od razu, potem co ~2 s) i zwraca współdzielony stan.
+///
+/// **Nie blokuje wołającego.** `SystemStatus::poll()` uruchamia podprocesy (`nmcli`,
+/// `wpctl`), które zaraz po zalogowaniu potrafią czekać sekundy (NetworkManager/PipeWire
+/// jeszcze wstają). Wcześniej wołaliśmy je w wątku UI, przez co panel pojawiał się z
+/// opóźnieniem — teraz startujemy z samą nazwą użytkownika (odczyt z otoczenia) i
+/// dopełniamy stan już z wątku.
+///
 pub fn spawn() -> Shared {
-    let shared: Shared = Arc::new(Mutex::new(SystemStatus::poll()));
+    let shared: Shared = Arc::new(Mutex::new(SystemStatus {
+        user: user_name(),
+        ..SystemStatus::default()
+    }));
     let writer = Arc::clone(&shared);
     std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_secs(2));
         let fresh = SystemStatus::poll();
         if let Ok(mut s) = writer.lock() {
             *s = fresh;
         }
+        std::thread::sleep(Duration::from_secs(2));
     });
     shared
+}
+
+/// Uruchamia wątek śledzący **systemowy motyw** (portal `org.freedesktop.appearance`).
+///
+/// Wynik zapisujemy w `$XDG_CONFIG_HOME/luna/system-dark`, skąd czytają go wszystkie
+/// procesy Luny (platforma aplikacji i kompozytor). Dzięki temu tryb `Auto` działa
+/// bez przekazywania zmiennych środowiskowych do już uruchomionych programów.
+pub fn watch_system_theme() {
+    std::thread::spawn(|| loop {
+        sync_system_dark();
+        std::thread::sleep(Duration::from_secs(15));
+    });
+}
+
+fn sync_system_dark() {
+    let Ok(conn) = zbus::blocking::Connection::session() else {
+        return;
+    };
+    let Ok(reply) = conn.call_method(
+        Some("org.freedesktop.portal.Desktop"),
+        "/org/freedesktop/portal/desktop",
+        Some("org.freedesktop.portal.Settings"),
+        "Read",
+        &("org.freedesktop.appearance", "color-scheme"),
+    ) else {
+        return;
+    };
+    let Ok(value) = reply.body().deserialize::<zbus::zvariant::OwnedValue>() else {
+        return;
+    };
+    // Portal: 1 = preferuj ciemny, 2 = preferuj jasny, 0 = brak preferencji.
+    let Ok(scheme) = u32::try_from(value) else {
+        return;
+    };
+    let dark = match scheme {
+        1 => true,
+        2 => false,
+        _ => return,
+    };
+    let _ = libluna_core::appearance::set_system_dark(dark);
 }
 
 /// Włącza/wyłącza Wi-Fi (przełącznik „Wi-Fi” w pasku).
@@ -113,13 +188,255 @@ pub fn set_wifi(on: bool) {
     spawn_cmd("nmcli", &["radio", "wifi", if on { "on" } else { "off" }]);
 }
 
+/// Czy w systemie jest adapter Bluetooth (`/sys/class/bluetooth`).
+pub fn bluetooth_available() -> bool {
+    std::fs::read_dir("/sys/class/bluetooth")
+        .ok()
+        .map(|mut d| d.any(|e| e.is_ok()))
+        .unwrap_or(false)
+}
+
+/// Włącza/wyłącza adapter Bluetooth.
+pub fn set_bluetooth(on: bool) {
+    if bluetooth_available() {
+        spawn_cmd("bluetoothctl", &["power", if on { "on" } else { "off" }]);
+    }
+}
+
+/// Włącza/wyłącza tryb samolotowy (wszystkie radia).
+pub fn set_airplane(on: bool) {
+    set_wifi(!on);
+    set_bluetooth(!on);
+}
+
+/// Czy tryb „nie przeszkadzać” jest włączony (plik `$XDG_CONFIG_HOME/luna/do-not-disturb`).
+pub fn dnd() -> bool {
+    state_path("do-not-disturb")
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| s.trim() == "1")
+        .unwrap_or(false)
+}
+
+/// Zapisuje stan trybu „nie przeszkadzać”.
+pub fn set_dnd(on: bool) {
+    let Some(path) = state_path("do-not-disturb") else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, if on { "1" } else { "0" });
+}
+
+/// Ścieżka pliku stanu w katalogu konfiguracji Luny.
+fn state_path(name: &str) -> Option<PathBuf> {
+    let dir = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    Some(dir.join("luna").join(name))
+}
+
+/// Siła night lightu (0–100) zapisana przez powłokę.
+pub fn night_light_percent() -> u8 {
+    state_path("night-light")
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| s.trim().parse::<u8>().ok())
+        .map(|v| v.min(100))
+        .unwrap_or(0)
+}
+
+/// Zapisuje siłę night lightu (stosuje ją kompozytor przez gniazdo sterowania).
+pub fn set_night_light_percent(percent: u8) {
+    write_state("night-light", &percent.min(100).to_string());
+}
+
+/// Czy tryb oszczędzania jest zapisany jako włączony.
+pub fn power_saver() -> bool {
+    state_path("power-saver")
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| s.trim() == "1")
+        .unwrap_or(false)
+}
+
+/// Zapisuje stan trybu oszczędzania.
+pub fn set_power_saver(on: bool) {
+    write_state("power-saver", if on { "1" } else { "0" });
+}
+
+fn write_state(name: &str, value: &str) {
+    let Some(path) = state_path(name) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, value);
+}
+
+/// Czy `power-profiles-daemon` jest dostępny (`powerprofilesctl` w `PATH`).
+pub fn ppd_available() -> bool {
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        std::env::var_os("PATH")
+            .map(|path| {
+                std::env::split_paths(&path).any(|dir| dir.join("powerprofilesctl").is_file())
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// Bieżący profil zasilania (np. `balanced`, `power-saver`) albo `None`.
+fn power_profile() -> Option<String> {
+    if !ppd_available() {
+        return None;
+    }
+    run("powerprofilesctl", &["get"])
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+}
+
+/// Ustawia profil zasilania w `power-profiles-daemon`.
+pub fn set_power_profile(profile: &str) {
+    spawn_cmd("powerprofilesctl", &["set", profile]);
+}
+
 /// Przełącza wyciszenie domyślnego wyjścia audio.
 pub fn toggle_mute() {
     spawn_cmd("wpctl", &["set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"]);
 }
 
+/// Ustawia głośność domyślnego wyjścia (w procentach 0..100).
+pub fn set_volume(percent: u8) {
+    let p = (percent as f64) / 100.0;
+    spawn_cmd(
+        "wpctl",
+        &["set-volume", "@DEFAULT_AUDIO_SINK@", &format!("{p:.2}")],
+    );
+}
+
+/// Zmienia głośność o `delta` procent (np. +5 lub -5).
+pub fn adjust_volume(current: u8, delta: i8) -> u8 {
+    let next = (current as i16 + delta as i16).clamp(0, 100) as u8;
+    set_volume(next);
+    next
+}
+
+/// Pojedyncza sieć Wi-Fi wykryta przez `nmcli`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WifiNetwork {
+    pub ssid: String,
+    pub signal: u8,
+    pub active: bool,
+}
+
+/// Skanuje dostępne sieci Wi-Fi.
+pub fn scan_wifi() -> Vec<WifiNetwork> {
+    let Some(out) = run(
+        "nmcli",
+        &["-t", "-f", "ACTIVE,SSID,SIGNAL", "dev", "wifi", "list"],
+    ) else {
+        return Vec::new();
+    };
+    let mut networks = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for line in out.lines() {
+        let parts: Vec<&str> = line.split(':').collect();
+        if parts.len() >= 3 {
+            let active = parts[0] == "yes";
+            let ssid = parts[1].trim().to_owned();
+            let signal: u8 = parts[2].trim().parse().unwrap_or(0);
+            if !ssid.is_empty() && seen.insert(ssid.clone()) {
+                networks.push(WifiNetwork {
+                    ssid,
+                    signal,
+                    active,
+                });
+            }
+        }
+    }
+    networks.sort_by(|a, b| {
+        b.active
+            .cmp(&a.active)
+            .then_with(|| b.signal.cmp(&a.signal))
+    });
+    networks
+}
+
 fn spawn_cmd(program: &str, args: &[&str]) {
     let _ = Command::new(program).args(args).spawn();
+}
+
+/// Uruchamia polecenie z limitem czasu (dla usług, które potrafią nie odpowiedzieć).
+fn run_timeout(program: &str, args: &[&str], timeout: Duration) -> Option<String> {
+    let mut child = Command::new(program)
+        .env("LC_ALL", "C")
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let start = Instant::now();
+    loop {
+        match child.try_wait().ok()? {
+            Some(status) => {
+                let out = child.wait_with_output().ok()?;
+                if status.success() {
+                    return Some(String::from_utf8_lossy(&out.stdout).into_owned());
+                }
+                return None;
+            }
+            None if start.elapsed() > timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            None => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+}
+
+/// Skan sieci Wi-Fi w tle.
+///
+/// `nmcli dev wifi list` potrafi trwać sekundy (realny skan radiowy), więc nie wolno
+/// wołać go z wątku UI. Powłoka prosi o skan przy otwarciu popupu sieci
+/// ([`WifiScan::refresh`]) i co klatkę czyta ostatni wynik ([`WifiScan::current`]).
+pub struct WifiScan {
+    nets: Arc<Mutex<Vec<WifiNetwork>>>,
+    requested: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl WifiScan {
+    /// Startuje wątek skanujący (leniwie — tylko na żądanie).
+    pub fn spawn() -> Self {
+        let nets: Arc<Mutex<Vec<WifiNetwork>>> = Arc::new(Mutex::new(Vec::new()));
+        let requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (w_nets, w_req) = (Arc::clone(&nets), Arc::clone(&requested));
+        std::thread::spawn(move || {
+            use std::sync::atomic::Ordering;
+            loop {
+                std::thread::sleep(Duration::from_millis(400));
+                if !w_req.swap(false, Ordering::Relaxed) {
+                    continue;
+                }
+                let fresh = scan_wifi();
+                if let Ok(mut g) = w_nets.lock() {
+                    *g = fresh;
+                }
+            }
+        });
+        Self { nets, requested }
+    }
+
+    /// Prosi o świeży skan (np. po otwarciu popupu sieci).
+    pub fn refresh(&self) {
+        self.requested
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Ostatnia znana lista sieci (kopia).
+    pub fn current(&self) -> Vec<WifiNetwork> {
+        self.nets.lock().map(|g| g.clone()).unwrap_or_default()
+    }
 }
 
 fn user_name() -> String {
@@ -176,12 +493,13 @@ fn parse_wifi_general(out: &str) -> Option<(bool, bool)> {
 }
 
 /// Parsuje `nmcli -t -f ACTIVE,SSID dev wifi` → SSID aktywnej sieci.
+#[allow(dead_code)]
 fn parse_ssid(out: &str) -> Option<String> {
     out.lines()
         .find_map(|l| l.strip_prefix("yes:").map(str::to_owned))
 }
 
-fn battery() -> Option<(u8, bool)> {
+fn battery() -> Option<BatteryStatus> {
     for entry in std::fs::read_dir("/sys/class/power_supply").ok()?.flatten() {
         if !entry.file_name().to_string_lossy().starts_with("BAT") {
             continue;
@@ -193,10 +511,75 @@ fn battery() -> Option<(u8, bool)> {
             .parse()
             .ok()?;
         let status = std::fs::read_to_string(dir.join("status")).unwrap_or_default();
-        let charging = matches!(status.trim(), "Charging" | "Full");
-        return Some((cap, charging));
+        let status = status.trim();
+        let charging = matches!(status, "Charging" | "Full");
+        let minutes = if status == "Discharging" {
+            remaining_minutes(&dir)
+        } else {
+            None
+        };
+        return Some(BatteryStatus {
+            percent: cap,
+            charging,
+            minutes,
+        });
     }
     None
+}
+
+/// Szacuje pozostały czas pracy na baterii (minuty) z `energy_*` lub `charge_*`.
+fn remaining_minutes(dir: &Path) -> Option<u32> {
+    let read = |name: &str| -> Option<u64> {
+        std::fs::read_to_string(dir.join(name))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    };
+    if let (Some(now), Some(rate)) = (read("energy_now"), read("power_now")) {
+        if rate > 0 {
+            return Some((now.saturating_mul(60) / rate) as u32);
+        }
+    }
+    if let (Some(now), Some(rate)) = (read("charge_now"), read("current_now")) {
+        if rate > 0 {
+            return Some((now.saturating_mul(60) / rate) as u32);
+        }
+    }
+    None
+}
+
+/// Odczytuje adapter Bluetooth: `(włączony, liczba podłączonych urządzeń)`.
+fn bluetooth() -> Option<(bool, usize)> {
+    if !bluetooth_available() {
+        return None;
+    }
+    let timeout = Duration::from_millis(1200);
+    let show = run_timeout("bluetoothctl", &["show"], timeout)?;
+    let powered = show.lines().any(|l| l.trim() == "Powered: yes");
+    let connected = run_timeout("bluetoothctl", &["devices", "Connected"], timeout)
+        .map(|o| {
+            o.lines()
+                .filter(|l| l.trim_start().starts_with("Device "))
+                .count()
+        })
+        .unwrap_or(0);
+    Some((powered, connected))
+}
+
+/// Opis domyślnego wyjścia audio (`node.description` z `wpctl inspect`).
+fn audio_sink() -> Option<String> {
+    let out = run("wpctl", &["inspect", "@DEFAULT_AUDIO_SINK@"])?;
+    parse_audio_sink(&out)
+}
+
+fn parse_audio_sink(out: &str) -> Option<String> {
+    out.lines().find_map(|line| {
+        let line = line.trim_start_matches(['*', ' ']);
+        let value = line.strip_prefix("node.description =")?.trim();
+        let value = value.trim_matches('"');
+        (!value.is_empty()).then(|| value.to_owned())
+    })
 }
 
 #[cfg(test)]
@@ -244,5 +627,12 @@ mod tests {
         let scan = "no:Dom\nyes:PaganNet\nno:Sasiad\n";
         assert_eq!(parse_ssid(scan).as_deref(), Some("PaganNet"));
         assert_eq!(parse_ssid("no:Dom\nno:Sasiad\n"), None);
+    }
+
+    #[test]
+    fn parses_audio_sink_description() {
+        let out = "id 45, type PipeWire:Interface:Node\n  * node.description = \"Głośniki wbudowane\"\n  * node.name = \"alsa_output\"\n";
+        assert_eq!(parse_audio_sink(out).as_deref(), Some("Głośniki wbudowane"));
+        assert_eq!(parse_audio_sink("brak\n"), None);
     }
 }

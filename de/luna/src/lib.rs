@@ -8,9 +8,12 @@
 
 pub mod apps;
 pub mod dbus_notifications;
+pub mod keyring;
+pub mod media;
 pub mod notifications;
 pub mod osd;
 pub mod panel;
+pub mod polkit;
 pub mod power;
 pub mod system;
 pub mod toplevels;

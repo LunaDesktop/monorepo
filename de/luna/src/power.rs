@@ -9,6 +9,8 @@ use std::process::Command;
 /// Akcja pozycji menu zasilania.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PowerAction {
+    /// Zablokuj ekran.
+    Lock,
     /// Zakończ bieżącą sesję.
     Logout,
     /// Uruchom ponownie komputer.
@@ -28,15 +30,19 @@ pub struct PowerItem {
 pub fn items() -> Vec<PowerItem> {
     vec![
         PowerItem {
+            label: libluna_i18n::tr("Zablokuj ekran").into(),
+            action: PowerAction::Lock,
+        },
+        PowerItem {
             label: libluna_i18n::tr("Wyloguj").into(),
             action: PowerAction::Logout,
         },
         PowerItem {
-            label: libluna_i18n::tr("Restart").into(),
+            label: libluna_i18n::tr("Uruchom ponownie").into(),
             action: PowerAction::Reboot,
         },
         PowerItem {
-            label: libluna_i18n::tr("Wyłącz").into(),
+            label: libluna_i18n::tr("Wyłącz komputer").into(),
             action: PowerAction::PowerOff,
         },
     ]
@@ -45,6 +51,7 @@ pub fn items() -> Vec<PowerItem> {
 /// Wykonuje akcję (`loginctl` w tle; powłoka zaraz zniknie).
 pub fn perform(action: PowerAction) {
     match action {
+        PowerAction::Lock => spawn("loginctl", &["lock-session".to_owned()]),
         PowerAction::Logout => {
             if let Some(args) = logout_args(
                 std::env::var("XDG_SESSION_ID").ok().as_deref(),
@@ -112,6 +119,7 @@ mod tests {
         assert_eq!(
             actions,
             vec![
+                PowerAction::Lock,
                 PowerAction::Logout,
                 PowerAction::Reboot,
                 PowerAction::PowerOff

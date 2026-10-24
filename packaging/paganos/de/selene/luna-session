@@ -7,6 +7,9 @@
 set -eu
 
 export XDG_CURRENT_DESKTOP=Luna
+# Pełny, przewidywalny PATH: menedżery logowania potrafią go obciąć (bez `/usr/sbin`
+# nie uruchomi się np. `thunar` czy `xclock`, bo ich binarki tam leżą).
+export PATH="/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin${PATH:+:$PATH}"
 export XDG_SESSION_TYPE=wayland
 export XDG_SESSION_DESKTOP=Luna
 
@@ -28,8 +31,12 @@ if [ "$SELENE_BACKEND" = "drm" ]; then
     export SELENE_INPUT
 fi
 
-# Diagnostyka wydajności (fps DRM + tempo kursora) — tymczasowo włączona.
-export SELENE_STATS=1
+# Diagnostyka wydajności (fps DRM + tempo kursora w Selene, fps powłoki w luna-shell).
+# Domyślnie **włączona**, bo log sesji jest trwały i tylko wtedy da się po fakcie ustalić,
+# gdzie znikają klatki. Wyłącz jawnie wolnym zerem:  SELENE_STATS=0 LUNA_STATS=0 luna-session
+: "${SELENE_STATS:=1}"
+: "${LUNA_STATS:=1}"
+export SELENE_STATS LUNA_STATS
 
 # Trwały log sesji: LightDM trzyma tylko 2 pliki `.xsession-errors` i obraca je przy
 # każdym starcie sesji, przez co logi Luny przepadają. Piszemy do stałego pliku w
@@ -37,30 +44,227 @@ export SELENE_STATS=1
 log_dir="${XDG_STATE_HOME:-$HOME/.local/state}/luna"
 if mkdir -p "$log_dir" 2>/dev/null; then
     log="$log_dir/session.log"
-    printf '=== luna-session %s ===\nXDG_RUNTIME_DIR=%s SELENE_BACKEND=%s SELENE_INPUT=%s\n' \
+    # Pochodzenie binarek: który plik i z jaką datą faktycznie wystartował. Bez tego
+    # łatwo testować stary build i szukać błędu, którego już nie ma.
+    selene_path="$(command -v selene 2>/dev/null || echo '<brak>')"
+    shell_path="$(command -v luna-shell 2>/dev/null || echo '<brak>')"
+    printf '=== luna-session %s ===\nXDG_RUNTIME_DIR=%s SELENE_BACKEND=%s SELENE_INPUT=%s\nselene: %s [%s]\nluna-shell: %s [%s]\nSELENE_STATS=%s LUNA_STATS=%s\n' \
         "$(date -Is)" "${XDG_RUNTIME_DIR:-<brak>}" "$SELENE_BACKEND" "${SELENE_INPUT:-<brak>}" \
+        "$selene_path" "$(stat -c %y "$selene_path" 2>/dev/null | cut -d. -f1 || echo '?')" \
+        "$shell_path" "$(stat -c %y "$shell_path" 2>/dev/null | cut -d. -f1 || echo '?')" \
+        "$SELENE_STATS" "$LUNA_STATS" \
         >>"$log" 2>/dev/null || true
     exec >>"$log" 2>&1
 fi
 
-# Kompozytor w tle, a po nim powłoka Luna (panel/OSD). Czekamy na gniazdo Wayland.
+# Kompozytor w tle, a po nim powłoka Luna (panel/OSD).
+rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+ts() { printf '%s luna-session: %s\n' "$(date +%H:%M:%S)" "$*"; }
+
+ts "uruchamiam selene"
+# Sprzątanie po poprzedniej sesji: zamki gniazd zostają po nagłym zabiciu kompozytora.
+# Katalog jest per-użytkownik, więc nie ruszamy niczego cudzego.
+marker="$rt/luna-wayland"
+rm -f "$marker" 2>/dev/null || true
+# Marker X11 z poprzedniej sesji jest bezużyteczny, a wręcz szkodliwy: sesja
+# ustawiłaby `DISPLAY` na ekran, który już nie istnieje (albo o innym numerze),
+# zanim nowy Xwayland w ogóle wstanie. Kasujemy zawsze.
+rm -f "$rt/luna-display" 2>/dev/null || true
+# Liczba monitorów z poprzedniej sesji też jest nieaktualna.
+rm -f "$rt/luna-outputs" 2>/dev/null || true
+rm -f "$rt"/wayland-*.lock 2>/dev/null || true
 selene &
 selene_pid=$!
 
-# Poczekaj, aż Selene zbindowuje gniazdo (zwykle ułamek sekundy).
-i=0
-while [ ! -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wayland-0" ] && [ "$i" -lt 50 ]; do
-    sleep 0.1
-    i=$((i + 1))
+# Czekamy na **marker gotowości** zapisany przez Selene (a nie na plik gniazda, który
+# mógł zostać po poprzedniej sesji). Marker zawiera nazwę gniazda, na którym Selene
+# naprawdę słucha — dzięki temu działa też `wayland-1`.
+sock=""
+waited=0
+while [ "$waited" -lt 100 ] && [ ! -f "$marker" ]; do
+    sleep 0.05
+    waited=$((waited + 1))
 done
-
-# Powłoka Luna (panel, launcher, OSD) — o ile jest zainstalowana.
-if command -v luna-shell >/dev/null 2>&1; then
-    export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
-    echo "luna-session: uruchamiam luna-shell ($(command -v luna-shell))"
-    luna-shell &
+if [ -f "$marker" ]; then
+    sock="$(cat "$marker" 2>/dev/null)"
+    ts "gniazdo Wayland gotowe: ${sock:-?} (po $((waited * 50)) ms)"
 else
-    echo "luna-session: brak luna-shell w PATH"
+    ts "UWAGA: Selene nie zgłosił gotowości w 5 s — powłoka może się nie połączyć"
+fi
+
+# Standardowe integracje toolkitów z Waylandem (Firefox, Qt, GTK, SDL, Electron)
+export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-${sock:-wayland-0}}"
+
+# Aplikacje X11: Selene uruchamia Xwayland i zapisuje numer ekranu w markerze.
+# Czekamy krótko (zwykle pojawia się od razu), żeby powłoka — a przez nią aplikacje —
+# dostały poprawne `DISPLAY`.
+# Aplikacje X11: Selene uruchamia Xwayland i zapisuje numer ekranu w markerze.
+# Powłoki **nie blokujemy** czekaniem na X11 — panel ma pojawić się natychmiast.
+# Gdy marker już jest, ustawiamy DISPLAY od razu; gdy jeszcze nie, luna-shell odczyta
+# go przy starcie każdej aplikacji, a wątek w tle uzupełni środowisko aktywacji D-Bus.
+display_marker="$rt/luna-display"
+xnum=""
+if [ -f "$display_marker" ]; then
+    xnum="$(cat "$display_marker" 2>/dev/null)"
+fi
+if [ -n "$xnum" ] && [ -S "/tmp/.X11-unix/X$xnum" ]; then
+    export DISPLAY=":$xnum"
+    ts "X11 gotowe: DISPLAY=$DISPLAY"
+else
+    # Bez Xwaylanda **nie zostawiamy odziedziczonego `DISPLAY`** (np. `:0` z pulpitu
+    # gospodarza) — inaczej aplikacje X11 lądują na tamtym ekranie i widać je
+    # z obcymi dekoracjami, poza Luną.
+    unset DISPLAY
+    ts "X11 jeszcze nie zgłosił ekranu — startuję powłokę od razu"
+    (
+        i=0
+        while [ "$i" -lt 100 ]; do
+            if [ -f "$display_marker" ]; then
+                n="$(cat "$display_marker" 2>/dev/null)"
+                if [ -n "$n" ] && [ -S "/tmp/.X11-unix/X$n" ]; then
+                    if command -v dbus-update-activation-environment >/dev/null 2>&1; then
+                        dbus-update-activation-environment DISPLAY=":$n" 2>/dev/null || true
+                    fi
+                    break
+                fi
+            fi
+            sleep 0.05
+            i=$((i + 1))
+        done
+    ) &
+fi
+# Diagnostyka: jakie ekrany X w ogóle istnieją (pomaga, gdy coś idzie nie tam).
+if [ -d /tmp/.X11-unix ]; then
+    ts "ekrany X w systemie: $(ls /tmp/.X11-unix 2>/dev/null | tr '\n' ' ')"
+fi
+export MOZ_ENABLE_WAYLAND=1
+export QT_QPA_PLATFORM="wayland;xcb"
+export GDK_BACKEND="wayland,x11"
+export SDL_VIDEODRIVER="wayland"
+export CLUTTER_BACKEND="wayland"
+export ELECTRON_OZONE_PLATFORM_HINT="auto"
+# Java/AWT: nasz XWM nie reparentuje okien (brak ramek X11), więc bez tej zmiennej okna
+# aplikacji Javy (IDE, narzędzia AWT/Swing) potrafią się źle rysować albo nie pojawiać.
+export _JAVA_AWT_WM_NONREPARENTING=1
+
+# Aktualizacja środowiska aktywacji D-Bus i systemd (wymagane m.in. dla xdg-desktop-portal)
+if command -v dbus-update-activation-environment >/dev/null 2>&1; then
+    dbus-update-activation-environment --systemd WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_SESSION_DESKTOP MOZ_ENABLE_WAYLAND QT_QPA_PLATFORM GDK_BACKEND _JAVA_AWT_WM_NONREPARENTING 2>/dev/null || true
+fi
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl --user import-environment WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_SESSION_DESKTOP MOZ_ENABLE_WAYLAND QT_QPA_PLATFORM GDK_BACKEND _JAVA_AWT_WM_NONREPARENTING 2>/dev/null || true
+fi
+
+# Portal XDG (aplikacje GTK4/flatpak): startujemy jawnie, z poprawnym środowiskiem sesji.
+# Bez tego aktywacja D-Bus bywała bez WAYLAND_DISPLAY/XDG_CURRENT_DESKTOP, a aplikacje
+# czekały ~25 s na odpowiedź („Cannot get portal … Przekroczono czas oczekiwania”).
+#
+# Uwaga: sam frontend `xdg-desktop-portal` nie wystarczy — potrzebny jest backend
+# (`xdg-desktop-portal-gtk`), który wybiera `luna-portals.conf`. Gdy backend jest
+# niekompletny (np. brak `libgnome-desktop-3.so.20` w PaganOS), frontend zawiesza się
+# na aktywacji backendu i **każde** żądanie portalu kończy się timeoutem. Wtedy lepiej
+# nie uruchamiać portalu wcale: D-Bus odpowiada błędem od razu, a GTK nie czeka 25 s.
+portal_bin=""
+for p in /usr/lib/xdg-desktop-portal /usr/libexec/xdg-desktop-portal; do
+    if [ -x "$p" ]; then portal_bin="$p"; break; fi
+done
+portal_backend_ok=1
+if [ -n "$portal_bin" ] && command -v ldd >/dev/null 2>&1; then
+    for backend in /usr/lib/xdg-desktop-portal-gtk /usr/libexec/xdg-desktop-portal-gtk; do
+        if [ -x "$backend" ] && ldd "$backend" 2>/dev/null | grep -q 'not found'; then
+            portal_backend_ok=0
+            missing="$(ldd "$backend" 2>/dev/null | grep 'not found' | sed 's/^[[:space:]]*//' | tr '\n' ' ')"
+            break
+        fi
+    done
+fi
+if [ -z "$portal_bin" ]; then
+    ts "xdg-desktop-portal: brak frontendu — aplikacje użyją własnych okien"
+elif [ "$portal_backend_ok" = 0 ]; then
+    ts "xdg-desktop-portal: backend GTK niekompletny ($missing) — pomijam portal"
+    ts "  (napraw pakiet xdg-desktop-portal-gtk, aby włączyć portale; na razie GTK bez portali)"
+    export GTK_USE_PORTAL=0
+    if [ -n "${GDK_DEBUG:-}" ]; then
+        export GDK_DEBUG="$GDK_DEBUG,no-portals"
+    else
+        export GDK_DEBUG="no-portals"
+    fi
+else
+    portal_log="${log_dir:-${XDG_STATE_HOME:-$HOME/.local/state}/luna}/portal.log"
+    "$portal_bin" >"$portal_log" 2>&1 &
+    ts "uruchamiam xdg-desktop-portal ($portal_bin, log: $portal_log)"
+fi
+# Aplikacje uruchamiane przez D-Bus (zsynchronizuj też środowisko aktywacji).
+if command -v dbus-update-activation-environment >/dev/null 2>&1; then
+    dbus-update-activation-environment \
+        ${GTK_USE_PORTAL:+GTK_USE_PORTAL} ${GDK_DEBUG:+GDK_DEBUG} 2>/dev/null || true
+fi
+
+# Baza kluczy i haseł (Luna Keyring — Secret Service API)
+rm -f "$rt/luna-keyring-ready" 2>/dev/null || true
+if command -v luna-keyring >/dev/null 2>&1; then
+    ts "uruchamiam luna-keyring"
+    luna-keyring &
+    # Krótkie oczekiwanie na zajęcie nazwy `org.freedesktop.secrets`. Aplikacje
+    # uruchamiane zaraz po zalogowaniu (Zed, VS Code) inaczej nie widzą keyringu.
+    k=0
+    while [ "$k" -lt 40 ] && [ ! -f "$rt/luna-keyring-ready" ]; do
+        sleep 0.05
+        k=$((k + 1))
+    done
+    if [ -f "$rt/luna-keyring-ready" ]; then
+        ts "luna-keyring gotowy (po $((k * 50)) ms)"
+    else
+        ts "luna-keyring: brak potwierdzenia gotowości po 2 s"
+    fi
+fi
+
+# Agent uwierzytelniania Polkit (okienka autoryzacji uprawnień)
+if command -v luna-polkit >/dev/null 2>&1; then
+    ts "uruchamiam luna-polkit"
+    luna-polkit &
+else
+    for agent in \
+        /usr/lib/polkit-gnome/polkit-gnome-authentication-agent-1 \
+        /usr/libexec/polkit-gnome-authentication-agent-1 \
+        /usr/lib/policykit-1-gnome/polkit-gnome-authentication-agent-1 \
+        lxpolkit
+    do
+        if command -v "$agent" >/dev/null 2>&1 || [ -x "$agent" ]; then
+            "$agent" &
+            break
+        fi
+    done
+fi
+
+# Powłoka Luna (panel, launcher, OSD).
+#
+# Domyślnie **jeden** panel na monitorze głównym (pierwszym) — popupy (kalendarz, Wi‑Fi,
+# głośność) są rysowane w tym samym buforze co pasek, więc mają sens tylko na jednym
+# ekranie. Panel na każdym monitorze (osobna instancja powłoki na wyjście) włączasz
+# jawnie:  LUNA_PANELS=all luna-session
+if command -v luna-shell >/dev/null 2>&1; then
+    if [ "${LUNA_PANELS:-primary}" = "all" ]; then
+        nouts=1
+        if [ -f "$rt/luna-outputs" ]; then
+            n="$(cat "$rt/luna-outputs" 2>/dev/null)"
+            case "$n" in
+                ''|*[!0-9]*) n=1 ;;
+            esac
+            if [ "$n" -ge 1 ]; then nouts="$n"; fi
+        fi
+        ts "uruchamiam luna-shell x$nouts (panel na każdym monitorze)"
+        i=0
+        while [ "$i" -lt "$nouts" ]; do
+            LUNA_OUTPUT="$i" luna-shell &
+            i=$((i + 1))
+        done
+    else
+        ts "uruchamiam luna-shell (panel na monitorze głównym)"
+        luna-shell &
+    fi
+else
+    ts "brak luna-shell w PATH"
 fi
 
 # Sesja żyje, dopóki działa kompozytor.

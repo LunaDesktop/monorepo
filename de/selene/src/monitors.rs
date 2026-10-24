@@ -18,6 +18,8 @@ pub struct OutputInfo {
     pub name: String,
     pub width: i32,
     pub height: i32,
+    /// Odświeżanie bieżącego trybu (Hz) — z EDID, nie stałe 60.
+    pub refresh_hz: i32,
     pub scale: i32,
     /// Pozycja logiczna (lewy-górny narożnik) w globalnej przestrzeni współrzędnych.
     pub x: i32,
@@ -30,6 +32,7 @@ impl Default for OutputInfo {
             name: "nested-0".to_owned(),
             width: 1280,
             height: 800,
+            refresh_hz: 60,
             scale: 1,
             x: 0,
             y: 0,
@@ -85,7 +88,7 @@ pub fn send_info(output: &WlOutput, info: &OutputInfo) {
         flags: wayland_server::WEnum::Value(wl_output::Mode::Current),
         width: info.width,
         height: info.height,
-        refresh: 60_000,
+        refresh: info.refresh_hz.max(1) * 1000,
     });
     let _ = output.send_event(wl_output::Event::Scale { factor: info.scale });
     let _ = output.send_event(wl_output::Event::Name {
@@ -112,6 +115,9 @@ impl GlobalDispatch<WlOutput, usize> for State {
             .cloned()
             .unwrap_or_default();
         send_info(&output, &info);
+        // Trzymamy zasób, żeby po faktycznym modesecie DRM wysłać poprawione
+        // `geometry`/`mode` (wczesny probe i setup mogą chwilowo różnić się trybem).
+        state.bound_outputs.push((*data, output));
     }
 }
 
@@ -128,6 +134,38 @@ impl Dispatch<WlOutput, usize> for State {
     }
 }
 
+/// Sygnatura listy monitorów — tania do porównania w pętli głównej.
+pub fn signature(outs: &[OutputInfo]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for o in outs {
+        for v in [o.x, o.y, o.width, o.height, o.refresh_hz, o.scale] {
+            h ^= v as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        for b in o.name.bytes() {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    h
+}
+
+/// Wysyła klientom nowe `wl_output` po zmianie modelu (np. faktyczny tryb z DRM).
+pub fn refresh_bound(state: &mut State) {
+    let outs = state.outputs.lock_or_recover().clone();
+    let sig = signature(&outs);
+    if sig == state.outputs_sig {
+        return;
+    }
+    state.outputs_sig = sig;
+    state.bound_outputs.retain(|(_, r)| r.is_alive());
+    for (idx, res) in &state.bound_outputs {
+        if let Some(info) = outs.get(*idx) {
+            send_info(res, info);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,6 +175,7 @@ mod tests {
             name: name.to_owned(),
             width: w,
             height: h,
+            refresh_hz: 60,
             scale: 1,
             x: 0,
             y: 0,
@@ -149,6 +188,18 @@ mod tests {
         layout_horizontal(&mut outs);
         assert_eq!((outs[0].x, outs[0].y), (0, 0));
         assert_eq!((outs[1].x, outs[1].y), (1920, 0));
+    }
+
+    #[test]
+    fn signature_notices_size_and_refresh_changes() {
+        let a = vec![out("eDP-1", 1920, 1080)];
+        let mut b = a.clone();
+        assert_eq!(signature(&a), signature(&b));
+        b[0].refresh_hz = 75;
+        assert_ne!(signature(&a), signature(&b));
+        b[0].refresh_hz = 60;
+        b[0].width = 1600;
+        assert_ne!(signature(&a), signature(&b));
     }
 
     #[test]

@@ -239,10 +239,7 @@ impl ThemeSettings {
 
     /// Domyślna ścieżka konfiguracji: `$XDG_CONFIG_HOME/luna/theme.conf`.
     pub fn config_path() -> Option<PathBuf> {
-        let base = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-        Some(base.join("luna").join("theme.conf"))
+        Some(config_dir()?.join("luna").join("theme.conf"))
     }
 
     /// Wczytuje ustawienia z domyślnej ścieżki (po cichu zwraca domyślne przy błędzie).
@@ -313,6 +310,44 @@ impl ThemeSettings {
         }
         std::fs::write(path, self.to_config_string())
     }
+}
+
+/// Katalog konfiguracji użytkownika (`$XDG_CONFIG_HOME` lub `~/.config`).
+fn config_dir() -> Option<PathBuf> {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+}
+
+/// Plik ze stanem systemowego motywu (`1` = ciemny, `0` = jasny).
+///
+/// Zapisuje go powłoka na podstawie portalu `org.freedesktop.appearance.color-scheme`.
+pub fn system_dark_path() -> Option<PathBuf> {
+    Some(config_dir()?.join("luna").join("system-dark"))
+}
+
+/// Czy system preferuje ciemny motyw.
+///
+/// Kolejność: jawny override `LUNA_SYSTEM_DARK` → plik zapisany przez powłokę → jasny.
+pub fn system_dark() -> bool {
+    if let Ok(v) = std::env::var("LUNA_SYSTEM_DARK") {
+        return !v.is_empty() && v != "0";
+    }
+    system_dark_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| s.trim() == "1")
+        .unwrap_or(false)
+}
+
+/// Zapisuje stan systemowego motywu (wywołuje watcher portalu w powłoce).
+pub fn set_system_dark(dark: bool) -> io::Result<()> {
+    let Some(path) = system_dark_path() else {
+        return Ok(());
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, if dark { "1" } else { "0" })
 }
 
 #[cfg(test)]

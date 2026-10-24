@@ -21,6 +21,98 @@ pub struct DesktopApp {
     pub comment: Option<String>,
     pub terminal: bool,
     pub categories: Vec<String>,
+    /// `TryExec` — polecenie, którego obecność w `PATH` decyduje o pokazaniu wpisu.
+    /// `None` = wpis nie deklaruje wymagania.
+    pub try_exec: Option<String>,
+    /// `OnlyShowIn` — lista pulpitów, w których wpis ma się pokazywać (pusta = wszystkie).
+    pub only_show_in: Vec<String>,
+    /// `NotShowIn` — lista pulpitów, w których wpis ma być ukryty.
+    pub not_show_in: Vec<String>,
+    /// `DBusActivatable=true` — aplikacja startuje przez D-Bus (może nie mieć binarki).
+    pub dbus_activatable: bool,
+    /// Ścieżka pliku `.desktop` — pozwala uruchomić aplikację przez `gio launch`,
+    /// które obsługuje `Path=`, kody pól (`%u`) i aktywację D-Bus.
+    pub desktop_path: Option<PathBuf>,
+}
+
+impl DesktopApp {
+    /// Czy wpis warto pokazywać. Gdy deklaruje `TryExec`, program musi istnieć w `PATH`;
+    /// w przeciwnym razie sprawdzamy pierwszy człon `Exec` (aplikacje `DBusActivatable`
+    /// pomijamy — mogą nie mieć binarki i wystartować przez magistralę).
+    pub fn available(&self) -> bool {
+        if let Some(cmd) = &self.try_exec {
+            return command_in_path(cmd);
+        }
+        if self.dbus_activatable {
+            return true;
+        }
+        exec_is_runnable(&self.exec)
+    }
+
+    /// Czy wpis ma się pokazywać w pulpicie `desktop`.
+    ///
+    /// `OnlyShowIn` traktujemy jako **podpowiedź**, nie filtr: użytkownik chce mieć
+    /// w launcherze wszystkie aplikacje (m.in. narzędzia XFCE, z których korzysta
+    /// w Lunie). Respektujemy tylko `NotShowIn` — to jawne „nie uruchamiaj tutaj”.
+    pub fn visible_in(&self, desktop: &str) -> bool {
+        let has = |list: &[String]| list.iter().any(|s| s.eq_ignore_ascii_case(desktop));
+        !has(&self.not_show_in)
+    }
+}
+
+/// „Pośredniki”, których nie oceniamy po nazwie — uruchamiają dalej, co im podano.
+const EXEC_LAUNCHERS: &[&str] = &[
+    "env",
+    "sh",
+    "bash",
+    "dash",
+    "flatpak",
+    "gio",
+    "gtk-launch",
+    "exo-open",
+    "xdg-open",
+];
+
+/// Czy pierwszy człon polecenia `Exec` da się uruchomić.
+fn exec_is_runnable(exec: &str) -> bool {
+    let Some(first) = exec.split_whitespace().next() else {
+        return false;
+    };
+    let first = first.trim_matches('"').trim_matches('\'');
+    // Przypisania środowiska (`FOO=bar app`) i znane pośredniki — nie oceniamy.
+    if first.is_empty() || first.contains('=') || EXEC_LAUNCHERS.contains(&first) {
+        return true;
+    }
+    command_in_path(first)
+}
+
+/// Dzieli wartość listy `.desktop` (`A;B;C;`) na elementy.
+fn split_list(value: &str) -> Vec<String> {
+    value
+        .split(';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Czy `cmd` (bez argumentów) da się znaleźć i uruchomić.
+fn command_in_path(cmd: &str) -> bool {
+    let cmd = cmd.trim();
+    if cmd.is_empty() {
+        return false;
+    }
+    // Ścieżka jawna: wystarczy sprawdzić plik.
+    if cmd.contains('/') {
+        return Path::new(cmd).is_file();
+    }
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| {
+        let p = dir.join(cmd);
+        p.is_file()
+    })
 }
 
 /// Język z otoczenia (`LANG`/`LC_MESSAGES`), np. `pl` z `pl_PL.UTF-8`.
@@ -56,6 +148,10 @@ pub fn parse(content: &str, lang: Option<&str>) -> Option<DesktopApp> {
     let mut ty = None;
     let mut nodisplay = false;
     let mut hidden = false;
+    let mut try_exec: Option<String> = None;
+    let mut only_show_in: Vec<String> = Vec::new();
+    let mut not_show_in: Vec<String> = Vec::new();
+    let mut dbus_activatable = false;
     let mut categories = Vec::new();
 
     let name_key = lang.map(|l| format!("Name[{l}]"));
@@ -84,6 +180,10 @@ pub fn parse(content: &str, lang: Option<&str>) -> Option<DesktopApp> {
             "Exec" => exec = Some(v.to_owned()),
             "Icon" => icon = Some(v.to_owned()),
             "Terminal" => terminal = v.eq_ignore_ascii_case("true"),
+            "TryExec" => try_exec = Some(v.to_owned()),
+            "OnlyShowIn" => only_show_in = split_list(v),
+            "NotShowIn" => not_show_in = split_list(v),
+            "DBusActivatable" => dbus_activatable = v.eq_ignore_ascii_case("true"),
             "NoDisplay" => nodisplay = v.eq_ignore_ascii_case("true"),
             "Hidden" => hidden = v.eq_ignore_ascii_case("true"),
             "Categories" => {
@@ -113,6 +213,11 @@ pub fn parse(content: &str, lang: Option<&str>) -> Option<DesktopApp> {
         comment,
         terminal,
         categories,
+        try_exec,
+        only_show_in,
+        not_show_in,
+        dbus_activatable,
+        desktop_path: None,
     })
 }
 
@@ -120,6 +225,7 @@ pub fn parse(content: &str, lang: Option<&str>) -> Option<DesktopApp> {
 pub fn scan() -> Vec<DesktopApp> {
     let lang = current_lang();
     let mut seen: HashSet<String> = HashSet::new();
+    let mut seen_apps: HashSet<(String, String)> = HashSet::new();
     let mut apps = Vec::new();
 
     for dir in application_dirs() {
@@ -133,7 +239,19 @@ pub fn scan() -> Vec<DesktopApp> {
                 continue;
             }
             if let Ok(content) = std::fs::read_to_string(&path) {
-                if let Some(app) = parse(&content, lang.as_deref()) {
+                if let Some(mut app) = parse(&content, lang.as_deref()) {
+                    app.desktop_path = Some(path.clone());
+                    // Zgodnie ze specyfikacją: nie pokazujemy wpisów, których nie ma jak
+                    // uruchomić (`TryExec`/`Exec`). `OnlyShowIn` **nie** ukrywa wpisów —
+                    // launcher Luny ma pokazywać wszystkie zainstalowane aplikacje.
+                    if !app.available() || !app.visible_in("Luna") {
+                        continue;
+                    }
+                    // Ten sam program bywa opisany kilkoma plikami (np. `google-chrome`
+                    // i `com.google.Chrome`) — pokazujemy go raz.
+                    if !seen_apps.insert((app.name.to_lowercase(), app.exec.clone())) {
+                        continue;
+                    }
                     apps.push(app);
                 }
             }
@@ -181,29 +299,265 @@ fn desktop_files(dir: &Path, depth: usize) -> Vec<PathBuf> {
 
 /// Dobiera ikonę z pakietu Luny na podstawie kategorii/nazwy (heurystyka).
 pub fn icon_for(app: &DesktopApp) -> IconName {
-    let cats = app.categories.join(" ").to_lowercase();
-    let name = app.name.to_lowercase();
-    let has = |needle: &str| cats.contains(needle) || name.contains(needle);
+    let id = app
+        .desktop_path
+        .as_ref()
+        .and_then(|p| p.file_stem())
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    icon_for_hint(
+        id,
+        &app.name,
+        app.icon.as_deref(),
+        &app.categories,
+        &app.exec,
+    )
+}
 
-    if has("filemanager") || has("files") || name.contains("pliki") {
-        IconName::Files
-    } else if has("terminal") || has("console") || name.contains("terminal") {
-        IconName::Terminal
-    } else if has("audio") || has("video") || has("player") || has("music") {
-        IconName::Music
-    } else if has("browser") || has("network") || has("wifi") {
-        IconName::Wifi
-    } else if has("settings") || has("preferences") || has("system") {
-        IconName::Settings
-    } else if has("office") || has("texteditor") || has("editor") {
-        IconName::Edit
-    } else if has("game") {
-        IconName::Star
-    } else if has("graphics") || has("photography") {
-        IconName::Edit
-    } else {
-        IconName::App
+/// Wspólna heurystyka ikon dla launchera **i taskbara**.
+///
+/// Bierzemy wszystko, co może opisać aplikację: `app_id`, tytuł okna, nazwę ikony
+/// z `.desktop`, kategorie i polecenie. Kolejność reguł jest od najbardziej
+/// szczegółowych do ogólnych — dzięki temu „Network Settings” trafia w ustawienia,
+/// a nie w ikonę Wi-Fi.
+pub fn icon_for_hint(
+    app_id: &str,
+    title: &str,
+    icon: Option<&str>,
+    categories: &[String],
+    exec: &str,
+) -> IconName {
+    let hay = format!(
+        "{} {} {} {} {}",
+        app_id,
+        title,
+        icon.unwrap_or_default(),
+        categories.join(" "),
+        exec
+    )
+    .to_lowercase();
+    const RULES: &[(&[&str], IconName)] = &[
+        (
+            &[
+                "terminal",
+                "console",
+                "alacritty",
+                "kitty",
+                "foot",
+                "konsole",
+                "xterm",
+                "karton",
+            ],
+            IconName::Terminal,
+        ),
+        (
+            &[
+                "filemanager",
+                "nautilus",
+                "thunar",
+                "nemo",
+                "dolphin",
+                "pcmanfm",
+                "caja",
+                "files",
+                "pliki",
+                "katalog",
+            ],
+            IconName::Files,
+        ),
+        (
+            &[
+                "browser",
+                "firefox",
+                "chromium",
+                "chrome",
+                "brave",
+                "epiphany",
+                "falkon",
+                "opera",
+                "vivaldi",
+                "zen-browser",
+            ],
+            IconName::Globe,
+        ),
+        (
+            &["mail", "thunderbird", "evolution", "geary", "outlook"],
+            IconName::Mail,
+        ),
+        (
+            &[
+                "chat",
+                "discord",
+                "slack",
+                "telegram",
+                "signal",
+                "whatsapp",
+                "element",
+                "matrix",
+                "messenger",
+            ],
+            IconName::Chat,
+        ),
+        (
+            &["zed", "vscode", "code-insiders", "code-oss", "sublime"],
+            IconName::Code,
+        ),
+        (
+            &[
+                "mousepad",
+                "gedit",
+                "kate",
+                "texteditor",
+                "editor",
+                "edytor",
+                "notepad",
+            ],
+            IconName::Edit,
+        ),
+        (
+            &[
+                "image",
+                "photo",
+                "gimp",
+                "krita",
+                "inkscape",
+                "ristretto",
+                "eog",
+                "shotwell",
+                "darktable",
+            ],
+            IconName::Image,
+        ),
+        (
+            &[
+                "video",
+                "vlc",
+                "mpv",
+                "totem",
+                "celluloid",
+                "mplayer",
+                "youtube",
+            ],
+            IconName::Video,
+        ),
+        (
+            &[
+                "music",
+                "audio",
+                "spotify",
+                "rhythmbox",
+                "elisa",
+                "clementine",
+                "audacious",
+                "odtwarzacz",
+            ],
+            IconName::Music,
+        ),
+        (
+            &[
+                "document",
+                "office",
+                "writer",
+                "libreoffice",
+                "onlyoffice",
+                "evince",
+                "reader",
+                "pdf",
+            ],
+            IconName::Document,
+        ),
+        (
+            &[
+                "calculator",
+                "galculator",
+                "qalculate",
+                "kcalc",
+                "kalkulator",
+            ],
+            IconName::Calculator,
+        ),
+        (
+            &["game", "steam", "lutris", "heroic", "gry"],
+            IconName::Game,
+        ),
+        (
+            &[
+                "store",
+                "sklep",
+                "pamac",
+                "software",
+                "discover",
+                "synaptic",
+                "shop",
+                "karton-shop",
+            ],
+            IconName::Store,
+        ),
+        (
+            &[
+                "screenshot",
+                "screenshooter",
+                "flameshot",
+                "spectacle",
+                "zrzut",
+            ],
+            IconName::Screenshot,
+        ),
+        (&["printer", "print", "cups"], IconName::Printer),
+        (&["bluetooth", "blueman"], IconName::Bluetooth),
+        (
+            &[
+                "monitor",
+                "htop",
+                "btop",
+                "missioncenter",
+                "hardinfo",
+                "gparted",
+                "lmission",
+                "taskmanager",
+                "task manager",
+            ],
+            IconName::Monitor,
+        ),
+        (
+            &["archive", "file-roller", "xarchiver", "7z", "zip", "ark"],
+            IconName::Archive,
+        ),
+        (
+            &["clock", "zegar", "calendar", "kalendarz"],
+            IconName::Clock,
+        ),
+        (
+            &[
+                "settings",
+                "preferences",
+                "control",
+                "ustawienia",
+                "pavucontrol",
+                "nm-connection",
+                "luna.settings",
+                "xfce4-settings",
+            ],
+            IconName::Settings,
+        ),
+        (&["wifi", "wi-fi", "network", "nm-"], IconName::Wifi),
+        (
+            &["volume", "pipewire", "dźwięk", "dzwiek"],
+            IconName::Volume,
+        ),
+        (&["home", "katalog domowy"], IconName::Home),
+        (
+            &["help", "info", "about", "pomoc", "welcome"],
+            IconName::Info,
+        ),
+        (&["user", "account", "konta"], IconName::User),
+    ];
+    for (needles, icon) in RULES {
+        if needles.iter().any(|n| hay.contains(n)) {
+            return *icon;
+        }
     }
+    IconName::App
 }
 
 #[cfg(test)]
@@ -230,7 +584,28 @@ Categories=Network;WebBrowser;
         assert_eq!(app.exec, "firefox"); // %u usunięte
         assert!(!app.terminal);
         assert!(app.categories.contains(&"WebBrowser".to_owned()));
-        assert_eq!(icon_for(&app), IconName::Wifi);
+        assert_eq!(icon_for(&app), IconName::Globe);
+    }
+
+    #[test]
+    fn icon_hint_uses_app_id_and_icon_name() {
+        // Taskbar nie ma kategorii `.desktop`, ale ma `app_id` i tytuł.
+        assert_eq!(
+            icon_for_hint("org.mozilla.firefox", "Strona startowa", None, &[], ""),
+            IconName::Globe
+        );
+        assert_eq!(
+            icon_for_hint("dev.zed.Zed", "projekt — Zed", None, &[], ""),
+            IconName::Code
+        );
+        assert_eq!(
+            icon_for_hint("org.telegram.desktop", "Telegram", None, &[], ""),
+            IconName::Chat
+        );
+        assert_eq!(
+            icon_for_hint("com.spotify.Client", "Spotify", None, &[], ""),
+            IconName::Music
+        );
     }
 
     #[test]
@@ -265,6 +640,65 @@ Categories=Network;WebBrowser;
     }
 
     #[test]
+    fn reads_try_exec_and_availability() {
+        // Program, którego na pewno nie ma — wpis jest niedostępny.
+        let content = "[Desktop Entry]\nType=Application\nName=X\nExec=x\nTryExec=__luna_brak_tego_programu__\n";
+        let app = parse(content, None).unwrap();
+        assert_eq!(app.try_exec.as_deref(), Some("__luna_brak_tego_programu__"));
+        assert!(!app.available());
+
+        // `TryExec=sh` istnieje w PATH.
+        let sh = parse(
+            "[Desktop Entry]\nType=Application\nName=Z\nExec=z\nTryExec=sh\n",
+            None,
+        )
+        .unwrap();
+        assert!(sh.available());
+    }
+
+    #[test]
+    fn hides_entries_with_missing_exec_binary() {
+        // Tak wygląda wpis Chrome na tej maszynie: `Exec` na brakującą binarkę,
+        // bez `TryExec`.
+        let chrome = parse(
+            "[Desktop Entry]\nType=Application\nName=Chrome\nExec=/usr/bin/google-chrome-stable %U\n",
+            None,
+        )
+        .unwrap();
+        assert!(!chrome.available());
+
+        // Zwykłe polecenie z PATH — pokazujemy.
+        let plain = parse(
+            "[Desktop Entry]\nType=Application\nName=A\nExec=sh -c x\n",
+            None,
+        )
+        .unwrap();
+        assert!(plain.available());
+
+        // Pośredniki i przypisania środowiska — nie oceniamy, pokazujemy.
+        for exec in [
+            "flatpak run org.example.App",
+            "env GDK_BACKEND=x11 foo",
+            "exo-open --launch MailReader",
+        ] {
+            let content = format!("[Desktop Entry]\nType=Application\nName=B\nExec={exec}\n");
+            let app = parse(&content, None).unwrap();
+            assert!(app.available(), "powinno być dostępne: {exec}");
+        }
+    }
+
+    #[test]
+    fn only_show_in_is_a_hint_not_a_filter() {
+        // Narzędzia XFCE mają `OnlyShowIn=XFCE;` — w Lunie nadal mają być widoczne.
+        let content = "[Desktop Entry]\nType=Application\nName=Edytor\nExec=xfce4-settings-editor\nOnlyShowIn=XFCE;\n";
+        let app = parse(content, None).unwrap();
+        assert!(app.visible_in("Luna"));
+        // `NotShowIn` nadal ukrywa.
+        let hidden = "[Desktop Entry]\nType=Application\nName=X\nExec=x\nNotShowIn=Luna;\n";
+        assert!(!parse(hidden, None).unwrap().visible_in("Luna"));
+    }
+
+    #[test]
     fn icon_heuristics_cover_common_categories() {
         let mk = |cat: &str, name: &str| DesktopApp {
             name: name.into(),
@@ -277,6 +711,11 @@ Categories=Network;WebBrowser;
                 .filter(|s| !s.is_empty())
                 .map(String::from)
                 .collect(),
+            try_exec: None,
+            only_show_in: Vec::new(),
+            not_show_in: Vec::new(),
+            dbus_activatable: false,
+            desktop_path: None,
         };
         assert_eq!(
             icon_for(&mk("System;FileManager;", "Pliki")),
@@ -288,7 +727,28 @@ Categories=Network;WebBrowser;
         );
         assert_eq!(
             icon_for(&mk("AudioVideo;Player;", "Odtwarzacz")),
+            IconName::Video
+        );
+        assert_eq!(
+            icon_for(&mk("Audio;Music;Player;", "Odtwarzacz muzyki")),
             IconName::Music
+        );
+        assert_eq!(
+            icon_for(&mk("Office;Writer;", "Dokumenty")),
+            IconName::Document
+        );
+        assert_eq!(
+            icon_for(&mk("Graphics;Photography;", "Zdjęcia")),
+            IconName::Image
+        );
+        assert_eq!(icon_for(&mk("Game;", "Gra")), IconName::Game);
+        assert_eq!(
+            icon_for(&mk("System;Settings;", "Ustawienia")),
+            IconName::Settings
+        );
+        assert_eq!(
+            icon_for(&mk("Utility;Calculator;", "Kalkulator")),
+            IconName::Calculator
         );
         assert_eq!(icon_for(&mk("Utility;", "Costam")), IconName::App);
     }

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Luna — widgety
+Name[pl]=Luna — widgety
+Comment=Pełne demo Ustawień libLuny: sidebar, motywy, akcenty, zakładki, pliki, popovery
+Comment[pl]=Pełne demo Ustawień libLuny: sidebar, motywy, akcenty, zakładki, pliki, popovery
+Exec=luna-showcase
+Icon=luna
+Terminal=false
+Categories=Development;Settings;
+Keywords=luna;widgets;demo;libluna;

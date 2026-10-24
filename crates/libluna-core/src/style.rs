@@ -616,7 +616,7 @@ impl Metrics {
     pub const fn standard() -> Self {
         Self {
             headerbar: HeaderBarMetrics {
-                height: 46.0,
+                height: 38.0,
                 control: 30.0,
                 control_gap: 2.0,
             },

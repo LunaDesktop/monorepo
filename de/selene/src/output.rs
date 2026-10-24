@@ -8,13 +8,14 @@
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
-use libluna_core::{Color, Point, Rect, Size, ThemeSettings};
+use libluna_core::{Color, Point, Rect, Size, Theme, ThemeSettings};
 use libluna_platform::{run, AppConfig, Frame};
-use libluna_render::{Scene, SoftwareRenderer, TextRun};
+use libluna_render::{ImageData, Scene, SoftwareRenderer, TextEngine, TextRun};
+use libluna_widgets::{ControlsSide, HeaderBar, PaintCtx};
 
 use crate::drm::{DrmBackend, DrmError};
 use crate::input::{self, Events};
-use crate::monitors::Outputs;
+use crate::monitors::{layout_horizontal, OutputInfo, Outputs};
 use crate::state::{CursorModel, Overview, OverviewModel, Window, WindowModel, WorkspaceModel};
 use crate::sync::LockExt;
 
@@ -31,11 +32,15 @@ pub fn spawn(
     height: u32,
 ) {
     std::thread::spawn(move || {
+        // Tryb nested nie ma sprzętowej tablicy gamma — chowamy kafelek night lightu.
+        write_gamma_flag(false);
         let mut wake = wake;
         let config = AppConfig::new("Selene")
             .app_id("eu.paganlinux.Luna.Selene")
             .initial_size(width, height)
-            .settings(ThemeSettings::default());
+            .settings(ThemeSettings::load());
+        let theme = user_theme();
+        let text = TextEngine::system();
         let result = run(config, move |frame: &mut Frame| {
             // Zgłoś bieżący rozmiar monitora (okno może być zmieniane przez rodzica).
             {
@@ -62,6 +67,9 @@ pub fn spawn(
                 ov,
                 true,
                 None,
+                true,
+                &theme,
+                &text,
             );
             // Utrzymuj klatki — model okien zmienia się poza tą pętlą.
             frame.request_frame();
@@ -82,23 +90,58 @@ pub fn spawn(
 ///
 /// LightDM potrafi wystartować sesję Wayland, **zanim ubije greeter** (Xorg), który
 /// trzyma master DRM. Bez ponowień Selene od razu widzi `MasterBusy` i zostawia czarny
-/// ekran. Czekamy do ~5 s, aż greeter zwolni mastera.
+/// ekran.
+///
+/// Greeter oddaje master zwykle w ułamku sekundy, dlatego pierwsze próby są **gęste**
+/// (20 ms) — wcześniej każde opóźnienie było płacone w krokach po 100 ms, co dawało
+/// odczucie „panel wyskakuje po ~5 sekundach”. Po pół sekundy przechodzimy na 100 ms,
+/// żeby nie palić procesora bez potrzeby.
 fn open_drm_waiting() -> Result<DrmBackend, DrmError> {
-    // LightDM potrafi wystartować sesję, zanim greeter (Xorg) zwolni ekran — bywa, że
-    // master jest już wolny, ale CRTC-e jeszcze zajęte (modeset się nie udaje). Dlatego
-    // próbujemy przez ~5 s niezależnie od powodu (master/zasoby/modeset).
-    let mut last = DrmError::MasterBusy;
-    for attempt in 0..50 {
-        match DrmBackend::open() {
-            Ok(backend) => return Ok(backend),
-            Err(e) => last = e,
+    let stats = std::env::var("SELENE_STATS").is_ok();
+    let started = std::time::Instant::now();
+    let deadline = started + Duration::from_secs(15);
+    let mut attempt = 0u32;
+    loop {
+        let err = match DrmBackend::open() {
+            Ok(backend) => {
+                if stats && attempt > 0 {
+                    eprintln!(
+                        "selene/drm: przejęto ekran po {:.0} ms",
+                        started.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
+                return Ok(backend);
+            }
+            Err(e) => e,
+        };
+        if std::time::Instant::now() >= deadline {
+            return Err(err);
         }
-        if attempt == 0 && std::env::var("SELENE_STATS").is_ok() {
-            eprintln!("selene/drm: init nieudany ({last:?}) — czekam na zwolnienie ekranu…");
+        if attempt == 0 && stats {
+            eprintln!("selene/drm: init nieudany ({err:?}) — czekam na zwolnienie ekranu…");
         }
-        std::thread::sleep(Duration::from_millis(100));
+        let wait_ms = if attempt < 25 { 20 } else { 100 };
+        attempt += 1;
+        std::thread::sleep(Duration::from_millis(wait_ms));
     }
-    Err(last)
+}
+
+/// Informuje powłokę (plikiem w `$XDG_RUNTIME_DIR`), czy night light jest dostępny.
+fn write_gamma_flag(supported: bool) {
+    let Some(rt) = std::env::var_os("XDG_RUNTIME_DIR") else {
+        return;
+    };
+    let path = std::path::PathBuf::from(rt).join("luna-gamma");
+    let _ = std::fs::write(path, if supported { "1" } else { "0" });
+}
+
+/// Opóźnienie do limitu ~30 FPS w trybie oszczędzania (`None` = bez limitu).
+fn throttle_delay(power_saver: bool, elapsed: Duration) -> Option<Duration> {
+    if !power_saver {
+        return None;
+    }
+    const MIN: Duration = Duration::from_millis(33);
+    (elapsed < MIN).then(|| MIN - elapsed)
 }
 
 /// Uruchamia wątek wyjścia DRM/KMS — renderuje scenę do buforów i skanuje na monitorach.
@@ -110,6 +153,10 @@ pub fn spawn_drm(
     cursor: CursorModel,
     ws: WorkspaceModel,
     overview: OverviewModel,
+    screenshot: crate::state::ScreenshotModel,
+    night_light: crate::state::NightLightModel,
+    power_saver: crate::state::PowerSaverModel,
+    outputs: Outputs,
     ws_count: usize,
 ) {
     std::thread::spawn(move || {
@@ -133,6 +180,41 @@ pub fn spawn_drm(
             }
         };
         let infos = backend.outputs();
+        // Night light: sprawdzamy **realne** wsparcie CRTC dla tablicy gamma i od razu
+        // wgrywamy neutralną rampę (to zarazem test ioctla). Flaga w katalogu runtime
+        // mówi powłoce, czy kafelek „Tryb nocny” jest w ogóle dostępny.
+        let gamma_ok = backend.supports_night_light() && backend.set_night_light(0);
+        write_gamma_flag(gamma_ok);
+        if std::env::var("SELENE_STATS").is_ok() {
+            eprintln!(
+                "selene/drm: night light {}",
+                if gamma_ok {
+                    "dostępny (gamma LUT)"
+                } else {
+                    "niedostępny"
+                }
+            );
+        }
+        // **Faktyczne** tryby z modesetu trafiają do wspólnego modelu monitorów.
+        // Wcześniej model zostawał przy wyniku wczesnego `discover()`; gdy kernel
+        // zgłosił inny tryb (albo inne złącze), panel i okna miały złą geometrię,
+        // a drugi monitor potrafił dostać nie-natywną rozdzielczość.
+        {
+            let mut list: Vec<OutputInfo> = infos
+                .iter()
+                .map(|(name, w, h, hz)| OutputInfo {
+                    name: name.clone(),
+                    width: *w as i32,
+                    height: *h as i32,
+                    refresh_hz: *hz as i32,
+                    scale: 1,
+                    x: 0,
+                    y: 0,
+                })
+                .collect();
+            layout_horizontal(&mut list);
+            *outputs.lock_or_recover() = list;
+        }
         let sizes: Vec<(u32, u32)> = infos.iter().map(|(_, w, h, _)| (*w, *h)).collect();
         let origins: Vec<(f64, f64)> = {
             // Wyjścia ułożone poziomo (spójne z modelem monitorów).
@@ -161,15 +243,23 @@ pub fn spawn_drm(
             .map(|(w, h)| SoftwareRenderer::new(*w, *h))
             .collect();
         let bg = Color::from_rgba8(0x1e, 0x20, 0x28, 0xff);
+        // Motyw i silnik tekstu dla dekoracji (widget `HeaderBar` z libLuny).
+        // Bierzemy **motyw użytkownika** (jasny/ciemny, akcent, styl z pliku), a nie
+        // twarde `Theme::dark()` — inaczej pasek okna X11 wyglądał inaczej niż okno
+        // aplikacji libLuny. Co 2 s sprawdzamy plik ustawień, żeby zmiana motywu
+        // w demo odświeżyła też dekoracje bez wylogowania.
+        let mut theme = user_theme();
+        let mut theme_checked = std::time::Instant::now();
+        let text_engine = TextEngine::system();
 
         // Sprzętowy kursor: renderujemy raz obraz strzałki (ARGB) i odtąd poruszamy
         // tylko płaszczyzną kursora — ruch myszy nie przemalowuje sceny.
         let (cursor_rgba, cw, ch) = cursor_image();
         let mut hw_cursor = true;
         for i in 0..sizes.len() {
-            // Obraz startowy poza ekranem (nie mruga, nie chowamy osobno ioctlem);
-            // gdy sterownik nie umie kursora sprzętowego — zostaje programowy.
-            if !backend.set_cursor_image(i, &cursor_rgba, cw, ch, -1000, -1000) {
+            // Bezpieczna próba na (0, 0) i natychmiastowe ukrycie — uodparnia na
+            // sterowniki DRM odrzucające ujemne współrzędne w `MODE_CURSOR`.
+            if !backend.set_cursor_image(i, &cursor_rgba, cw, ch, 0, 0) || !backend.hide_cursor(i) {
                 hw_cursor = false;
             }
         }
@@ -179,8 +269,7 @@ pub fn spawn_drm(
                 libluna_i18n::tr("DRM hardware cursor unavailable; using software cursor")
             );
         }
-        // Obraz ustawiony → ruchy realizujemy samym `MOVE`.
-        let mut cursor_shown = vec![hw_cursor; sizes.len()];
+        let mut cursor_shown = vec![false; sizes.len()];
 
         // Diagnostyka (SELENE_STATS=1): fps i rozbicie czasu na render/present/wait_flip.
         let stats = std::env::var("SELENE_STATS").is_ok();
@@ -188,20 +277,80 @@ pub fn spawn_drm(
         let mut frames = 0u64;
         let (mut ms_render, mut ms_present, mut ms_wait) = (0.0f64, 0.0f64, 0.0f64);
         let mut report = std::time::Instant::now();
-        let mut last_sig: Option<u64> = None;
+        let mut last_sigs: Vec<Option<u64>> = vec![None; sizes.len()];
         let mut last_cur: Option<Point> = None;
+        let mut applied_night: Option<u8> = None;
+        let mut applied_power = false;
+        let mut last_present = std::time::Instant::now();
         loop {
+            // Motyw użytkownika mógł się zmienić (demo/Ustawienia) — odśwież, gdy inny.
+            if theme_checked.elapsed() >= Duration::from_secs(2) {
+                theme_checked = std::time::Instant::now();
+                let next = user_theme();
+                if next != theme {
+                    theme = next;
+                    // Wymuś pełny render (sygnatury nie zawierają kolorów motywu).
+                    for sig in last_sigs.iter_mut() {
+                        *sig = None;
+                    }
+                }
+            }
+            // Night light i oszczędzanie energii — zmiany z gniazda sterowania.
+            if gamma_ok {
+                let requested = night_light.load(std::sync::atomic::Ordering::Relaxed);
+                if applied_night != Some(requested) {
+                    applied_night = Some(requested);
+                    backend.set_night_light(requested);
+                    if stats {
+                        eprintln!("selene/drm: night light {requested}%");
+                    }
+                }
+            }
+            let power = power_saver.load(std::sync::atomic::Ordering::Relaxed);
+            if power != applied_power {
+                applied_power = power;
+                if stats {
+                    eprintln!(
+                        "selene/drm: power saver {}",
+                        if power { "on" } else { "off" }
+                    );
+                }
+            }
+            // Zrzut ekranu (Super+F12): kompozytor trzyma gotowe klatki każdego monitora,
+            // więc wystarczy je zapisać.
+            if screenshot.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                save_screenshots(&renderers, &infos);
+            }
             let cur = *cursor.lock_or_recover();
             let cur_ws = *ws.lock_or_recover();
             let ov = *overview.lock_or_recover();
 
-            // Sygnatura sceny nie zależy od kursora, gdy rysuje go sprzęt — dzięki temu
-            // samo przesunięcie myszy nie powoduje przemalowania sceny.
-            let sig = scene_signature(&model, cur_ws, ov, if hw_cursor { None } else { cur });
-            let scene_changed = last_sig != Some(sig);
             let cur_changed = last_cur != cur;
-            if !scene_changed && !cur_changed {
-                std::thread::sleep(Duration::from_millis(4));
+            let mut any_changed = false;
+            let mut changed = vec![false; sizes.len()];
+
+            for i in 0..sizes.len() {
+                let (w, h) = sizes[i];
+                let (ox, oy) = origins[i];
+                let sig = output_signature(
+                    &model,
+                    cur_ws,
+                    ov,
+                    if hw_cursor { None } else { cur },
+                    ox,
+                    oy,
+                    w as f64,
+                    h as f64,
+                );
+                if last_sigs[i] != Some(sig) {
+                    last_sigs[i] = Some(sig);
+                    changed[i] = true;
+                    any_changed = true;
+                }
+            }
+
+            if !any_changed && !cur_changed {
+                std::thread::sleep(Duration::from_millis(2));
                 continue;
             }
             last_cur = cur;
@@ -233,29 +382,56 @@ pub fn spawn_drm(
                 }
             }
 
-            if scene_changed {
-                last_sig = Some(sig);
+            if any_changed {
+                // Tryb oszczędzania: maksymalnie ~30 klatek/s (oszczędza CPU/GPU
+                // podczas animacji i przewijania; kursor sprzętowy pozostaje płynny).
+                if let Some(delay) = throttle_delay(power, last_present.elapsed()) {
+                    std::thread::sleep(delay);
+                }
+                last_present = std::time::Instant::now();
+                // Renderowanie monitorów **równolegle**: każdy ma własny bufor i scenę,
+                // więc na maszynie wielordzeniowej dwie klatki 1080p powstają w czasie
+                // jednej. Sekwencyjny render dwóch monitorów zjadał cały budżet klatki
+                // (7–10 ms każdy) i powłoka „zwalniała” do ~20 FPS.
+                let t_render = std::time::Instant::now();
+                let theme = &theme;
+                let text_engine = &text_engine;
+                std::thread::scope(|scope| {
+                    for (i, renderer) in renderers.iter_mut().enumerate() {
+                        if !changed[i] {
+                            continue;
+                        }
+                        let (w, h) = sizes[i];
+                        let (ox, oy) = origins[i];
+                        let model = &model;
+                        scope.spawn(move || {
+                            let mut scene = Scene::new();
+                            build_scene(
+                                &mut scene,
+                                Size::new(w as f64, h as f64),
+                                ox,
+                                oy,
+                                model,
+                                cur_ws,
+                                ws_count,
+                                ov,
+                                i == 0,
+                                cur,
+                                !hw_cursor,
+                                &theme,
+                                &text_engine,
+                            );
+                            renderer.draw(&scene, 1.0, bg);
+                        });
+                    }
+                });
+                ms_render += t_render.elapsed().as_secs_f64() * 1000.0;
+
+                let mut num_flips = 0;
                 for i in 0..sizes.len() {
-                    let (w, h) = sizes[i];
-                    let (ox, oy) = origins[i];
-
-                    let t = std::time::Instant::now();
-                    let mut scene = Scene::new();
-                    build_scene(
-                        &mut scene,
-                        Size::new(w as f64, h as f64),
-                        ox,
-                        oy,
-                        &model,
-                        cur_ws,
-                        ws_count,
-                        ov,
-                        i == 0,
-                        if hw_cursor { None } else { cur },
-                    );
-                    renderers[i].draw(&scene, 1.0, bg);
-                    ms_render += t.elapsed().as_secs_f64() * 1000.0;
-
+                    if !changed[i] {
+                        continue;
+                    }
                     let t = std::time::Instant::now();
                     let flipped = backend.present(i, renderers[i].data());
                     if !flipped && !flip_error_logged {
@@ -267,24 +443,29 @@ pub fn spawn_drm(
                     }
                     ms_present += t.elapsed().as_secs_f64() * 1000.0;
 
-                    // Czekamy na flip tylko, gdy został zakolejkowany (inaczej `read`
-                    // mógłby zablokować się na zawsze).
                     if flipped {
-                        let t = std::time::Instant::now();
-                        backend.wait_flip();
-                        ms_wait += t.elapsed().as_secs_f64() * 1000.0;
+                        num_flips += 1;
                     }
                 }
+
+                // Czekamy równolegle na flipy zakolejkowane na monitorach
+                for _ in 0..num_flips {
+                    let t = std::time::Instant::now();
+                    backend.wait_flip();
+                    ms_wait += t.elapsed().as_secs_f64() * 1000.0;
+                }
+
                 frames += 1;
                 if stats && report.elapsed().as_secs_f64() >= 2.0 {
                     let secs = report.elapsed().as_secs_f64();
-                    let per_frame = (frames * sizes.len() as u64).max(1) as f64;
+                    let frames_f = frames.max(1) as f64;
+                    let per_monitor = frames_f * sizes.len() as f64;
                     eprintln!(
-                        "selene/drm: {:.1} klatek/s | render {:.2} ms, present {:.2} ms, wait_flip {:.2} ms",
+                        "selene/drm: {:.1} klatek/s | render {:.2} ms/klatke, present {:.2} ms, wait_flip {:.2} ms",
                         frames as f64 / secs,
-                        ms_render / per_frame,
-                        ms_present / per_frame,
-                        ms_wait / per_frame
+                        ms_render / frames_f,
+                        ms_present / per_monitor.max(1.0),
+                        ms_wait / per_monitor.max(1.0)
                     );
                     frames = 0;
                     ms_render = 0.0;
@@ -295,6 +476,76 @@ pub fn spawn_drm(
             }
         }
     });
+}
+
+/// Zapisuje bieżące klatki (po jednej na monitor) jako PNG — obsługa `Super+F12`.
+pub fn save_screenshots(renderers: &[SoftwareRenderer], infos: &[(String, u32, u32, u32)]) {
+    let dir = screenshot_dir();
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    for (i, renderer) in renderers.iter().enumerate() {
+        let name = infos
+            .get(i)
+            .map(|(n, _, _, _)| n.as_str())
+            .unwrap_or("ekran");
+        let path = dir.join(format!("luna-{stamp}-{name}.png"));
+        match renderer.encode_png() {
+            Some(png) => match std::fs::write(&path, png) {
+                Ok(()) => eprintln!("selene: zrzut ekranu: {}", path.display()),
+                Err(e) => eprintln!("selene: nie udało się zapisać zrzutu: {e}"),
+            },
+            None => eprintln!("selene: nie udało się zakodować zrzutu"),
+        }
+    }
+}
+
+/// Katalog na zrzuty: `XDG_PICTURES_DIR` → `~/.config/user-dirs.dirs` → `$HOME/Pictures`
+/// (oraz polskie `Obrazy`) → `/tmp`.
+fn screenshot_dir() -> std::path::PathBuf {
+    let mut pictures = std::env::var("XDG_PICTURES_DIR")
+        .ok()
+        .filter(|d| !d.is_empty());
+    // Wiele sesji nie eksportuje `XDG_PICTURES_DIR`; użytkownik ma je w `user-dirs.dirs`.
+    if pictures.is_none() {
+        if let Some(home) = std::env::var_os("HOME") {
+            let cfg = std::path::PathBuf::from(&home)
+                .join(".config")
+                .join("user-dirs.dirs");
+            if let Ok(text) = std::fs::read_to_string(cfg) {
+                for line in text.lines() {
+                    let line = line.trim();
+                    if let Some(rest) = line.strip_prefix("XDG_PICTURES_DIR=") {
+                        let value = rest
+                            .trim()
+                            .trim_matches('"')
+                            .replace("$HOME", &home.to_string_lossy());
+                        if !value.is_empty() {
+                            pictures = Some(value);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some(p) = pictures {
+        candidates.push(p);
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = std::path::PathBuf::from(home);
+        candidates.push(home.join("Pictures").to_string_lossy().into_owned());
+        candidates.push(home.join("Obrazy").to_string_lossy().into_owned());
+    }
+    for dir in candidates {
+        let p = std::path::PathBuf::from(dir).join("Screenshots");
+        if std::fs::create_dir_all(&p).is_ok() {
+            return p;
+        }
+    }
+    std::path::PathBuf::from("/tmp")
 }
 
 /// Obraz kursora (strzałka) w RGBA8 — do płaszczyzny kursora DRM.
@@ -308,6 +559,63 @@ fn cursor_image() -> (Vec<u8>, u32, u32) {
     (renderer.data().to_vec(), w, h)
 }
 
+/// Sygnatura sceny dla konkretnego monitora — pozwala pominąć render monitora, na którym nic się nie zmieniło.
+fn output_signature(
+    model: &WindowModel,
+    current_ws: usize,
+    overview: Overview,
+    cursor: Option<Point>,
+    ox: f64,
+    oy: f64,
+    ow: f64,
+    oh: f64,
+) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut mix = |v: u64| {
+        h ^= v;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    };
+    mix(current_ws as u64);
+    mix(u64::from(overview.on));
+    if let Some((slot, (px, py))) = overview.drag {
+        mix(slot as u64);
+        mix(px.to_bits());
+        mix(py.to_bits());
+    }
+    let mon_rect = Rect::from_xywh(ox, oy, ow, oh);
+    {
+        let windows = model.lock_or_recover();
+        for w in windows.iter() {
+            if !w.mapped || w.minimized || !w.in_workspace(current_ws) {
+                continue;
+            }
+            if !w.outer().intersects(&mon_rect) {
+                continue;
+            }
+            mix(w.x.to_bits());
+            mix(w.y.to_bits());
+            mix(w.z as u64);
+            mix(w.width as u64);
+            mix(w.height as u64);
+            mix(u64::from(w.mapped) | (u64::from(w.minimized) << 1) | (u64::from(w.layer) << 2));
+            // Pasek tytułu, pełny ekran, popup i tytuł zmieniają wygląd bez zmiany geometrii.
+            mix(u64::from(w.ssd) | (u64::from(w.fullscreen) << 1) | (u64::from(w.popup) << 2));
+            mix(w.title.as_bytes().iter().fold(0u64, |acc, b| {
+                acc.wrapping_mul(31).wrapping_add(u64::from(*b))
+            }));
+            mix(std::sync::Arc::as_ptr(&w.data) as u64);
+        }
+    }
+    if let Some(c) = cursor {
+        if mon_rect.contains(c) {
+            mix(c.x.to_bits());
+            mix(c.y.to_bits());
+        }
+    }
+    h
+}
+
+#[allow(dead_code)]
 /// Sygnatura sceny (okna + kursor + przestrzeń + podgląd) — do wykrywania zmian.
 fn scene_signature(
     model: &WindowModel,
@@ -336,7 +644,13 @@ fn scene_signature(
             mix(w.z as u64);
             mix(w.width as u64);
             mix(w.height as u64);
+            mix(w.image_offset.0.to_bits());
+            mix(w.image_offset.1.to_bits());
             mix(u64::from(w.mapped) | (u64::from(w.minimized) << 1) | (u64::from(w.layer) << 2));
+            mix(u64::from(w.ssd) | (u64::from(w.fullscreen) << 1) | (u64::from(w.popup) << 2));
+            mix(w.title.as_bytes().iter().fold(0u64, |acc, b| {
+                acc.wrapping_mul(31).wrapping_add(u64::from(*b))
+            }));
             mix(std::sync::Arc::as_ptr(&w.data) as u64);
         }
     }
@@ -345,6 +659,15 @@ fn scene_signature(
         mix(c.y.to_bits());
     }
     h
+}
+
+/// Motyw użytkownika dla dekoracji okien (`~/.config/luna/theme.conf` + styl z pliku).
+///
+/// Dzięki temu pasek SSD (okna X11 i klienci negocjujący `server_side`) ma dokładnie
+/// ten sam wygląd co `HeaderBar` w aplikacjach libLuny — jasny/ciemny, akcent i styl.
+fn user_theme() -> Theme {
+    let system_dark = libluna_core::appearance::system_dark();
+    ThemeSettings::load().resolve_themed(system_dark)
 }
 
 /// Buduje scenę okien w rozmiarze wyjścia, przesuniętą o `(ox, oy)` (origin monitora).
@@ -360,16 +683,24 @@ fn build_scene(
     overview: Overview,
     _is_primary: bool,
     cursor: Option<Point>,
+    show_cursor: bool,
+    theme: &Theme,
+    text: &TextEngine,
 ) {
     let sh = |r: Rect| r.offset(-ox, -oy);
     scene.clear();
-    // Tło pulpitu: pionowy gradient (płaskie tło wyglądało jak demo).
-    fill_vgradient(
-        scene,
-        Rect::from_size(size),
-        Color::from_rgba8(0x23, 0x28, 0x3a, 0xff),
-        Color::from_rgba8(0x0f, 0x11, 0x18, 0xff),
-    );
+    // Tło pulpitu: tapeta z `assets/branding` (gradient zostaje jako zapas).
+    match wallpaper_for(size.width.max(1.0) as u32, size.height.max(1.0) as u32) {
+        Some(img) => {
+            scene.background(img);
+        }
+        None => fill_vgradient(
+            scene,
+            Rect::from_size(size),
+            Color::from_rgba8(0x23, 0x28, 0x3a, 0xff),
+            Color::from_rgba8(0x0f, 0x11, 0x18, 0xff),
+        ),
+    }
 
     {
         let windows = model.lock_or_recover();
@@ -379,61 +710,42 @@ fn build_scene(
             if !w.mapped || w.minimized || !w.in_workspace(current_ws) {
                 continue;
             }
-            // Tło treści tylko dla zwykłych okien — powierzchnie warstwowe (panele)
-            // bywają przezroczyste, więc nie zakrywamy ich czernią.
-            if !w.layer {
-                scene.fill_rect(sh(w.content()), Color::from_rgba8(0x00, 0x00, 0x00, 0xff));
-            }
-            // Treść okna (bufor klienta).
-            scene.image(sh(w.content()), w.data.clone());
-            // Dekoracja tylko dla topleveli (popupy i panele jej nie mają).
-            if !w.popup && !w.layer {
-                scene.fill_rect(sh(w.titlebar()), Color::from_rgba8(0x2c, 0x2f, 0x38, 0xff));
-                scene.text(
-                    TextRun::new(Point::new(w.x - ox + 10.0, w.y - oy + 20.0), &w.title, 13.0)
-                        .with_color(Color::from_rgba8(0xee, 0xee, 0xee, 0xff)),
-                );
-                let glyph = Color::from_rgba8(0xd0, 0xd0, 0xd0, 0xff);
-                let shift = |p: Point| Point::new(p.x - ox, p.y - oy);
-                // Zamknięcie — krzyżyk.
-                let c = shift(w.close_rect().center());
-                scene.stroke_line(
-                    Point::new(c.x - 4.0, c.y - 4.0),
-                    Point::new(c.x + 4.0, c.y + 4.0),
-                    1.6,
-                    glyph,
-                );
-                scene.stroke_line(
-                    Point::new(c.x + 4.0, c.y - 4.0),
-                    Point::new(c.x - 4.0, c.y + 4.0),
-                    1.6,
-                    glyph,
-                );
-                // Maksymalizacja — kwadrat.
-                let m = shift(w.maximize_rect().center());
-                scene.stroke_rounded_rect(
-                    Rect::from_xywh(m.x - 4.0, m.y - 4.0, 8.0, 8.0),
-                    0.0,
-                    1.4,
-                    glyph,
-                );
-                // Minimalizacja — kreska.
-                let n = shift(w.minimize_rect().center());
-                scene.stroke_line(
-                    Point::new(n.x - 4.0, n.y + 3.0),
-                    Point::new(n.x + 4.0, n.y + 3.0),
-                    1.6,
-                    glyph,
-                );
-            }
-            // Obramowanie całego okna (tylko zwykłe okna).
-            if !w.layer {
-                scene.stroke_rounded_rect(
-                    sh(w.outer()),
-                    6.0,
-                    1.0,
-                    Color::from_rgba8(0x50, 0x54, 0x60, 0xff),
-                );
+            // Tło treści: **nie malujemy czerni** pod buforem klienta. Bufory bywają
+            // częściowo przezroczyste (cienie i zaokrąglenia CSD w GTK), a czarne tło
+            // przeświecało przez nie jako ramka wokół okna.
+            // `buffer_rect()` uwzględnia cienie CSD (`set_window_geometry`) — bufor
+            // jest większy od widocznego okna i musi być rysowany z przesunięciem.
+            scene.image(sh(w.buffer_rect()), w.data.clone());
+            // Pasek tytułu rysujemy **tylko** oknom z naszym SSD (`w.ssd`). Klienty
+            // z własnymi dekoracjami (GTK/libadwaita, CSD) nie mają `ssd`, a wcześniej
+            // rysowaliśmy im mimo to tytuł i przyciski okna — lewitowały nad treścią.
+            if w.ssd {
+                // Dokładnie ten sam widget, którego używają aplikacje libLuny
+                // (`libluna_widgets::HeaderBar`) — dzięki temu dekoracje kompozytora
+                // i aplikacji są identyczne (tło, typografia, kontrolki, odstępy).
+                let bar = sh(w.titlebar());
+                let mut ctx = PaintCtx::new(scene, theme, text);
+                // Podświetlenie kontrolki pod kursorem — bez tego pasek SSD zachowywał
+                // się „martwo” w porównaniu z oknami libLuny (tam hover działa).
+                let hovered = cursor.and_then(|c| {
+                    let p = Point::new(c.x - ox, c.y - oy);
+                    if bar.contains(p) {
+                        HeaderBar::new().control_at(bar, theme, p)
+                    } else {
+                        None
+                    }
+                });
+                let mut header = HeaderBar::new()
+                    .title(w.title.clone())
+                    .controls(ControlsSide::Right);
+                // Dopasuj kolor paska do górnej części okna (jeśli bufor ma kryjące piksele).
+                if let Some((bg, fg)) = crate::decoration::tint_from_image(&w.data) {
+                    header = header.tinted(bg, fg);
+                }
+                header.paint(&mut ctx, bar, hovered);
+                // **Bez** własnej ramki wokół całego okna — libLuna rysuje tylko pasek
+                // (z własną linią pod nim). Dodatkowy `stroke` wyglądał jak obca ramka
+                // od innego środowiska, zwłaszcza na oknach X11.
             }
         }
     }
@@ -453,7 +765,7 @@ fn build_scene(
     }
 
     // Kursor rysuje ten monitor, na którym leży (tryb DRM — nikt go za nas nie narysuje).
-    if let Some(c) = cursor {
+    if let Some(c) = cursor.filter(|_| show_cursor) {
         let (cx, cy) = (c.x - ox, c.y - oy);
         if cx >= 0.0 && cy >= 0.0 && cx < size.width && cy < size.height {
             draw_cursor(scene, Point::new(cx, cy));
@@ -462,6 +774,48 @@ fn build_scene(
 }
 
 /// Wypełnia prostokąt pionowym gradientem (pasami — tanie, a tło nie jest płaskie).
+/// Tapeta pulpitu (z `assets/branding`), przeskalowana „cover” do rozmiaru wyjścia.
+///
+/// Skalowanie robimy **raz** na rozmiar i trzymamy w cache — w pętli renderowania
+/// idzie wtedy tani blit 1:1, a nie skalowanie pełnego ekranu co klatkę.
+fn wallpaper_for(w: u32, h: u32) -> Option<std::sync::Arc<ImageData>> {
+    let (w, h) = (w.max(1), h.max(1));
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<Vec<((u32, u32), std::sync::Arc<ImageData>)>>,
+    > = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    let mut guard = cache.lock_or_recover();
+    if let Some((_, img)) = guard.iter().find(|((cw, ch), _)| *cw == w && *ch == h) {
+        return Some(std::sync::Arc::clone(img));
+    }
+    let src = wallpaper_source()?;
+    let img = std::sync::Arc::new(libluna_render::wallpaper::cover(src, w, h));
+    guard.push(((w, h), std::sync::Arc::clone(&img)));
+    Some(img)
+}
+
+/// Dekoduje tapetę raz na proces. Podmiana: `SELENE_WALLPAPER=/ścieżka.png`.
+/// Wyłączenie (powrót do gradientu): `SELENE_NO_WALLPAPER=1`.
+fn wallpaper_source() -> Option<&'static ImageData> {
+    static SRC: std::sync::OnceLock<Option<ImageData>> = std::sync::OnceLock::new();
+    SRC.get_or_init(|| {
+        if std::env::var_os("SELENE_NO_WALLPAPER").is_some() {
+            return None;
+        }
+        if let Ok(path) = std::env::var("SELENE_WALLPAPER") {
+            if let Ok(bytes) = std::fs::read(&path) {
+                if let Some(img) = libluna_render::wallpaper::decode_png(&bytes) {
+                    return Some(img);
+                }
+            }
+        }
+        libluna_render::wallpaper::decode_png(include_bytes!(
+            "../../../assets/branding/paganlinux.png"
+        ))
+    })
+    .as_ref()
+}
+
 fn fill_vgradient(scene: &mut Scene, rect: Rect, top: Color, bottom: Color) {
     const BANDS: usize = 64;
     let h = rect.height() / BANDS as f64;
@@ -590,6 +944,218 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "generuje podglad do docs/images (uruchom recznie)"]
+    fn render_desktop_preview() {
+        use std::sync::{Arc, Mutex};
+        let model: WindowModel = Arc::new(Mutex::new(Vec::new()));
+        let mut scene = Scene::new();
+        build_scene(
+            &mut scene,
+            Size::new(1920.0, 1080.0),
+            0.0,
+            0.0,
+            &model,
+            0,
+            1,
+            Overview::default(),
+            true,
+            None,
+            true,
+            &Theme::dark(),
+            &TextEngine::none(),
+        );
+        let mut renderer = SoftwareRenderer::new(1920, 1080);
+        renderer.draw(&scene, 1.0, Color::from_rgba8(0x1e, 0x20, 0x28, 0xff));
+        let png = renderer.encode_png().expect("PNG");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/images/luna-desktop.png"
+        );
+        std::fs::write(path, png).expect("zapis PNG");
+        println!("saved {path}");
+    }
+
+    #[test]
+    fn power_saver_caps_presentation_at_30_fps() {
+        assert_eq!(throttle_delay(false, Duration::from_millis(5)), None);
+        assert_eq!(
+            throttle_delay(true, Duration::from_millis(10)),
+            Some(Duration::from_millis(23))
+        );
+        assert_eq!(throttle_delay(true, Duration::from_millis(40)), None);
+    }
+
+    #[test]
+    fn desktop_background_is_the_wallpaper() {
+        use std::sync::{Arc, Mutex};
+        let model: WindowModel = Arc::new(Mutex::new(Vec::new()));
+        let mut scene = Scene::new();
+        build_scene(
+            &mut scene,
+            Size::new(320.0, 180.0),
+            0.0,
+            0.0,
+            &model,
+            0,
+            1,
+            Overview::default(),
+            true,
+            None,
+            true,
+            &Theme::dark(),
+            &TextEngine::none(),
+        );
+        // Pierwsze polecenie to tło pulpitu — tapeta przeskalowana dokładnie do rozmiaru
+        // wyjścia (renderer kopiuje ją wprost), a nie gradient z 64 pasów.
+        match &scene.commands()[0] {
+            libluna_render::DrawCommand::Background { data } => {
+                assert_eq!((data.width, data.height), (320, 180));
+            }
+            other => panic!("oczekiwano tapety, a jest {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ssd_header_highlights_hovered_close_like_libluna() {
+        use libluna_render::DrawCommand;
+        use std::sync::{Arc, Mutex};
+        let data = Arc::new(ImageData::new(400, 300, vec![0u8; 400 * 300 * 4]));
+        let windows = vec![Window {
+            x: 0.0,
+            y: 0.0,
+            width: 400,
+            height: 300,
+            image_offset: (0.0, 0.0),
+            z: 1,
+            title: "Test".to_owned(),
+            popup: false,
+            layer: false,
+            mapped: true,
+            workspace: 0,
+            input: None,
+            input_capture: false,
+            minimized: false,
+            maximized: false,
+            fullscreen: false,
+            ssd: true,
+            saved: None,
+            data,
+        }];
+        let model: WindowModel = Arc::new(Mutex::new(windows));
+        let theme = Theme::light();
+        let has_error_fill = |scene: &Scene| {
+            scene.commands().iter().any(|c| {
+                matches!(
+                    c,
+                    DrawCommand::FillRoundedRect { color, .. } if *color == theme.colors.error
+                )
+            })
+        };
+        // Środek kontrolki „zamknij”: szerokość 400, pad 6, bok 30.
+        let close = Point::new(400.0 - 6.0 - 30.0 + 15.0, 23.0);
+        let mut scene = Scene::new();
+        build_scene(
+            &mut scene,
+            Size::new(800.0, 600.0),
+            0.0,
+            0.0,
+            &model,
+            0,
+            1,
+            Overview::default(),
+            true,
+            Some(close),
+            false,
+            &theme,
+            &TextEngine::none(),
+        );
+        assert!(
+            has_error_fill(&scene),
+            "hover na „zamknij” powinien dać czerwone tło jak HeaderBar libLuny"
+        );
+
+        // Poza kontrolkami — brak podświetlenia.
+        let mut scene = Scene::new();
+        build_scene(
+            &mut scene,
+            Size::new(800.0, 600.0),
+            0.0,
+            0.0,
+            &model,
+            0,
+            1,
+            Overview::default(),
+            true,
+            Some(Point::new(100.0, 23.0)),
+            false,
+            &theme,
+            &TextEngine::none(),
+        );
+        assert!(!has_error_fill(&scene));
+    }
+
+    #[test]
+    fn ssd_header_takes_color_from_window_content() {
+        use libluna_render::DrawCommand;
+        use std::sync::{Arc, Mutex};
+        // Ciemny, kryjący pasek narzędzi w górnych 28 px → pasek SSD w tym samym kolorze.
+        let (w, h) = (400u32, 300u32);
+        let mut rgba = vec![0u8; (w * h * 4) as usize];
+        for y in 0..28u32 {
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                rgba[i..i + 4].copy_from_slice(&[0x11, 0x22, 0x33, 0xff]);
+            }
+        }
+        let model: WindowModel = Arc::new(Mutex::new(vec![Window {
+            x: 0.0,
+            y: 0.0,
+            width: 400,
+            height: 300,
+            image_offset: (0.0, 0.0),
+            z: 1,
+            title: "Test".to_owned(),
+            popup: false,
+            layer: false,
+            mapped: true,
+            workspace: 0,
+            input: None,
+            input_capture: false,
+            minimized: false,
+            maximized: false,
+            fullscreen: false,
+            ssd: true,
+            saved: None,
+            data: Arc::new(ImageData::new(w, h, rgba)),
+        }]));
+        let mut scene = Scene::new();
+        build_scene(
+            &mut scene,
+            Size::new(800.0, 600.0),
+            0.0,
+            0.0,
+            &model,
+            0,
+            1,
+            Overview::default(),
+            true,
+            None,
+            false,
+            &Theme::dark(),
+            &TextEngine::none(),
+        );
+        let tint = Color::from_rgba8(0x11, 0x22, 0x33, 0xff);
+        assert!(
+            scene.commands().iter().any(|c| matches!(
+                c,
+                DrawCommand::FillRect { rect, color }
+                    if *color == tint && rect.y() == 0.0 && rect.height() == crate::state::TITLEBAR
+            )),
+            "pasek SSD powinien przyjąć kolor górnej części treści okna"
+        );
+    }
+
+    #[test]
     #[ignore = "benchmark reczny"]
     fn bench_1080p_frame() {
         use std::sync::{Arc, Mutex};
@@ -612,6 +1178,9 @@ mod tests {
                 Overview::default(),
                 true,
                 Some(Point::new(100.0, 100.0)),
+                true,
+                &Theme::dark(),
+                &TextEngine::none(),
             );
             renderer.draw(&scene, 1.0, bg);
         }
@@ -636,6 +1205,7 @@ mod tests {
             y: 0.0,
             width: 1920,
             height: 680,
+            image_offset: (0.0, 0.0),
             z: 1_000_000,
             title: String::new(),
             popup: false,
@@ -643,9 +1213,11 @@ mod tests {
             mapped: true,
             workspace: 0,
             input: None,
+            input_capture: false,
             minimized: false,
             maximized: false,
             fullscreen: false,
+            ssd: true,
             saved: None,
             data,
         }];
@@ -668,11 +1240,84 @@ mod tests {
                 Overview::default(),
                 true,
                 Some(Point::new(100.0, 100.0)),
+                true,
+                &Theme::dark(),
+                &TextEngine::none(),
             );
             renderer.draw(&scene, 1.0, bg);
         }
         println!(
             "render 1080p + panel 1920x680: {:.2} ms/klatke",
+            t.elapsed().as_secs_f64() * 1000.0 / n as f64
+        );
+    }
+
+    #[test]
+    #[ignore = "benchmark reczny"]
+    fn bench_sparse_panel() {
+        use std::sync::{Arc, Mutex};
+        use std::time::Instant;
+        let (w, h) = (1920u32, 680u32);
+        let mut rgba = vec![0u8; (w * h * 4) as usize];
+        let mut fill = |x0: u32, y0: u32, x1: u32, y1: u32| {
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let i = ((y * w + x) * 4) as usize;
+                    rgba[i..i + 4].copy_from_slice(&[30, 30, 30, 255]);
+                }
+            }
+        };
+        // Pasek na całą szerokość + launcher 720×600 (reszta przezroczysta).
+        fill(0, 0, w, 48);
+        fill(600, 72, 1320, 672);
+        let data = Arc::new(ImageData::new(w, h, rgba).with_sparse(true));
+        let windows = vec![Window {
+            x: 0.0,
+            y: 0.0,
+            width: w as i32,
+            height: h as i32,
+            image_offset: (0.0, 0.0),
+            z: 1_000_000,
+            title: String::new(),
+            popup: false,
+            layer: true,
+            mapped: true,
+            workspace: 0,
+            input: None,
+            input_capture: false,
+            minimized: false,
+            maximized: false,
+            fullscreen: false,
+            ssd: true,
+            saved: None,
+            data,
+        }];
+        let model: WindowModel = Arc::new(Mutex::new(windows));
+        let bg = Color::from_rgba8(0x1e, 0x20, 0x28, 0xff);
+        let mut renderer = SoftwareRenderer::new(1920, 1080);
+        let n = 20;
+        let t = Instant::now();
+        for _ in 0..n {
+            let mut scene = Scene::new();
+            build_scene(
+                &mut scene,
+                Size::new(1920.0, 1080.0),
+                0.0,
+                0.0,
+                &model,
+                0,
+                1,
+                Overview::default(),
+                true,
+                Some(Point::new(100.0, 100.0)),
+                true,
+                &Theme::dark(),
+                &TextEngine::none(),
+            );
+            renderer.draw(&scene, 1.0, bg);
+        }
+        println!(
+            "render 1080p + sparse panel: {:.2} ms/klatke",
             t.elapsed().as_secs_f64() * 1000.0 / n as f64
         );
     }

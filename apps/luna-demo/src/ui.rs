@@ -27,6 +27,8 @@ const ROW_H: f64 = 56.0;
 const ABOUT_ENTRY: usize = 5;
 /// Indeks pozycji „Styl” w menu „☰” (otwiera wybór stylu).
 const STYLE_ENTRY: usize = 4;
+/// Pozycja „Widgety” w sidebarze — pokazuje pełną galerię komponentów.
+pub const WIDGETS_NAV: usize = 7;
 
 /// Domyślna szerokość paska bocznego.
 pub const DEFAULT_SIDEBAR_W: f64 = 220.0;
@@ -73,6 +75,8 @@ pub struct Demo {
     pub pending_close: bool,
     pub pending_minimize: bool,
     pub pending_maximize: bool,
+    /// Przeciąganie okna za pasek tytułu (CSD).
+    pub pending_move: bool,
     /// Otwarty popover i podświetlona pozycja.
     pub popover: Option<Popover>,
     pub popover_hover: Option<usize>,
@@ -133,6 +137,7 @@ impl Default for Demo {
             pending_close: false,
             pending_minimize: false,
             pending_maximize: false,
+            pending_move: false,
             popover: None,
             popover_hover: None,
             tabs: {
@@ -240,7 +245,13 @@ pub fn make_nav() -> NavList {
         NavEntry::Section(tr("Advanced")),
         NavEntry::Item(tr("Network")),
         NavEntry::Item(tr("System")),
+        NavEntry::Item(tr("Widgets")),
     ])
+}
+
+/// Czy w sidebarze wybrana jest strona „Widgety” (galeria komponentów).
+pub fn is_gallery(demo: &Demo) -> bool {
+    demo.nav_selected == Some(WIDGETS_NAV)
 }
 
 /// Pozycje menu „☰" (aktualnie przetłumaczone).
@@ -653,6 +664,20 @@ pub fn handle_events(
         .set_content_height(items.content_height(lay.items, theme));
 
     for event in events {
+        if std::env::var("LUNA_DEBUG_INPUT").is_ok() {
+            match event {
+                Event::PointerButton(b) => eprintln!(
+                    "demo: button {:?} {:?} at ({:.1},{:.1}) control={:?}",
+                    b.button,
+                    b.state,
+                    b.position.x,
+                    b.position.y,
+                    header.control_at(header_rect, theme, b.position)
+                ),
+                Event::Window(w) => eprintln!("demo: window {w:?}"),
+                _ => {}
+            }
+        }
         match event {
             Event::PointerButton(pe) if pe.button == PointerButton::Left => {
                 let p = pe.position;
@@ -780,6 +805,19 @@ pub fn handle_events(
                             demo.popover = Some(Popover::Language);
                         } else if lay.sidebar_handle.contains(p) {
                             demo.dragging_sidebar = true;
+                        } else if lay.sidebar_button.contains(p) {
+                            // Przycisk „pokaż/ukryj sidebar” leży w pasku tytułu —
+                            // musi mieć pierwszeństwo przed obszarem przeciągania okna.
+                            demo.sidebar_visible = !demo.sidebar_visible;
+                        } else if header_rect.contains(p) {
+                            // Pasek tytułu poza kontrolkami i przyciskami — przeciąganie okna.
+                            demo.pending_move = true;
+                        } else if is_gallery(demo) {
+                            // Na stronie galerii jedynymi aktywnymi elementami są
+                            // sidebar (zmiana strony) i pasek tytułu.
+                            if let Some(i) = nav.index_at(lay.sidebar, p, theme) {
+                                demo.nav_selected = Some(i);
+                            }
                         } else if let Some(i) = theme_vs.index_at(lay.theme_switcher, p) {
                             settings.set_preference(ThemePreference::ALL[i]);
                         } else if let Some(i) = view_vs.index_at(lay.view_switcher, p) {
@@ -828,7 +866,7 @@ pub fn handle_events(
                             demo.volume = slider.value_at(lay.volume_track, p);
                         } else if lay.bottom_bar.contains(p) {
                             demo.show_bottom_bar = !demo.show_bottom_bar;
-                        } else if lay.sidebar_toggle.contains(p) || lay.sidebar_button.contains(p) {
+                        } else if lay.sidebar_toggle.contains(p) {
                             demo.sidebar_visible = !demo.sidebar_visible;
                         } else {
                             for (i, r) in lay.accents.iter().enumerate() {
@@ -1094,7 +1132,11 @@ pub fn build_scene(
     if lay.sidebar.width() > 0.0 {
         draw_sidebar(&mut paint, &lay, demo);
     }
-    draw_content(&mut paint, lay.area, &lay, demo, preference, accent);
+    if is_gallery(demo) {
+        crate::gallery_page::paint(&mut paint, lay.area);
+    } else {
+        draw_content(&mut paint, lay.area, &lay, demo, preference, accent);
+    }
     if demo.show_bottom_bar {
         draw_statusbar(&mut paint, Rect::from_xywh(0.0, h - STATUS_H, w, STATUS_H));
     }

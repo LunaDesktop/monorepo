@@ -8,17 +8,20 @@
 //!
 //! Dekoracje są po stronie klienta (CSD) — rysujemy własny HeaderBar.
 
+use std::cell::RefCell;
 use std::error::Error;
 use std::time::{Duration, Instant};
 
 use libluna_core::{
     Accent, ButtonState, Color, Event, KeyEvent, Modifiers, Point, PointerButton, PointerEvent,
-    ScrollEvent, Size, Theme, ThemePreference, ThemeSettings, WindowEvent,
+    Rect, ScrollEvent, Size, Theme, ThemePreference, ThemeSettings, WindowEvent,
 };
 use libluna_render::{Scene, SoftwareRenderer, TextEngine};
 
 use smithay_client_toolkit::reexports::calloop::{EventLoop, LoopHandle};
 use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
+use smithay_client_toolkit::reexports::csd_frame::WindowState;
+use smithay_client_toolkit::reexports::protocols::xdg::shell::client::xdg_toplevel;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_keyboard, delegate_layer, delegate_output, delegate_pointer,
@@ -49,9 +52,19 @@ use smithay_client_toolkit::{
 };
 use wayland_client::{
     globals::registry_queue_init,
-    protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
-    Connection, QueueHandle,
+    protocol::{wl_keyboard, wl_output, wl_pointer, wl_region, wl_seat, wl_shm, wl_surface},
+    Connection, Dispatch, QueueHandle,
 };
+
+/// Minimalny odstęp między klatkami wywołanymi **wyłącznie** ruchem kursora.
+/// Bez tego każdy ruch myszy (setki zdarzeń/s) wysyłałby cały bufor 1920×680.
+const MOTION_FRAME: Duration = Duration::from_millis(12);
+
+/// Maksymalne tempo prezentacji powłoki (~60 Hz). Bez tego pętla potrafiła wysłać
+/// kilkaset buforów na sekundę: każde wybudzenie przez `wl_buffer.release` kończyło się
+/// kolejnym `commit`, a kompozytor dopiero co zwolnił bufor. Powłoka paliła CPU, a obraz
+/// i tak nie był szybszy niż odświeżanie monitora.
+const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
 /// Domknięcie rysujące jedną klatkę (łącznie z obsługą zdarzeń).
 type RenderFn = dyn for<'a> FnMut(&mut Frame<'a>);
@@ -86,6 +99,19 @@ pub struct AppConfig {
     pub layer: Option<LayerConfig>,
     /// Przezroczyste tło powierzchni (dla paneli/OSD warstwowych).
     pub transparent: bool,
+}
+
+/// Region wejścia powierzchni.
+///
+/// `Auto` pozwala kompozytorowi wyliczyć region z kanału alfa (panele) — kliknięcia
+/// w przezroczyste części przechodzą do okien pod spodem. `Rects` ustawia jawny region;
+/// powłoka używa go, by przy otwartym popupie przechwycić **wszystkie** kliknięcia
+/// i zamknąć popup także po kliknięciu poza jego obrysem.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum InputRegion {
+    #[default]
+    Auto,
+    Rects(Vec<Rect>),
 }
 
 /// Konfiguracja powierzchni warstwowej (`wlr-layer-shell`).
@@ -136,11 +162,17 @@ impl LayerConfig {
 
     /// Powierzchnia „chrome”: pasek o grubości `bar` plus przezroczysty obszar pod nim
     /// (na OSD i powiadomienia). Strefa wyłączna obejmuje tylko pasek.
+    /// Gdy `total == 0`, powierzchnia rozciąga się na cały monitor (`Anchor::BOTTOM`).
     pub fn top_chrome(namespace: impl Into<String>, bar: u32, total: u32) -> Self {
+        let anchor = if total == 0 {
+            Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT
+        } else {
+            Anchor::TOP | Anchor::LEFT | Anchor::RIGHT
+        };
         Self {
             namespace: namespace.into(),
             layer: Layer::Top,
-            anchor: Anchor::TOP | Anchor::LEFT | Anchor::RIGHT,
+            anchor,
             size: (0, total),
             margin: (0, 0, 0, 0),
             exclusive_zone: bar as i32,
@@ -201,6 +233,10 @@ pub struct WindowActions {
     pub close: bool,
     pub minimize: bool,
     pub toggle_maximize: bool,
+    /// Żądanie rozpoczęcia przeciągania okna (klient przesuwa je przez kompozytor).
+    pub move_requested: bool,
+    /// Żądanie zmiany rozmiaru; bitmaska: 1 = góra, 2 = dół, 4 = lewo, 8 = prawo.
+    pub resize_requested: Option<u8>,
 }
 
 /// Kontekst rysowania i obsługi zdarzeń przekazywany do domknięcia aplikacji.
@@ -209,6 +245,8 @@ pub struct WindowActions {
 /// fizycznych przypada na jednostkę. Zdarzenia z [`Frame::events`] dotyczą okresu
 /// od poprzedniej klatki.
 pub struct Frame<'a> {
+    /// Scena w pikselach **logicznych**. Platforma czyści ją przed każdym wywołaniem
+    /// domknięcia (aplikacja rysuje całą klatkę od zera — nie musi wołać `clear`).
     pub scene: &'a mut Scene,
     /// Rozwiązany motyw (jasny/ciemny + akcent) dla bieżącej klatki.
     pub theme: Theme,
@@ -222,6 +260,10 @@ pub struct Frame<'a> {
     settings: &'a mut ThemeSettings,
     actions: &'a mut WindowActions,
     frame_requested: &'a mut bool,
+    /// Termin kolejnej klatki (np. zegar), niezależny od animacji.
+    frame_deadline: &'a mut Option<Instant>,
+    motion_redraw: &'a mut bool,
+    input_region: &'a RefCell<InputRegion>,
     system_dark: bool,
     /// Uchwyt do wybudzania pętli z innego wątku (np. po powiadomieniu D-Bus).
     waker: WakeHandle,
@@ -243,6 +285,25 @@ impl Frame<'_> {
         self.actions.toggle_maximize = true;
     }
 
+    /// Rozpoczyna przeciąganie okna. Wywołaj przy wciśnięciu lewego przycisku na
+    /// własnym pasku tytułu (CSD) — dalszy ruch wykonuje już kompozytor, więc okno
+    /// nie „ucieka” względem kursora i działa też poza jego powierzchnią.
+    ///
+    /// Ma sens tylko dla zwykłych okien (`xdg_toplevel`), nie dla powierzchni
+    /// warstwowych.
+    pub fn begin_move(&mut self) {
+        self.actions.move_requested = true;
+    }
+
+    /// Rozpoczyna zmianę rozmiaru okna z podanej krawędzi/rogu.
+    ///
+    /// `edges` to bitmaska: 1 = góra, 2 = dół, 4 = lewo, 8 = prawo (jak w xdg-shell).
+    pub fn begin_resize(&mut self, edges: u8) {
+        if edges & 0xf != 0 {
+            self.actions.resize_requested = Some(edges & 0xf);
+        }
+    }
+
     /// Czas od poprzedniej klatki w sekundach (do kroku animacji).
     pub fn delta_time(&self) -> f64 {
         self.dt
@@ -252,6 +313,38 @@ impl Frame<'_> {
     /// Dopóki aplikacja nie zawoła tej metody, okno odświeża się tylko na zdarzenia.
     pub fn request_frame(&mut self) {
         *self.frame_requested = true;
+    }
+
+    /// Prosi o klatkę po `delay` — np. zegar w panelu albo okresowe sprawdzanie stanu.
+    /// Jeśli termin jest już ustawiony wcześniej, zostaje zachowany.
+    pub fn request_frame_after(&mut self, delay: Duration) {
+        let deadline = Instant::now() + delay;
+        match *self.frame_deadline {
+            Some(current) if current <= deadline => {}
+            _ => *self.frame_deadline = Some(deadline),
+        }
+    }
+
+    /// Włącza/wyłącza odświeżanie na **sam ruch wskaźnika** (np. podświetlenie pod
+    /// kursorem w launcherze). Domyślnie wyłączone dla powierzchni warstwowych, bo
+    /// ruch myszy potrafi wysyłać setki zdarzeń na sekundę i wywoływać lawinę
+    /// commitów buforów. Powłoka włącza to tylko, gdy otwarte jest menu/launcher.
+    pub fn set_motion_redraw(&mut self, on: bool) {
+        *self.motion_redraw = on;
+    }
+
+    /// Czy włączone jest odświeżanie na ruch wskaźnika.
+    pub fn motion_redraw(&self) -> bool {
+        *self.motion_redraw
+    }
+
+    /// Ustawia region wejścia powierzchni (patrz [`InputRegion`]). Zmiana jest
+    /// zastosowana przy najbliższym `commit` (czyli w tej samej klatce).
+    ///
+    /// Metoda bierze `&self`, bo powłoka wywołuje ją, trzymając już wypożyczone
+    /// `frame.text`/`frame.events`.
+    pub fn set_input_region(&self, region: InputRegion) {
+        *self.input_region.borrow_mut() = region;
     }
     /// Bieżące ustawienia wyglądu (kopia).
     pub fn settings(&self) -> ThemeSettings {
@@ -340,6 +433,15 @@ where
         .map_err(|e| format!("wl_compositor unavailable: {e}"))?;
     let shm = Shm::bind(&globals, &qh).map_err(|e| format!("wl_shm unavailable: {e}"))?;
 
+    // Stan wyjść tworzymy **przed** powierzchnią warstwową — pozwala to wybrać monitor,
+    // do którego kotwiczymy panel (`LUNA_OUTPUT=<indeks>`). Dzięki temu każdy monitor ma
+    // własną instancję powłoki, a nie kopię tego samego bufora.
+    let output_state = OutputState::new(&globals, &qh);
+    let chosen_output: Option<wl_output::WlOutput> = std::env::var("LUNA_OUTPUT")
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .and_then(|idx| output_state.outputs().nth(idx));
+
     let surface = compositor.create_surface(&qh);
     // Dwa tryby: zwykłe okno `xdg-shell` (CSD) albo powierzchnia warstwowa (panel/dock).
     let target = match &config.layer {
@@ -351,7 +453,7 @@ where
                 surface,
                 layer_cfg.layer,
                 Some(layer_cfg.namespace.clone()),
-                None,
+                chosen_output.as_ref(),
             );
             ls.set_anchor(layer_cfg.anchor);
             ls.set_size(layer_cfg.size.0, layer_cfg.size.1);
@@ -394,7 +496,7 @@ where
     let mut app = App {
         registry_state: RegistryState::new(&globals),
         seat_state: SeatState::new(&globals, &qh),
-        output_state: OutputState::new(&globals, &qh),
+        output_state,
         shm,
         loop_handle: event_loop.handle(),
         exit: false,
@@ -403,12 +505,19 @@ where
         height: ih,
         scale: 1.0,
         system_dark: config.system_dark,
+        system_dark_config: config.system_dark,
+        theme_stamp: None,
         transparent: config.transparent,
         buffer: None,
+        buffer_format: None,
         target,
         configured: config.layer.is_none(),
+        compositor: compositor.clone(),
+        qh: qh.clone(),
         keyboard: None,
         pointer: None,
+        seat: None,
+        last_serial: 0,
         modifiers: Modifiers::NONE,
         renderer: SoftwareRenderer::new(iw, ih),
         settings: config.settings,
@@ -418,20 +527,68 @@ where
         needs_redraw: true,
         actions: WindowActions::default(),
         frame_requested: false,
+        frame_deadline: None,
+        motion_redraw: false,
+        input_region: RefCell::new(InputRegion::Auto),
+        // Domyślnie regionu **nie dotykamy** (okna mają pełny obszar, panele liczą go
+        // z alfy). Dopiero jawna zmiana tworzy `wl_region`.
+        applied_input_region: Some(InputRegion::Auto),
+        stats: std::env::var("LUNA_STATS").is_ok(),
+        stat_frames: 0,
+        stat_ms_draw: 0.0,
+        stat_ms_present: 0.0,
+        stat_report: Instant::now(),
         last_tick: Instant::now(),
+        last_present: Instant::now() - Duration::from_millis(100),
         maximized: false,
         wake,
     };
 
     while !app.exit {
         // Gdy trwa animacja (aplikacja prosi o klatki), odświeżamy płynnie (~60 Hz).
-        let timeout = if app.needs_redraw {
+        let mut timeout = if app.needs_redraw {
             Duration::from_millis(16)
         } else {
             Duration::from_millis(100)
         };
+        // Ruch kursora nie może wysyłać bufora częściej niż ~80 Hz — inaczej setki
+        // zdarzeń na sekundę zamieniają powłokę w młynkiem commitów (1–5 FPS).
+        if app.needs_redraw && app.motion_only_pending() {
+            let since = app.last_present.elapsed();
+            if since < MOTION_FRAME {
+                timeout = timeout.min(MOTION_FRAME - since);
+            }
+        }
+        // Ogólny limit ~60 Hz: dotyczy też animacji i odpowiedzi na zdarzenia.
+        if app.needs_redraw {
+            let since = app.last_present.elapsed();
+            if since < FRAME_INTERVAL {
+                timeout = timeout.min(FRAME_INTERVAL - since);
+            }
+        }
+        // Zaplanowana klatka (np. zegar co kilka sekund) — budzimy pętlę na czas.
+        if let Some(deadline) = app.frame_deadline {
+            let now = Instant::now();
+            if now >= deadline {
+                app.frame_deadline = None;
+                app.needs_redraw = true;
+            } else {
+                timeout = timeout.min(deadline - now);
+            }
+        }
         event_loop.dispatch(timeout, &mut app)?;
+        // Motyw/system „auto” mogą zmienić się w innym procesie — sprawdzaj przy każdym
+        // przebudzeniu pętli (stat pliku jest tani), żeby zmiana działała też bez zdarzeń.
+        app.refresh_appearance();
         if app.needs_redraw && app.configured {
+            if app.motion_only_pending() && app.last_present.elapsed() < MOTION_FRAME {
+                // Za wcześnie — kolejna iteracja pętli dokończy klatkę.
+                continue;
+            }
+            if app.last_present.elapsed() < FRAME_INTERVAL {
+                // Kompozytor nie pokaże szybciej niż monitor i tak; nie zalewajmy go.
+                continue;
+            }
             app.redraw();
         }
     }
@@ -451,14 +608,27 @@ struct App {
     height: u32,
     scale: f64,
     system_dark: bool,
+    /// Wartość z `AppConfig` (jawny override). Reszta pochodzi z systemu (`auto`).
+    system_dark_config: bool,
+    /// Znacznik czasu `theme.conf` — wykrywa zmiany motywu w innych procesach.
+    theme_stamp: Option<std::time::SystemTime>,
     /// Czy tło powierzchni ma być przezroczyste (panele/OSD).
     transparent: bool,
     buffer: Option<Buffer>,
+    /// Format wybrany dla buforów shm (`Abgr/Xbgr` = bez swizzle; `Argb` = fallback).
+    buffer_format: Option<wl_shm::Format>,
     target: Target,
     /// Powierzchnia warstwowa ma sens dopiero po pierwszej konfiguracji.
     configured: bool,
+    compositor: CompositorState,
+    /// Kolejka zdarzeń — potrzebna do tworzenia regionów wejścia w trakcie działania.
+    qh: QueueHandle<App>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     pointer: Option<wl_pointer::WlPointer>,
+    /// Ostatni `wl_seat` — potrzebny do `xdg_toplevel.move`/`resize`.
+    seat: Option<wl_seat::WlSeat>,
+    /// Serial ostatniego zdarzenia wskaźnika (wymagany przez `move`/`resize`).
+    last_serial: u32,
     modifiers: Modifiers,
     renderer: SoftwareRenderer,
     settings: ThemeSettings,
@@ -469,8 +639,24 @@ struct App {
     actions: WindowActions,
     /// Aplikacja poprosiła o kolejną klatkę (animacja w toku).
     frame_requested: bool,
+    /// Termin kolejnej klatki zaplanowanej przez aplikację (np. zegar).
+    frame_deadline: Option<Instant>,
+    /// Czy sam ruch kursora ma wywoływać przerysowanie (patrz [`Frame::set_motion_redraw`]).
+    motion_redraw: bool,
+    /// Żądany region wejścia powierzchni.
+    input_region: RefCell<InputRegion>,
+    /// Region faktycznie ustawiony (żeby nie tworzyć nowego `wl_region` co klatkę).
+    applied_input_region: Option<InputRegion>,
+    /// Diagnostyka (`LUNA_STATS=1`): koszt rysowania i wysyłki bufora.
+    stats: bool,
+    stat_frames: u64,
+    stat_ms_draw: f64,
+    stat_ms_present: f64,
+    stat_report: Instant,
     /// Znacznik czasu poprzedniej klatki (do liczenia `dt`).
     last_tick: Instant,
+    /// Kiedy ostatnio wysłaliśmy bufor (limit klatek na ruch kursora).
+    last_present: Instant,
     maximized: bool,
     /// Uchwyt wybudzania pętli (np. z wątku D‑Bus).
     wake: WakeHandle,
@@ -500,8 +686,41 @@ impl Target {
 
 impl App {
     fn queue(&mut self, event: Event) {
+        let is_motion = matches!(event, Event::PointerMotion { .. } | Event::PointerLeave);
+        let is_layer = matches!(&self.target, Target::Layer(_));
         self.pending_events.push(event);
-        self.needs_redraw = true;
+        // Dla powierzchni warstwowych (np. powłoka luna-shell) sam ruch kursora nie
+        // wymusza przerysowania — chyba że aplikacja jawnie o to poprosi
+        // ([`Frame::set_motion_redraw`], np. gdy otwarty jest launcher i chcemy
+        // podświetlać pozycję pod kursorem). Zapobiega to lawinie commitów buforów
+        // 1920x1080 i spadkowi wydajności do 1-5 FPS.
+        if !(is_layer && is_motion) || self.motion_redraw {
+            self.needs_redraw = true;
+        }
+    }
+
+    /// Wykrywa zmiany motywu zapisane przez inny proces (np. Quick Panel w powłoce)
+    /// i aktualizuje stan „system ciemny” dla trybu Auto.
+    fn refresh_appearance(&mut self) {
+        let stamp = ThemeSettings::config_path()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .and_then(|m| m.modified().ok());
+        if stamp.is_some() && stamp != self.theme_stamp {
+            self.theme_stamp = stamp;
+            self.settings = ThemeSettings::load();
+            self.needs_redraw = true;
+            if self.stats {
+                eprintln!("luna-platform: przeładowano motyw z pliku");
+            }
+        }
+        let effective = self.system_dark_config || libluna_core::appearance::system_dark();
+        if effective != self.system_dark {
+            self.system_dark = effective;
+            self.needs_redraw = true;
+            if self.stats {
+                eprintln!("luna-platform: system dark = {effective}");
+            }
+        }
     }
 
     fn redraw(&mut self) {
@@ -516,6 +735,7 @@ impl App {
 
         self.settings.clear_dirty();
         let mut theme = self.settings.resolve(self.system_dark);
+        let t_draw = Instant::now();
         self.render_frame(theme, &events, dt);
 
         // Jeśli domknięcie zmieniło motyw w trakcie, przerysuj bez zdarzeń.
@@ -531,8 +751,52 @@ impl App {
             self.needs_redraw = true;
         }
 
+        let is_layer = matches!(&self.target, Target::Layer(_));
+        let motion_only = !events.is_empty()
+            && events
+                .iter()
+                .all(|e| matches!(e, Event::PointerMotion { .. } | Event::PointerLeave));
+        // Region wejścia ustawiamy **przed** ewentualnym wczesnym powrotem — zmiana
+        // regionu (otwarcie/zamknięcie popupu) musi zostać wysłana do kompozytora.
+        let input_changed = self.apply_input_region();
+        if is_layer && !self.frame_requested && !self.motion_redraw && motion_only {
+            // Brak żądania nowej klatki i tylko ruchy myszy — nie wysyłaj bufora do
+            // kompozytora. Gdy powłoka prosi o odświeżanie na ruch (`motion_redraw`,
+            // otwarty launcher/popup), klatkę jednak wysyłamy — inaczej podświetlenie
+            // pod kursorem nie nadążało za myszą.
+            if input_changed {
+                self.target.commit();
+            }
+            return;
+        }
+
+        let t_present = Instant::now();
         self.present();
+        let ms_present = t_present.elapsed().as_secs_f64() * 1000.0;
         self.apply_actions();
+
+        // Diagnostyka (`LUNA_STATS=1`): ile kosztuje rysowanie sceny, a ile wysyłka
+        // bufora do kompozytora. To rozstrzyga, czy wąskim gardłem jest powłoka, czy
+        // samo `present` (konwersja + `commit`).
+        if self.stats {
+            self.stat_ms_draw += t_draw.elapsed().as_secs_f64() * 1000.0 - ms_present;
+            self.stat_ms_present += ms_present;
+            self.stat_frames += 1;
+            let secs = self.stat_report.elapsed().as_secs_f64();
+            if secs >= 2.0 {
+                let n = self.stat_frames.max(1) as f64;
+                eprintln!(
+                    "luna-platform: {:.1} prezentacji/s | rysowanie {:.2} ms, wysyłka {:.2} ms",
+                    self.stat_frames as f64 / secs,
+                    self.stat_ms_draw / n,
+                    self.stat_ms_present / n
+                );
+                self.stat_frames = 0;
+                self.stat_ms_draw = 0.0;
+                self.stat_ms_present = 0.0;
+                self.stat_report = Instant::now();
+            }
+        }
 
         // Aplikacja poprosiła o kolejną klatkę (animacja) — odśwież ponownie.
         if self.frame_requested {
@@ -543,7 +807,18 @@ impl App {
     /// Wykonuje akcje okna zgłoszone w trakcie klatki.
     fn apply_actions(&mut self) {
         if self.actions.close {
+            if std::env::var("LUNA_DEBUG_INPUT").is_ok() {
+                eprintln!("platform: actions.close → exit");
+            }
             self.exit = true;
+        }
+        let (want_move, want_resize) = (self.actions.move_requested, self.actions.resize_requested);
+        if std::env::var("LUNA_DEBUG_INPUT").is_ok() && (want_move || want_resize.is_some()) {
+            eprintln!(
+                "platform: actions move={want_move} resize={want_resize:?} seat={} target_window={}",
+                self.seat.is_some(),
+                matches!(&self.target, Target::Window(_))
+            );
         }
         if let Target::Window(window) = &self.target {
             if self.actions.minimize {
@@ -557,6 +832,21 @@ impl App {
                     window.unset_maximized();
                 }
             }
+            if want_move || want_resize.is_some() {
+                if let Some(seat) = self.seat.clone() {
+                    let serial = self.last_serial;
+                    if std::env::var("LUNA_DEBUG_INPUT").is_ok() {
+                        eprintln!(
+                            "platform: move={want_move} resize={want_resize:?} serial={serial}"
+                        );
+                    }
+                    if want_move {
+                        window.move_(&seat, serial);
+                    } else if let Some(edges) = want_resize {
+                        window.resize(&seat, serial, resize_edge(edges));
+                    }
+                }
+            }
         }
     }
 
@@ -567,6 +857,16 @@ impl App {
         let phys_h = (height as f64 * scale).round().max(1.0) as u32;
         self.renderer.resize(phys_w, phys_h);
 
+        // Scena jest wielokrotnego użytku, więc **musi** zostać wyczyszczona przed każdym
+        // wywołaniem domknięcia. Bez tego komendy rysowania sumowały się z klatki na
+        // klatkę i powłoka zwalniała z każdą sekundą (panel schodził do 1–5 FPS).
+        // Kanarek: gdyby ktoś usunął czyszczenie, build z `debug_assertions` to zgłosi.
+        debug_assert!(
+            self.scene.is_empty(),
+            "scena nie została wyczyszczona po poprzedniej klatce"
+        );
+        self.scene.clear();
+
         {
             let App {
                 render,
@@ -575,6 +875,9 @@ impl App {
                 settings,
                 actions,
                 frame_requested,
+                frame_deadline,
+                motion_redraw,
+                input_region,
                 wake,
                 ..
             } = self;
@@ -589,6 +892,9 @@ impl App {
                 settings,
                 actions,
                 frame_requested,
+                frame_deadline,
+                motion_redraw,
+                input_region: &*input_region,
                 system_dark,
                 waker: wake.clone(),
             };
@@ -601,6 +907,23 @@ impl App {
         } else {
             theme.colors.window_bg
         };
+
+        // Klatka zawierająca wyłącznie ruch kursora, pusta scena i brak żądania klatki:
+        // nie ma czego rysować ani wysyłać. Wypełnianie bufora (1920x680 ≈ 5 MB)
+        // dla każdego zdarzenia myszy zapychało procesor bez żadnego efektu.
+        let motion_only = events
+            .iter()
+            .all(|e| matches!(e, Event::PointerMotion { .. } | Event::PointerLeave));
+        let is_layer = matches!(&self.target, Target::Layer(_));
+        if self.transparent
+            && is_layer
+            && self.scene.is_empty()
+            && motion_only
+            && !self.frame_requested
+        {
+            return;
+        }
+
         self.renderer.draw(&self.scene, scale, bg);
     }
 
@@ -610,14 +933,34 @@ impl App {
         let phys_h = (height as f64 * scale).round().max(1.0) as u32;
         let stride = phys_w as i32 * 4;
 
+        // Preferujemy format natywny dla renderera (`RGBA` w pamięci): `Abgr8888`
+        // (z alfą, panele) albo `Xbgr8888` (okna nieprzezroczyste). Dzięki temu
+        // `present` to zwykły `memcpy`, a nie podmiana R↔B na 5 MB każdą klatkę.
+        // Gdy kompozytor ich nie ogłasza — zostaje `Argb8888` + swizzle.
+        let format = match self.buffer_format {
+            Some(f) => f,
+            None => {
+                let want = if self.transparent {
+                    wl_shm::Format::Abgr8888
+                } else {
+                    wl_shm::Format::Xbgr8888
+                };
+                let f = if self.shm.formats().contains(&want) {
+                    want
+                } else {
+                    wl_shm::Format::Argb8888
+                };
+                self.buffer_format = Some(f);
+                if self.stats {
+                    eprintln!("luna-platform: format shm {:?}", f);
+                }
+                f
+            }
+        };
+
         let buffer = self.buffer.get_or_insert_with(|| {
             self.pool
-                .create_buffer(
-                    phys_w as i32,
-                    phys_h as i32,
-                    stride,
-                    wl_shm::Format::Argb8888,
-                )
+                .create_buffer(phys_w as i32, phys_h as i32, stride, format)
                 .expect("shm buffer allocation")
                 .0
         });
@@ -628,36 +971,91 @@ impl App {
                 // Kompozytor wciąż trzyma poprzedni bufor — potrzebny drugi (double buffering).
                 let (second, canvas) = self
                     .pool
-                    .create_buffer(
-                        phys_w as i32,
-                        phys_h as i32,
-                        stride,
-                        wl_shm::Format::Argb8888,
-                    )
+                    .create_buffer(phys_w as i32, phys_h as i32, stride, format)
                     .expect("second shm buffer allocation");
                 *buffer = second;
                 canvas
             }
         };
 
-        // tiny-skia daje RGBA8888; wl_shm Argb8888 to w pamięci BGRA.
         let pixels = self.renderer.data();
-        let count = (phys_w as usize * phys_h as usize).min(canvas.len() / 4);
-        for (dst, src) in canvas
-            .chunks_exact_mut(4)
-            .zip(pixels.chunks_exact(4))
-            .take(count)
-        {
-            dst[0] = src[2];
-            dst[1] = src[1];
-            dst[2] = src[0];
-            dst[3] = src[3];
+        let count = (phys_w as usize * phys_h as usize)
+            .min(canvas.len() / 4)
+            .min(pixels.len() / 4);
+        let direct = matches!(format, wl_shm::Format::Abgr8888 | wl_shm::Format::Xbgr8888);
+        if direct {
+            // Pamięć już w kolejności RGBA — kopiujemy całość jednym `memcpy`.
+            canvas[..count * 4].copy_from_slice(&pixels[..count * 4]);
+        } else {
+            #[cfg(target_endian = "little")]
+            {
+                // Po 4 bajty naraz (u32): podmiana R↔B to kilka operacji bitowych.
+                // Bajt-po-bajcie na 1920×680 zajmowało ~2.5 ms **na każdą klatkę**.
+                let src32 =
+                    unsafe { std::slice::from_raw_parts(pixels.as_ptr() as *const u32, count) };
+                let dst32 = unsafe {
+                    std::slice::from_raw_parts_mut(canvas.as_mut_ptr() as *mut u32, count)
+                };
+                for (d, &s) in dst32.iter_mut().zip(src32.iter()) {
+                    *d = (s & 0xFF00_FF00) | ((s & 0x00FF_0000) >> 16) | ((s & 0x0000_00FF) << 16);
+                }
+            }
+            #[cfg(not(target_endian = "little"))]
+            {
+                for (dst, src) in canvas
+                    .chunks_exact_mut(4)
+                    .zip(pixels.chunks_exact(4))
+                    .take(count)
+                {
+                    dst[0] = src[2];
+                    dst[1] = src[1];
+                    dst[2] = src[0];
+                    dst[3] = src[3];
+                }
+            }
         }
 
         let surface = self.target.surface();
         surface.damage_buffer(0, 0, phys_w as i32, phys_h as i32);
         buffer.attach_to(surface).expect("buffer attach");
         self.target.commit();
+        self.last_present = Instant::now();
+    }
+
+    /// Ustawia region wejścia, gdy zmienił się od poprzedniej klatki.
+    ///
+    /// `InputRegion::Auto` wysyła **pusty** region — kompozytor traktuje go jako
+    /// „wróć do regionu z kanału alfa”. `Rects` wysyła jawne prostokąty.
+    fn apply_input_region(&mut self) -> bool {
+        let desired = self.input_region.borrow().clone();
+        if self.applied_input_region.as_ref() == Some(&desired) {
+            return false;
+        }
+        let surface = self.target.surface().clone();
+        let region = self.compositor.wl_compositor().create_region(&self.qh, ());
+        if let InputRegion::Rects(rects) = &desired {
+            for r in rects {
+                region.add(
+                    r.x().round() as i32,
+                    r.y().round() as i32,
+                    r.width().round().max(0.0) as i32,
+                    r.height().round().max(0.0) as i32,
+                );
+            }
+        }
+        surface.set_input_region(Some(&region));
+        region.destroy();
+        self.applied_input_region = Some(desired);
+        true
+    }
+
+    /// Czy oczekujące zdarzenia to wyłącznie ruch kursora (bez kliknięć/klawiszy).
+    fn motion_only_pending(&self) -> bool {
+        !self.pending_events.is_empty()
+            && self
+                .pending_events
+                .iter()
+                .all(|e| matches!(e, Event::PointerMotion { .. } | Event::PointerLeave))
     }
 }
 
@@ -670,6 +1068,21 @@ fn map_button(code: u32) -> PointerButton {
         0x116 => PointerButton::Back,
         0x115 => PointerButton::Forward,
         other => PointerButton::Other(other),
+    }
+}
+
+/// Bitmaska krawędzi (1=góra, 2=dół, 4=lewo, 8=prawo) → `xdg_toplevel::ResizeEdge`.
+fn resize_edge(bits: u8) -> xdg_toplevel::ResizeEdge {
+    match bits & 0xf {
+        1 => xdg_toplevel::ResizeEdge::Top,
+        2 => xdg_toplevel::ResizeEdge::Bottom,
+        4 => xdg_toplevel::ResizeEdge::Left,
+        8 => xdg_toplevel::ResizeEdge::Right,
+        5 => xdg_toplevel::ResizeEdge::TopLeft,
+        9 => xdg_toplevel::ResizeEdge::TopRight,
+        6 => xdg_toplevel::ResizeEdge::BottomLeft,
+        10 => xdg_toplevel::ResizeEdge::BottomRight,
+        _ => xdg_toplevel::ResizeEdge::None,
     }
 }
 
@@ -746,9 +1159,19 @@ impl WindowHandler for App {
         configure: WindowConfigure,
         _serial: u32,
     ) {
+        if std::env::var("LUNA_DEBUG_INPUT").is_ok() {
+            eprintln!(
+                "platform: configure size={:?} state={:?}",
+                configure.new_size, configure.state
+            );
+        }
         self.buffer = None;
         self.width = configure.new_size.0.map(|v| v.get()).unwrap_or(self.width);
         self.height = configure.new_size.1.map(|v| v.get()).unwrap_or(self.height);
+        // Synchronizuj stan z kompozytorem — okno może zostać zmaksymalizowane
+        // także z panelu/przełącznika, nie tylko przyciskiem w HeaderBarze.
+        self.maximized = configure.state.contains(WindowState::MAXIMIZED)
+            || configure.state.contains(WindowState::FULLSCREEN);
         self.queue(Event::Window(WindowEvent::Resize(Size::new(
             self.width as f64,
             self.height as f64,
@@ -785,7 +1208,9 @@ impl SeatHandler for App {
         &mut self.seat_state
     }
 
-    fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
+    fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, seat: wl_seat::WlSeat) {
+        self.seat = Some(seat);
+    }
 
     fn new_capability(
         &mut self,
@@ -794,6 +1219,14 @@ impl SeatHandler for App {
         seat: wl_seat::WlSeat,
         capability: Capability,
     ) {
+        // SCTK nie zawsze woła `new_seat` przy podłączaniu do istniejącej sesji —
+        // jedynym pewnym miejscem, w którym mamy uchwyt do globalnego `wl_seat`,
+        // jest `new_capability`. Bez tego `self.seat` zostawało `None` i żądania
+        // `xdg_toplevel.move`/`resize` (przeciąganie okna za pasek) były po cichu
+        // pomijane.
+        if self.seat.is_none() {
+            self.seat = Some(seat.clone());
+        }
         if capability == Capability::Keyboard && self.keyboard.is_none() {
             if let Ok(keyboard) = self.seat_state.get_keyboard(qh, &seat, None) {
                 self.keyboard = Some(keyboard);
@@ -864,6 +1297,7 @@ impl KeyboardHandler for App {
         }
         self.queue(Event::Key(KeyEvent {
             keysym: u32::from(event.keysym),
+            keycode: event.raw_code,
             text: event.utf8.clone(),
             state: ButtonState::Pressed,
             modifiers: self.modifiers,
@@ -881,6 +1315,7 @@ impl KeyboardHandler for App {
     ) {
         self.queue(Event::Key(KeyEvent {
             keysym: u32::from(event.keysym),
+            keycode: event.raw_code,
             text: None,
             state: ButtonState::Released,
             modifiers: self.modifiers,
@@ -902,6 +1337,8 @@ impl KeyboardHandler for App {
             alt: modifiers.alt,
             shift: modifiers.shift,
             logo: modifiers.logo,
+            // SCTK nie raportuje osobno poziomu 3; stan i tak ustawia kompozytor.
+            level3: false,
         };
     }
 }
@@ -935,7 +1372,9 @@ impl PointerHandler for App {
                         modifiers: self.modifiers,
                     });
                 }
-                PointerEventKind::Press { button, .. } => {
+                PointerEventKind::Press { button, serial, .. } => {
+                    // Serial jest wymagany przez `xdg_toplevel.move`/`resize`.
+                    self.last_serial = serial;
                     self.queue(Event::PointerButton(PointerEvent {
                         position,
                         button: map_button(button),
@@ -989,4 +1428,36 @@ impl ProvidesRegistryState for App {
         &mut self.registry_state
     }
     registry_handlers![OutputState, SeatState];
+}
+
+// `wl_region` nie ma zdarzeń — potrzebny tylko do utworzenia regionu wejścia.
+impl Dispatch<wl_region::WlRegion, ()> for App {
+    fn event(
+        _state: &mut Self,
+        _proxy: &wl_region::WlRegion,
+        _event: <wl_region::WlRegion as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resize_edges_map_to_xdg_edges() {
+        assert_eq!(resize_edge(1), xdg_toplevel::ResizeEdge::Top);
+        assert_eq!(resize_edge(2), xdg_toplevel::ResizeEdge::Bottom);
+        assert_eq!(resize_edge(4), xdg_toplevel::ResizeEdge::Left);
+        assert_eq!(resize_edge(8), xdg_toplevel::ResizeEdge::Right);
+        // Kombinacje to sumy bitów, nie „albo” — to był realny błąd w pierwszej wersji.
+        assert_eq!(resize_edge(1 | 4), xdg_toplevel::ResizeEdge::TopLeft);
+        assert_eq!(resize_edge(1 | 8), xdg_toplevel::ResizeEdge::TopRight);
+        assert_eq!(resize_edge(2 | 4), xdg_toplevel::ResizeEdge::BottomLeft);
+        assert_eq!(resize_edge(2 | 8), xdg_toplevel::ResizeEdge::BottomRight);
+        assert_eq!(resize_edge(0), xdg_toplevel::ResizeEdge::None);
+    }
 }

@@ -11,6 +11,9 @@ use libluna_widgets::{paint_icon, IconName, PaintCtx};
 
 /// Czas animacji wejścia/wyjścia (s).
 const SLIDE: f64 = 0.22;
+/// Odstęp powiadomień od krawędzi ekranu (żeby wyglądały jak karta w rogu).
+const MARGIN: f64 = 12.0;
+
 /// Szerokość pojedynczego powiadomienia.
 pub const WIDTH: f64 = 340.0;
 /// Wysokość pojedynczego powiadomienia.
@@ -93,6 +96,11 @@ impl Notifications {
         self.items.push((n, 0.0));
     }
 
+    /// Usuwa wszystkie toasty (np. po włączeniu trybu „nie przeszkadzać”).
+    pub fn clear(&mut self) {
+        self.items.clear();
+    }
+
     /// Przesuwa czas i usuwa wygasłe powiadomienia.
     pub fn advance(&mut self, dt: f64) {
         for (_, age) in &mut self.items {
@@ -130,11 +138,11 @@ impl Notifications {
     }
 
     /// Prostokąt `i`-tego powiadomienia w kolumnie zakotwiczonej w prawym-górnym
-    /// narożniku obszaru `area`.
+    /// narożniku obszaru `area` (z odstępem od krawędzi).
     pub fn rect_in(area: Rect, i: usize) -> Rect {
         Rect::from_xywh(
-            area.right() - WIDTH,
-            area.y() + i as f64 * (HEIGHT + GAP),
+            area.right() - WIDTH - MARGIN,
+            area.y() + MARGIN + i as f64 * (HEIGHT + GAP),
             WIDTH,
             HEIGHT,
         )
@@ -186,6 +194,21 @@ impl Notifications {
             }
         }
         None
+    }
+
+    /// Prostokąt obejmujący cały stos powiadomień (do regionu wejścia powierzchni).
+    ///
+    /// Powłoka jest wyższa niż sam pasek (mieści popupy), więc musi jawnie oddać
+    /// kliknięcia poza swoim widocznym obszarem. Powiadomienia są jedynym elementem
+    /// poza paskiem, który nadal ma przyjmować kliknięcia.
+    pub fn stack_rect(area: Rect, count: usize) -> Rect {
+        let n = count.max(1) as f64;
+        Rect::from_xywh(
+            area.right() - WIDTH - MARGIN,
+            area.y(),
+            WIDTH + MARGIN,
+            MARGIN + n * (HEIGHT + GAP),
+        )
     }
 
     /// Rysuje stos powiadomień w obszarze `area` (od góry, do prawej).
@@ -313,12 +336,31 @@ mod tests {
     }
 
     #[test]
+    fn clear_removes_all_toasts() {
+        let mut n = Notifications::new();
+        n.push(Notification::new("A", "t", "b"));
+        n.push(Notification::new("B", "t", "b"));
+        n.clear();
+        assert!(n.is_empty());
+    }
+
+    #[test]
     fn rects_stack_downward_from_top_right() {
         let area = Rect::from_xywh(0.0, 40.0, 1280.0, 200.0);
         let a = Notifications::rect_in(area, 0);
         let b = Notifications::rect_in(area, 1);
-        assert_eq!(a.right(), area.right());
+        assert_eq!(a.right(), area.right() - MARGIN);
         assert!(b.y() > a.y());
+    }
+
+    #[test]
+    fn stack_rect_covers_visible_toasts_only() {
+        let area = Rect::from_xywh(0.0, 48.0, 1920.0, 700.0);
+        let r = Notifications::stack_rect(area, 2);
+        assert!(r.contains(Notifications::rect_in(area, 0).center()));
+        assert!(r.contains(Notifications::rect_in(area, 1).center()));
+        // Poza stosem (lewa strona ekranu) nie blokujemy kliknięć okien.
+        assert!(!r.contains(Point::new(100.0, 200.0)));
     }
 
     #[test]

@@ -11,7 +11,7 @@ use tiny_skia::{
     Shader, Stroke, Transform,
 };
 
-use crate::scene::{DrawCommand, Scene};
+use crate::scene::{DrawCommand, ImageData, Scene};
 use crate::text::TextEngine;
 
 /// Renderer software'owy: trzyma własny bufor pikseli.
@@ -69,7 +69,15 @@ impl SoftwareRenderer {
         let scale = Scale::new(scale);
         let transform = Transform::from_scale(scale.factor() as f32, scale.factor() as f32);
 
-        pixmap.fill(ts_color(background));
+        // Gdy scena zaczyna się od tła pokrywającego cały bufor, wypełnianie kolorem
+        // jest zbyteczne — tło i tak nadpisze wszystkie piksele.
+        let bg_covers = scene.commands().iter().any(|c| {
+            matches!(c, DrawCommand::Background { data }
+                if data.width == pixmap.width() && data.height == pixmap.height())
+        });
+        if !bg_covers {
+            pixmap.fill(ts_color(background));
+        }
 
         let mut clip_stack: Vec<Rect> = Vec::new();
         let mut mask: Option<Mask> = None;
@@ -206,11 +214,62 @@ impl SoftwareRenderer {
                         continue;
                     };
                     let k = scale.factor() as f32;
-                    let sx = (rect.width() as f32 / data.width as f32) * k;
-                    let sy = (rect.height() as f32 / data.height as f32) * k;
-                    let t = Transform::from_scale(sx, sy)
-                        .post_translate(rect.x() as f32 * k, rect.y() as f32 * k);
-                    pixmap.draw_pixmap(0, 0, src, &PixmapPaint::default(), t, mask.as_ref());
+                    let is_1to1 = (scale.factor() - 1.0).abs() < 0.001
+                        && (rect.width().round() as u32) == data.width
+                        && (rect.height().round() as u32) == data.height;
+
+                    if is_1to1 && mask.is_none() && data.sparse {
+                        // Rzadki obraz (panel, popup): większość pikseli ma `alpha == 0`.
+                        // Blit z pomijaniem zer jest znacznie tańszy niż blendowanie
+                        // całego prostokąta 1920×680 (~7 ms/klatkę).
+                        blend_sparse(
+                            pixmap,
+                            data,
+                            (rect.x() * k as f64).round() as i32,
+                            (rect.y() * k as f64).round() as i32,
+                        );
+                        continue;
+                    }
+
+                    if is_1to1 && mask.is_none() {
+                        // Błyskawiczna ścieżka tiny-skia: bezpośredni blit zoptymalizowany pod SIMD
+                        // bez narzutu macierzy transformacji i interpolacji.
+                        pixmap.draw_pixmap(
+                            (rect.x() * k as f64).round() as i32,
+                            (rect.y() * k as f64).round() as i32,
+                            src,
+                            &PixmapPaint::default(),
+                            Transform::identity(),
+                            None,
+                        );
+                    } else {
+                        let sx = (rect.width() as f32 / data.width as f32) * k;
+                        let sy = (rect.height() as f32 / data.height as f32) * k;
+                        let t = Transform::from_scale(sx, sy)
+                            .post_translate(rect.x() as f32 * k, rect.y() as f32 * k);
+                        pixmap.draw_pixmap(0, 0, src, &PixmapPaint::default(), t, mask.as_ref());
+                    }
+                }
+                DrawCommand::Background { data } => {
+                    // Tło pulpitu: pełnoekranowy obraz kopiujemy wprost (jeden `memcpy`)
+                    // zamiast mieszać 2 mln pikseli. Gdy rozmiar nie zgadza się z buforem
+                    // (np. podgląd), rysujemy ze skalowaniem.
+                    if data.width == pixmap.width() && data.height == pixmap.height() {
+                        pixmap.data_mut().copy_from_slice(&data.rgba);
+                    } else if let Some(src) =
+                        PixmapRef::from_bytes(&data.rgba, data.width, data.height)
+                    {
+                        let sx = pixmap.width() as f32 / data.width as f32;
+                        let sy = pixmap.height() as f32 / data.height as f32;
+                        pixmap.draw_pixmap(
+                            0,
+                            0,
+                            src,
+                            &PixmapPaint::default(),
+                            Transform::from_scale(sx, sy),
+                            None,
+                        );
+                    }
                 }
             }
         }
@@ -331,10 +390,101 @@ fn build_mask(pixmap: &Pixmap, rect: Rect, transform: Transform) -> Option<Mask>
     Some(mask)
 }
 
+/// Dzielenie przez 255 zaokrąglone w górę (szybkie, bez FP).
+fn div255(x: u32) -> u32 {
+    let x = x + 128;
+    (x + (x >> 8)) >> 8
+}
+
+/// Rysuje obraz 1:1 z pominięciem w pełni przezroczystych pikseli.
+///
+/// Format: premultiplied RGBA8. Dla `alpha == 255` to zwykłe kopiowanie,
+/// dla pozostałych — source-over. Piksele z `alpha == 0` są pomijane, co daje
+/// dużą oszczędność na panelu/popupach (przezroczyste tło).
+fn blend_sparse(pixmap: &mut Pixmap, src: &ImageData, dx: i32, dy: i32) {
+    let dw = pixmap.width() as i32;
+    let dh = pixmap.height() as i32;
+    let sw = src.width as i32;
+    let sh = src.height as i32;
+    let stride = dw as usize * 4;
+    let dst = pixmap.data_mut();
+    let x0 = dx.max(0);
+    let x1 = (dx + sw).min(dw);
+    let y0 = dy.max(0);
+    let y1 = (dy + sh).min(dh);
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+    for ty in y0..y1 {
+        let sy = (ty - dy) as usize;
+        let srow = sy * src.width as usize * 4;
+        let drow = ty as usize * stride;
+        let mut tx = x0;
+        while tx < x1 {
+            let sx = (tx - dx) as usize;
+            let si = srow + sx * 4;
+            let a = src.rgba[si + 3];
+            if a == 0 {
+                tx += 1;
+                continue;
+            }
+            if a == 255 {
+                // Ciąg w pełni nieprzezroczystych pikseli → jeden `memcpy` na wiersz.
+                let run_start = tx;
+                let mut run_end = tx + 1;
+                while run_end < x1 {
+                    let s2 = (run_end - dx) as usize;
+                    if src.rgba[srow + s2 * 4 + 3] != 255 {
+                        break;
+                    }
+                    run_end += 1;
+                }
+                let ss = srow + (run_start - dx) as usize * 4;
+                let se = srow + (run_end - dx) as usize * 4;
+                let ds = drow + run_start as usize * 4;
+                let de = drow + run_end as usize * 4;
+                dst[ds..de].copy_from_slice(&src.rgba[ss..se]);
+                tx = run_end;
+                continue;
+            }
+            let inv = 255 - u32::from(a);
+            let s = &src.rgba[si..si + 4];
+            let d = &mut dst[drow + tx as usize * 4..][..4];
+            for c in 0..3 {
+                d[c] = (u32::from(s[c]) + div255(u32::from(d[c]) * inv)).min(255) as u8;
+            }
+            d[3] = (u32::from(a) + div255(u32::from(d[3]) * inv)).min(255) as u8;
+            tx += 1;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use libluna_core::{style::weight, Point};
+
+    #[test]
+    fn sparse_blend_skips_transparent_and_blends_alpha() {
+        let mut pm = Pixmap::new(2, 2).unwrap();
+        pm.fill(tiny_skia::Color::from_rgba8(255, 0, 0, 255));
+        let mut rgba = vec![0u8; 2 * 2 * 4];
+        // (1,1): premultiplied biały 50%.
+        rgba[(3) * 4..(3) * 4 + 4].copy_from_slice(&[128, 128, 128, 128]);
+        let img = ImageData::new(2, 2, rgba).with_sparse(true);
+        blend_sparse(&mut pm, &img, 0, 0);
+        let d = pm.data();
+        assert_eq!(
+            &d[0..4],
+            &[255, 0, 0, 255],
+            "piksel alfa=0 nie może zmienić tła"
+        );
+        assert_eq!(
+            &d[12..16],
+            &[255, 128, 128, 255],
+            "source-over premultiplied na czerwonym tle"
+        );
+    }
 
     fn pixel(renderer: &SoftwareRenderer, x: u32, y: u32) -> [u8; 4] {
         let w = renderer.width() as usize;
