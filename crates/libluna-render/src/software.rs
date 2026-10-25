@@ -79,7 +79,7 @@ impl SoftwareRenderer {
             pixmap.fill(ts_color(background));
         }
 
-        let mut clip_stack: Vec<Rect> = Vec::new();
+        let mut clip_stack: Vec<(Rect, f64)> = Vec::new();
         let mut mask: Option<Mask> = None;
 
         for cmd in scene.commands() {
@@ -166,25 +166,38 @@ impl SoftwareRenderer {
                     }
                 }
                 DrawCommand::PushClip { rect } => {
-                    let effective = match clip_stack.last() {
-                        Some(current) => current.intersection(rect).unwrap_or(Rect::ZERO),
-                        None => *rect,
+                    let (effective, radius) = match clip_stack.last() {
+                        Some((current, _)) => {
+                            (current.intersection(rect).unwrap_or(Rect::ZERO), 0.0)
+                        }
+                        None => (*rect, 0.0),
                     };
-                    clip_stack.push(effective);
-                    mask = build_mask(pixmap, effective, transform);
+                    clip_stack.push((effective, radius));
+                    mask = build_mask(pixmap, effective, radius, transform);
+                }
+                DrawCommand::PushClipRounded { rect, radius } => {
+                    let (effective, effective_radius) = match clip_stack.last() {
+                        Some((current, current_radius)) => (
+                            current.intersection(rect).unwrap_or(Rect::ZERO),
+                            radius.min(*current_radius),
+                        ),
+                        None => (*rect, *radius),
+                    };
+                    clip_stack.push((effective, effective_radius));
+                    mask = build_mask(pixmap, effective, effective_radius, transform);
                 }
                 DrawCommand::PopClip => {
                     clip_stack.pop();
                     mask = clip_stack
                         .last()
                         .copied()
-                        .and_then(|r| build_mask(pixmap, r, transform));
+                        .and_then(|(r, rad)| build_mask(pixmap, r, rad, transform));
                 }
                 DrawCommand::Text(run) => {
                     let (w, h) = (pixmap.width() as usize, pixmap.height() as usize);
                     // Tekst nie korzysta z maski kształtów — obcinamy wprost piksele.
                     let k = scale.factor();
-                    let clip = clip_stack.last().map(|r| crate::text::ClipRect {
+                    let clip = clip_stack.last().map(|(r, _)| crate::text::ClipRect {
                         x0: (r.x() * k).floor() as i64,
                         y0: (r.y() * k).floor() as i64,
                         x1: (r.right() * k).ceil() as i64,
@@ -382,9 +395,9 @@ fn stroke(
     pixmap.stroke_path(path, &paint(color), &stroke, transform, mask);
 }
 
-fn build_mask(pixmap: &Pixmap, rect: Rect, transform: Transform) -> Option<Mask> {
+fn build_mask(pixmap: &Pixmap, rect: Rect, radius: f64, transform: Transform) -> Option<Mask> {
     let mut mask = Mask::new(pixmap.width(), pixmap.height())?;
-    if let Some(path) = rect_path(rect, 0.0) {
+    if let Some(path) = rect_path(rect, radius) {
         mask.fill_path(&path, FillRule::Winding, true, transform);
     }
     Some(mask)
@@ -568,6 +581,24 @@ mod tests {
             corner[0] > 200 && corner[1] > 200 && corner[2] > 200,
             "corner: {corner:?}"
         );
+    }
+
+    #[test]
+    fn rounded_clip_cuts_corners() {
+        let mut r = SoftwareRenderer::new(40, 40);
+        let mut scene = Scene::new();
+        scene
+            .push_clip_rounded(Rect::from_xywh(0.0, 0.0, 40.0, 40.0), 12.0)
+            .fill_rect(
+                Rect::from_xywh(0.0, 0.0, 40.0, 40.0),
+                Color::from_rgba8(255, 0, 0, 255),
+            )
+            .pop_clip();
+        r.draw(&scene, 1.0, Color::WHITE);
+
+        // Narożnik poza promieniem pozostaje tłem, środek jest wypełniony.
+        assert_eq!(pixel(&r, 1, 1), [255, 255, 255, 255]);
+        assert_eq!(pixel(&r, 20, 20), [255, 0, 0, 255]);
     }
 
     #[test]

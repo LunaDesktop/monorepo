@@ -130,6 +130,8 @@ pub enum DrawCommand {
     FillPolygon { points: Vec<Point>, color: Color },
     /// Ogranicza kolejne polecenia do prostokąta (zastosowanie kumulacyjne).
     PushClip { rect: Rect },
+    /// Ogranicza kolejne polecenia do **zaokrąglonego** prostokąta (kumulacyjnie).
+    PushClipRounded { rect: Rect, radius: f64 },
     /// Zdejmuje ostatnie ograniczenie.
     PopClip,
     /// Tekst.
@@ -259,6 +261,13 @@ impl Scene {
 
     pub fn push_clip(&mut self, rect: Rect) -> &mut Self {
         self.commands.push(DrawCommand::PushClip { rect });
+        self
+    }
+
+    /// Ogranicza kolejne polecenia do zaokrąglonego prostokąta (np. narożniki okna).
+    pub fn push_clip_rounded(&mut self, rect: Rect, radius: f64) -> &mut Self {
+        self.commands
+            .push(DrawCommand::PushClipRounded { rect, radius });
         self
     }
 
