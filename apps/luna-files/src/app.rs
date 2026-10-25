@@ -5,13 +5,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use libluna_core::{ThemePreference, ThemeSettings};
+use libluna_core::{Point, ThemePreference, ThemeSettings};
 use libluna_i18n::{set_locale, tr, tr_args, Locale};
 use libluna_platform::{run as run_app, AppConfig, Frame};
 use libluna_render::ImageData;
 use libluna_widgets::{
     AlertDialog, Entry as TextEntry, ItemView, Menu, NavEntry, NavList, PaintCtx, ScrollView,
-    SearchEntry, Toast, ViewMode,
+    SearchEntry, Toast, ViewMode, WindowControl,
 };
 
 use crate::model::{human_size, now_secs, DirView, Entry, Kind, SortKey};
@@ -276,6 +276,10 @@ pub struct App {
     pub status: String,
     /// Zakładka pod kursorem (podświetlenie w pasku tytułu).
     pub tab_hover: Option<usize>,
+    /// Ostatnia pozycja kursora w oknie (do podświetlania przycisków).
+    pub pointer: Option<Point>,
+    /// Kontrolka okna pod kursorem (— □ ✕).
+    pub controls_hover: Option<WindowControl>,
     /// Preferencje (język, domyślny widok, ukryte pliki).
     pub prefs: Prefs,
     /// Okno Ustawień (modal).
@@ -332,6 +336,8 @@ impl App {
             last_mount_refresh: Instant::now() - Duration::from_secs(10),
             status: String::new(),
             tab_hover: None,
+            pointer: None,
+            controls_hover: None,
             prefs,
             settings_open: false,
             about: None,

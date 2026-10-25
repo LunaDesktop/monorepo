@@ -318,7 +318,7 @@ fn paint_header(ctx: &mut PaintCtx, app: &App, lay: &Layout) {
     // Kontrolki okna rysuje widget — bez tytułu, bo w jednym wierszu jest pasek ścieżki.
     HeaderBar::new()
         .controls(ControlsSide::Right)
-        .paint(ctx, lay.top, None);
+        .paint(ctx, lay.top, app.controls_hover);
     if multi {
         // Oba wiersze mają wyglądać jak jeden pasek: zamalowuj linię pod górnym.
         ctx.scene.fill_rect(
@@ -341,18 +341,27 @@ fn paint_header(ctx: &mut PaintCtx, app: &App, lay: &Layout) {
 
 fn paint_tabs(ctx: &mut PaintCtx, app: &App, lay: &Layout) {
     tab_bar(app).paint(ctx, lay.tabs);
-    icon_button(ctx, lay.plus, IconName::Plus, true, false);
+    icon_button(
+        ctx,
+        lay.plus,
+        IconName::Plus,
+        true,
+        false,
+        is_hovered(app, lay.plus),
+    );
 }
 
 fn paint_nav(ctx: &mut PaintCtx, app: &App, ch: &Chrome) {
     let pane = app.pane();
 
     // Przełącznik paska bocznego (jak w aplikacjach libLuny).
-    ctx.scene.fill_rounded_rect(
-        ch.sidebar_toggle,
-        ctx.theme.radius.small,
-        ctx.theme.colors.shade,
-    );
+    let sidebar_bg = if is_hovered(app, ch.sidebar_toggle) {
+        ctx.theme.colors.shade.scale_alpha(1.6)
+    } else {
+        ctx.theme.colors.shade
+    };
+    ctx.scene
+        .fill_rounded_rect(ch.sidebar_toggle, ctx.theme.radius.small, sidebar_bg);
     sidebar_icon(
         ctx,
         ctx.theme.colors.text,
@@ -366,6 +375,7 @@ fn paint_nav(ctx: &mut PaintCtx, app: &App, ch: &Chrome) {
         IconName::ChevronLeft,
         !pane.back.is_empty(),
         false,
+        is_hovered(app, ch.back),
     );
     icon_button(
         ctx,
@@ -373,8 +383,14 @@ fn paint_nav(ctx: &mut PaintCtx, app: &App, ch: &Chrome) {
         IconName::ChevronRight,
         !pane.forward.is_empty(),
         false,
+        is_hovered(app, ch.forward),
     );
-    icon_up(ctx, ch.up, pane.dir.parent().is_some());
+    icon_up(
+        ctx,
+        ch.up,
+        pane.dir.parent().is_some(),
+        is_hovered(app, ch.up),
+    );
 
     if let Some(edit) = &pane.edit {
         edit.entry.paint(ctx, ch.path);
@@ -385,13 +401,34 @@ fn paint_nav(ctx: &mut PaintCtx, app: &App, ch: &Chrome) {
         bar.paint(ctx, ch.path);
     }
 
-    icon_button(ctx, ch.search, IconName::Search, true, pane.search_active);
+    icon_button(
+        ctx,
+        ch.search,
+        IconName::Search,
+        true,
+        pane.search_active,
+        is_hovered(app, ch.search),
+    );
     let view_icon = match pane.view.mode() {
         ViewMode::List => IconName::Grid,
         ViewMode::Grid => IconName::List,
     };
-    icon_button(ctx, ch.view, view_icon, true, false);
-    icon_button(ctx, ch.menu, IconName::Menu, true, false);
+    icon_button(
+        ctx,
+        ch.view,
+        view_icon,
+        true,
+        false,
+        is_hovered(app, ch.view),
+    );
+    icon_button(
+        ctx,
+        ch.menu,
+        IconName::Menu,
+        true,
+        false,
+        is_hovered(app, ch.menu),
+    );
 }
 
 fn paint_sidebar(ctx: &mut PaintCtx, app: &App, lay: &Layout) {
@@ -653,16 +690,21 @@ fn paint_status(ctx: &mut PaintCtx, app: &App, lay: &Layout) {
     }
 }
 
-fn icon_button(ctx: &mut PaintCtx, rect: Rect, name: IconName, enabled: bool, active: bool) {
-    if active || enabled {
-        let bg = if active {
-            ctx.theme.colors.shade
-        } else {
-            Color::TRANSPARENT
-        };
-        if active {
-            ctx.scene.fill_rounded_rect(rect, 6.0, bg);
-        }
+fn icon_button(
+    ctx: &mut PaintCtx,
+    rect: Rect,
+    name: IconName,
+    enabled: bool,
+    active: bool,
+    hover: bool,
+) {
+    if enabled && !active && hover {
+        ctx.scene
+            .fill_rounded_rect(rect, 6.0, ctx.theme.colors.shade);
+    }
+    if active && enabled {
+        ctx.scene
+            .fill_rounded_rect(rect, 6.0, ctx.theme.colors.shade);
     }
     let color = if enabled {
         ctx.theme.colors.text
@@ -670,6 +712,11 @@ fn icon_button(ctx: &mut PaintCtx, rect: Rect, name: IconName, enabled: bool, ac
         ctx.theme.colors.dim_text.scale_alpha(0.5)
     };
     icon::paint_icon(ctx, name, rect.deflate(Insets::splat(6.0)), color);
+}
+
+/// Czy kursor jest nad prostokątem (dla podświetlenia przycisków).
+fn is_hovered(app: &App, rect: Rect) -> bool {
+    app.pointer.is_some_and(|p| rect.contains(p))
 }
 
 /// Ikona przełącznika paska bocznego (◧ / ▭) — jak w pozostałych aplikacjach Luny.
@@ -684,7 +731,11 @@ fn sidebar_icon(ctx: &mut PaintCtx, color: Color, box_: Rect, filled: bool) {
     }
 }
 
-fn icon_up(ctx: &mut PaintCtx, rect: Rect, enabled: bool) {
+fn icon_up(ctx: &mut PaintCtx, rect: Rect, enabled: bool, hover: bool) {
+    if enabled && hover {
+        ctx.scene
+            .fill_rounded_rect(rect, 6.0, ctx.theme.colors.shade);
+    }
     let color = if enabled {
         ctx.theme.colors.text
     } else {
@@ -1043,6 +1094,16 @@ pub fn handle_events(
             },
             Event::PointerMotion { position, .. } => {
                 let p = *position;
+                app.pointer = Some(p);
+                // Podświetlenie kontrolek okna (— □ ✕): `HeaderBar::paint` rysuje je
+                // tylko dla kontrolki przekazanej jako `hovered`.
+                app.controls_hover = if lay.top.contains(p) {
+                    HeaderBar::new()
+                        .controls(ControlsSide::Right)
+                        .control_at(lay.top, theme, p)
+                } else {
+                    None
+                };
                 if let Some(context) = app.context.as_mut() {
                     context.menu.hover_at(context.panel, Some(p), theme);
                     continue;
@@ -1068,6 +1129,8 @@ pub fn handle_events(
                 }
             }
             Event::PointerLeave => {
+                app.pointer = None;
+                app.controls_hover = None;
                 app.tab_hover = None;
                 app.sidebar.set_hovered(None);
                 for pane in &mut app.panes {
@@ -2212,6 +2275,44 @@ mod tests {
             px(panel.center().x as usize, panel.center().y as usize),
             px(10, 700)
         );
+    }
+
+    #[test]
+    fn window_controls_track_hover() {
+        let mut app = app();
+        let theme = Theme::light();
+        let text = TextEngine::system();
+        let size = Size::new(1120.0, 720.0);
+        let lay = layout(&app, size, &theme, &text);
+        let close = HeaderBar::new()
+            .controls(ControlsSide::Right)
+            .controls_layout(lay.top, &theme)
+            .close
+            .unwrap();
+        handle_events(
+            &mut app,
+            &[Event::PointerMotion {
+                position: close.center(),
+                modifiers: Modifiers::default(),
+            }],
+            size,
+            &theme,
+            &text,
+        );
+        assert_eq!(app.controls_hover, Some(WindowControl::Close));
+        assert!(app.pointer.is_some());
+
+        handle_events(
+            &mut app,
+            &[Event::PointerMotion {
+                position: Point::new(close.center().x, close.center().y + 300.0),
+                modifiers: Modifiers::default(),
+            }],
+            size,
+            &theme,
+            &text,
+        );
+        assert_eq!(app.controls_hover, None);
     }
 
     #[test]
