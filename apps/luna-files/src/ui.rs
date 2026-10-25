@@ -1006,19 +1006,19 @@ fn on_left_press(
             if let Some(i) = comps.index_at(ch.path, text, theme, p) {
                 let target = segment_path(&path, i);
                 app.navigate(app.active, target);
+                return;
             }
+            // Puste miejsce paska ścieżki (między segmentami) to nasz „pasek tytułu”
+            // — bez tego okna nie dało się przesunąć, bo pasek zajmuje cały wiersz.
+            app.pending_move = true;
             return;
         }
     }
 
-    // 5. Przeciąganie okna za wolne miejsce paska (poza przyciskami i ścieżką).
+    // 5. Reszta paska (wolne miejsce, także dolny wiersz z zakładkami)
+    //    przeciąga okno — dokładnie jak pasek tytułu.
     if lay.header.contains(p) {
-        if lay.top.contains(p) {
-            let content = header.controls_layout(lay.top, theme).content;
-            if content.contains(p) {
-                app.pending_move = true;
-            }
-        }
+        app.pending_move = true;
         return;
     }
 
