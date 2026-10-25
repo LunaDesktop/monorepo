@@ -501,6 +501,12 @@ pub fn interactive_move_at(state: &mut State, slot: usize, pos: Point) {
     if window_geometry(state, slot).is_none() {
         return;
     }
+    if std::env::var("SELENE_STATS").is_ok() {
+        eprintln!(
+            "selene/win: drag start slot={slot} pos=({:.0},{:.0})",
+            pos.x, pos.y
+        );
+    }
     raise_and_focus(state, slot);
     begin_drag(state, slot, pos);
 }

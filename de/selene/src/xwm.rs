@@ -22,8 +22,8 @@ use wayland_server::Resource;
 use x11rb::connection::Connection;
 use x11rb::protocol::composite::{ConnectionExt as CompositeExt, Redirect};
 use x11rb::protocol::xproto::{
-    Atom, AtomEnum, ChangeWindowAttributesAux, ClientMessageEvent, ConfigureWindowAux,
-    ConnectionExt, EventMask, InputFocus, PropMode, Window,
+    Atom, AtomEnum, ChangeWindowAttributesAux, ClientMessageEvent, ConfigWindow,
+    ConfigureWindowAux, ConnectionExt, EventMask, InputFocus, PropMode, Window,
 };
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
@@ -83,6 +83,14 @@ pub enum X11Change {
     /// Interaktywna zmiana rozmiaru (bitmaska jak w `seat`: 1=góra, 2=dół, 4=lewo, 8=prawo).
     Resize {
         edges: u8,
+        x: i32,
+        y: i32,
+    },
+    /// Klient sam przesunął okno (`ConfigureRequest` z X/Y).
+    ///
+    /// Tak robią okna CSD, które nie używają `_NET_WM_MOVERESIZE` (np. część
+    /// wersji Firefoksa): bez tego model okna zostawał w starym miejscu.
+    Place {
         x: i32,
         y: i32,
     },
@@ -381,6 +389,7 @@ fn become_wm(conn: &RustConnection, root: Window, atoms: &mut Atoms) -> Option<b
         atoms.net_wm_name,
         atoms.net_wm_window_type,
         atoms.net_frame_extents,
+        atoms.net_wm_moveresize,
     ];
     set_prop32(
         conn,
@@ -504,14 +513,52 @@ fn handle_event(
             publish_client_list(conn, root, atoms, state);
         }
         Event::ConfigureRequest(e) => {
-            // Klient prosi o geometrię — spełniamy (nie mamy własnej polityki kafelkowej).
-            let aux = ConfigureWindowAux::new()
-                .x(i32::from(e.x))
-                .y(i32::from(e.y))
-                .width(u32::from(e.width))
-                .height(u32::from(e.height));
+            // Klient prosi o geometrię. Stosujemy **tylko pola z maski** — przy
+            // samym przesunięciu `width`/`height` w evencie są zerowe i wcześniej
+            // mogły skurczyć okno do 0×0. Zmianę pozycji odbijamy też w modelu
+            // kompozytora: okna CSD (Firefox) przesuwają się same, bez moveresize.
+            let mask = u16::from(e.value_mask);
+            let mut aux = ConfigureWindowAux::new();
+            if mask & u16::from(ConfigWindow::X) != 0 {
+                aux = aux.x(i32::from(e.x));
+            }
+            if mask & u16::from(ConfigWindow::Y) != 0 {
+                aux = aux.y(i32::from(e.y));
+            }
+            if mask & u16::from(ConfigWindow::WIDTH) != 0 {
+                aux = aux.width(u32::from(e.width));
+            }
+            if mask & u16::from(ConfigWindow::HEIGHT) != 0 {
+                aux = aux.height(u32::from(e.height));
+            }
             let _ = conn.configure_window(e.window, &aux);
             let _ = conn.flush();
+            if mask & (u16::from(ConfigWindow::X) | u16::from(ConfigWindow::Y)) != 0 {
+                // Tylko okna z własnymi dekoracjami (CSD) przesuwają się same.
+                // Oknom SSD pozycję ustala kompozytor — ich `ConfigureRequest`
+                // nie może nadpisywać modelu (byłby skok przy mapowaniu).
+                let csd = state
+                    .lock_or_recover()
+                    .windows
+                    .get(&e.window)
+                    .map(|i| i.client_decorations)
+                    .unwrap_or(false);
+                if csd {
+                    if std::env::var("SELENE_STATS").is_ok() {
+                        eprintln!(
+                            "selene/xwm: ConfigureRequest 0x{:x} mask={mask:#x} pos=({},{})",
+                            e.window, e.x, e.y
+                        );
+                    }
+                    state.lock_or_recover().changes.push((
+                        e.window,
+                        X11Change::Place {
+                            x: i32::from(e.x),
+                            y: i32::from(e.y),
+                        },
+                    ));
+                }
+            }
         }
         Event::PropertyNotify(e) => {
             if e.atom == atoms.net_wm_name
@@ -601,6 +648,18 @@ fn handle_event(
                 // `data = [x_root, y_root, direction, button, source]`.
                 let data = e.data.as_data32();
                 let (x, y, direction) = (data[0] as i32, data[1] as i32, data[2]);
+                if std::env::var("SELENE_STATS").is_ok() {
+                    let serial = state
+                        .lock_or_recover()
+                        .by_serial
+                        .iter()
+                        .find(|(_, w)| **w == e.window)
+                        .map(|(s, _)| *s);
+                    eprintln!(
+                        "selene/xwm: _NET_WM_MOVERESIZE 0x{:x} dir={direction} pos=({x},{y}) serial={serial:?}",
+                        e.window
+                    );
+                }
                 let change = match direction {
                     // 8 = Move, 0..=7 = krawędzie/narożniki, 11 = Cancel.
                     8 => Some(X11Change::Move { x, y }),
@@ -982,17 +1041,31 @@ pub fn sync(state: &mut State) {
             X11Change::Fullscreen(on) => crate::seat::set_fullscreen(state, slot, on),
             X11Change::Maximized(on) => crate::seat::set_maximized(state, slot, on),
             X11Change::Minimize(on) => crate::seat::set_minimized(state, slot, on),
-            X11Change::Move { x, y } => crate::seat::interactive_move_at(
-                state,
-                slot,
-                libluna_core::Point::new(x as f64, y as f64),
-            ),
+            X11Change::Move { x, y } => {
+                if std::env::var("SELENE_STATS").is_ok() {
+                    eprintln!("selene/xwm: move serial={serial} slot={slot} pos=({x},{y})");
+                }
+                crate::seat::interactive_move_at(
+                    state,
+                    slot,
+                    libluna_core::Point::new(x as f64, y as f64),
+                )
+            }
             X11Change::Resize { edges, x, y } => crate::seat::interactive_resize_at(
                 state,
                 slot,
                 edges,
                 libluna_core::Point::new(x as f64, y as f64),
             ),
+            X11Change::Place { x, y } => {
+                if std::env::var("SELENE_STATS").is_ok() {
+                    eprintln!("selene/xwm: self-move slot={slot} pos=({x},{y})");
+                }
+                if let Some(w) = state.windows.lock_or_recover().get_mut(slot) {
+                    w.x = x as f64;
+                    w.y = y as f64;
+                }
+            }
         }
     }
 }
