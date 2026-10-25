@@ -188,6 +188,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             wake_write,
             Arc::clone(&state.ws_current),
             Arc::clone(&state.overview),
+            Arc::clone(&state.screenshot),
             ws_count,
             1280,
             800,

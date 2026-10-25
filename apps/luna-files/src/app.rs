@@ -263,6 +263,8 @@ pub struct App {
     pub last_click: Option<(usize, Instant)>,
     pub last_mount_refresh: Instant,
     pub status: String,
+    /// Zakładka pod kursorem (podświetlenie w pasku tytułu).
+    pub tab_hover: Option<usize>,
     pub pending_close: bool,
     pub pending_minimize: bool,
     pub pending_maximize: bool,
@@ -298,6 +300,7 @@ impl App {
             last_click: None,
             last_mount_refresh: Instant::now() - Duration::from_secs(10),
             status: String::new(),
+            tab_hover: None,
             pending_close: false,
             pending_minimize: false,
             pending_maximize: false,

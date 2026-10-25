@@ -23,8 +23,6 @@ use crate::places;
 use crate::trash;
 
 const SIDEBAR_W: f64 = 216.0;
-const TABS_H: f64 = 34.0;
-const NAV_H: f64 = 40.0;
 const STATUS_H: f64 = 28.0;
 const PREVIEW_W: f64 = 300.0;
 const PAD: f64 = 8.0;
@@ -32,8 +30,15 @@ const BTN: f64 = 28.0;
 const PANE_PATH_H: f64 = 26.0;
 
 struct Layout {
+    /// Cały pasek tytułu: jeden wiersz albo dwa (gdy otwarte są zakładki).
     header: Rect,
+    /// Górny wiersz paska — kontrolki okna i zakładki.
+    top: Rect,
+    /// Pasek zakładek wewnątrz `HeaderBar` (jego obszar `content`).
     tabs: Rect,
+    /// Przycisk „nowa zakładka” obok zakładek (tylko przy >1 zakładce).
+    plus: Rect,
+    /// Wiersz nawigacji (przy jednej zakładce to ten sam wiersz co `top`).
     nav: Rect,
     sidebar: Rect,
     status: Rect,
@@ -41,13 +46,13 @@ struct Layout {
 }
 
 struct Chrome {
+    sidebar_toggle: Rect,
     back: Rect,
     forward: Rect,
     up: Rect,
     search: Rect,
     view: Rect,
     menu: Rect,
-    plus: Rect,
     path: Rect,
 }
 
@@ -75,11 +80,58 @@ fn hit_index(pane: &Pane, rows: Rect, p: Point, theme: &Theme) -> Option<usize> 
     }
 }
 
-fn layout(app: &App, size: Size, theme: &Theme) -> Layout {
+/// Pasek zakładek z bieżącego stanu aplikacji.
+fn tab_bar(app: &App) -> TabBar {
+    let pane = app.pane();
+    let tabs: Vec<Tab> = pane
+        .tabs
+        .iter()
+        .map(|p| Tab::new(tab_title(p)).closable(true))
+        .collect();
+    let mut bar = TabBar::with_tabs(tabs).expand(false);
+    bar.set_selected(pane.tab);
+    bar.set_hovered(app.tab_hover);
+    bar
+}
+
+fn layout(app: &App, size: Size, theme: &Theme, text: &TextEngine) -> Layout {
     let hh = theme.metrics.headerbar.height;
-    let header = Rect::from_xywh(0.0, 0.0, size.width, hh);
-    let tabs = Rect::from_xywh(0.0, hh, size.width, TABS_H);
-    let nav = Rect::from_xywh(0.0, tabs.bottom(), size.width, NAV_H);
+    let multi = app.pane().tabs.len() > 1;
+    // Pasek jest **jeden**: nawigacja siedzi w tym samym wierszu co kontrolki okna.
+    // Dopiero przy wielu zakładkach dochodzi drugi wiersz (na górze), bo tam jest
+    // ich miejsce — dokładnie jak w GNOME Files.
+    let header_h = if multi { hh * 2.0 } else { hh };
+    let header = Rect::from_xywh(0.0, 0.0, size.width, header_h);
+    let top = Rect::from_xywh(0.0, 0.0, size.width, hh);
+    let nav = if multi {
+        Rect::from_xywh(0.0, hh, size.width, hh)
+    } else {
+        top
+    };
+    // Zakładki zajmują `content` górnego wiersza — między krawędzią a kontrolkami okna.
+    let content = HeaderBar::new()
+        .controls(ControlsSide::Right)
+        .controls_layout(top, theme)
+        .content;
+    let tabs_w = (content.width() - BTN - 4.0).max(1.0);
+    let tab_h = theme.metrics.tabs.height.min(content.height());
+    let tabs = Rect::from_xywh(content.x(), content.center().y - tab_h / 2.0, tabs_w, tab_h);
+    // „+” tuż za ostatnią zakładką (jak w przeglądarce), ale nigdy pod kontrolkami okna.
+    let plus = if multi {
+        let last_right = tab_bar(app)
+            .segments(tabs, text, theme)
+            .last()
+            .map(|r| r.right())
+            .unwrap_or(tabs.x());
+        Rect::from_xywh(
+            (last_right + 6.0).min(content.right() - BTN),
+            content.center().y - BTN / 2.0,
+            BTN,
+            BTN,
+        )
+    } else {
+        Rect::ZERO
+    };
     let status = Rect::from_xywh(
         0.0,
         (size.height - STATUS_H).max(nav.bottom()),
@@ -109,7 +161,9 @@ fn layout(app: &App, size: Size, theme: &Theme) -> Layout {
     }
     Layout {
         header,
+        top,
         tabs,
+        plus,
         nav,
         sidebar,
         status,
@@ -117,19 +171,31 @@ fn layout(app: &App, size: Size, theme: &Theme) -> Layout {
     }
 }
 
-fn chrome(lay: &Layout, size: Size) -> Chrome {
+fn chrome(app: &App, lay: &Layout, theme: &Theme) -> Chrome {
+    let multi = app.pane().tabs.len() > 1;
+    // Przy jednej zakładce nawigacja dzieli wiersz z kontrolkami okna, więc kończymy
+    // przed nimi. Przy dwóch wierszach dolny jest wolny na całej szerokości.
+    let (left, right) = if multi {
+        (lay.nav.x() + PAD, lay.nav.right() - PAD)
+    } else {
+        let content = HeaderBar::new()
+            .controls(ControlsSide::Right)
+            .controls_layout(lay.top, theme)
+            .content;
+        (content.x(), content.right())
+    };
     let cy = lay.nav.center().y;
-    let mut x = lay.nav.x() + PAD;
+    let mut x = left;
     let btn = |x: &mut f64| {
         let r = Rect::from_xywh(*x, cy - BTN / 2.0, BTN, BTN);
         *x += BTN + 2.0;
         r
     };
+    let sidebar_toggle = btn(&mut x);
     let back = btn(&mut x);
     let forward = btn(&mut x);
     let up = btn(&mut x);
 
-    let right = lay.nav.right() - PAD;
     let menu = Rect::from_xywh(right - BTN, cy - BTN / 2.0, BTN, BTN);
     let view = Rect::from_xywh(menu.x() - BTN - 4.0, cy - BTN / 2.0, BTN, BTN);
     let search = Rect::from_xywh(view.x() - BTN - 4.0, cy - BTN / 2.0, BTN, BTN);
@@ -137,22 +203,16 @@ fn chrome(lay: &Layout, size: Size) -> Chrome {
         up.right() + PAD,
         lay.nav.y() + 5.0,
         (search.x() - PAD - (up.right() + PAD)).max(40.0),
-        NAV_H - 10.0,
-    );
-    let plus = Rect::from_xywh(
-        (size.width - PAD - BTN).max(0.0),
-        lay.tabs.center().y - BTN / 2.0,
-        BTN,
-        BTN,
+        (lay.nav.height() - 10.0).max(20.0),
     );
     Chrome {
+        sidebar_toggle,
         back,
         forward,
         up,
         search,
         view,
         menu,
-        plus,
         path,
     }
 }
@@ -215,16 +275,15 @@ fn pane_rects(app: &App, lay: &Layout, i: usize, theme: &Theme) -> PaneRects {
 // ---------------------------------------------------------------------------
 
 pub fn paint(app: &App, scene: &mut Scene, size: Size, theme: &Theme, text: &TextEngine) {
-    let lay = layout(app, size, theme);
-    let ch = chrome(&lay, size);
+    let lay = layout(app, size, theme, text);
+    let ch = chrome(app, &lay, theme);
     let mut ctx = PaintCtx::new(scene, theme, text);
 
     ctx.scene
         .fill_rect(Rect::from_size(size), theme.colors.window_bg);
 
     paint_header(&mut ctx, app, &lay);
-    paint_tabs(&mut ctx, app, &lay, &ch);
-    paint_nav(&mut ctx, app, &lay, &ch);
+    paint_nav(&mut ctx, app, &ch);
     paint_sidebar(&mut ctx, app, &lay);
     paint_panes(&mut ctx, app, &lay);
     paint_status(&mut ctx, app, &lay);
@@ -242,37 +301,54 @@ pub fn paint(app: &App, scene: &mut Scene, size: Size, theme: &Theme, text: &Tex
 }
 
 fn paint_header(ctx: &mut PaintCtx, app: &App, lay: &Layout) {
-    let title = if app.pane().dir.path == Path::new("/") {
-        libluna_i18n::tr("File System")
-    } else {
-        app.pane().dir.title()
-    };
-    let header = HeaderBar::new().title(title).controls(ControlsSide::Right);
-    header.paint(ctx, lay.header, None);
-}
-
-fn paint_tabs(ctx: &mut PaintCtx, app: &App, lay: &Layout, ch: &Chrome) {
-    let pane = app.pane();
-    let tabs: Vec<Tab> = pane
-        .tabs
-        .iter()
-        .map(|p| Tab::new(tab_title(p)).closable(pane.tabs.len() > 1))
-        .collect();
-    let mut bar = TabBar::with_tabs(tabs).expand(false);
-    bar.set_selected(pane.tab);
-    let rect = Rect::from_xywh(
-        lay.tabs.x(),
-        lay.tabs.y(),
-        (ch.plus.x() - lay.tabs.x() - PAD).max(1.0),
-        lay.tabs.height(),
+    let multi = app.pane().tabs.len() > 1;
+    // Jeden pasek: tło obejmuje też dolny wiersz, gdy są zakładki.
+    ctx.scene
+        .fill_rect(lay.header, ctx.theme.colors.headerbar_bg);
+    // Kontrolki okna rysuje widget — bez tytułu, bo w jednym wierszu jest pasek ścieżki.
+    HeaderBar::new()
+        .controls(ControlsSide::Right)
+        .paint(ctx, lay.top, None);
+    if multi {
+        // Oba wiersze mają wyglądać jak jeden pasek: zamalowuj linię pod górnym.
+        ctx.scene.fill_rect(
+            Rect::from_xywh(lay.top.x(), lay.top.bottom() - 1.0, lay.top.width(), 1.0),
+            ctx.theme.colors.headerbar_bg,
+        );
+        paint_tabs(ctx, app, lay);
+    }
+    // Jedna linia pod całym paskiem (nie dwie).
+    ctx.scene.fill_rect(
+        Rect::from_xywh(
+            lay.header.x(),
+            lay.header.bottom() - 1.0,
+            lay.header.width(),
+            1.0,
+        ),
+        ctx.theme.colors.border,
     );
-    bar.paint(ctx, rect);
-    icon_button(ctx, ch.plus, IconName::Plus, true, false);
 }
 
-fn paint_nav(ctx: &mut PaintCtx, app: &App, lay: &Layout, ch: &Chrome) {
+fn paint_tabs(ctx: &mut PaintCtx, app: &App, lay: &Layout) {
+    tab_bar(app).paint(ctx, lay.tabs);
+    icon_button(ctx, lay.plus, IconName::Plus, true, false);
+}
+
+fn paint_nav(ctx: &mut PaintCtx, app: &App, ch: &Chrome) {
     let pane = app.pane();
-    ctx.scene.fill_rect(lay.nav, ctx.theme.colors.headerbar_bg);
+
+    // Przełącznik paska bocznego (jak w aplikacjach libLuny).
+    ctx.scene.fill_rounded_rect(
+        ch.sidebar_toggle,
+        ctx.theme.radius.small,
+        ctx.theme.colors.shade,
+    );
+    sidebar_icon(
+        ctx,
+        ctx.theme.colors.text,
+        ch.sidebar_toggle,
+        app.sidebar_visible,
+    );
 
     icon_button(
         ctx,
@@ -578,6 +654,18 @@ fn icon_button(ctx: &mut PaintCtx, rect: Rect, name: IconName, enabled: bool, ac
     icon::paint_icon(ctx, name, rect.deflate(Insets::splat(6.0)), color);
 }
 
+/// Ikona przełącznika paska bocznego (◧ / ▭) — jak w pozostałych aplikacjach Luny.
+fn sidebar_icon(ctx: &mut PaintCtx, color: Color, box_: Rect, filled: bool) {
+    let c = box_.center();
+    let (w, h) = (18.0, 14.0);
+    let outer = Rect::from_xywh(c.x - w / 2.0, c.y - h / 2.0, w, h);
+    ctx.scene.stroke_rounded_rect(outer, 3.0, 1.5, color);
+    if filled {
+        let inner = Rect::from_xywh(outer.x() + 2.0, outer.y() + 2.0, w * 0.36, h - 4.0);
+        ctx.scene.fill_rounded_rect(inner, 2.0, color);
+    }
+}
+
 fn icon_up(ctx: &mut PaintCtx, rect: Rect, enabled: bool) {
     let color = if enabled {
         ctx.theme.colors.text
@@ -681,8 +769,8 @@ pub fn handle_events(
     theme: &Theme,
     text: &TextEngine,
 ) {
-    let lay = layout(app, size, theme);
-    let ch = chrome(&lay, size);
+    let lay = layout(app, size, theme, text);
+    let ch = chrome(app, &lay, theme);
 
     // Modal konfliktu blokuje resztę interfejsu.
     if app.conflict.is_some() {
@@ -756,6 +844,12 @@ pub fn handle_events(
                     context.menu.hover_at(context.panel, Some(p), theme);
                     continue;
                 }
+                let tab_hover = if app.pane().tabs.len() > 1 && lay.tabs.contains(p) {
+                    tab_bar(app).index_at(lay.tabs, text, theme, p)
+                } else {
+                    None
+                };
+                app.tab_hover = tab_hover;
                 let _hovered =
                     app.sidebar
                         .index_at(lay.sidebar.deflate(Insets::splat(6.0)), p, theme);
@@ -771,6 +865,7 @@ pub fn handle_events(
                 }
             }
             Event::PointerLeave => {
+                app.tab_hover = None;
                 app.sidebar.set_hovered(None);
                 for pane in &mut app.panes {
                     pane.view.set_hovered(None);
@@ -827,10 +922,10 @@ fn on_left_press(
         return;
     }
 
-    // 2. Kontrolki okna (nasz HeaderBar).
+    // 2. Kontrolki okna (górny wiersz paska).
     let header = HeaderBar::new().controls(ControlsSide::Right);
-    if lay.header.contains(p) {
-        if let Some(control) = header.control_at(lay.header, theme, p) {
+    if lay.top.contains(p) {
+        if let Some(control) = header.control_at(lay.top, theme, p) {
             match control {
                 WindowControl::Close => app.pending_close = true,
                 WindowControl::Minimize => app.pending_minimize = true,
@@ -838,45 +933,32 @@ fn on_left_press(
             }
             return;
         }
-        // Przeciąganie za wolny obszar paska.
-        let content = header.controls_layout(lay.header, theme).content;
-        if content.contains(p) {
-            app.pending_move = true;
-        }
-        return;
     }
 
-    // 3. Zakładki.
-    if lay.tabs.contains(p) {
-        if ch.plus.contains(p) {
+    // 3. Zakładki (tylko gdy jest ich więcej niż jedna).
+    if app.pane().tabs.len() > 1 && lay.top.contains(p) {
+        if lay.plus.contains(p) {
             app.new_tab();
             return;
         }
-        let pane = app.pane();
-        let tabs: Vec<Tab> = pane
-            .tabs
-            .iter()
-            .map(|tp| Tab::new(tab_title(tp)).closable(pane.tabs.len() > 1))
-            .collect();
-        let mut bar = TabBar::with_tabs(tabs).expand(false);
-        bar.set_selected(pane.tab);
-        let rect = Rect::from_xywh(
-            lay.tabs.x(),
-            lay.tabs.y(),
-            (ch.plus.x() - lay.tabs.x() - PAD).max(1.0),
-            lay.tabs.height(),
-        );
-        if let Some(i) = bar.close_at(rect, text, theme, p) {
+        let bar = tab_bar(app);
+        if let Some(i) = bar.close_at(lay.tabs, text, theme, p) {
             app.select_tab(i);
             app.close_tab();
-        } else if let Some(i) = bar.index_at(rect, text, theme, p) {
-            app.select_tab(i);
+            return;
         }
-        return;
+        if let Some(i) = bar.index_at(lay.tabs, text, theme, p) {
+            app.select_tab(i);
+            return;
+        }
     }
 
-    // 4. Pasek nawigacji.
+    // 4. Pasek nawigacji (przy jednej zakładce w tym samym wierszu co kontrolki).
     if lay.nav.contains(p) {
+        if ch.sidebar_toggle.contains(p) {
+            app.sidebar_visible = !app.sidebar_visible;
+            return;
+        }
         if ch.back.contains(p) {
             app.back();
             return;
@@ -929,7 +1011,18 @@ fn on_left_press(
         }
     }
 
-    // 5. Panel boczny.
+    // 5. Przeciąganie okna za wolne miejsce paska (poza przyciskami i ścieżką).
+    if lay.header.contains(p) {
+        if lay.top.contains(p) {
+            let content = header.controls_layout(lay.top, theme).content;
+            if content.contains(p) {
+                app.pending_move = true;
+            }
+        }
+        return;
+    }
+
+    // 6. Panel boczny.
     if lay.sidebar.contains(p) {
         let entry = app
             .sidebar

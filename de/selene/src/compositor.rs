@@ -264,9 +264,24 @@ impl Dispatch<wl_surface::WlSurface, SurfaceData> for State {
             crate::subsurface::repaint_parent(state, &sub.parent);
         }
         // Okno w modelu chowamy (nie usuwamy — indeks slotu musi zostać stabilny).
-        if let Some(slot) = *data.slot.lock_or_recover() {
+        // Ważne: guard `data.slot` zwalniamy **przed** `clear_focus_if` — inaczej
+        // `broadcast_states` próbuje zamknąć ten sam mutex i wątek wisi.
+        let slot = *data.slot.lock_or_recover();
+        if let Some(slot) = slot {
             if let Some(win) = state.windows.lock_or_recover().get_mut(slot) {
                 win.mapped = false;
+                win.minimized = false;
+                win.maximized = false;
+                win.fullscreen = false;
+                win.input_capture = false;
+                win.input = None;
+                // Zwolnij bufor ostatniej klatki (może mieć kilka MB).
+                win.data = std::sync::Arc::new(ImageData::empty(1, 1));
+            }
+            // Fokus nie może wskazywać na powierzchnię, której już nie ma.
+            crate::seat::clear_focus_if(state, slot);
+            if std::env::var("SELENE_STATS").is_ok() {
+                eprintln!("selene/win: powierzchnia zniszczona slot={slot}");
             }
         }
         // Pasek (foreign-toplevel) dowiaduje się, że okno zniknęło.

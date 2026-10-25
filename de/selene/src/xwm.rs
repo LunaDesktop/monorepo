@@ -73,6 +73,19 @@ impl X11Info {
 pub enum X11Change {
     Fullscreen(bool),
     Maximized(bool),
+    /// Klient prosi o zminimalizowanie/przywrócenie (`WM_CHANGE_STATE` / IconicState).
+    Minimize(bool),
+    /// Interaktywne przesunięcie od pozycji wskaźnika (`_NET_WM_MOVERESIZE`, kierunek 8).
+    Move {
+        x: i32,
+        y: i32,
+    },
+    /// Interaktywna zmiana rozmiaru (bitmaska jak w `seat`: 1=góra, 2=dół, 4=lewo, 8=prawo).
+    Resize {
+        edges: u8,
+        x: i32,
+        y: i32,
+    },
 }
 
 /// Polecenia z kompozytora do wątku XWM.
@@ -576,6 +589,31 @@ fn handle_event(
                 st.ewmh.insert(e.window, flags);
                 st.changes
                     .extend(pending.into_iter().map(|c| (e.window, c)));
+            } else if e.type_ == atoms.wm_change_state {
+                // `WM_CHANGE_STATE`: 1 = NormalState, 3 = IconicState (minimalizacja).
+                let data = e.data.as_data32();
+                let iconic = data[0] == 3;
+                state
+                    .lock_or_recover()
+                    .changes
+                    .push((e.window, X11Change::Minimize(iconic)));
+            } else if e.type_ == atoms.net_wm_moveresize {
+                // `data = [x_root, y_root, direction, button, source]`.
+                let data = e.data.as_data32();
+                let (x, y, direction) = (data[0] as i32, data[1] as i32, data[2]);
+                let change = match direction {
+                    // 8 = Move, 0..=7 = krawędzie/narożniki, 11 = Cancel.
+                    8 => Some(X11Change::Move { x, y }),
+                    0..=7 => Some(X11Change::Resize {
+                        edges: move_resize_edges(direction),
+                        x,
+                        y,
+                    }),
+                    _ => None,
+                };
+                if let Some(change) = change {
+                    state.lock_or_recover().changes.push((e.window, change));
+                }
             }
         }
         Event::UnmapNotify(e) => {
@@ -656,6 +694,21 @@ fn apply_command(
 }
 
 /// Odczytuje serial z komunikatu `WL_SURFACE_SERIAL` (dwa razy 32 bity: `lo`, `hi`).
+/// Bitmaska krawędzi dla kierunku `_NET_WM_MOVERESIZE` (1=góra, 2=dół, 4=lewo, 8=prawo).
+fn move_resize_edges(direction: u32) -> u8 {
+    match direction {
+        0 => 1 | 4, // lewy-górny
+        1 => 1,     // góra
+        2 => 1 | 8, // prawy-górny
+        3 => 8,     // prawo
+        4 => 2 | 8, // prawy-dolny
+        5 => 2,     // dół
+        6 => 2 | 4, // lewy-dolny
+        7 => 4,     // lewo
+        _ => 0,
+    }
+}
+
 fn serial_from_client_message(data: &x11rb::protocol::xproto::ClientMessageData) -> u64 {
     let raw = data.serialize();
     if raw.len() < 8 {
@@ -868,6 +921,8 @@ struct Atoms {
     net_wm_window_type_notification: Atom,
     net_frame_extents: Atom,
     wl_surface_serial: Atom,
+    wm_change_state: Atom,
+    net_wm_moveresize: Atom,
 }
 
 impl Atoms {
@@ -895,6 +950,8 @@ impl Atoms {
             net_wm_window_type_notification: atom(conn, "_NET_WM_WINDOW_TYPE_NOTIFICATION")?,
             net_frame_extents: atom(conn, "_NET_FRAME_EXTENTS")?,
             wl_surface_serial: atom(conn, "WL_SURFACE_SERIAL")?,
+            wm_change_state: atom(conn, "WM_CHANGE_STATE")?,
+            net_wm_moveresize: atom(conn, "_NET_WM_MOVERESIZE")?,
         })
     }
 }
@@ -924,6 +981,18 @@ pub fn sync(state: &mut State) {
         match change {
             X11Change::Fullscreen(on) => crate::seat::set_fullscreen(state, slot, on),
             X11Change::Maximized(on) => crate::seat::set_maximized(state, slot, on),
+            X11Change::Minimize(on) => crate::seat::set_minimized(state, slot, on),
+            X11Change::Move { x, y } => crate::seat::interactive_move_at(
+                state,
+                slot,
+                libluna_core::Point::new(x as f64, y as f64),
+            ),
+            X11Change::Resize { edges, x, y } => crate::seat::interactive_resize_at(
+                state,
+                slot,
+                edges,
+                libluna_core::Point::new(x as f64, y as f64),
+            ),
         }
     }
 }

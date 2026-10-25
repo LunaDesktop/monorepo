@@ -1429,7 +1429,7 @@ fn x11_window(state: &State, slot: usize) -> Option<u32> {
 }
 
 /// Zdejmuje fokus klawiatury/wskaźnika z okna (np. po minimalizacji).
-fn clear_focus_if(state: &mut State, slot: usize) {
+pub(crate) fn clear_focus_if(state: &mut State, slot: usize) {
     if state.keyboard_focus.as_ref().map(|(s, _)| *s) == Some(slot) {
         if let Some((_, surface)) = state.keyboard_focus.clone() {
             if let Some(kb) = keyboard_for(state, &surface) {

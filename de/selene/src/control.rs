@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::state::State;
+use crate::sync::LockExt;
 
 pub struct Control {
     listener: UnixListener,
@@ -58,6 +59,29 @@ fn handle(state: &mut State, line: &str) {
             let (ws, title) = rest.split_once(' ').unwrap_or((rest, ""));
             if let Ok(ws) = ws.parse::<usize>() {
                 crate::seat::move_window_by_title(state, title, ws);
+            }
+        }
+        // `windows` — diagnostyka: lista okien w modelu kompozycji.
+        "windows" => {
+            let ws = *state.ws_current.lock_or_recover();
+            let wins = state.windows.lock_or_recover();
+            eprintln!("selene/control: okna={} ws={ws}", wins.len());
+            for (i, w) in wins.iter().enumerate() {
+                eprintln!(
+                    "selene/control:   [{i}] mapped={} min={} popup={} layer={} z={} \"{}\" {}x{} @ ({:.0},{:.0}) data={}x{}",
+                    w.mapped,
+                    w.minimized,
+                    w.popup,
+                    w.layer,
+                    w.z,
+                    w.title,
+                    w.width,
+                    w.height,
+                    w.x,
+                    w.y,
+                    w.data.width,
+                    w.data.height
+                );
             }
         }
         // `screenshot` — zapis klatek wszystkich monitorów (Super+F12).

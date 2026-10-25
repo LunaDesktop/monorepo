@@ -16,7 +16,9 @@ use libluna_widgets::{ControlsSide, HeaderBar, PaintCtx};
 use crate::drm::{DrmBackend, DrmError};
 use crate::input::{self, Events};
 use crate::monitors::{layout_horizontal, OutputInfo, Outputs};
-use crate::state::{CursorModel, Overview, OverviewModel, Window, WindowModel, WorkspaceModel};
+use crate::state::{
+    CursorModel, Overview, OverviewModel, ScreenshotModel, Window, WindowModel, WorkspaceModel,
+};
 use crate::sync::LockExt;
 
 /// Uruchamia wątek wyjścia (nested Wayland) o zadanym rozmiarze.
@@ -27,6 +29,7 @@ pub fn spawn(
     wake: UnixStream,
     ws: WorkspaceModel,
     overview: OverviewModel,
+    screenshot: ScreenshotModel,
     ws_count: usize,
     width: u32,
     height: u32,
@@ -71,6 +74,23 @@ pub fn spawn(
                 &theme,
                 &text,
             );
+            // Zrzut ekranu także w trybie nested: kompozytor nie ma tu skanouta,
+            // więc kodujemy bieżącą scenę bezpośrednio do PNG.
+            if screenshot.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                let mut renderer = SoftwareRenderer::new(size.width as u32, size.height as u32);
+                renderer.draw(frame.scene, frame.scale, Color::TRANSPARENT);
+                if let Some(png) = renderer.encode_png() {
+                    let stamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let path = screenshot_dir().join(format!("luna-{stamp}-nested.png"));
+                    match std::fs::write(&path, png) {
+                        Ok(()) => eprintln!("selene: zrzut ekranu: {}", path.display()),
+                        Err(e) => eprintln!("selene: nie udało się zapisać zrzutu: {e}"),
+                    }
+                }
+            }
             // Utrzymuj klatki — model okien zmienia się poza tą pętlą.
             frame.request_frame();
         });
@@ -715,6 +735,16 @@ fn build_scene(
             // przeświecało przez nie jako ramka wokół okna.
             // `buffer_rect()` uwzględnia cienie CSD (`set_window_geometry`) — bufor
             // jest większy od widocznego okna i musi być rysowany z przesunięciem.
+            // Zaokrąglone narożniki: wymuszamy dla wszystkich zwykłych okien (także CSD),
+            // promieniem z motywu. Maksymalizowane/fullscreen zostają ostre.
+            let radius = if !w.popup && !w.layer && !w.maximized && !w.fullscreen {
+                theme.radius.large
+            } else {
+                0.0
+            };
+            if radius > 0.0 {
+                scene.push_clip_rounded(sh(w.outer()), radius);
+            }
             scene.image(sh(w.buffer_rect()), w.data.clone());
             // Pasek tytułu rysujemy **tylko** oknom z naszym SSD (`w.ssd`). Klienty
             // z własnymi dekoracjami (GTK/libadwaita, CSD) nie mają `ssd`, a wcześniej
@@ -746,6 +776,9 @@ fn build_scene(
                 // **Bez** własnej ramki wokół całego okna — libLuna rysuje tylko pasek
                 // (z własną linią pod nim). Dodatkowy `stroke` wyglądał jak obca ramka
                 // od innego środowiska, zwłaszcza na oknach X11.
+            }
+            if radius > 0.0 {
+                scene.pop_clip();
             }
         }
     }
