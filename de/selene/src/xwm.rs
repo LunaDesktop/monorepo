@@ -518,6 +518,12 @@ fn handle_event(
             // mogły skurczyć okno do 0×0. Zmianę pozycji odbijamy też w modelu
             // kompozytora: okna CSD (Firefox) przesuwają się same, bez moveresize.
             let mask = u16::from(e.value_mask);
+            if std::env::var("SELENE_STATS").is_ok() {
+                eprintln!(
+                    "selene/xwm: ConfigureRequest 0x{:x} mask={mask:#x} pos=({},{}) size={}x{}",
+                    e.window, e.x, e.y, e.width, e.height
+                );
+            }
             let mut aux = ConfigureWindowAux::new();
             if mask & u16::from(ConfigWindow::X) != 0 {
                 aux = aux.x(i32::from(e.x));
@@ -604,25 +610,53 @@ fn handle_event(
                 let action = data[0];
                 let mut st = state.lock_or_recover();
                 let mut flags = *st.ewmh.get(&e.window).unwrap_or(&(false, false));
+                if std::env::var("SELENE_STATS").is_ok() {
+                    let name = |a: u32| {
+                        if a == 0 {
+                            return String::new();
+                        }
+                        conn.get_atom_name(a)
+                            .ok()
+                            .and_then(|c| c.reply().ok())
+                            .map(|r| String::from_utf8_lossy(&r.name).into_owned())
+                            .unwrap_or_default()
+                    };
+                    eprintln!(
+                        "selene/xwm: _NET_WM_STATE 0x{:x} action={action} a1={} a2={} source={} flags={flags:?}",
+                        e.window,
+                        name(data[1]),
+                        name(data[2]),
+                        data[3]
+                    );
+                }
                 let mut pending: Vec<X11Change> = Vec::new();
+                // Akcja 2 = toggle. Cel liczymy **raz**, przed pętlą: komunikat
+                // zawiera dwa atomy (MAX_VERT + MAX_HORZ), a wcześniej drugi atom
+                // widział już zmieniony `flags` i natychmiast cofał pierwszy —
+                // maksymalizacja z przycisku Firefoksa nie działała wcale.
+                let toggle_fullscreen = !flags.0;
+                let toggle_maximized = !flags.1;
                 for state_atom in [data[1], data[2]] {
                     if state_atom == 0 {
                         continue;
                     }
-                    let (fullscreen, current) = if state_atom == atoms.net_wm_state_fullscreen {
-                        (true, flags.0)
+                    let fullscreen = if state_atom == atoms.net_wm_state_fullscreen {
+                        true
                     } else if state_atom == atoms.net_wm_state_maximized_vert
                         || state_atom == atoms.net_wm_state_maximized_horz
                     {
-                        (false, flags.1)
+                        false
                     } else {
                         continue;
                     };
-                    let on = match action {
-                        0 => false,
-                        1 => true,
-                        2 => !current,
-                        _ => continue,
+                    let on = match net_wm_state_target(
+                        action,
+                        fullscreen,
+                        toggle_fullscreen,
+                        toggle_maximized,
+                    ) {
+                        Some(on) => on,
+                        None => continue,
                     };
                     let change = if fullscreen {
                         flags.0 = on;
@@ -750,6 +784,29 @@ fn apply_command(
     }
     let _ = conn.flush();
     let _ = state;
+}
+
+/// Docelowy stan jednego atomu `_NET_WM_STATE`.
+///
+/// Akcja 2 (toggle) wymaga wartości wyliczonej **raz** przed pętlą po atomach:
+/// inaczej drugi atom (`MAXIMIZED_HORZ`) widzi już zmieniony stan po pierwszym
+/// (`MAXIMIZED_VERT`) i natychmiast go cofa.
+fn net_wm_state_target(
+    action: u32,
+    fullscreen: bool,
+    toggle_fullscreen: bool,
+    toggle_maximized: bool,
+) -> Option<bool> {
+    match action {
+        0 => Some(false),
+        1 => Some(true),
+        2 => Some(if fullscreen {
+            toggle_fullscreen
+        } else {
+            toggle_maximized
+        }),
+        _ => None,
+    }
 }
 
 /// Odczytuje serial z komunikatu `WL_SURFACE_SERIAL` (dwa razy 32 bity: `lo`, `hi`).
@@ -1158,6 +1215,26 @@ mod tests {
         assert_eq!(move_resize_edges(7), 4); // lewo
         assert_eq!(move_resize_edges(8), 0); // „move” nie jest zmianą rozmiaru
         assert_eq!(move_resize_edges(99), 0);
+    }
+
+    #[test]
+    fn toggle_maximize_targets_both_atoms_consistently() {
+        // Komunikat Firefoksa: action=2 (toggle), MAX_VERT + MAX_HORZ.
+        // Oba atomy muszą dostać ten sam cel — inaczej drugi cofa pierwszy.
+        let toggle_maximized = true; // okno było niezmaxymalizowane
+        let vertical = net_wm_state_target(2, false, false, toggle_maximized);
+        let horizontal = net_wm_state_target(2, false, false, toggle_maximized);
+        assert_eq!(vertical, Some(true));
+        assert_eq!(horizontal, Some(true));
+    }
+
+    #[test]
+    fn state_actions_map_to_targets() {
+        assert_eq!(net_wm_state_target(0, false, true, true), Some(false));
+        assert_eq!(net_wm_state_target(1, false, false, false), Some(true));
+        assert_eq!(net_wm_state_target(2, true, true, false), Some(true));
+        assert_eq!(net_wm_state_target(2, true, false, true), Some(false));
+        assert_eq!(net_wm_state_target(9, false, true, true), None);
     }
 
     #[test]

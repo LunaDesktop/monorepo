@@ -19,7 +19,9 @@ kompozytora, na którym codzienna praca nie wymaga obejść.
 | `zwlr_layer_shell_v1` v4 | panele, tło, OSD; region wejścia z alfy |
 | `zwlr_foreign_toplevel_manager_v1` v3 | pasek zadań: tytuł, stan, aktywacja, zamknięcie |
 | `ext_workspace_manager_v1` | przestrzenie robocze |
+| ekran blokady (`luna-lock`) | overlay + `keyboard_interactivity=exclusive`; jedna powierzchnia na wszystkie wyjścia |
 | `xwayland_shell_v1` + XWM | okna X11, `_NET_WM_STATE`, ramki, menu X11 |
+| X11 CSD (Firefox itd.) | ruch: `_NET_WM_MOVERESIZE` w `_NET_SUPPORTED` **oraz** self-move przez `ConfigureRequest`; maksymalizacja: `_NET_WM_STATE` z akcją 2 i dwoma atomami — cel liczony raz na komunikat |
 | `xdg_surface.set_window_geometry` | widoczny prostokąt vs bufor z cieniami CSD |
 | multi-monitor | obszary robocze per wyjście, panel rezerwuje miejsce tylko u siebie |
 
@@ -43,6 +45,9 @@ kompozytora, na którym codzienna praca nie wymaga obejść.
     dziś ogłaszamy v1, więc klienty nie dostają pełnej informacji o kafelkowaniu.
 11. **`buffer_scale` / `buffer_transform`** — całkowite HiDPI i obrót ekranu.
 12. **`ext_session_lock` / screencopy** — blokada sesji i zrzuty ekranu aplikacji.
+    Dziś `luna-lock` robi blokadę warstwą `overlay` (działa w Lunie, ale nie jest
+    standardowym protokołem blokady dla zewnętrznych lockerów); `ext_session_lock`
+    i screencopy pozostają do dodania.
 
 ## Znane problemy do zbadania
 
