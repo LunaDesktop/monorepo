@@ -1076,6 +1076,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn moveresize_directions_map_to_edges() {
+        assert_eq!(move_resize_edges(0), 1 | 4); // lewy-górny
+        assert_eq!(move_resize_edges(1), 1); // góra
+        assert_eq!(move_resize_edges(3), 8); // prawo
+        assert_eq!(move_resize_edges(4), 2 | 8); // prawy-dolny
+        assert_eq!(move_resize_edges(5), 2); // dół
+        assert_eq!(move_resize_edges(7), 4); // lewo
+        assert_eq!(move_resize_edges(8), 0); // „move” nie jest zmianą rozmiaru
+        assert_eq!(move_resize_edges(99), 0);
+    }
+
+    #[test]
     fn normal_windows_are_decorated_but_menus_are_not() {
         let normal = X11Info {
             kind: X11Kind::Normal,

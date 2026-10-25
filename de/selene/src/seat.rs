@@ -496,6 +496,36 @@ pub fn interactive_resize_from_toplevel(
     }
 }
 
+/// Rozpoczyna przeciągnięcie okna z pozycji globalnej (X11 `_NET_WM_MOVERESIZE`).
+pub fn interactive_move_at(state: &mut State, slot: usize, pos: Point) {
+    if window_geometry(state, slot).is_none() {
+        return;
+    }
+    raise_and_focus(state, slot);
+    begin_drag(state, slot, pos);
+}
+
+/// Rozpoczyna zmianę rozmiaru z pozycji globalnej (X11 `_NET_WM_MOVERESIZE`).
+pub fn interactive_resize_at(state: &mut State, slot: usize, edges: u8, pos: Point) {
+    if edges == 0 {
+        return;
+    }
+    let Some((x, y, w, h)) = window_geometry(state, slot) else {
+        return;
+    };
+    raise_and_focus(state, slot);
+    state.resize = Some(ResizeState {
+        slot,
+        edges,
+        start_x: x,
+        start_y: y,
+        start_w: w,
+        start_h: h,
+        start_px: pos.x,
+        start_py: pos.y,
+    });
+}
+
 /// Slot okna dla danych `xdg_toplevel` (przez powiązaną `wl_surface`).
 pub(crate) fn toplevel_slot(data: &XdgToplevelData) -> Option<usize> {
     let sd = data.surface.data::<SurfaceData>()?;
