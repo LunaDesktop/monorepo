@@ -35,6 +35,21 @@ Dostępne binarki:
 - zmiana nazwy (`F2`), nowy folder (`Ctrl+N`), odświeżanie (`F5`/`Ctrl+R`),
   otwieranie plików przez `xdg-open`, terminal w katalogu (`F4`).
 
+**Archiwa**
+- pakowanie zaznaczenia do **ZIP** (menu kontekstowe → „Skompresuj do ZIP”),
+  z unikalną nazwą (`Paczka.zip`, `Paczka (2).zip`), w tle z postępem i anulowaniem;
+- rozpakowywanie **ZIP / TAR / TAR.GZ / TAR.XZ / TAR.BZ2 / 7z / RAR** —
+  „Wypakuj tutaj” i „Wypakuj do folderu” (podkatalog o nazwie archiwum);
+- korzysta z `bsdtar`/`tar`/`zip`/`7z`/`unrar` (libarchive), więc nie ciągniemy
+  ciężkich bibliotek, a RAR działa mimo zamkniętego formatu.
+
+**Ustawienia i informacje**
+- okno **Ustawień** (`Ctrl+,` lub menu ☰): motyw (jasny/ciemny/auto), widok
+  (lista/siatka), język (polski/angielski/niemiecki), pokazywanie plików ukrytych;
+- wybory są trwałe (`$XDG_CONFIG_HOME/luna/files.conf`), a zmiana języka działa
+  natychmiast (także w panelu bocznym i menu);
+- **O aplikacji** — nazwa, wersja, licencja.
+
 **Urządzenia**
 - panel boczny: miejsca XDG (z `~/.config/user-dirs.dirs`), kosz, zamontowane dyski
   z wolnym miejscem (rozmiar z `statvfs`);
@@ -54,7 +69,9 @@ Dostępne binarki:
 | `list.rs` | lista z kolumnami, nagłówki sortowania, wirtualizacja wierszy |
 | `trash.rs` | kosz XDG: `files/` + `info/*.trashinfo`, kolizje nazw, `EXDEV` |
 | `places.rs` | miejsca XDG, montowania (`/proc/self/mountinfo`), `statvfs`, UDisks2 |
-| `ops.rs` | wielowątkowa kolejka kopiuj/przenieś/usuń/zmień nazwę |
+| `ops.rs` | wielowątkowa kolejka kopiuj/przenieś/usuń/zmień nazwę/pakuj/wypakuj |
+| `archive.rs` | wykrywanie formatów, plany poleceń `zip`/`tar`/`bsdtar`/`7z`, anulowanie |
+| `prefs.rs` | trwałe preferencje (`language`, `view`, `show_hidden`) w XDG |
 | `app.rs` | stan aplikacji, historia, zakładki, powiadomienia, pętla klatki |
 | `ui.rs` | layout, rysowanie, obsługa myszy/klawiatury, menu |
 
@@ -70,6 +87,7 @@ Dostępne binarki:
 | `Ctrl+H` | ukryj/pokaż pliki ukryte |
 | `F9` | pokaż/ukryj panel boczny |
 | `Ctrl+N` | nowy folder |
+| `Ctrl+,` | Ustawienia |
 | `F2` / `F3` / `F4` / `F5` | zmiana nazwy / dwa panele / terminal / odśwież |
 | `Space` | podgląd |
 | `Delete` / `Shift+Delete` | do kosza / trwale usuń |
@@ -79,7 +97,6 @@ Dostępne binarki:
 
 - MTP/PTP (telefony) przez GVFS/libmtp, LUKS i montowanie partycji systemowych;
 - miniatury obrazów i wideo, podgląd PDF, kolumny (Miller), masowa zmiana nazw;
-- archiwa (zip/tar/7z) bez zewnętrznych aplikacji;
 - bezpośrednie sygnały UDisks2 (`InterfacesAdded/Removed`) zamiast odpytywania;
 - systemowy schowek dla „Kopiuj ścieżkę” (wymaga API schowka w `libluna-platform`);
 - „Otwórz za pomocą…” z wyborem aplikacji i zapamiętywaniem domyślnych.

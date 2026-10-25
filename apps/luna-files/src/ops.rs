@@ -19,15 +19,46 @@ use crate::trash;
 /// Zadanie do wykonania w tle.
 #[derive(Debug, Clone)]
 pub enum Job {
-    Copy { srcs: Vec<PathBuf>, dst: PathBuf },
-    Move { srcs: Vec<PathBuf>, dst: PathBuf },
-    Trash { paths: Vec<PathBuf> },
-    Delete { paths: Vec<PathBuf> },
-    Rename { from: PathBuf, to: PathBuf },
-    NewFolder { parent: PathBuf },
-    Mkdir { path: PathBuf },
-    Restore { path: PathBuf },
-    Purge { path: PathBuf },
+    Copy {
+        srcs: Vec<PathBuf>,
+        dst: PathBuf,
+    },
+    Move {
+        srcs: Vec<PathBuf>,
+        dst: PathBuf,
+    },
+    Trash {
+        paths: Vec<PathBuf>,
+    },
+    Delete {
+        paths: Vec<PathBuf>,
+    },
+    Rename {
+        from: PathBuf,
+        to: PathBuf,
+    },
+    NewFolder {
+        parent: PathBuf,
+    },
+    Mkdir {
+        path: PathBuf,
+    },
+    Restore {
+        path: PathBuf,
+    },
+    Purge {
+        path: PathBuf,
+    },
+    /// Pakuje `items` do archiwum `dest` (format wynika z rozszerzenia).
+    Compress {
+        items: Vec<PathBuf>,
+        dest: PathBuf,
+    },
+    /// Wypakowuje `archive` do katalogu `dest`.
+    Extract {
+        archive: PathBuf,
+        dest: PathBuf,
+    },
 }
 
 /// Decyzja przy konflikcie nazw (dialog w UI).
@@ -185,6 +216,8 @@ fn run(job: Job, tx: &Sender<OpsEvent>, cancel: &AtomicBool, decisions: &Receive
         Job::Mkdir { .. } => "Creating folder",
         Job::Restore { .. } => "Restoring",
         Job::Purge { .. } => "Deleting",
+        Job::Compress { .. } => "Creating archive",
+        Job::Extract { .. } => "Extracting",
     });
     let _ = tx.send(OpsEvent::Started {
         label: label.clone(),
@@ -304,6 +337,40 @@ fn run(job: Job, tx: &Sender<OpsEvent>, cancel: &AtomicBool, decisions: &Receive
             Ok(()) => ok = 1,
             Err(e) => failed.push(format!("{}: {e}", path.display())),
         },
+        Job::Compress { items, dest } => {
+            let _ = tx.send(OpsEvent::Progress {
+                done: 0,
+                total: 0,
+                current: dest
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            });
+            match crate::archive::compress(&items, &dest, cancel) {
+                Ok(()) => {
+                    ok = 1;
+                    created = Some(dest);
+                }
+                Err(e) => failed.push(format!("{}: {e}", dest.display())),
+            }
+        }
+        Job::Extract { archive, dest } => {
+            let _ = tx.send(OpsEvent::Progress {
+                done: 0,
+                total: 0,
+                current: archive
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            });
+            match crate::archive::extract(&archive, &dest, cancel) {
+                Ok(()) => {
+                    ok = 1;
+                    created = Some(dest);
+                }
+                Err(e) => failed.push(format!("{}: {e}", archive.display())),
+            }
+        }
     }
 
     let _ = tx.send(OpsEvent::Finished {

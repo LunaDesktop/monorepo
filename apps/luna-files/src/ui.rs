@@ -7,19 +7,23 @@ use std::time::{Duration, Instant};
 
 use libluna_core::style::weight;
 use libluna_core::{
-    ButtonState, Color, Event, Insets, KeyEvent, Modifiers, Point, PointerButton, Rect, Size, Theme,
+    ButtonState, Color, Event, Insets, KeyEvent, Modifiers, Point, PointerButton, Rect, Size,
+    Theme, ThemePreference,
 };
 use libluna_render::{Scene, TextEngine};
 use libluna_widgets::{
-    icon, AlertDialog, ControlsSide, Entry as TextEntry, HeaderBar, IconName, Menu, MenuEntry,
-    PaintCtx, PathBar, Tab, TabBar, TextInput, ViewMode, WindowControl,
+    icon, AlertDialog, Button, ControlsSide, Entry as TextEntry, HeaderBar, IconName, Menu,
+    MenuEntry, PaintCtx, PathBar, PreferencesDialog, Switch, Tab, TabBar, TextInput, ViewMode,
+    ViewSwitcher, WindowControl,
 };
 
 use crate::app::{App, ContextMenu, EditState, MenuCmd, MenuTarget, Pane, SideAction, SPLIT_GAP};
+use crate::archive;
 use crate::list;
 use crate::model::{format_mtime, human_size, Kind, SortKey};
 use crate::ops::Job;
 use crate::places;
+use crate::prefs;
 use crate::trash;
 
 const SIDEBAR_W: f64 = 216.0;
@@ -297,6 +301,12 @@ pub fn paint(app: &App, scene: &mut Scene, size: Size, theme: &Theme, text: &Tex
     }
     if let Some(confirm) = &app.confirm_empty {
         confirm.paint(&mut ctx, size);
+    }
+    if app.settings_open {
+        paint_settings(&mut ctx, app, size);
+    }
+    if let Some(about) = &app.about {
+        about.paint(&mut ctx, size);
     }
 }
 
@@ -582,13 +592,15 @@ fn paint_status(ctx: &mut PaintCtx, app: &App, lay: &Layout) {
         } else {
             0.0
         };
-        let bar = Rect::from_xywh(
-            lay.status.x(),
-            lay.status.y() - 3.0,
-            lay.status.width() * ratio,
-            3.0,
-        );
-        ctx.scene.fill_rect(bar, colors.accent);
+        if total > 0 {
+            let bar = Rect::from_xywh(
+                lay.status.x(),
+                lay.status.y() - 3.0,
+                lay.status.width() * ratio,
+                3.0,
+            );
+            ctx.scene.fill_rect(bar, colors.accent);
+        }
         let speed = if app.op_speed > 1.0 {
             format!("{}/s", human_size(app.op_speed as u64))
         } else {
@@ -600,11 +612,17 @@ fn paint_status(ctx: &mut PaintCtx, app: &App, lay: &Layout) {
         } else {
             String::new()
         };
-        let mut label = format!(
-            "{} {}%",
-            app.op_label.clone().unwrap_or_default(),
-            (ratio * 100.0).round() as i64
-        );
+        // Operacje bez znanego rozmiaru (np. archiwa) nie mają procentów — pokazujemy
+        // samą nazwę zadania i bieżący element.
+        let mut label = if total > 0 {
+            format!(
+                "{} {}%",
+                app.op_label.clone().unwrap_or_default(),
+                (ratio * 100.0).round() as i64
+            )
+        } else {
+            app.op_label.clone().unwrap_or_default()
+        };
         if !speed.is_empty() {
             label.push_str(" · ");
             label.push_str(&speed);
@@ -762,6 +780,158 @@ fn segment_path(path: &Path, index: usize) -> PathBuf {
 // Zdarzenia
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Ustawienia / O aplikacji
+// ---------------------------------------------------------------------------
+
+struct SettingsLayout {
+    rows: [Rect; 4],
+    theme_seg: Rect,
+    view_seg: Rect,
+    lang_seg: Rect,
+    hidden_switch: Rect,
+    done: Rect,
+}
+
+fn settings_dialog() -> PreferencesDialog {
+    PreferencesDialog::new(libluna_i18n::tr("Settings"), 376.0)
+}
+
+fn settings_layout(size: Size, theme: &Theme) -> SettingsLayout {
+    let rects = settings_dialog().rects(size, theme);
+    let pad = theme.spacing.lg;
+    let inner = rects.content.deflate(Insets::new(pad, pad, pad, pad));
+    let row_h = 46.0;
+    let rows: [Rect; 4] = std::array::from_fn(|i| {
+        Rect::from_xywh(
+            inner.x(),
+            inner.y() + i as f64 * row_h,
+            inner.width(),
+            row_h,
+        )
+    });
+    let seg_w = 232.0_f64.min(inner.width() * 0.55);
+    let seg = |i: usize| {
+        Rect::from_xywh(
+            inner.right() - seg_w,
+            rows[i].center().y - 15.0,
+            seg_w,
+            30.0,
+        )
+    };
+    let (sw, sh) = Switch::new(false).size(theme);
+    let hidden_switch = Rect::from_xywh(inner.right() - sw, rows[3].center().y - sh / 2.0, sw, sh);
+    let bh = theme.metrics.button.height;
+    let done = Rect::from_xywh(inner.right() - 120.0, inner.bottom() - bh, 120.0, bh);
+    SettingsLayout {
+        rows,
+        theme_seg: seg(0),
+        view_seg: seg(1),
+        lang_seg: seg(2),
+        hidden_switch,
+        done,
+    }
+}
+
+fn paint_settings(ctx: &mut PaintCtx, app: &App, size: Size) {
+    settings_dialog().paint(ctx, size);
+    let theme = *ctx.theme;
+    let lay = settings_layout(size, &theme);
+    let body = theme.typography.body.size;
+    let labels = [
+        libluna_i18n::tr("Theme"),
+        libluna_i18n::tr("View"),
+        libluna_i18n::tr("Language"),
+        libluna_i18n::tr("Show hidden files"),
+    ];
+    for (i, label) in labels.iter().enumerate() {
+        ctx.label_left(
+            lay.rows[i].x() + 12.0,
+            lay.rows[i].center().y,
+            label,
+            body,
+            weight::NORMAL,
+            theme.colors.text,
+        );
+        if i > 0 {
+            ctx.scene.fill_rect(
+                Rect::from_xywh(lay.rows[i].x(), lay.rows[i].y(), lay.rows[i].width(), 1.0),
+                theme.colors.border,
+            );
+        }
+    }
+
+    let mut theme_switcher = ViewSwitcher::new([
+        libluna_i18n::tr("Light"),
+        libluna_i18n::tr("Dark"),
+        libluna_i18n::tr("Auto"),
+    ]);
+    let theme_index = ThemePreference::ALL
+        .iter()
+        .position(|p| *p == app.theme_pref)
+        .unwrap_or(2);
+    theme_switcher.set_selected(theme_index);
+    theme_switcher.paint(ctx, lay.theme_seg);
+
+    let mut view_switcher = ViewSwitcher::new([libluna_i18n::tr("List"), libluna_i18n::tr("Grid")]);
+    view_switcher.set_selected(match app.pane().view.mode() {
+        ViewMode::List => 0,
+        ViewMode::Grid => 1,
+    });
+    view_switcher.paint(ctx, lay.view_seg);
+
+    // Nazwy języków pokazujemy natywnie — tak jak w systemowych ustawieniach.
+    let mut lang_switcher = ViewSwitcher::new(["Polski", "English", "Deutsch"]);
+    lang_switcher.set_selected(prefs::language_index(&app.prefs.language));
+    lang_switcher.paint(ctx, lay.lang_seg);
+
+    Switch::new(app.pane().dir.show_hidden()).paint(ctx, lay.hidden_switch);
+    Button::new(libluna_i18n::tr("Done")).paint(ctx, lay.done);
+}
+
+/// Obsługuje klik w otwartym oknie Ustawień (modal blokuje resztę).
+fn on_settings_press(app: &mut App, p: Point, size: Size, theme: &Theme) {
+    let lay = settings_layout(size, theme);
+    let dialog = settings_dialog();
+    if dialog.close_at(size, theme, p) || dialog.scrim_at(size, theme, p) || lay.done.contains(p) {
+        app.settings_open = false;
+        return;
+    }
+
+    let theme_switcher = ViewSwitcher::new([
+        libluna_i18n::tr("Light"),
+        libluna_i18n::tr("Dark"),
+        libluna_i18n::tr("Auto"),
+    ]);
+    if let Some(i) = theme_switcher.index_at(lay.theme_seg, p) {
+        let pref = ThemePreference::ALL[i];
+        app.theme_pref = pref;
+        app.pending_theme = Some(pref);
+        return;
+    }
+
+    let view_switcher = ViewSwitcher::new([libluna_i18n::tr("List"), libluna_i18n::tr("Grid")]);
+    if let Some(i) = view_switcher.index_at(lay.view_seg, p) {
+        app.set_view(if i == 0 {
+            ViewMode::List
+        } else {
+            ViewMode::Grid
+        });
+        return;
+    }
+
+    let lang_switcher = ViewSwitcher::new(["Polski", "English", "Deutsch"]);
+    if let Some(i) = lang_switcher.index_at(lay.lang_seg, p) {
+        app.set_language(prefs::LANGUAGES[i]);
+        return;
+    }
+
+    if lay.hidden_switch.contains(p) {
+        let on = app.pane().dir.show_hidden();
+        app.set_show_hidden(!on);
+    }
+}
+
 pub fn handle_events(
     app: &mut App,
     events: &[Event],
@@ -771,6 +941,36 @@ pub fn handle_events(
 ) {
     let lay = layout(app, size, theme, text);
     let ch = chrome(app, &lay, theme);
+
+    // Modale (Ustawienia, O aplikacji) pochłaniają całe wejście.
+    if app.settings_open {
+        for event in events {
+            if let Event::PointerButton(pe) = event {
+                if pe.button == PointerButton::Left && pe.state == ButtonState::Pressed {
+                    on_settings_press(app, pe.position, size, theme);
+                }
+            }
+        }
+        return;
+    }
+    if app.about.is_some() {
+        for event in events {
+            if let Event::PointerButton(pe) = event {
+                if pe.button == PointerButton::Left && pe.state == ButtonState::Pressed {
+                    let close = app.about.as_ref().is_some_and(|about| {
+                        let r = about.rects(size, theme, text);
+                        about.action_at(size, theme, text, pe.position).is_some()
+                            || r.dialog.close.contains(pe.position)
+                            || !r.dialog.panel.contains(pe.position)
+                    });
+                    if close {
+                        app.about = None;
+                    }
+                }
+            }
+        }
+        return;
+    }
 
     // Modal konfliktu blokuje resztę interfejsu.
     if app.conflict.is_some() {
@@ -1291,6 +1491,7 @@ fn on_key(
             }
             0x74 => app.new_tab(),                    // Ctrl+T
             0x77 => app.close_tab(),                  // Ctrl+W
+            0x2c => app.settings_open = true,         // Ctrl+,
             0x63 => copy_selection(app, false),       // Ctrl+C
             0x78 => copy_selection(app, true),        // Ctrl+X
             0x76 => paste(app),                       // Ctrl+V
@@ -1663,6 +1864,14 @@ fn menu_entries(app: &App, target: &MenuTarget) -> (Vec<MenuEntry>, Vec<Option<M
             m.action(tr("Open"), Some("Enter"), MenuCmd::Open);
             m.action(tr("Open in Terminal"), Some("F4"), MenuCmd::OpenTerminal);
             m.sep();
+            m.action(tr("Compress to ZIP"), None, MenuCmd::Compress);
+            if let MenuTarget::Item(path, is_dir) = target {
+                if !*is_dir && archive::is_archive(path) {
+                    m.action(tr("Extract Here"), None, MenuCmd::ExtractHere);
+                    m.action(tr("Extract to Folder"), None, MenuCmd::ExtractTo);
+                }
+            }
+            m.sep();
             m.action(tr("Copy"), Some("Ctrl+C"), MenuCmd::Copy);
             m.action(tr("Cut"), Some("Ctrl+X"), MenuCmd::Cut);
             m.sep();
@@ -1748,6 +1957,11 @@ fn menu_entries(app: &App, target: &MenuTarget) -> (Vec<MenuEntry>, Vec<Option<M
             m.sep();
             m.action(tr("Refresh"), Some("F5"), MenuCmd::Refresh);
             m.action(tr("Empty Trash"), None, MenuCmd::EmptyTrash);
+            if matches!(target, MenuTarget::AppMenu) {
+                m.sep();
+                m.action(tr("Settings"), Some("Ctrl+,"), MenuCmd::Settings);
+                m.action(tr("About Files"), None, MenuCmd::About);
+            }
         }
     }
     (m.entries, m.cmds)
@@ -1868,6 +2082,24 @@ fn run_menu(app: &mut App, index: usize) {
                 app.navigate(app.active, mount);
             }
         }
+        MenuCmd::Settings => app.settings_open = true,
+        MenuCmd::About => app.show_about(),
+        MenuCmd::Compress => {
+            if let Some((path, _)) = target {
+                // Kompresujemy całe zaznaczenie, jeśli kliknięty element jest jego częścią.
+                let mut items = app.pane().selection();
+                if !items.contains(&path) {
+                    items = vec![path];
+                }
+                let dir = app.pane().dir.path.clone();
+                app.compress(items, &dir);
+            }
+        }
+        MenuCmd::ExtractHere | MenuCmd::ExtractTo => {
+            if let Some((path, _)) = target {
+                app.extract(path, matches!(cmd, MenuCmd::ExtractHere));
+            }
+        }
     }
 }
 
@@ -1910,4 +2142,106 @@ fn show_properties(app: &mut App, path: &Path) {
         ],
     );
     app.show_toast(msg);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app() -> App {
+        App::new(std::env::temp_dir())
+    }
+
+    #[test]
+    fn settings_dialog_renders_panel() {
+        let mut app = app();
+        app.settings_open = true;
+        let theme = Theme::light();
+        let text = TextEngine::system();
+        let size = Size::new(1120.0, 720.0);
+        let mut scene = Scene::new();
+        paint(&app, &mut scene, size, &theme, &text);
+        let mut renderer = libluna_render::SoftwareRenderer::new(1120, 720);
+        renderer.draw(&scene, 1.0, theme.colors.window_bg);
+        let panel = settings_dialog().rects(size, &theme).panel;
+        let px = |x: usize, y: usize| {
+            let i = (y * 1120 + x) * 4;
+            renderer.data()[i..i + 4].to_vec()
+        };
+        // Wnętrze panelu ma inne tło niź obszar poza modalem (przygaszenie + karta).
+        assert_ne!(
+            px(panel.center().x as usize, panel.center().y as usize),
+            px(10, 700)
+        );
+    }
+
+    #[test]
+    fn about_dialog_can_be_opened() {
+        let mut app = app();
+        assert!(app.about.is_none());
+        app.show_about();
+        assert!(app.about.is_some());
+    }
+
+    #[test]
+    fn settings_controls_stay_inside_dialog() {
+        let theme = Theme::light();
+        let size = Size::new(1120.0, 720.0);
+        let lay = settings_layout(size, &theme);
+        let dialog = settings_dialog();
+        let panel = dialog.rects(size, &theme).panel;
+        for row in lay.rows {
+            assert!(panel.contains(row.center()), "wiersz poza panelem");
+        }
+        assert!(panel.contains(lay.theme_seg.center()));
+        assert!(panel.contains(lay.view_seg.center()));
+        assert!(panel.contains(lay.lang_seg.center()));
+        assert!(panel.contains(lay.hidden_switch.center()));
+        assert!(panel.contains(lay.done.center()));
+        // Kontrolki nie nachodzą na przycisk zamknięcia w nagłówku.
+        let close = dialog.rects(size, &theme).close;
+        assert!(!lay.theme_seg.intersects(&close));
+    }
+
+    #[test]
+    fn app_menu_has_settings_and_about_at_the_end() {
+        let app = app();
+        let (_, cmds) = menu_entries(&app, &MenuTarget::AppMenu);
+        let tail: Vec<MenuCmd> = cmds.iter().rev().filter_map(|c| *c).take(2).collect();
+        assert_eq!(tail.len(), 2);
+        assert!(matches!(tail[0], MenuCmd::About));
+        assert!(matches!(tail[1], MenuCmd::Settings));
+    }
+
+    #[test]
+    fn archive_item_menu_offers_extract_actions() {
+        let app = app();
+        let dir = std::env::temp_dir();
+        let (_, cmds) = menu_entries(&app, &MenuTarget::Item(dir.join("paczka.zip"), false));
+        let has = |needle: fn(&MenuCmd) -> bool| cmds.iter().flatten().any(needle);
+        assert!(has(|c| matches!(c, MenuCmd::Compress)));
+        assert!(has(|c| matches!(c, MenuCmd::ExtractHere)));
+        assert!(has(|c| matches!(c, MenuCmd::ExtractTo)));
+    }
+
+    #[test]
+    fn regular_item_menu_has_no_extract_actions() {
+        let app = app();
+        let dir = std::env::temp_dir();
+        let (_, cmds) = menu_entries(&app, &MenuTarget::Item(dir.join("notatka.txt"), false));
+        assert!(cmds
+            .iter()
+            .flatten()
+            .all(|c| !matches!(c, MenuCmd::ExtractHere | MenuCmd::ExtractTo)));
+        assert!(cmds
+            .iter()
+            .flatten()
+            .any(|c| matches!(c, MenuCmd::Compress)));
+        // Katalog (nawet o nazwie „.zip”) nie jest archiwum w menu.
+        let (_, cmds) = menu_entries(&app, &MenuTarget::Item(dir.join("folder.zip"), true));
+        assert!(cmds
+            .iter()
+            .flatten()
+            .all(|c| !matches!(c, MenuCmd::ExtractHere | MenuCmd::ExtractTo)));
+    }
 }

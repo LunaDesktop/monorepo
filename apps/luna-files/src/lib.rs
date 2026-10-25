@@ -1,10 +1,12 @@
 //! Luna Files — menedżer plików środowiska Luna na libLunie.
 
 pub mod app;
+pub mod archive;
 pub mod list;
 pub mod model;
 pub mod ops;
 pub mod places;
+pub mod prefs;
 pub mod trash;
 pub mod ui;
 

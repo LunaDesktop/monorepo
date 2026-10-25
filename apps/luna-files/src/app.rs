@@ -5,19 +5,20 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use libluna_core::ThemeSettings;
+use libluna_core::{ThemePreference, ThemeSettings};
 use libluna_i18n::{set_locale, tr, tr_args, Locale};
 use libluna_platform::{run as run_app, AppConfig, Frame};
 use libluna_render::ImageData;
 use libluna_widgets::{
     AlertDialog, Entry as TextEntry, ItemView, Menu, NavEntry, NavList, PaintCtx, ScrollView,
-    SearchEntry, Toast,
+    SearchEntry, Toast, ViewMode,
 };
 
 use crate::model::{human_size, now_secs, DirView, Entry, Kind, SortKey};
 use crate::ops::{Job, Ops, OpsEvent};
 use crate::places::{self, Mount, Place};
-use crate::{trash, ui};
+use crate::prefs::Prefs;
+use crate::{archive, trash, ui};
 
 /// Odstęp między panelami w trybie dzielonym.
 pub const SPLIT_GAP: f64 = 4.0;
@@ -192,6 +193,16 @@ pub enum MenuCmd {
     EmptyTrash,
     Unmount(usize),
     OpenDevice(usize),
+    /// Otwiera okno Ustawień.
+    Settings,
+    /// Otwiera okno „O aplikacji”.
+    About,
+    /// Pakuje zaznaczone elementy do archiwum ZIP.
+    Compress,
+    /// Wypakowuje archiwum do jego katalogu.
+    ExtractHere,
+    /// Wypakowuje archiwum do podkatalogu o nazwie archiwum.
+    ExtractTo,
 }
 
 pub struct Clipboard {
@@ -265,6 +276,16 @@ pub struct App {
     pub status: String,
     /// Zakładka pod kursorem (podświetlenie w pasku tytułu).
     pub tab_hover: Option<usize>,
+    /// Preferencje (język, domyślny widok, ukryte pliki).
+    pub prefs: Prefs,
+    /// Okno Ustawień (modal).
+    pub settings_open: bool,
+    /// Okno „O aplikacji” (modal).
+    pub about: Option<AlertDialog>,
+    /// Motyw wybrany w Ustawieniach — aplikowany przez pętlę klatki.
+    pub pending_theme: Option<ThemePreference>,
+    /// Bieżąca preferencja motywu (do podświetlenia w Ustawieniach).
+    pub theme_pref: ThemePreference,
     pub pending_close: bool,
     pub pending_minimize: bool,
     pub pending_maximize: bool,
@@ -273,10 +294,20 @@ pub struct App {
 
 impl App {
     pub fn new(start: PathBuf) -> Self {
+        Self::with_prefs(start, Prefs::load())
+    }
+
+    pub fn with_prefs(start: PathBuf, prefs: Prefs) -> Self {
         let home = places::home();
         let start = if start.is_dir() { start } else { home };
+        let mut panes = [Pane::new(start.clone()), Pane::new(start)];
+        for pane in &mut panes {
+            pane.view.set_mode(prefs.view);
+            pane.dir.set_show_hidden(prefs.show_hidden);
+            pane.sync_view();
+        }
         let mut app = Self {
-            panes: [Pane::new(start.clone()), Pane::new(start)],
+            panes,
             active: 0,
             split: false,
             sidebar_visible: true,
@@ -301,6 +332,11 @@ impl App {
             last_mount_refresh: Instant::now() - Duration::from_secs(10),
             status: String::new(),
             tab_hover: None,
+            prefs,
+            settings_open: false,
+            about: None,
+            pending_theme: None,
+            theme_pref: ThemePreference::System,
             pending_close: false,
             pending_minimize: false,
             pending_maximize: false,
@@ -308,6 +344,92 @@ impl App {
         };
         app.rebuild_sidebar();
         app
+    }
+
+    /// Zapisuje bieżące preferencje (wywoływane po zmianie w Ustawieniach).
+    pub fn save_prefs(&self) {
+        self.prefs.save();
+    }
+
+    /// Ustawia język i odświeża wszystkie napisy zależne od katalogu tłumaczeń.
+    pub fn set_language(&mut self, code: &str) {
+        self.prefs.language = code.to_owned();
+        set_locale(Locale::new(code));
+        self.rebuild_sidebar();
+        self.status = self.status_text();
+        self.save_prefs();
+    }
+
+    /// Ustawia domyślny widok we wszystkich panelach.
+    pub fn set_view(&mut self, mode: ViewMode) {
+        self.prefs.view = mode;
+        for pane in &mut self.panes {
+            pane.view.set_mode(mode);
+            pane.sync_view();
+        }
+        self.save_prefs();
+    }
+
+    /// Pokazuje/ukrywa pliki ukryte we wszystkich panelach.
+    pub fn set_show_hidden(&mut self, show: bool) {
+        self.prefs.show_hidden = show;
+        for pane in &mut self.panes {
+            pane.dir.set_show_hidden(show);
+            pane.sync_view();
+        }
+        self.save_prefs();
+    }
+
+    /// Otwiera okno „O aplikacji”.
+    pub fn show_about(&mut self) {
+        let body = format!(
+            "Luna Files {}\n{}\n\n© 2026 Luna Project · GPL-3.0-or-later",
+            env!("CARGO_PKG_VERSION"),
+            tr("File manager for the Luna desktop.")
+        );
+        self.about = Some(
+            AlertDialog::new(tr("About Files"), body)
+                .width(500.0)
+                .button(tr("Done")),
+        );
+    }
+
+    /// Tworzy archiwum ZIP z podanych elementów w katalogu `dir`.
+    pub fn compress(&mut self, items: Vec<PathBuf>, dir: &Path) {
+        if items.is_empty() {
+            return;
+        }
+        let base = if items.len() == 1 {
+            items[0]
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| tr("Archive"))
+        } else {
+            tr("Archive")
+        };
+        let dest = archive::unique_path(dir, &base, "zip");
+        self.submit(Job::Compress { items, dest });
+    }
+
+    /// Wypakowuje archiwum: `here = true` → do katalogu archiwum, inaczej do podkatalogu.
+    pub fn extract(&mut self, archive_path: PathBuf, here: bool) {
+        if !archive::is_archive(&archive_path) {
+            self.show_toast(tr("Unsupported archive format"));
+            return;
+        }
+        let Some(parent) = archive_path.parent() else {
+            return;
+        };
+        let dest = if here {
+            parent.to_path_buf()
+        } else {
+            parent.join(archive::archive_stem(&archive_path))
+        };
+        self.submit(Job::Extract {
+            archive: archive_path,
+            dest,
+        });
     }
 
     pub fn pane(&self) -> &Pane {
@@ -805,7 +927,10 @@ fn spawn_terminal(program: &str, dir: &str) -> bool {
 
 /// Uruchamia aplikację (binarki `luna-files` i `gaminedes`).
 pub fn run(title_key: &str, app_id: &str) -> Result<(), Box<dyn Error>> {
-    set_locale(Locale::from_env());
+    // Język z konfiguracji aplikacji ma pierwszeństwo nad `LANG` — jego wybór
+    // w Ustawieniach ma być trwały między uruchomieniami.
+    let prefs = Prefs::load();
+    set_locale(Locale::new(prefs.language.clone()));
     libluna_i18n::load_catalogs_from_dirs();
     let title = tr(title_key);
 
@@ -827,11 +952,12 @@ pub fn run(title_key: &str, app_id: &str) -> Result<(), Box<dyn Error>> {
         .settings(settings)
         .system_dark(system_dark);
 
-    let mut app = App::new(start);
+    let mut app = App::with_prefs(start, prefs);
     app.status = app.status_text();
 
     run_app(config, move |frame: &mut Frame| {
         let theme = frame.settings().resolve_themed(frame.system_dark());
+        app.theme_pref = frame.settings().preference();
         app.drain_ops();
         app.refresh_devices_if_needed();
 
@@ -852,6 +978,9 @@ pub fn run(title_key: &str, app_id: &str) -> Result<(), Box<dyn Error>> {
         if app.pending_move {
             frame.begin_move();
             app.pending_move = false;
+        }
+        if let Some(pref) = app.pending_theme.take() {
+            frame.set_preference(pref);
         }
 
         app.update_preview();
