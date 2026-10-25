@@ -1110,8 +1110,11 @@ fn map_button(code: u32) -> PointerButton {
         0x110 => PointerButton::Left,
         0x111 => PointerButton::Right,
         0x112 => PointerButton::Middle,
-        0x116 => PointerButton::Back,
-        0x115 => PointerButton::Forward,
+        // Myszy raportują „wstecz/dalej” na dwa sposoby: BTN_SIDE/BTN_EXTRA
+        // (0x113/0x114 — tak robi większość myszy i X11 jako 8/9) oraz
+        // BTN_BACK/BTN_FORWARD (0x116/0x115). Obsługujemy oba warianty.
+        0x113 | 0x116 => PointerButton::Back,
+        0x114 | 0x115 => PointerButton::Forward,
         other => PointerButton::Other(other),
     }
 }
@@ -1504,5 +1507,17 @@ mod tests {
         assert_eq!(resize_edge(2 | 4), xdg_toplevel::ResizeEdge::BottomLeft);
         assert_eq!(resize_edge(2 | 8), xdg_toplevel::ResizeEdge::BottomRight);
         assert_eq!(resize_edge(0), xdg_toplevel::ResizeEdge::None);
+    }
+
+    #[test]
+    fn mouse_side_buttons_map_to_back_and_forward() {
+        // Większość myszy: BTN_SIDE/BTN_EXTRA (X11: 8/9).
+        assert_eq!(map_button(0x113), PointerButton::Back);
+        assert_eq!(map_button(0x114), PointerButton::Forward);
+        // Niektóre urządzenia raportują BTN_BACK/BTN_FORWARD.
+        assert_eq!(map_button(0x116), PointerButton::Back);
+        assert_eq!(map_button(0x115), PointerButton::Forward);
+        assert_eq!(map_button(0x112), PointerButton::Middle);
+        assert_eq!(map_button(0x999), PointerButton::Other(0x999));
     }
 }

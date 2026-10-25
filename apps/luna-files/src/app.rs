@@ -561,9 +561,26 @@ impl App {
     }
 
     pub fn new_tab(&mut self) {
-        let p = self.pane_mut();
-        p.tabs.push(p.dir.path.clone());
-        p.tab = p.tabs.len() - 1;
+        let path = self.pane().dir.path.clone();
+        self.new_tab_at(path);
+    }
+
+    /// Otwiera `path` w nowej karcie (np. środkowym przyciskiem myszy).
+    pub fn new_tab_at(&mut self, path: PathBuf) {
+        if !path.is_dir() {
+            return;
+        }
+        {
+            let p = self.pane_mut();
+            p.tabs.push(path);
+            p.tab = p.tabs.len() - 1;
+            if let Ok(dir) = DirView::load(&p.tabs[p.tab]) {
+                p.dir = dir;
+                p.sync_view();
+            }
+        }
+        let path = self.pane().dir.path.clone();
+        self.select_sidebar_for(&path);
     }
 
     pub fn close_tab(&mut self) {

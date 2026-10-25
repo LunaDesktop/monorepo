@@ -1033,6 +1033,9 @@ pub fn handle_events(
                 (PointerButton::Right, ButtonState::Pressed) => {
                     on_right_press(app, pe.position, &lay, size, theme, text)
                 }
+                (PointerButton::Middle, ButtonState::Pressed) => {
+                    on_middle_press(app, pe.position, &lay, theme)
+                }
                 (PointerButton::Back, ButtonState::Pressed) => app.back(),
                 (PointerButton::Forward, ButtonState::Pressed) => app.forward(),
                 (_, ButtonState::Released) => {}
@@ -1397,6 +1400,42 @@ fn on_right_press(
             open_menu(app, p, MenuTarget::Background, size, theme, text);
         }
         return;
+    }
+}
+
+/// Środkowy przycisk myszy: otwiera folder (albo miejsce z panelu bocznego)
+/// w nowej karcie — jak w Nautilusie. Dla plików nic nie robi.
+fn on_middle_press(app: &mut App, p: Point, lay: &Layout, theme: &Theme) {
+    let count = if app.split { 2 } else { 1 };
+    for i in 0..count {
+        if !lay.panes[i].contains(p) {
+            continue;
+        }
+        let pr = pane_rects(app, lay, i, theme);
+        let rows = file_rows(&app.panes[i], pr.items);
+        if let Some(index) = hit_index(&app.panes[i], rows, p, theme) {
+            if let Some(entry) = app.panes[i].dir.entry(index) {
+                let path = entry.path.clone();
+                if entry.is_dir {
+                    app.new_tab_at(path);
+                }
+            }
+        }
+        return;
+    }
+
+    if lay.sidebar.contains(p) {
+        let hovered = app
+            .sidebar
+            .index_at(lay.sidebar.deflate(Insets::splat(6.0)), p, theme);
+        if let Some(entry) = hovered {
+            if let Some(action) = app.sidebar_entry_action.get(entry).copied().flatten() {
+                if let Some(SideAction::Go(path)) = app.sidebar_actions.get(action) {
+                    let path = path.clone();
+                    app.new_tab_at(path);
+                }
+            }
+        }
     }
 }
 
@@ -2173,6 +2212,31 @@ mod tests {
             px(panel.center().x as usize, panel.center().y as usize),
             px(10, 700)
         );
+    }
+
+    #[test]
+    fn middle_click_opens_folder_in_new_tab() {
+        let dir = std::env::temp_dir().join("luna-files-middle-click");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("podkatalog")).unwrap();
+        let mut app = App::new(dir.clone());
+        let theme = Theme::light();
+        let text = TextEngine::system();
+        let size = Size::new(1120.0, 720.0);
+        let lay = layout(&app, size, &theme, &text);
+        let pr = pane_rects(&app, &lay, 0, &theme);
+        let rows = file_rows(&app.panes[0], pr.items);
+        let row_h = theme.metrics.itemview.row_h;
+        on_middle_press(
+            &mut app,
+            Point::new(rows.center().x, rows.y() + row_h / 2.0),
+            &lay,
+            &theme,
+        );
+        assert_eq!(app.pane().tabs.len(), 2);
+        assert_eq!(app.pane().dir.path, dir.join("podkatalog"));
+        assert_eq!(app.pane().tab, 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

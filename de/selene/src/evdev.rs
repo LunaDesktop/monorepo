@@ -358,8 +358,10 @@ fn decode(bytes: &[u8]) -> Option<Decoded> {
                 0x110 => Some(Decoded::Button(PointerButton::Left, pressed)),
                 0x111 => Some(Decoded::Button(PointerButton::Right, pressed)),
                 0x112 => Some(Decoded::Button(PointerButton::Middle, pressed)),
-                0x115 => Some(Decoded::Button(PointerButton::Forward, pressed)),
-                0x116 => Some(Decoded::Button(PointerButton::Back, pressed)),
+                // „Wstecz/dalej” bywa raportowane jako BTN_SIDE/BTN_EXTRA
+                // (większość myszy, X11: przyciski 8/9) albo BTN_BACK/FORWARD.
+                0x113 | 0x116 => Some(Decoded::Button(PointerButton::Back, pressed)),
+                0x114 | 0x115 => Some(Decoded::Button(PointerButton::Forward, pressed)),
                 // Pozostałe `BTN_*` (touchpad, tablet, pióro, joystick) **nie** są
                 // klawiszami — bez tego filtr przesyłał dotknięcia panelu jako klawisze.
                 0x100..=0x15f => None,
@@ -636,6 +638,23 @@ mod tests {
         assert_eq!(
             decode(&raw(EV_KEY, 0x110, 1)),
             Some(Decoded::Button(PointerButton::Left, true))
+        );
+        // Boki myszy — oba warianty kodów (BTN_SIDE/EXTRA oraz BTN_BACK/FORWARD).
+        assert_eq!(
+            decode(&raw(EV_KEY, 0x113, 1)),
+            Some(Decoded::Button(PointerButton::Back, true))
+        );
+        assert_eq!(
+            decode(&raw(EV_KEY, 0x114, 1)),
+            Some(Decoded::Button(PointerButton::Forward, true))
+        );
+        assert_eq!(
+            decode(&raw(EV_KEY, 0x116, 1)),
+            Some(Decoded::Button(PointerButton::Back, true))
+        );
+        assert_eq!(
+            decode(&raw(EV_KEY, 0x115, 1)),
+            Some(Decoded::Button(PointerButton::Forward, true))
         );
         assert_eq!(
             decode(&raw(EV_KEY, 30, 0)),
