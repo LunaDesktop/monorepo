@@ -72,6 +72,7 @@ Sceny syntetyczne:
 | `rounded` | 700 kart (wypełnienie + obwódka) |
 | `text` | 400 napisów (11–19 px) |
 | `clip` | 48 przyciętych komórek po 8 kształtów |
+| `icons` | 250 ikon wektorowych: okrąg + łamana + wielokąt (cache ścieżek) |
 | `mixed` | 180 kart: tło, obrazek, nagłówek, 4 wiersze w clipie |
 
 To **górna granica** gęstości, nie typowy ekran. Terminal 900×600 w praktyce
@@ -83,29 +84,36 @@ rysuje ~0,5–2 ms/klatkę, panel powłoki ~1–3 ms.
 
 | Rozdzielczość | Scena | Komendy | Śr. ms | FPS | Mpx/s |
 |---|---:|---:|---:|---:|---:|
-| 1280×800 | rects | 900 | 10,27 | 97 | 100 |
-| 1280×800 | rounded | 1400 | 31,53 | 32 | 33 |
-| 1280×800 | text | 400 | 13,86 | 72 | 74 |
-| 1280×800 | clip | 480 | 6,81 | 147 | 150 |
-| 1280×800 | mixed | 1800 | 42,98 | 23 | 24 |
-| 1920×1080 | rects | 900 | 10,40 | 96 | 199 |
-| 1920×1080 | rounded | 1400 | 30,05 | 33 | 69 |
-| 1920×1080 | text | 400 | 13,89 | 72 | 149 |
-| 1920×1080 | clip | 480 | 7,81 | 128 | 266 |
-| 1920×1080 | mixed | 1800 | 47,25 | 21 | 44 |
-| 2560×1440 | rects | 900 | 10,44 | 96 | 353 |
-| 2560×1440 | rounded | 1400 | 31,02 | 32 | 119 |
-| 2560×1440 | text | 400 | 14,22 | 70 | 259 |
-| 2560×1440 | clip | 480 | 10,27 | 97 | 359 |
-| 2560×1440 | mixed | 1800 | 54,59 | 18 | 68 |
+| 1280×800 | rects | 900 | 6,80 | 147 | 151 |
+| 1280×800 | rounded | 1400 | 28,82 | 35 | 36 |
+| 1280×800 | text | 400 | 13,50 | 74 | 76 |
+| 1280×800 | clip | 480 | 6,76 | 148 | 152 |
+| 1280×800 | icons | 750 | 8,72 | 115 | 117 |
+| 1280×800 | mixed | 1800 | 47,10 | 21 | 22 |
+| 1920×1080 | rects | 900 | 7,49 | 134 | 277 |
+| 1920×1080 | rounded | 1400 | 30,65 | 33 | 68 |
+| 1920×1080 | text | 400 | 13,98 | 72 | 148 |
+| 1920×1080 | clip | 480 | 8,07 | 124 | 257 |
+| 1920×1080 | icons | 750 | 8,73 | 115 | 238 |
+| 1920×1080 | mixed | 1800 | 49,86 | 20 | 42 |
+| 2560×1440 | rects | 900 | 8,55 | 117 | 431 |
+| 2560×1440 | rounded | 1400 | 32,91 | 30 | 112 |
+| 2560×1440 | text | 400 | 14,89 | 67 | 248 |
+| 2560×1440 | clip | 480 | 11,19 | 89 | 330 |
+| 2560×1440 | icons | 750 | 9,98 | 100 | 369 |
+| 2560×1440 | mixed | 1800 | 57,87 | 17 | 64 |
 
-Dodatkowo: PNG 1920×1080 ≈ **12 ms**, 2,2 MiB; `VmHWM` procesu benchmarku
-≈ **54 MiB** (fonty, cache glifów, bufor 1920×1080).
+Dodatkowo: PNG 1920×1080 ≈ **13,6 ms**, 2,2 MiB; `VmHWM` procesu benchmarku
+≈ **52 MiB** (fonty, cache glifów, bufor 1920×1080).
 
 Wnioski:
 
-- Wąskim gardłem są **kształty z zaokrągleniami/obwódkami** (tiny-skia rasteryzuje
-  ścieżki na CPU) oraz **clip** — nie samo wypełnianie tła.
+- **`FillRect` przez `Pixmap::fill_rect`** (bez budowania `Path`) dało `rects`
+  10,4 → 7,5 ms przy 1080p (~28%). To najtańszy zysk i został włączony na stałe.
+- **Cache ścieżek** (`PathCache`, 2048 wpisów, 0,25 px) pomaga powtarzalnym
+  kształtom (ikony, stałe karty), ale w scenie `rounded` z unikalną geometrią
+  prawie nic nie zmienił: **rasteryzacja dominuje nad budowaniem ścieżki**.
+- Wąskim gardłem pozostają **zaokrąglenia/obwódki i clip** — nie wypełnianie tła.
 - Samo wypełnienie 2560×1440 jest tanie; koszt rośnie z liczbą ścieżek i glifów.
 - Bufor klatki to 4,1 MiB (1280×800), 8,3 MiB (1920×1080), 14,7 MiB (2560×1440).
   `wl_shm` z double bufferingiem może trzymać dwa takie bufory.
@@ -138,6 +146,11 @@ Dlatego kolejność to **damage → mniej komend → ewentualnie GPU**.
       pomija identyczne `commit` i zawęża `damage_buffer` do zmienionego prostokąta.
 - [x] **Scene fingerprint**: `Scene::same_as` + `last_scene` w platformie — gdy komendy
       są identyczne, `renderer.draw` jest pomijany (obrazy po `Arc`).
+- [x] **Cache ścieżek** (`PathCache`): zaokrąglenia, okręgi, łamane i wielokąty;
+      2048 wpisów FIFO, kwantyzacja 0,25 px. Plus szybka ścieżka `Pixmap::fill_rect`
+      dla zwykłych prostokątów.
+- [ ] **Cache rastrowy kształtów** (np. 9-slice dla kart/przycisków) — to dopiero
+      zaatakuje dominujący koszt rasteryzacji zaokrągleń.
 - [ ] Pełny damage tracking: `Scene`/widgety raportują prostokąty uszkodzeń, renderer
       nie rysuje całej sceny (dziś nadal budujemy ją od zera).
 - [ ] Cache glifów i ścieżek między klatkami (dziś `tiny-skia` buduje ścieżki od nowa).

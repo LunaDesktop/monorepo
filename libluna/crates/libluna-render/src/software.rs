@@ -5,12 +5,13 @@
 //! (ARGB8888 little-endian to to samo ułożenie bajtów co RGBA8888 — do potwierdzenia
 //! przy podłączaniu Waylanda).
 
-use libluna_core::{Color, Point, Rect, Scale, Size};
+use libluna_core::{Color, Rect, Scale, Size};
 use tiny_skia::{
-    FillRule, FilterQuality, LineCap, LineJoin, Mask, Paint, Path, PathBuilder, Pixmap,
-    PixmapPaint, PixmapRef, Shader, Stroke, Transform,
+    FillRule, FilterQuality, LineCap, LineJoin, Mask, Paint, Path, Pixmap, PixmapPaint, PixmapRef,
+    Shader, Stroke, Transform,
 };
 
+use crate::path_cache::PathCache;
 use crate::scene::{DrawCommand, ImageData, Scene};
 use crate::text::TextEngine;
 
@@ -18,6 +19,7 @@ use crate::text::TextEngine;
 pub struct SoftwareRenderer {
     pixmap: Pixmap,
     text: TextEngine,
+    paths: PathCache,
 }
 
 impl SoftwareRenderer {
@@ -26,6 +28,7 @@ impl SoftwareRenderer {
         Self {
             pixmap: Pixmap::new(width.max(1), height.max(1)).expect("buffer allocation"),
             text: TextEngine::system(),
+            paths: PathCache::new(),
         }
     }
 
@@ -34,6 +37,7 @@ impl SoftwareRenderer {
         Self {
             pixmap: Pixmap::new(width.max(1), height.max(1)).expect("buffer allocation"),
             text: TextEngine::mono(),
+            paths: PathCache::new(),
         }
     }
 
@@ -73,7 +77,11 @@ impl SoftwareRenderer {
 
     /// Rasteryzuje scenę. `scale` przelicza piksele logiczne sceny na fizyczne.
     pub fn draw(&mut self, scene: &Scene, scale: f64, background: Color) {
-        let SoftwareRenderer { pixmap, text } = self;
+        let SoftwareRenderer {
+            pixmap,
+            text,
+            paths,
+        } = self;
         let scale = Scale::new(scale);
         let transform = Transform::from_scale(scale.factor() as f32, scale.factor() as f32);
 
@@ -93,8 +101,12 @@ impl SoftwareRenderer {
         for cmd in scene.commands() {
             match cmd {
                 DrawCommand::FillRect { rect, color } => {
-                    if let Some(path) = rect_path(*rect, 0.0) {
-                        fill(pixmap, &path, *color, transform, mask.as_ref());
+                    // Ścieżka dla zwykłego prostokąta to zbędny narzut: tiny-skia
+                    // ma szybkie `fill_rect` (skan linii, bez budowania `Path`).
+                    if color.a > 0.0 {
+                        if let Some(r) = ts_rect(*rect) {
+                            pixmap.fill_rect(r, &paint(*color), transform, mask.as_ref());
+                        }
                     }
                 }
                 DrawCommand::FillRoundedRect {
@@ -102,8 +114,14 @@ impl SoftwareRenderer {
                     radius,
                     color,
                 } => {
-                    if let Some(path) = rect_path(*rect, *radius) {
-                        fill(pixmap, &path, *color, transform, mask.as_ref());
+                    if *radius <= 0.0 {
+                        if color.a > 0.0 {
+                            if let Some(r) = ts_rect(*rect) {
+                                pixmap.fill_rect(r, &paint(*color), transform, mask.as_ref());
+                            }
+                        }
+                    } else if let Some(path) = paths.rect(*rect, *radius) {
+                        fill(pixmap, path, *color, transform, mask.as_ref());
                     }
                 }
                 DrawCommand::StrokeRoundedRect {
@@ -112,8 +130,8 @@ impl SoftwareRenderer {
                     width,
                     color,
                 } => {
-                    if let Some(path) = rect_path(*rect, *radius) {
-                        stroke(pixmap, &path, *width, *color, transform, mask.as_ref());
+                    if let Some(path) = paths.rect(*rect, *radius) {
+                        stroke(pixmap, path, *width, *color, transform, mask.as_ref());
                     }
                 }
                 DrawCommand::StrokeLine {
@@ -123,7 +141,7 @@ impl SoftwareRenderer {
                     color,
                 } => {
                     if color.a > 0.0 && *width > 0.0 {
-                        if let Some(path) = line_path(*from, *to) {
+                        if let Some(path) = paths.line(*from, *to) {
                             let stroke = Stroke {
                                 width: *width as f32,
                                 line_cap: LineCap::Round,
@@ -131,7 +149,7 @@ impl SoftwareRenderer {
                                 ..Default::default()
                             };
                             pixmap.stroke_path(
-                                &path,
+                                path,
                                 &paint(*color),
                                 &stroke,
                                 transform,
@@ -145,8 +163,8 @@ impl SoftwareRenderer {
                     radius,
                     color,
                 } => {
-                    if let Some(path) = circle_path(*center, *radius) {
-                        fill(pixmap, &path, *color, transform, mask.as_ref());
+                    if let Some(path) = paths.circle(*center, *radius) {
+                        fill(pixmap, path, *color, transform, mask.as_ref());
                     }
                 }
                 DrawCommand::StrokeCircle {
@@ -155,8 +173,8 @@ impl SoftwareRenderer {
                     width,
                     color,
                 } => {
-                    if let Some(path) = circle_path(*center, *radius) {
-                        stroke(pixmap, &path, *width, *color, transform, mask.as_ref());
+                    if let Some(path) = paths.circle(*center, *radius) {
+                        stroke(pixmap, path, *width, *color, transform, mask.as_ref());
                     }
                 }
                 DrawCommand::StrokePolyline {
@@ -164,13 +182,13 @@ impl SoftwareRenderer {
                     width,
                     color,
                 } => {
-                    if let Some(path) = polyline_path(points) {
-                        stroke(pixmap, &path, *width, *color, transform, mask.as_ref());
+                    if let Some(path) = paths.polyline(points) {
+                        stroke(pixmap, path, *width, *color, transform, mask.as_ref());
                     }
                 }
                 DrawCommand::FillPolygon { points, color } => {
-                    if let Some(path) = polygon_path(points) {
-                        fill(pixmap, &path, *color, transform, mask.as_ref());
+                    if let Some(path) = paths.polygon(points) {
+                        fill(pixmap, path, *color, transform, mask.as_ref());
                     }
                 }
                 DrawCommand::PushClip { rect } => {
@@ -181,7 +199,9 @@ impl SoftwareRenderer {
                         None => (*rect, 0.0),
                     };
                     clip_stack.push((effective, radius));
-                    mask = build_mask(pixmap, effective, radius, transform);
+                    mask = paths
+                        .rect(effective, radius)
+                        .and_then(|path| build_mask(pixmap, path, transform));
                 }
                 DrawCommand::PushClipRounded { rect, radius } => {
                     let (effective, effective_radius) = match clip_stack.last() {
@@ -192,14 +212,17 @@ impl SoftwareRenderer {
                         None => (*rect, *radius),
                     };
                     clip_stack.push((effective, effective_radius));
-                    mask = build_mask(pixmap, effective, effective_radius, transform);
+                    mask = paths
+                        .rect(effective, effective_radius)
+                        .and_then(|path| build_mask(pixmap, path, transform));
                 }
                 DrawCommand::PopClip => {
                     clip_stack.pop();
-                    mask = clip_stack
-                        .last()
-                        .copied()
-                        .and_then(|(r, rad)| build_mask(pixmap, r, rad, transform));
+                    mask = clip_stack.last().copied().and_then(|(rect, radius)| {
+                        paths
+                            .rect(rect, radius)
+                            .and_then(|path| build_mask(pixmap, path, transform))
+                    });
                 }
                 DrawCommand::Text(run) => {
                     let (w, h) = (pixmap.width() as usize, pixmap.height() as usize);
@@ -337,70 +360,13 @@ fn ts_color(color: Color) -> tiny_skia::Color {
     tiny_skia::Color::from_rgba8(r, g, b, a)
 }
 
-fn line_path(from: Point, to: Point) -> Option<Path> {
-    let mut pb = PathBuilder::new();
-    pb.move_to(from.x as f32, from.y as f32);
-    pb.line_to(to.x as f32, to.y as f32);
-    pb.finish()
-}
-
-fn rect_path(rect: Rect, radius: f64) -> Option<Path> {
-    if rect.width() <= 0.0 || rect.height() <= 0.0 {
-        return None;
-    }
-    let x = rect.x() as f32;
-    let y = rect.y() as f32;
-    let w = rect.width() as f32;
-    let h = rect.height() as f32;
-    let mut pb = PathBuilder::new();
-    let r = radius.min(rect.width() / 2.0).min(rect.height() / 2.0) as f32;
-    if r > 0.0 {
-        pb.move_to(x + r, y);
-        pb.line_to(x + w - r, y);
-        pb.quad_to(x + w, y, x + w, y + r);
-        pb.line_to(x + w, y + h - r);
-        pb.quad_to(x + w, y + h, x + w - r, y + h);
-        pb.line_to(x + r, y + h);
-        pb.quad_to(x, y + h, x, y + h - r);
-        pb.line_to(x, y + r);
-        pb.quad_to(x, y, x + r, y);
-        pb.close();
-    } else {
-        pb.push_rect(tiny_skia::Rect::from_xywh(x, y, w, h)?);
-    }
-    pb.finish()
-}
-
-fn circle_path(center: Point, radius: f64) -> Option<Path> {
-    if radius <= 0.0 {
-        return None;
-    }
-    PathBuilder::from_circle(center.x as f32, center.y as f32, radius as f32)
-}
-
-fn polyline_path(points: &[Point]) -> Option<Path> {
-    if points.len() < 2 {
-        return None;
-    }
-    let mut pb = PathBuilder::new();
-    pb.move_to(points[0].x as f32, points[0].y as f32);
-    for p in &points[1..] {
-        pb.line_to(p.x as f32, p.y as f32);
-    }
-    pb.finish()
-}
-
-fn polygon_path(points: &[Point]) -> Option<Path> {
-    if points.len() < 3 {
-        return None;
-    }
-    let mut pb = PathBuilder::new();
-    pb.move_to(points[0].x as f32, points[0].y as f32);
-    for p in &points[1..] {
-        pb.line_to(p.x as f32, p.y as f32);
-    }
-    pb.close();
-    pb.finish()
+fn ts_rect(rect: Rect) -> Option<tiny_skia::Rect> {
+    tiny_skia::Rect::from_xywh(
+        rect.x() as f32,
+        rect.y() as f32,
+        rect.width() as f32,
+        rect.height() as f32,
+    )
 }
 
 fn paint(color: Color) -> Paint<'static> {
@@ -438,11 +404,9 @@ fn stroke(
     pixmap.stroke_path(path, &paint(color), &stroke, transform, mask);
 }
 
-fn build_mask(pixmap: &Pixmap, rect: Rect, radius: f64, transform: Transform) -> Option<Mask> {
+fn build_mask(pixmap: &Pixmap, path: &Path, transform: Transform) -> Option<Mask> {
     let mut mask = Mask::new(pixmap.width(), pixmap.height())?;
-    if let Some(path) = rect_path(rect, radius) {
-        mask.fill_path(&path, FillRule::Winding, true, transform);
-    }
+    mask.fill_path(path, FillRule::Winding, true, transform);
     Some(mask)
 }
 

@@ -22,7 +22,7 @@ use libluna_core::{Color, Point, Rect};
 use libluna_render::{ImageData, Renderer, Scene, SoftwareRenderer, TextRun};
 
 const RESOLUTIONS: [(u32, u32); 3] = [(1280, 800), (1920, 1080), (2560, 1440)];
-const SCENES: [&str; 5] = ["rects", "rounded", "text", "clip", "mixed"];
+const SCENES: [&str; 6] = ["rects", "rounded", "text", "clip", "icons", "mixed"];
 
 #[derive(Clone, Copy)]
 struct Args {
@@ -296,6 +296,32 @@ fn build_scene(name: &str, width: u32, height: u32) -> Scene {
                     }
                     scene.pop_clip();
                 }
+            }
+        }
+        "icons" => {
+            // Ikony wektorowe: okręgi + łamane + wielokąty. W realnym UI te same
+            // kształty wracają co klatkę, więc testują cache ścieżek.
+            for i in 0..250 {
+                let x = rng.range(0.0, w - 40.0);
+                let y = rng.range(0.0, h - 40.0);
+                let color = colors[i % colors.len()];
+                let cx = x + 12.0;
+                let cy = y + 12.0;
+                scene.stroke_circle(Point::new(cx, cy), 7.0, 1.4, color);
+                let line = [
+                    Point::new(x + 2.0, y + 28.0),
+                    Point::new(x + 12.0, y + 20.0),
+                    Point::new(x + 22.0, y + 28.0),
+                    Point::new(x + 32.0, y + 18.0),
+                ];
+                scene.stroke_polyline(&line, 1.6, color.scale_alpha(0.9));
+                let poly = [
+                    Point::new(x + 4.0, y + 6.0),
+                    Point::new(x + 12.0, y + 2.0),
+                    Point::new(x + 20.0, y + 9.0),
+                    Point::new(x + 9.0, y + 14.0),
+                ];
+                scene.fill_polygon(&poly, color.scale_alpha(0.45));
             }
         }
         _ => {

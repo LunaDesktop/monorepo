@@ -16,6 +16,7 @@
 //! w widgetach.
 
 pub mod damage;
+mod path_cache;
 pub mod renderer;
 pub mod scene;
 pub mod software;
