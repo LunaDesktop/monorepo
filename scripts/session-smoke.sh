@@ -317,12 +317,22 @@ start_terminal term-b env $client_env "$term_bin" -e sh -c \
 set -- $(win_xy "Terminal") # najwyższe okno = B
 bx=$(( ${1:-60} + 40 ))
 by=$(( ${2:-20} + 70 ))
-send_input "click $bx $by"
-sleep 0.3
-paste_keys
-sleep 1.5
-enter_keys
-sleep 0.5
+# Dwie próby: nowy klient potrzebuje chwili na focus i pierwszą klatkę, a przy
+# zimnym starcie pojedyncze "klik + wklej" potrafiło wyprzedzić gotowość PTY.
+# Prawdziwie zepsuty schowek i tak zawiedzie w obu próbach.
+attempt=0
+while [ "$attempt" -lt 2 ]; do
+    send_input "click $bx $by"
+    sleep 0.5
+    paste_keys
+    sleep 1.5
+    enter_keys
+    sleep 0.6
+    if [ -f "$paste_out" ] && grep -q "SMOKE-CLIP" "$paste_out"; then
+        break
+    fi
+    attempt=$((attempt + 1))
+done
 [ -f "$paste_out" ] || fail "wklejony tekst nie dotarł do terminala B"
 grep -q "SMOKE-CLIP" "$paste_out" || fail "schowek nie zawierał SMOKE-CLIP: $(cat "$paste_out")"
 note "schowek przeszedł między dwoma klientami"

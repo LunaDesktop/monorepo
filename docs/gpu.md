@@ -28,8 +28,9 @@ GLES 3.2, **EGL surfaceless** (bez X11/Waylanda), 1920×1080:
 | ten sam pulpit, CPU | **12,63 ms** |
 
 Wniosek: przy 30 oknach GPU jest ~36× szybsze, a realistyczny pulpit z tekstem
-(paski SSD) ~8× — mimo że tekst jest rasteryzowany na CPU w małych warstwach.
-Czas GPU zawiera już `glReadPixels` (wyjście bez zero-copy).
+(paski SSD) ~8× — mimo że **tekst** jest już rysowany glifami z atlasu (bez warstw
+CPU), a wektory nadal idą przez małe warstwy CPU. Sam render to ~0,40 ms; pozostałe
+~1,09 ms to `glReadPixels` (wyjście bez zero-copy) — patrz sekcja 4.
 
 ### Dostępne rozszerzenia (ta maszyna)
 
@@ -62,7 +63,8 @@ klienci Wayland (wl_shm; dmabuf — etap 2)
         ├─ SoftwareRenderer (CPU, domyślnie)
         └─ GpuRenderer (EGL/GLES; LUNA_GPU=1 / SELENE_GPU=1)
               ├─ GPU: obrazy, prostokąty, zaokrąglenia, obwódki, okręgi, clip
-              ├─ CPU: tekst i wektory → małe warstwy wstawiane w kolejności z
+              ├─ GPU: tekst z atlasu glifów (krycie w alfie, kolor z uniformu)
+              ├─ CPU: wektory (ikony, kursor) → małe warstwy wstawiane w kolejności z
               └─ wyjście: glReadPixels → wl_shm (nested) / dumb buffer (DRM)
 ```
 
@@ -80,9 +82,10 @@ Zakres (zrobione):
 1. `gpu.rs`: loader EGL/GLES (`dlopen`/`eglGetProcAddress`), kontekst surfaceless,
    shadery (tekstura z clipem; kształty SDF: prostokąt, zaokrąglenie, obwódka, okrąg).
 2. Import `wl_shm` jako tekstur z cache per `Arc<ImageData>` (eviction po 120 klatkach).
-3. Kolejność `z` zachowana: tekst, łamane i wielokąty (ikony, kursor, tytuły SSD)
-   idą do małych **warstw CPU** rasteryzowanych przez `SoftwareRenderer` i rysowanych
-   jako quad dokładnie w tym miejscu sceny — bez zmiany wyglądu.
+3. Kolejność `z` zachowana: **tekst idzie glifami z atlasu** (jedna tekstura,
+krycie w alfie, kolor z uniformu, cache per znak/rozmiar), a wektory (ikony,
+kursor) idą do małych **warstw CPU** rasteryzowanych przez `SoftwareRenderer`
+i rysowanych jako quad dokładnie w tym miejscu sceny — bez zmiany wyglądu.
 4. Wyjście: `glReadPixels` do bufora `Renderer::data()` (fallback bez GBM).
 5. Włączenie: `LUNA_GPU=1` (każda aplikacja libLuny) lub `SELENE_GPU=1` (kompozytor
    zagnieżdżony). Brak EGL = log + CPU, sesja żyje.
@@ -140,16 +143,21 @@ Waylandzie bez `LUNA_X11_APPS` — **spełnione dla Zed** (patrz pkt 6).
 ### ETAP 3 — pełny GPU dla `Scene` (ścieżki, tekst, clip)
 
 **Status: ✅ podstawy działają** (obrazy, prostokąty, zaokrąglenia, obwódki,
-okręgi, clip prostokątny/zaokrąglony; tekst i wektory przez warstwy CPU).
+okręgi, clip prostokątny/zaokrąglony, **tekst z atlasu glifów**; wektory przez
+warstwy CPU).
 
 Pozostało:
-1. **Atlas glifów** — dziś tekst jest rasteryzowany przez `TextEngine` do warstwy
-   CPU; docelowo atlas + instancjonowane quady (mniej kopii i uploadów).
-2. **Ścieżki natywnie** — `StrokeLine`/`FillPolygon` (ikony, kursor) przez
-   triangulację/SDF, żeby zniknęły warstwy CPU.
-3. **Clip stencil** dla wielu zaokrąglonych clipów jednocześnie (dziś ostatni).
-4. Kryterium: te same scenariusze co `render_bench`, p95 ≤ 8 ms przy 2560×1440,
+1. **Ścieżki natywnie** — `StrokeLine`/`FillPolygon` (ikony, kursor) przez
+   triangulację/SDF, żeby zniknęły ostatnie warstwy CPU.
+2. **Clip stencil** dla wielu zaokrąglonych clipów jednocześnie (dziś ostatni).
+3. Kryterium: te same scenariusze co `render_bench`, p95 ≤ 8 ms przy 2560×1440,
    pamięć ≤ +20%, fallback CPU gdy brak EGL.
+
+Zrobione: **atlas glifów** — `TextEngine::glyph` daje krycie + metryki, `GpuRenderer`
+pakuje glify do jednej tekstury (512², półkowy packer, cache per znak/rozmiar) i
+rysuje każdy glif quadem. `advance` liczymy z dokładnego rozmiaru, więc napisy nie
+rozjeżdżają się względem `measure`. Pomiar: desktop 1,49 ms, z czego render 0,40 ms
+(reszta to readback).
 
 Zrobione: **clip zaokrąglony na GPU**. Uniform `round` pakował `(x, y, szerokość,
 promień)`, a shader czytał z tego `(szerokość, wysokość)` i promień — czyli
@@ -162,9 +170,14 @@ własny uniform `round_r`, a rozmiar clipu idzie w `zw`; pilnuje tego test
 
 1. `EGL_PLATFORM_GBM` + `gbm_surface`/`gbm_bo` (Mesa), `EGL_KHR_swap_buffers_with_damage`
    zamiast readbacku.
-2. Na NVIDIA bez GBM: pozostaje readback (1,2 ms — akceptowalne) albo
+2. Na NVIDIA bez GBM: pozostaje readback (1,09 ms na 1080p — akceptowalne) albo
    `libnvidia-egl-gbm`, gdy dostępne.
-3. Kryterium: brak kopii klatki przez CPU na Intel/AMD; tear-free przez page-flip.
+3. **Readback tylko z regionu uszkodzenia** (damage): dziś `glReadPixels` czyta całą
+   klatkę (~1,09 ms przy 1080p, ~4× więcej przy 4K), choć panel/tytuł zmieniają
+   kilkaset pikseli. Wymaga podania damage **przed** rysowaniem (z różnicy scen,
+   nie z porównania pikseli) i `present` z prostokątem w backendzie DRM.
+4. Kryterium: brak kopii klatki przez CPU na Intel/AMD; tear-free przez page-flip;
+   przy samym ruchu kursora i animacji panelu odczyt ≤ 10% klatki.
 
 ## 4. Ryzyka i zasady
 
@@ -173,7 +186,7 @@ własny uniform `round_r`, a rozmiar clipu idzie w `zw`; pilnuje tego test
 - **Nie zgadujemy formatów dmabuf.** Lista z EGL, inaczej `failed`.
 - **Nie trzymamy mapowań shm na stałe.** Cache tekstur per `wl_buffer`, usuwany
   przy `release`; inaczej wyciek pamięci przy dużych oknach.
-- **Readback to nie porażka.** 1,2 ms na 1080p (NVIDIA) jest tańsze niż
+- **Readback to nie porażka.** 1,09 ms na 1080p (NVIDIA) jest tańsze niż
   przekomplikowanie wyjścia; zero-copy dopiero, gdy platforma je oferuje.
 - **Pomiary przed i po** tym samym narzędziem (`render_bench` + `gpu_probe`),
   inaczej „przyspieszenie” jest anegdotą.
@@ -181,14 +194,16 @@ własny uniform `round_r`, a rozmiar clipu idzie w `zw`; pilnuje tego test
 ## 5. Kolejność prac (konkret)
 
 1. [x] Sonda EGL + benchmark (`gpu_probe`), potwierdzenie dmabuf/fence.
-2. [x] `GpuRenderer` (etap 1) — `LUNA_GPU=1`/`SELENE_GPU=1`, fallback CPU, warstwy
-   CPU dla tekstu/wektorów, pomiar 12,6 → 1,6 ms na scenie pulpitu.
+2. [x] `GpuRenderer` (etap 1) — `LUNA_GPU=1`/`SELENE_GPU=1`, fallback CPU, pomiar
+   12,6 → 1,6 ms na scenie pulpitu.
 3. [x] `zwp_linux_dmabuf_v1` v3 (etap 2): formaty jednoplanowe + modyfikatory,
    `create_immed`/`create`, cache `EGLImage`, release przy następnym commicie.
 4. [x] Test z realnym klientem GPU (Zed w osobnej instancji) — dmabuf `XR24`
    z modyfikatorem NVIDII zaimportowany i wyświetlony.
 5. [x] Kompozycja GPU w trybie DRM (kontekst per monitor, render sekwencyjny,
    readback do dumb buffera, zrzuty z aktywnego backendu).
-6. [ ] Zero-copy DRM (etap 4) na Mesa; NVIDIA — readback.
-7. [ ] Fence (`EGL_KHR_fence_sync`) zamiast `glFinish`, formaty wieloplanowe
-   (wideo), dmabuf dla `wlr-layer-shell`.
+6. [x] Atlas glifów: tekst bez warstw CPU (render pulpitu 0,40 ms; readback 1,09 ms).
+7. [ ] Ścieżki natywnie (ikony, kursor) — ostatnie warstwy CPU.
+8. [ ] Readback z damage + zero-copy DRM (etap 4) na Mesa; NVIDIA — readback.
+9. [ ] Fence (`EGL_KHR_fence_sync`) zamiast synchronicznego readbacku, formaty
+   wieloplanowe (wideo), dmabuf dla `wlr-layer-shell`.

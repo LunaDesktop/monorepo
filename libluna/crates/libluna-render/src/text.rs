@@ -48,6 +48,19 @@ const MONO_BOLD_CANDIDATES: &[&str] = &[
     "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
 ];
 
+/// Pojedynczy glif gotowy do wgrania do atlasu.
+pub struct GlyphRaster {
+    pub width: usize,
+    pub height: usize,
+    /// Krycie glifu, `width * height` bajtów (0 = przezroczysty).
+    pub coverage: Vec<u8>,
+    /// Pozycja bitmapy względem punktu wstawienia (px).
+    pub xmin: i32,
+    pub ymin: i32,
+    /// Szerokość przesunięcia pióra (px), liczona z **dokładnego** rozmiaru.
+    pub advance: f32,
+}
+
 /// Silnik tekstu: trzyma fonty i potrafi mierzyć oraz rysować napisy.
 pub struct TextEngine {
     regular: Option<Font>,
@@ -112,6 +125,27 @@ impl TextEngine {
             max_descent = max_descent.max(-(m.ymin as f32));
         }
         Size::new(advance as f64, (max_ascent + max_descent) as f64)
+    }
+
+    /// Rasteryzuje jeden glif na potrzeby atlasu GPU.
+    ///
+    /// Bitmapa jest liczona w rozmiarze zaokrąglonym do 0,5 px (mniej wariantów
+    /// w atlasie), ale `advance` wraca z **dokładnego** `px` — inaczej długie
+    /// napisy rozjeżdżałyby się względem `measure`.
+    pub fn glyph(&self, ch: char, px: f32, weight: u16) -> Option<GlyphRaster> {
+        let font = self.font_for(weight)?;
+        let exact = px.max(1.0);
+        let quantized = ((exact * 2.0).round() / 2.0).max(1.0);
+        let (metrics, coverage) = font.rasterize(ch, quantized);
+        let advance = font.metrics(ch, exact).advance_width;
+        Some(GlyphRaster {
+            width: metrics.width,
+            height: metrics.height,
+            coverage,
+            xmin: metrics.xmin,
+            ymin: metrics.ymin,
+            advance,
+        })
     }
 
     /// Rysuje tekst do bufora RGBA8888 **premnożonego** (format tiny-skia).

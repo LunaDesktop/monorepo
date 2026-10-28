@@ -146,6 +146,7 @@ type GlGenTextures = unsafe extern "C" fn(i32, *mut Gluint);
 type GlDeleteTextures = unsafe extern "C" fn(i32, *const Gluint);
 type GlBindTexture = unsafe extern "C" fn(u32, Gluint);
 type GlTexImage2D = unsafe extern "C" fn(u32, i32, i32, i32, i32, i32, u32, u32, *const c_void);
+type GlTexSubImage2D = unsafe extern "C" fn(u32, i32, i32, i32, i32, i32, u32, u32, *const c_void);
 type GlTexParameteri = unsafe extern "C" fn(u32, u32, i32);
 type GlActiveTexture = unsafe extern "C" fn(u32);
 type GlPixelStorei = unsafe extern "C" fn(u32, i32);
@@ -184,7 +185,6 @@ type GlVertexAttribPointer = unsafe extern "C" fn(Gluint, i32, u32, Glboolean, i
 type GlEnableVertexAttribArray = unsafe extern "C" fn(Gluint);
 type GlDrawArrays = unsafe extern "C" fn(u32, i32, i32);
 type GlReadPixels = unsafe extern "C" fn(i32, i32, i32, i32, u32, u32, *mut c_void);
-type GlFinish = unsafe extern "C" fn();
 
 /// Informacje o kontekście GPU (diagnostyka, `gpu_probe`, log przy starcie).
 #[derive(Debug, Clone)]
@@ -230,6 +230,7 @@ struct Gl {
     delete_textures: GlDeleteTextures,
     bind_texture: GlBindTexture,
     tex_image_2d: GlTexImage2D,
+    tex_sub_image_2d: GlTexSubImage2D,
     tex_parameteri: GlTexParameteri,
     active_texture: GlActiveTexture,
     pixel_storei: GlPixelStorei,
@@ -268,7 +269,6 @@ struct Gl {
     enable_vertex_attrib_array: GlEnableVertexAttribArray,
     draw_arrays: GlDrawArrays,
     read_pixels: GlReadPixels,
-    finish: GlFinish,
 }
 
 impl Gl {
@@ -392,6 +392,7 @@ impl Gl {
                     delete_textures: glfn!("glDeleteTextures"),
                     bind_texture: glfn!("glBindTexture"),
                     tex_image_2d: glfn!("glTexImage2D"),
+                    tex_sub_image_2d: glfn!("glTexSubImage2D"),
                     tex_parameteri: glfn!("glTexParameteri"),
                     active_texture: glfn!("glActiveTexture"),
                     pixel_storei: glfn!("glPixelStorei"),
@@ -430,7 +431,6 @@ impl Gl {
                     enable_vertex_attrib_array: glfn!("glEnableVertexAttribArray"),
                     draw_arrays: glfn!("glDrawArrays"),
                     read_pixels: glfn!("glReadPixels"),
-                    finish: glfn!("glFinish"),
                 },
                 info,
             ))
@@ -695,6 +695,34 @@ void main() {
     gl_FragColor = color * a;
 }";
 
+/// Shader glifów: próbkuje krycie z atlasu i mnoży przez kolor tekstu.
+const FS_GLYPH: &str = "\
+precision mediump float;
+varying vec2 local;
+uniform sampler2D tex;
+uniform vec4 rect;
+uniform vec4 uv;
+uniform vec4 color;
+uniform vec4 clip;
+uniform vec4 round;
+uniform float round_r;
+float sd_round(vec2 p, vec2 size, float r) {
+    r = min(r, min(size.x, size.y) * 0.5);
+    vec2 q = abs(p - size * 0.5) - (size * 0.5 - vec2(r));
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+void main() {
+    if (local.x < clip.x || local.y < clip.y ||
+        local.x > clip.x + clip.z || local.y > clip.y + clip.w) discard;
+    vec2 t = (local - rect.xy) / rect.zw;
+    float a = texture2D(tex, uv.xy + t * uv.zw).a;
+    if (round.z > 0.0 && round.w > 0.0 && round_r > 0.0) {
+        float d = sd_round(local - round.xy, round.zw, round_r);
+        a *= clamp(0.5 - d, 0.0, 1.0);
+    }
+    gl_FragColor = color * a;
+}";
+
 struct Tex {
     id: Gluint,
     w: u32,
@@ -703,6 +731,20 @@ struct Tex {
     used: u64,
     /// `EGLImage` do zniszczenia razem z teksturą (`null` dla tekstur z CPU).
     egl_image: *mut c_void,
+}
+
+/// Shader glifów z atlasu (tekst bez warstw CPU).
+struct GlyphProgram {
+    id: Gluint,
+    pos: Gluint,
+    screen: Glint,
+    rect: Glint,
+    uv: Glint,
+    color: Glint,
+    clip: Glint,
+    round: Glint,
+    round_r: Glint,
+    tex: Glint,
 }
 
 /// Backend GPU: EGL surfaceless + GLES2, wyjście przez readback.
@@ -715,14 +757,20 @@ pub struct GpuRenderer {
     vbo: Gluint,
     tex_prog: TexProgram,
     shape_prog: ShapeProgram,
+    glyph_prog: GlyphProgram,
     text: TextEngine,
-    /// Bufor do rasteryzacji warstw CPU (tekst/wektory). Trzymamy go, bo
+    /// Atlas glifów (krycie w kanale alfa) i cache glifów per (znak, rozmiar).
+    atlas: Atlas,
+    glyphs: HashMap<GlyphKey, Glyph>,
+    /// Bufor do rasteryzacji warstw CPU (wektory). Trzymamy go, bo
     /// `SoftwareRenderer::new` ładuje font z dysku — tworzenie go per warstwa
     /// kosztowało setki ms na klatkę.
     layer: SoftwareRenderer,
     textures: HashMap<usize, Tex>,
     frame: u64,
     pixels: Vec<u8>,
+    /// Czas `glReadPixels` z ostatniej klatki (diagnostyka).
+    readback_ms: f32,
 }
 
 impl GpuRenderer {
@@ -744,6 +792,7 @@ impl GpuRenderer {
         }
         let tex_prog = TexProgram::new(&gl)?;
         let shape_prog = ShapeProgram::new(&gl)?;
+        let glyph_prog = GlyphProgram::new(&gl)?;
         let vbo = unsafe {
             let mut vbo = 0;
             (gl.gen_buffers)(1, &mut vbo);
@@ -766,6 +815,7 @@ impl GpuRenderer {
             vbo,
             tex_prog,
             shape_prog,
+            glyph_prog,
             text,
             layer: if mono {
                 SoftwareRenderer::new_mono(1, 1)
@@ -773,8 +823,11 @@ impl GpuRenderer {
                 SoftwareRenderer::new(1, 1)
             },
             textures: HashMap::new(),
+            atlas: Atlas::new(512),
+            glyphs: HashMap::new(),
             frame: 0,
             pixels: Vec::new(),
+            readback_ms: 0.0,
         };
         renderer.create_targets();
         Ok(renderer)
@@ -1118,6 +1171,197 @@ impl GpuRenderer {
 
     /// Rasteryzuje tekst/wektory przez CPU do małej warstwy i rysuje ją jako quad.
     #[allow(clippy::too_many_arguments)]
+    /// Rysuje tekst glifami z atlasu (pozycje w pikselach fizycznych).
+    fn draw_text(&mut self, run: &TextRun, k: f64, clip_stack: &[(Rect, f64)]) {
+        if run.text.is_empty() {
+            return;
+        }
+        let px = run.size * k;
+        if px < 1.0 {
+            return;
+        }
+        let screen = Rect::from_xywh(0.0, 0.0, self.width as f64, self.height as f64);
+        let (clip, round) = clip_for(clip_stack, screen);
+        let [cr, cg, cb, ca] = run.color.to_rgba8();
+        let af = f32::from(ca) / 255.0;
+        let color = (
+            f32::from(cr) / 255.0 * af,
+            f32::from(cg) / 255.0 * af,
+            f32::from(cb) / 255.0 * af,
+            af,
+        );
+        let mut pen = run.origin.x * k;
+        let baseline = run.origin.y * k;
+        for ch in run.text.chars() {
+            let Some(g) = self.glyph(ch, px as f32, run.weight) else {
+                continue;
+            };
+            if g.tw > 0 && g.th > 0 {
+                let x = pen + f64::from(g.xmin);
+                let y = baseline - f64::from(g.th as i32 + g.ymin);
+                let rect = Rect::from_xywh(x, y, f64::from(g.tw), f64::from(g.th));
+                self.draw_glyph(g, rect, color, clip, round);
+            }
+            pen += f64::from(g.advance);
+        }
+    }
+
+    /// Zwraca glif z cache, w razie potrzeby rasteryzując go do atlasu.
+    /// `None` = brak fontu (tryb `TextEngine::none`).
+    fn glyph(&mut self, ch: char, px: f32, weight: u16) -> Option<Glyph> {
+        let bold = weight >= libluna_core::style::weight::BOLD;
+        let size_key = (px.max(1.0) * 2.0).round() as u32;
+        let key = (ch as u32, size_key, bold);
+        if let Some(g) = self.glyphs.get(&key) {
+            return Some(*g);
+        }
+        let raster = self.text.glyph(ch, px, weight)?;
+        let (tw, th) = (raster.width as u32, raster.height as u32);
+        let mut glyph = Glyph {
+            u: 0.0,
+            v: 0.0,
+            tw: 0,
+            th: 0,
+            xmin: raster.xmin,
+            ymin: raster.ymin,
+            advance: raster.advance,
+        };
+        // Glif bez bitmapy (spacja) zapamiętujemy od razu — tylko `advance`.
+        if tw == 0 || th == 0 {
+            self.glyphs.insert(key, glyph);
+            return Some(glyph);
+        }
+        if tw + 1 > self.atlas.size || th + 1 > self.atlas.size {
+            return None;
+        }
+        if self.atlas.x + tw + 1 > self.atlas.size {
+            self.atlas.x = 0;
+            self.atlas.y += self.atlas.row_h + 1;
+            self.atlas.row_h = 0;
+        }
+        if self.atlas.y + th + 1 > self.atlas.size {
+            // Atlas pełny — czyścimy i pakujemy od nowa; glify wrócą leniwie.
+            self.atlas.reset();
+            self.glyphs.clear();
+        }
+        let (ax, ay) = (self.atlas.x, self.atlas.y);
+        let size = self.atlas.size;
+        // Tymczasowo pakujemy krycie jako RGBA (RGB=0, A=krycie), bo
+        // `glTexSubImage2D` w GLES2 czyta wiersze bez odstępu.
+        let mut tmp = vec![0u8; (tw * th * 4) as usize];
+        for i in 0..(tw * th) as usize {
+            tmp[i * 4 + 3] = raster.coverage[i];
+        }
+        self.atlas_ensure();
+        unsafe {
+            (self.gl.bind_texture)(GL_TEXTURE_2D, self.atlas.tex);
+            (self.gl.tex_sub_image_2d)(
+                GL_TEXTURE_2D,
+                0,
+                ax as i32,
+                ay as i32,
+                tw as i32,
+                th as i32,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                tmp.as_ptr() as *const c_void,
+            );
+        }
+        self.atlas.x += tw + 1;
+        self.atlas.row_h = self.atlas.row_h.max(th);
+        glyph.u = ax as f32 / size as f32;
+        glyph.v = ay as f32 / size as f32;
+        glyph.tw = tw;
+        glyph.th = th;
+        self.glyphs.insert(key, glyph);
+        Some(glyph)
+    }
+
+    /// Tworzy teksturę atlasu przy pierwszym glifie.
+    fn atlas_ensure(&mut self) {
+        if self.atlas.tex != 0 {
+            return;
+        }
+        let size = self.atlas.size;
+        unsafe {
+            let mut tex = 0;
+            (self.gl.gen_textures)(1, &mut tex);
+            (self.gl.bind_texture)(GL_TEXTURE_2D, tex);
+            (self.gl.tex_image_2d)(
+                GL_TEXTURE_2D,
+                0,
+                GL_RGBA as i32,
+                size as i32,
+                size as i32,
+                0,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                std::ptr::null(),
+            );
+            (self.gl.tex_parameteri)(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR as i32);
+            (self.gl.tex_parameteri)(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as i32);
+            (self.gl.tex_parameteri)(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE as i32);
+            (self.gl.tex_parameteri)(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE as i32);
+            self.atlas.tex = tex;
+        }
+    }
+
+    /// Rysuje pojedynczy glif (kolor premnożony, jak w `draw_shape`).
+    fn draw_glyph(
+        &self,
+        g: Glyph,
+        rect: Rect,
+        color: (f32, f32, f32, f32),
+        clip: Rect,
+        round: Option<(Rect, f64)>,
+    ) {
+        let p = &self.glyph_prog;
+        let size = self.atlas.size as f32;
+        unsafe {
+            (self.gl.use_program)(p.id);
+            (self.gl.bind_buffer)(GL_ARRAY_BUFFER, self.vbo);
+            (self.gl.enable_vertex_attrib_array)(p.pos);
+            (self.gl.vertex_attrib_pointer)(p.pos, 2, GL_FLOAT, 0, 0, std::ptr::null());
+            (self.gl.active_texture)(GL_TEXTURE0);
+            (self.gl.bind_texture)(GL_TEXTURE_2D, self.atlas.tex);
+            (self.gl.uniform_1i)(p.tex, 0);
+            (self.gl.uniform_2f)(p.screen, self.width as f32, self.height as f32);
+            (self.gl.uniform_4f)(
+                p.rect,
+                rect.x() as f32,
+                rect.y() as f32,
+                rect.width() as f32,
+                rect.height() as f32,
+            );
+            (self.gl.uniform_4f)(p.uv, g.u, g.v, g.tw as f32 / size, g.th as f32 / size);
+            (self.gl.uniform_4f)(p.color, color.0, color.1, color.2, color.3);
+            (self.gl.uniform_4f)(
+                p.clip,
+                clip.x() as f32,
+                clip.y() as f32,
+                clip.width() as f32,
+                clip.height() as f32,
+            );
+            match round {
+                Some((r, radius)) => {
+                    (self.gl.uniform_4f)(
+                        p.round,
+                        r.x() as f32,
+                        r.y() as f32,
+                        r.width() as f32,
+                        r.height() as f32,
+                    );
+                    (self.gl.uniform_1f)(p.round_r, radius as f32);
+                }
+                None => {
+                    (self.gl.uniform_4f)(p.round, 0.0, 0.0, 0.0, 0.0);
+                    (self.gl.uniform_1f)(p.round_r, 0.0);
+                }
+            }
+            (self.gl.draw_arrays)(GL_TRIANGLE_STRIP, 0, 4);
+        }
+    }
+
     fn flush_cpu_layer(
         &mut self,
         commands: &[DrawCommand],
@@ -1159,8 +1403,12 @@ impl GpuRenderer {
     }
 
     fn finish(&mut self) {
+        // `glReadPixels` z FBO i tak czeka na zakończenie rysowania do tego bufora,
+        // więc `glFinish` był tylko dodatkowym pełnym płotem (droższy przy dmabuf,
+        // gdzie GPU ma jeszcze własną pracę). Docelowo jawne `EGL_KHR_fence_sync`,
+        // gdy dojdzie zero-copy wyjście.
+        let t = std::time::Instant::now();
         unsafe {
-            (self.gl.finish)();
             (self.gl.bind_framebuffer)(GL_FRAMEBUFFER, self.fbo);
             (self.gl.read_pixels)(
                 0,
@@ -1172,6 +1420,12 @@ impl GpuRenderer {
                 self.pixels.as_mut_ptr() as *mut c_void,
             );
         }
+        self.readback_ms = t.elapsed().as_secs_f32() * 1000.0;
+    }
+
+    /// Czas `glReadPixels` z ostatniej klatki (ms).
+    pub fn readback_ms(&self) -> f32 {
+        self.readback_ms
     }
 }
 
@@ -1237,8 +1491,12 @@ impl Renderer for GpuRenderer {
                     self.flush_run(&mut run, &mut run_bounds, k, &clip_stack);
                     clip_stack.pop();
                 }
-                DrawCommand::Text(_)
-                | DrawCommand::StrokeLine { .. }
+                DrawCommand::Text(text_run) => {
+                    // Tekst idzie glifami z atlasu — bez rasteryzacji warstwy CPU.
+                    self.flush_run(&mut run, &mut run_bounds, k, &clip_stack);
+                    self.draw_text(text_run, k, &clip_stack);
+                }
+                DrawCommand::StrokeLine { .. }
                 | DrawCommand::StrokePolyline { .. }
                 | DrawCommand::FillPolygon { .. } => {
                     extend(&mut run_bounds, command_bounds(cmd, &self.text));
@@ -1408,6 +1666,48 @@ impl GpuRenderer {
         let (clip, round) = clip_for(clip_stack, screen);
         let cmds = std::mem::take(run);
         self.flush_cpu_layer(&cmds, b, scale, clip, round);
+    }
+}
+
+/// Klucz cache glifów: znak, rozmiar w px×2 (albo 0 dla „bez bitmapy”) i pogrubienie.
+type GlyphKey = (u32, u32, bool);
+
+/// Wpis w atlasie: pozycja UV, rozmiar bitmapy i metryki wstawienia.
+#[derive(Clone, Copy)]
+struct Glyph {
+    u: f32,
+    v: f32,
+    tw: u32,
+    th: u32,
+    xmin: i32,
+    ymin: i32,
+    advance: f32,
+}
+
+/// Atlas glifów: jedna tekstura RGBA, krycie w alfie, pakowanie półkowe.
+struct Atlas {
+    tex: Gluint,
+    size: u32,
+    x: u32,
+    y: u32,
+    row_h: u32,
+}
+
+impl Atlas {
+    fn new(size: u32) -> Self {
+        Self {
+            tex: 0,
+            size,
+            x: 0,
+            y: 0,
+            row_h: 0,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.x = 0;
+        self.y = 0;
+        self.row_h = 0;
     }
 }
 
@@ -1652,6 +1952,27 @@ impl ShapeProgram {
     }
 }
 
+impl GlyphProgram {
+    fn new(gl: &Gl) -> Result<Self, String> {
+        let id = link(gl, VS, FS_GLYPH)?;
+        unsafe {
+            (gl.use_program)(id);
+            Ok(Self {
+                id,
+                pos: (gl.get_attrib_location)(id, b"pos\0".as_ptr() as *const Glchar) as Gluint,
+                screen: (gl.get_uniform_location)(id, b"screen\0".as_ptr() as *const Glchar),
+                rect: (gl.get_uniform_location)(id, b"rect\0".as_ptr() as *const Glchar),
+                uv: (gl.get_uniform_location)(id, b"uv\0".as_ptr() as *const Glchar),
+                color: (gl.get_uniform_location)(id, b"color\0".as_ptr() as *const Glchar),
+                clip: (gl.get_uniform_location)(id, b"clip\0".as_ptr() as *const Glchar),
+                round: (gl.get_uniform_location)(id, b"round\0".as_ptr() as *const Glchar),
+                round_r: (gl.get_uniform_location)(id, b"round_r\0".as_ptr() as *const Glchar),
+                tex: (gl.get_uniform_location)(id, b"tex\0".as_ptr() as *const Glchar),
+            })
+        }
+    }
+}
+
 fn link(gl: &Gl, vs_src: &str, fs_src: &str) -> Result<Gluint, String> {
     let vs = shader(gl, GL_VERTEX_SHADER, vs_src)?;
     let fs = shader(gl, GL_FRAGMENT_SHADER, fs_src)?;
@@ -1861,6 +2182,47 @@ mod tests {
     fn pixel(gpu: &GpuRenderer, x: usize, y: usize) -> (u8, u8, u8) {
         let i = (y * 64 + x) * 4;
         (gpu.data()[i], gpu.data()[i + 1], gpu.data()[i + 2])
+    }
+
+    /// Tekst musi iść z atlasu glifów (bez warstwy CPU) i być widoczny także
+    /// w clipie zaokrąglonym — to tekst okien i pasków tytułu.
+    #[test]
+    fn gpu_draws_text_from_atlas() {
+        if !available() {
+            eprintln!("pominięto: brak EGL/GPU");
+            return;
+        }
+        let mut gpu = match GpuRenderer::new(160, 48) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("pominięto: {e}");
+                return;
+            }
+        };
+        if !gpu.text.has_font() {
+            eprintln!("pominięto: brak fontu systemowego");
+            return;
+        }
+        let run = TextRun::new(Point::new(6.0, 30.0), "Luna", 20.0)
+            .with_color(Color::from_rgba8(0xff, 0xff, 0xff, 0xff));
+        let mut scene = Scene::new();
+        scene.text(run.clone());
+        gpu.draw(&scene, 1.0, Color::BLACK);
+        let lit = |gpu: &GpuRenderer| {
+            gpu.data()
+                .chunks_exact(4)
+                .filter(|p| p[0] > 100 && p[1] > 100 && p[2] > 100)
+                .count()
+        };
+        assert!(lit(&gpu) > 40, "tekst bez clipu niewidoczny");
+
+        // Ten sam tekst w zaokrąglonym clipie (jak w oknie).
+        let mut scene = Scene::new();
+        scene.push_clip_rounded(Rect::from_xywh(0.0, 0.0, 160.0, 48.0), 10.0);
+        scene.text(run);
+        scene.pop_clip();
+        gpu.draw(&scene, 1.0, Color::BLACK);
+        assert!(lit(&gpu) > 40, "tekst w clipie zaokrąglonym niewidoczny");
     }
 
     /// Pełny round-trip: tekstura GL → eksport MESA do `dmabuf` → import przez

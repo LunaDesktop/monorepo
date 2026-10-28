@@ -15,7 +15,10 @@
 //!
 //! - `windows` — 30 buforów okien 640×480 (czyste mieszanie pikseli),
 //! - `desktop` — tło 1920×1080, 6 okien, paski tytułu i kursor (realny miks
-//!   GPU + warstw CPU na tekst/wektory).
+//!   GPU + tekst z atlasu glifów + warstwa CPU na wektor).
+//!
+//! Wypisuje też czas samego `glReadPixels` — przy wyjściu bez zero-copy to zwykle
+//! największa część budżetu klatki (patrz `docs/gpu.md`, etap 4).
 //!
 //! Kody wyjścia: `0` = OK, `2` = brak EGL, `3` = brak kontekstu.
 
@@ -109,6 +112,7 @@ fn main() {
     let gpu_windows = run(&windows, &mut gpu);
     let cpu_windows = run(&windows, &mut cpu);
     let gpu_desktop = run(&desktop, &mut gpu);
+    let readback = f64::from(gpu.readback_ms());
     let cpu_desktop = run(&desktop, &mut cpu);
 
     if json {
@@ -140,6 +144,11 @@ fn main() {
         cpu_desktop / gpu_desktop.max(0.01)
     );
     println!();
+    println!(
+        "  z tego readback (glReadPixels, bez zero-copy): {:.2} ms, sam render ≈ {:.2} ms",
+        readback,
+        (gpu_desktop - readback).max(0.0)
+    );
     println!(
         "  GPU desktop → {:.1} fps, CPU desktop → {:.1} fps",
         1000.0 / gpu_desktop,
