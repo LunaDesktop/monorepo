@@ -1,50 +1,16 @@
+# Meta-repozytorium Luna.
+#
+# libLuna, Luna, Selene, luna-greeter i aplikacje są TU niezależnymi workspace'ami
+# Cargo — każdy ma własny Cargo.lock i można go otworzyć/zbudować osobno:
+#
+#   make build            # buduje wszystkie pakiety (wspólny target/)
+#   make test             # testuje wszystkie pakiety
+#   cd selene && cargo run
+#   cd apps/luna-terminal && cargo build
+#
+# Ten manifest jest celowo pusty (żadnych członków): nie da się mieć jednego
+# workspace'u Cargo, który jednocześnie zawiera inne workspace'y. Służy tylko
+# temu, żeby `cargo` uruchomione w katalogu głównym nie kończyło się błędem.
 [workspace]
 resolver = "2"
-members = [
-    "crates/libluna",
-    "crates/libluna-core",
-    "crates/libluna-i18n",
-    "crates/libluna-render",
-    "crates/libluna-platform",
-    "crates/libluna-widgets",
-    "apps/luna-demo",
-    "apps/luna-files",
-    "de/luna",
-    "de/selene",
-]
-
-[workspace.package]
-version = "0.0.1"
-edition = "2021"
-license = "MPL-2.0"
-rust-version = "1.80"
-authors = ["Patryk Szkudlarek / libLuna contributors"]
-repository = "https://github.com/mijsys/libLuna"
-
-[workspace.dependencies]
-libluna-core = { path = "crates/libluna-core", version = "0.0.1" }
-libluna-i18n = { path = "crates/libluna-i18n", version = "0.0.1" }
-libluna-render = { path = "crates/libluna-render", version = "0.0.1" }
-libluna-platform = { path = "crates/libluna-platform", version = "0.0.1" }
-libluna-widgets = { path = "crates/libluna-widgets", version = "0.0.1" }
-libluna = { path = "crates/libluna", version = "0.0.1" }
-
-tiny-skia = "0.11"
-
-[profile.dev.package."*"]
-opt-level = 2
-
-# Profil `dev` (cargo run/test domyślnie): bez optymalizacji kod rysujący potrafi chodzić
-# setki razy wolniej (panel spada do 1–5 FPS), co łatwo pomylić z błędem wydajności.
-# Lekka optymalizacja usuwa tę pułapkę, a kompilacja zostaje szybka.
-[profile.dev]
-opt-level = 1
-
-# Optymalizacja wydania: pełny LTO i jedna jednostka kodegenu (mniejszy, szybszy binarny
-# kompozytor + środowisko). `panic = "unwind"` świadomie zostawione — panika klienta nie
-# powinna zabijać całej sesji.
-[profile.release]
-opt-level = 3
-lto = "thin"
-codegen-units = 1
-strip = true
+members = []

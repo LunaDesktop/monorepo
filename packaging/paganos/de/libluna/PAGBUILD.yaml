@@ -1,7 +1,7 @@
 # Receptura PaganOS (pagbuild) — libLuna (toolkit GUI).
 # Target w repo receptur: de/libluna/PAGBUILD.yaml
 #
-# Źródło: lokalny tarball całego workspace'u (konwencja „fork-first" — build bez sieci),
+# Źródło: lokalny tarball całego meta-repozytorium (konwencja „fork-first" — build bez sieci),
 # generowany skryptem packaging/paganos/make-tarball.sh. Katalog w tarballu: luna-${pkgver}/
 
 pkgname: libluna
@@ -24,15 +24,15 @@ sha256sums:
 build: |
   cd luna-${pkgver}
 
-  # Build tylko pakietu demo (nie ciągniemy kompozytora Selene).
-  cargo build --release --locked -p luna-demo
+  # Demo jest osobnym workspace'em; budujemy tylko je (bez Selene/Luny).
+  ( cd apps/luna-demo && cargo build --release --locked )
 
-  install -Dm755 target/release/luna-demo "${PKGDIR}/usr/bin/luna-demo"
-  install -Dm755 target/release/gallery  "${PKGDIR}/usr/bin/luna-gallery"
+  install -Dm755 apps/luna-demo/target/release/luna-demo "${PKGDIR}/usr/bin/luna-demo"
+  install -Dm755 apps/luna-demo/target/release/gallery  "${PKGDIR}/usr/bin/luna-gallery"
 
   # Katalogi tłumaczeń (doładowywane w runtime z /usr/share/luna/i18n).
   install -d "${PKGDIR}/usr/share/luna/i18n"
-  install -m644 crates/libluna-i18n/i18n/*.lang "${PKGDIR}/usr/share/luna/i18n/"
+  install -m644 libluna/crates/libluna-i18n/i18n/*.lang "${PKGDIR}/usr/share/luna/i18n/"
 
   # Przykładowe motywy (nakładki na motyw bazowy).
   install -d "${PKGDIR}/usr/share/luna/themes"

@@ -15,9 +15,15 @@ gnieździe nasłuchu i deskryptorze backendu. `libLuna` jest zwykłą zależnoś
 
 | Warstwa / Layer | Nazwa / Name | Opis |
 | --- | --- | --- |
-| Toolkit GUI | **libLuna** | widgety, render, i18n (`crates/libluna-*`) |
-| Środowisko | **Luna** | pulpit (panel, launcher, OSD) — `de/luna` |
-| Kompozytor | **Selene** | serwer Wayland — `de/selene` |
+| Toolkit GUI | **libLuna** | widgety, render, i18n (`libluna/crates/libluna-*`) |
+| Środowisko | **Luna** | pulpit (panel, launcher, OSD) — `luna` |
+| Kompozytor | **Selene** | serwer Wayland — `selene` |
+| Logowanie | **Luna Greeter** | ekran logowania dla greetd — `luna-greeter` |
+
+Pakiety źródłowe są osobnymi workspace'ami w katalogach najwyższego poziomu:
+`libluna/`, `luna/`, `selene/`, `luna-greeter/` oraz `apps/*`. Katalog `de/` zawiera już
+tylko **integrację sesji** (launcher, wpisy `.desktop`, portale XDG, przykładowy greetd),
+wspólną dla tych pakietów.
 
 ## Co już działa / What works (M-K5)
 
@@ -65,34 +71,103 @@ gnieździe nasłuchu i deskryptorze backendu. `libLuna` jest zwykłą zależnoś
 - **Wejście evdev** (`SELENE_INPUT=evdev`, opcjonalne): własne czytanie `/dev/input/event*`
   (wskaźnik względny z wirtualnym kursorem, przyciski, kółko, klawiatura) — rodzime wejście
   dla trybu DRM, bez nadrzędnego kompozytora. Wymaga dostępu do grupy `input`/root.
+- **Izolacja od sygnałów konsoli**: w trybie DRM Selene zakłada własną grupę procesów i
+  przejmuje pierwszy plan VT (`vt.rs`). Bez tego konsola jądra (zostaje w trybie tekstowym)
+  wysyłała `SIGINT` z Ctrl+C do **całej** grupy procesów sesji — ginął proces `greetd`
+  nadzorujący sesję, a logind kończył sesję (wyglądało to jak wylogowanie). `SIGINT`,
+  `SIGQUIT` i `SIGTSTP` są ignorowane, a `SIGTERM`/`SIGHUP` logują pid nadawcy i kończą
+  sesję z kodem `128+n`.
 - Wielojęzyczność (`libluna-i18n`) i optymalizacja (`[profile.release]` LTO, cache `shm`).
 
-## Powłoka Luna / Luna shell (`de/luna`)
+## Powłoka Luna / Luna shell (`luna`)
 
 Środowisko graficzne Luna (odpowiednik GNOME Shell) na libLunie, działające na kompozytorze
 Selene.
 
-- `de/luna/src/panel.rs` — **panel górny** (sam przycisk burger, tytuł okna, zegar/data,
+- `luna/src/panel.rs` — **panel górny** (sam przycisk burger, tytuł okna, zegar/data,
   przełączniki z ikonami, przestrzenie robocze, użytkownik) i **launcher** w trzech widokach:
   **Lista**, **Siatka**, **Karuzela** (segmentowy przełącznik w nagłówku).
   Ikony z pakietu `libluna-widgets::icon` (`IconName`/`paint_icon`) — wektorowe, spójne ze stylem.
-- `luna-panel` (bin) — render headless: `docs/images/luna-shell-{light,dark}.png`
-  oraz `docs/images/luna-launcher-{list,grid,carousel}.png`.
+- `luna-panel` (bin) — render headless: `docs/images/luna-panel-idle.png`,
+  `luna-launcher-{list,grid,carousel}.png`, `luna-popup-*.png` (w tym
+  `luna-popup-notifications.png`) i `luna-osd.png`.
 - `luna-shell` (bin) — powierzchnia „chrome” na żywo: burger otwiera/zamyka launcher,
   przełącznik widoku, **przewijanie listy**, klik w aplikację **uruchamia** ją;
   **nawigacja klawiaturą** (strzałki poruszają zaznaczeniem, `Enter` uruchamia, `Esc` zamyka),
   do tego **OSD** i **powiadomienia** (`osd.rs`, `notifications.rs`) z ikonami pakietu.
-- **Galeria ikon**: `cargo run -p luna-demo --bin icons` → `docs/images/icons.png`
+  Klik w zegar otwiera kalendarz **i centrum powiadomień** (historia, „Wyczyść”);
+  kropka przy zegarze pokazuje, że w historii są powiadomienia.
+- **Wyszukiwanie w launcherze**: pole ma przycisk **„×”** czyszczący frazę, a zamknięcie
+  launchera resetuje wyszukiwanie i przewinięcie — kolejne otwarcie pokazuje pełną listę.
+- **Panel i launcher**: każdy klikalny element (burger, przyciski okien, kropki przestrzeni,
+  przełączniki, zegar, użytkownik, zasilanie, kafelki/wiersze launchera, przełącznik widoku,
+  „×” wyszukiwania, kafelki i przyciski Quick Panelu, menu sesji, listy Wi-Fi i głośności)
+  podświetla się pod kursorem. Mechanizm jest wspólny (`libluna_widgets::Hover`):
+  powłoka podaje mu zdarzenia, a rysowanie pyta `is_hovered`/`index`.
+- **Ekran blokady** (`luna-lock`): pełnoekranowy overlay `wlr-layer-shell` z klawiaturą
+  wyłączną, hasło weryfikowane w tle przez `polkit-agent-helper-1`/`sudo`, jedna powierzchnia
+  rysowana na wszystkich monitorach. Wejście: menu sesji → **Zablokuj ekran**.
+  Tło to **ta sama tapeta co na pulpicie** (przyciemniona pod kartę):
+  `LUNA_WALLPAPER`/`SELENE_WALLPAPER`, a potem `~/.config/luna/wallpaper.conf`
+  (`path=/ścieżka/do.png`); brak pliku → wbudowana grafika Luny.
+  `SELENE_NO_WALLPAPER=1` wyłącza tapetę także na ekranie blokady.
+- **Menu sesji**: Ustawienia, Zablokuj ekran, Wyloguj, Uruchom ponownie, Wyłącz komputer.
+  Restart i wyłączenie idą przez `systemctl` (a nie `loginctl`, które takich poleceń nie ma).
+- **Daemon powiadomień** (w `luna-shell`): standardowe `org.freedesktop.Notifications`
+  z akcjami, `replaces_id`, `CloseNotification` i wpisami trwałymi (`expire_timeout = 0`).
+  Historia, DND i centrum powiadomień są w tej samej powłoce; aplikacje wołają zwykły D-Bus.
+- **Luna Settings** (`luna-settings`, `apps/luna-settings`) — centrum ustawień na
+  libLunie: sidebar z sekcjami **Środowisko / Sprzęt / Informacje** i stronami
+  **Wygląd** (motyw, akcent, styl), **Ikony** (styl wektorowy + **zewnętrzne zestawy
+  freedesktop**, np. Papirus, z podglądem i wyborem globalnym), **Ekran logowania**
+  (tapety z miniaturami, motyw i zegar greetera; szkic zmian, przycisk **Zastosuj
+  zmiany** i **formularz hasła administratora** przez `sudo -S`), **Ekran blokady**
+  (per użytkownik, bez roota), **Powiadomienia** (DND + róg toastów + **test**),
+  **Język i region** (wyszukiwany wybór języka/locale/strefy; `locale.conf` +
+  `region.conf`; zmiana języka działa **natychmiast** we wszystkich aplikacjach Luny),
+  **Przestrzenie robocze** (liczba + nazwy; panel i `Super+Tab` aktualizują się
+  na żywo przez `luna-control`), **Ekrany** (odczyt DRM
+  + jasność), **Dźwięk**, **Zasilanie**, **System** i **O Luna**. Wejście z menu sesji
+  („Ustawienia”) i wpisu `.desktop`. Podglądy:
+  `cargo run --manifest-path apps/luna-settings/Cargo.toml --bin preview` → `docs/images/luna-settings-*.png`.
+- **Luna Terminal** (`luna-terminal`, `apps/luna-terminal`) — emulator VT100/xterm bez
+  GTK/VTE: `posix_openpt` + `fork`/`exec`, scrollback 2000 linii, kolory 16/256/truecolor,
+  tryb alternatywny (`vim`, `less`, `htop`), kursory aplikacji i mapa klawiatury
+  xterm-256color. Font monospace: `TextEngine::mono()` + `AppConfig::monospace(true)`.
+  Wejście z wpisu `eu.luna.Terminal.desktop`; podgląd headless:
+  `cargo run --manifest-path apps/luna-terminal/Cargo.toml --bin preview` → `docs/images/luna-terminal.png`.
+  Szczegóły: [`docs/terminal.md`](../docs/terminal.md).
+- **Wielojęzyczność na żywo**: `libluna-platform` obserwuje `~/.config/luna/locale.conf`,
+  przeładowuje katalogi `libluna-i18n`, ustawia `LANGUAGE`/`LANG` i odrysowuje okno;
+  aplikacje z cache'owanymi napisami (sidebar, nawigacja, tytuł okna) odświeżają je po
+  zmianie języka. Ustawienia zapisują też `~/.config/environment.d/00-luna-locale.conf`
+  i aktualizują środowisko D-Busa/systemd user, więc **nowe aplikacje spoza Luny**
+  startują w nowym języku. Szczegóły: `docs/settings.md`.
+- **Galeria ikon**: `cargo run --manifest-path apps/luna-demo/Cargo.toml --bin icons` → `docs/images/icons.png`
   (cały `IconName::ALL` z podpisami, motyw jasny i ciemny).
 - **Prawdziwe aplikacje**: `apps.rs` skanuje pliki `.desktop` (`XDG_DATA_HOME`/`XDG_DATA_DIRS`),
   parsuje `[Desktop Entry]` (nazwy lokalizowane po `LANG`), filtruje `NoDisplay`/`Hidden`;
-  podgląd: `cargo run -p luna --bin luna-apps`. Gdy brak `.desktop` — zestaw demo.
+  podgląd: `cargo run --manifest-path luna/Cargo.toml --bin luna-apps`. Gdy brak `.desktop` — zestaw demo.
 - `libluna-platform` obsługuje teraz oba tryby: okno `xdg-shell` (CSD) i powierzchnię
   warstwową (`AppConfig::layer(LayerConfig::…)`) — `LayerConfig::top_panel`/`overlay`/`top_chrome`
   oraz przezroczyste tło (`AppConfig::transparent`).
 - Dane (`PanelState`, `App`) są oddzielone od rysowania (`PaintCtx`), więc ten sam kod
-  obsługuje podglądy i sesję na żywo.
-- Dalej: usługa D-Bus `org.freedesktop.Notifications`, centrum powiadomień, menu kontekstowe.
+  obsługuje podglądy i sesję na żywo. Podgląd centrum powiadomień:
+  `docs/images/luna-popup-notifications.png` (`cargo run --manifest-path luna/Cargo.toml --bin luna-panel`).
+
+## Ekran logowania / Login manager (`luna-greeter`)
+
+- `luna-greeter` jest frontendem **greetd** (JSON po `GREETD_SOCK` / `/run/greetd-ipc`);
+  PAM, logind i uruchomienie sesji zostają w daemonie, a UI działa jako użytkownik `greeter`.
+- Ekran pokazuje lokalne konta z `/etc/passwd`, pozwala wpisać dowolną nazwę (LDAP/SSSD),
+  a sesje wykrywa z systemowych `wayland-sessions/` i `xsessions/` (menu Wayland/X11).
+  Po udanym logowaniu zapamiętuje ostatnie konto/sesję, a awatary bierze z AccountsService.
+  Obsługuje `auth_message` (`secret`/`visible`/`info`/`error`), ponowną próbę po `auth_error`
+  i uruchamia wybraną sesję przez `start_session`.
+- `de/session/luna-greeter-session` startuje Selene jako kompozytor greetera i po zakończeniu
+  greetera zwalnia DRM. Konfiguracja greetd: `de/greetd/config.toml.example`.
+- Szczegóły instalacji, wymagania (`video`/`render`/`input`, `wlr-layer-shell`) i tryb podglądu:
+  [`docs/greeter.md`](../docs/greeter.md).
 
 ## Jeszcze nie / Not yet
 
@@ -110,7 +185,7 @@ Selene.
 ```sh
 # katalog runtime z prawem 0700
 mkdir -p .selene-runtime && chmod 700 .selene-runtime
-XDG_RUNTIME_DIR="$PWD/.selene-runtime" cargo run -p selene
+XDG_RUNTIME_DIR="$PWD/.selene-runtime" cargo run --manifest-path selene/Cargo.toml
 # → "Selene compositor started (wayland-0)" + gniazdo wayland-0 w katalogu runtime
 ```
 
@@ -124,14 +199,16 @@ rysuje własny kursor (strzałkę), bo nie ma nadrzędnego kompozytora.
 Log uruchomienia sesji trafia do stałego pliku `~/.local/state/luna/session.log`
 (LightDM trzyma tylko dwa pliki `.xsession-errors` i obraca je przy każdej sesji, więc
 bez tego diagnostyka przepada).
+- **Zrzuty bez myszy**: `touch "$XDG_RUNTIME_DIR/luna-shell-launcher"` otwiera/zamyka
+  launcher w działającej powłoce (przydatne do testów języka i wyglądu).
 
 Tryb nested (domyślny) uruchamia okno na nadrzędnym kompozytorze. **Realne wyjście DRM**
 (gdy masz wolnego mastera, np. z osobnej konsoli):
 
 ```sh
-SELENE_BACKEND=drm XDG_RUNTIME_DIR="$PWD/.selene-runtime" cargo run -p selene
-# diagnostyka bez zmiany trybu:  SELENE_DRM_PROBE=1 cargo run -p selene
-# rodzime wejście (gdy brak nadrzędnego kompozytora):  SELENE_INPUT=evdev cargo run -p selene
+SELENE_BACKEND=drm XDG_RUNTIME_DIR="$PWD/.selene-runtime" cargo run --manifest-path selene/Cargo.toml
+# diagnostyka bez zmiany trybu:  SELENE_DRM_PROBE=1 cargo run --manifest-path selene/Cargo.toml
+# rodzime wejście (gdy brak nadrzędnego kompozytora):  SELENE_INPUT=evdev cargo run --manifest-path selene/Cargo.toml
 ```
 
 Uwaga: tryb DRM przejmuje ekran (page-flip); gdy master trzyma Twoja sesja, Selene
@@ -169,7 +246,7 @@ wejdzie backend wyświetlania.
 ## Architektura / Architecture
 
 ```
-de/selene/src/
+selene/src/
   main.rs        # display, globale (wl_output per monitor), gniazdo, pętla poll
   state.rs       # stan: model okien (min/max/fullscreen), z-order, fokus, drag/resize, monitory
   compositor.rs  # wl_compositor / wl_surface / wl_region / wl_callback + kompozycja okien

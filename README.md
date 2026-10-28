@@ -81,29 +81,56 @@ i kompozytor **Selene** buduje się na nim.
 
 ## Struktura repozytorium
 
+To **meta-repozytorium**: każdy pakiet jest osobnym workspace'em Cargo (własny
+`Cargo.lock`), więc można go wydać i aktualizować niezależnie (GitHub / pakiet OS).
+
 ```
-libluna/
-  crates/
-    libluna/           # fasada: jedno wejście (core + render + platform + widgets + i18n) + prelude
-    libluna-core/      # geometria, kolor, skala, zdarzenia, tokeny motywu, ustawienia wyglądu
-    libluna-i18n/      # wielojęzyczność: każdy język w pliku i18n/<kod>.lang + przełączanie w runtime
-    libluna-render/    # graf sceny + backend software (tiny-skia + fontdue)
-    libluna-platform/  # Wayland: xdg-shell (CSD), wl_shm, wejście, pętla zdarzeń, motyw w Frame
-    libluna-widgets/   # widgety: ViewSwitcher, NavList, Menu, Button, Switch, Slider, DropDown, HeaderBar, TabBar/TabView, BottomSheet, Pager, PathBar, SearchEntry, ItemView, ScrollView, Stepper, CheckButton, RadioGroup, Card, ActionRow
-  apps/
-    luna-demo/         # demo aplikacji środowiska Luna; też render offline do PNG
-  de/                  # środowisko graficzne Luna
-    README.md          # opis Selene (kompozytor) + nazewnictwo
-    selene/            # kompozytor Wayland (bez smithay: wayland-server + własna pętla)
-  templates/
-    minimal-app/       # szablon startowy aplikacji
-  tools/
-    libluna-new.sh     # scaffolder: generuje gotowy projekt aplikacji
-  docs/                # architektura, roadmap, zrzuty ekranu
+luna/                        # meta-repozytorium (dev + integracja)
+  libluna/                   # TOOLKIT — [workspace], osobny pakiet/repo
+    crates/
+      libluna/               # fasada: jedno wejście (core + render + platform + widgets + i18n) + prelude
+      libluna-core/          # geometria, kolor, skala, zdarzenia, tokeny motywu, ustawienia wyglądu
+      libluna-i18n/          # wielojęzyczność: każdy język w pliku i18n/<kod>.lang + przełączanie w runtime
+      libluna-render/        # graf sceny + backend software (tiny-skia + fontdue)
+      libluna-platform/      # Wayland: xdg-shell (CSD), wl_shm, wejście, pętla zdarzeń, motyw w Frame
+      libluna-widgets/       # widgety: ViewSwitcher, NavList, Menu, Button, Switch, Slider, DropDown, HeaderBar, TabBar/TabView, BottomSheet, Pager, PathBar, SearchEntry, ItemView, ScrollView, Stepper, CheckButton, RadioGroup, Card, ActionRow
+    templates/minimal-app/   # szablon startowy aplikacji
+    tools/libluna-new.sh     # scaffolder: generuje gotowy projekt aplikacji
+  luna/                      # POWŁOKA — [workspace]: panel, launcher, OSD, powiadomienia, keyring/polkit
+  selene/                    # KOMPOZYTOR — [workspace]: Wayland (bez smithay: wayland-server + własna pętla)
+  luna-greeter/              # LOGOWANIE — [workspace]: ekran logowania (frontend greetd)
+  apps/                      # APLIKACJE — każda osobny [workspace]
+    luna-demo/               # demo aplikacji środowiska Luna; też render offline do PNG
+    luna-files/              # menedżer plików Luna Files
+    luna-settings/           # centrum ustawień środowiska i systemu
+    luna-terminal/           # terminal: PTY + VT100/xterm, font monospace, kolory ANSI
+  de/                        # integracja sesji (wspólna dla pakietów)
+    README.md                # opis środowiska, Selene i nazewnictwo
+    greetd/                  # przykładowa konfiguracja greetd dla Luny
+    session/                 # launcher sesji, wpisy .desktop, portale XDG
+  docs/                      # architektura, roadmap, zrzuty ekranu
+  web/luna.paganlinux.eu/    # strona projektu + dokumentacja deweloperska (PL)
+  examples/                  # przykładowe motywy i tłumaczenia
+  packaging/                 # receptury PaganOS
+  scripts/install.sh         # instalator całego środowiska / pojedynczego pakietu
+  Makefile                   # wspólne build/test/install
 ```
 
 Mapowanie pojęć GTK/GDK/Gsk/libadwaita → libLuna: [`docs/architecture.md`](docs/architecture.md).
 Plan dalszej pracy: [`docs/roadmap.md`](docs/roadmap.md).
+Centrum ustawień: [`docs/settings.md`](docs/settings.md).
+Zestaw ikon: [`docs/icons.md`](docs/icons.md).
+Menedżer logowania: [`docs/greeter.md`](docs/greeter.md).
+Osobne repozytoria i aktualizacja pojedynczych pakietów: [`docs/repositories.md`](docs/repositories.md).
+
+Dokumentacja dla deweloperów: <https://luna.paganlinux.eu/docs/> — szybki start,
+[koncepcje](https://luna.paganlinux.eu/docs/concepts.html),
+[biblioteka 77 widgetów](https://luna.paganlinux.eu/docs/widgets.html),
+[motywy](https://luna.paganlinux.eu/docs/theming.html) i
+[indeks API](https://luna.paganlinux.eu/docs/api.html).
+Wersja angielska: <https://luna.paganlinux.eu/en/docs/>.
+Podglądy widgetów i indeks API generują się z kodu: `make web-assets`; pełne
+rustdoc: `make web-api`.
 
 ## Budowanie i uruchamianie
 
@@ -114,22 +141,63 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
 ```bash
-cargo build --workspace
-cargo test --workspace
+# bez zależności od make (działa wszędzie):
+./scripts/workspaces.sh build    # wszystkie pakiety
+./scripts/workspaces.sh test     # testy (bez doctestów)
+./scripts/workspaces.sh check    # szybka weryfikacja typów
+./scripts/workspaces.sh test-doc # doctesty (wymaga rustdoc w PATH)
+./scripts/workspaces.sh smoke    # test dymny sesji (zagnieżdżony Selene)
+./scripts/workspaces.sh lock     # odśwież Cargo.lock po zmianie wersji
+
+# albo, jeśli masz sprawne make:
+make build
+make test
+make smoke      # test dymny sesji (zagnieżdżony Selene)
+make check
+
+# pojedynczy pakiet — tak samo jak w osobnym repozytorium:
+cd libluna && cargo build
+cd apps/luna-terminal && cargo build
 ```
+
+`test` celowo pomija doctesty: część toolchainów (np. systemowy `rustc` na PaganOS)
+nie zawiera `rustdoc`. Doctesty uruchomisz przez `test-doc` — najlepiej z toolchainem
+rustup, który ma `rustdoc` w `~/.cargo/bin`.
+
+`smoke` uruchamia **pełny przepływ sesji** na zagnieżdżonym Selene (panel, okna,
+klawiatura, schowek między klientami, ekran blokady) — szczegóły i wymagania:
+[`docs/testing.md`](docs/testing.md).
+
+Pomiar rasteryzacji (baseline CPU pod decyzję o backendzie GPU):
+
+```bash
+cargo run --release --manifest-path libluna/Cargo.toml \
+    -p libluna-render --example render_bench
+```
+
+Wyniki, kryteria GPU i zasady stabilności API: [`docs/rendering.md`](docs/rendering.md),
+[`docs/api-stability.md`](docs/api-stability.md).
+
+Jeśli `make` w ogóle nie startuje (`libguile-3.0.so.1: cannot open shared object file`),
+to problem systemowego pakietu `make`, nie projektu: użyj `./scripts/workspaces.sh`
+albo doinstaluj zależność: `sudo pag install guile`.
+
+Oba warianty używają wspólnego `target/` (dzięki temu `scripts/install.sh` widzi
+wszystkie binarki). Bezpośrednie `cargo` uruchomione w podkatalogu pakietu tworzy
+własny `<pakiet>/target/` — to normalne i nie wpływa na inne pakiety.
 
 Okno z demem (wymaga kompozytora Wayland, np. Selene):
 
 ```bash
-cargo run -p luna-demo
+cargo run --manifest-path apps/luna-demo/Cargo.toml
 ```
 
 Podgląd bez kompozytora — render do PNG (język, motyw i akcent do wyboru):
 
 ```bash
-cargo run -p luna-demo --bin render -- --lang pl docs/images/settings-light.png
-cargo run -p luna-demo --bin render -- --no-sidebar --sidebar-width 340 /tmp/out.png
-cargo run -p luna-demo --bin render -- --dark --accent purple --lang de docs/images/settings-de-dark.png
+cargo run --manifest-path apps/luna-demo/Cargo.toml --bin render -- --lang pl docs/images/settings-light.png
+cargo run --manifest-path apps/luna-demo/Cargo.toml --bin render -- --no-sidebar --sidebar-width 340 /tmp/out.png
+cargo run --manifest-path apps/luna-demo/Cargo.toml --bin render -- --dark --accent purple --lang de docs/images/settings-de-dark.png
 ```
 
 ### Demo interaktywne bez kompozytora (headless)
@@ -140,8 +208,8 @@ w kropkę akcentu, w pozycję nawigacji, w przełącznik widoku, w ikonę `◧`,
 krawędzi) przez tę samą funkcję `handle_events` i renderuje klatki:
 
 ```bash
-cargo run -p luna-demo --bin simulate            # → docs/images/demo-step-*.png + demo-montage.png
-cargo test -p luna-demo --test interaction       # te same interakcje jako asercje
+cargo run --manifest-path apps/luna-demo/Cargo.toml --bin simulate            # → docs/images/demo-step-*.png + demo-montage.png
+cargo test --manifest-path apps/luna-demo/Cargo.toml --test interaction       # te same interakcje jako asercje
 ```
 
 ![Sekwencja interakcji](docs/images/demo-montage.png)
@@ -150,7 +218,7 @@ cargo test -p luna-demo --test interaction       # te same interakcje jako aserc
 
 `scripts/install.sh` buduje binarki w trybie release i instaluje **środowisko Luna**
 (kompozytor `selene`, powłoka `luna-shell`, sesja `luna-session`, demo, tłumaczenia, motywy,
-wpis sesji Wayland i **ikonę sesji**):
+wpis sesji Wayland, **ikonę sesji** oraz ekran logowania `luna-greeter`):
 
 ```bash
 # instalacja testowa do katalogu (bez ruszania systemu) — nic nie wymaga uprawnień
@@ -164,11 +232,21 @@ sudo ./scripts/install.sh --prefix /usr
 
 # usunięcie
 sudo ./scripts/install.sh --prefix /usr --uninstall
+
+# aktualizacja TYLKO jednego komponentu (np. terminala) — bez całego środowiska
+sudo ./scripts/install.sh --prefix /usr --only terminal
 ```
+
+Komponenty dla `--only`: `base`, `selene`, `luna`, `greeter`, `demo`, `settings`,
+`files`, `terminal`, `icons`. `base` instaluje tylko wspólne zasoby (sesja, tłumaczenia, motywy,
+ikona, licencja), a `icons` sam pastelowy pakiet ikon (`share/icons/Luna-Icons`:
+PNG 16–512 px + skalowalne SVG).
 
 Po instalacji sesja „Luna” pojawia się w menedżerze logowania (`share/wayland-sessions/selene.desktop`),
 z ikoną Luna (`share/icons/hicolor/.../apps/luna.svg` + PNG w kilku rozmiarach oraz `pixmaps/luna.png`,
-rysowanymi z `assets/branding/luna.svg`).
+rysowanymi z `assets/branding/luna.svg`). Instalator kładzie też `luna-greeter`
+i `luna-greeter-session` — ekran logowania dla greetd (konfiguracja i wymagania:
+[`docs/greeter.md`](docs/greeter.md)).
 Na sprzęcie Selene przejmuje ekran przez DRM/KMS — trzeba **wylogować bieżący pulpit** (wolny
 master DRM) i mieć dostęp do `/dev/input` (grupa `input`) dla wejścia. Testowo, obok działającej
 sesji, można uruchomić `SELENE_BACKEND=nested selene` (okno na obecnym pulpicie) i podłączyć
@@ -204,16 +282,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### Scaffolder (najszybciej)
 
 ```bash
-./tools/libluna-new.sh ~/projekty/moja-apka
+./libluna/tools/libluna-new.sh ~/projekty/moja-apka
 cd ~/projekty/moja-apka && cargo run
 ```
 
-Skrypt tworzy projekt z poprawną ścieżką do libLuny. Szablon: [`templates/minimal-app`](templates/minimal-app).
+Skrypt tworzy projekt z poprawną ścieżką do libLuny. Szablon: [`libluna/templates/minimal-app`](libluna/templates/minimal-app).
 
 ### Działający przykład
 
 ```bash
-cargo run -p libluna --example minimal
+cargo run --manifest-path libluna/Cargo.toml -p libluna --example minimal
 ```
 
 > Uwaga: na tym etapie (przed M2) aplikacja wypełnia **graf sceny** ręcznie. Gdy wejdą
@@ -297,14 +375,14 @@ Nieznane klucze są ignorowane (zgodność wprzód). Wczytuje/nakłada to
 Podgląd (headless) tego samego okna w stylach:
 
 ```sh
-cargo run -p luna-demo --bin render -- --theme examples/luna/themes/nord.theme docs/images/settings-nord.png
-cargo run -p luna-demo --bin layout -- --theme examples/luna/themes/nord.theme --out docs/images/layout-nord.png
+cargo run --manifest-path apps/luna-demo/Cargo.toml --bin render -- --theme examples/luna/themes/nord.theme docs/images/settings-nord.png
+cargo run --manifest-path apps/luna-demo/Cargo.toml --bin layout -- --theme examples/luna/themes/nord.theme --out docs/images/layout-nord.png
 ```
 
 Do zrobienia pozostaje **okno podglądu na żywo** wewnątrz aplikacji (miniatura aktualizowana przy
 przewijaniu listy). Sam wybór stylu działa już w demo: **menu `☰` → „Styl”** otwiera listę
 („Domyślny” + style z plików), a wybór jest natychmiast stosowany i zapisywany w `theme.conf`.
-Headlessowy podgląd (montaż motywów) to `cargo run -p luna-demo --bin styles` →
+Headlessowy podgląd (montaż motywów) to `cargo run --manifest-path apps/luna-demo/Cargo.toml --bin styles` →
 `docs/images/styles.png`. W headless demo/testach katalog ze stylami wskazuje `LUNA_THEMES_DIR`.
 
 ### Co jeszcze decyduje o „looku GTK4”
@@ -318,7 +396,7 @@ zmienić bez przepisywania aplikacji. Rozmiar samych kontrolek okna jest już to
 
 ## Dodawanie i edycja języków
 
-Każdy język to **jeden plik** `crates/libluna-i18n/i18n/<kod>.lang`. Format:
+Każdy język to **jeden plik** `libluna/crates/libluna-i18n/i18n/<kod>.lang`. Format:
 
 ```
 __name__ = Français          # natywna nazwa języka w UI (opcjonalne)
@@ -335,7 +413,7 @@ Appearance = Apparence       # klucz (angielski) = tłumaczenie
 Przykładowy, kompletny plik francuski jest w `examples/luna/i18n/fr.lang`:
 
 ```bash
-XDG_CONFIG_HOME="$PWD/examples" cargo run -p luna-demo --bin render -- --lang fr /tmp/fr.png
+XDG_CONFIG_HOME="$PWD/examples" cargo run --manifest-path apps/luna-demo/Cargo.toml --bin render -- --lang fr /tmp/fr.png
 ```
 
 ## Co już działa (M0 + i18n/wygląd)
@@ -349,13 +427,16 @@ XDG_CONFIG_HOME="$PWD/examples" cargo run -p luna-demo --bin render -- --lang fr
 - `libluna-i18n`: `Locale` (z `LANG`/`LC_*`), `Catalog`, `Translations`, globalne `tr`/`set_locale`,
   makro `t!` z podstawianiem argumentów, **języki z osobnych plików** `i18n/<kod>.lang`
   (wbudowane) oraz **doładowywane w runtime** z katalogów; `languages()` i `language_name()`.
+  **Zmiana języka w Ustawieniach działa od razu** we wszystkich procesach na libLunie
+  (`libluna-platform` obserwuje `locale.conf` i przeładowuje katalogi).
 - `libluna-render`: graf sceny (prostokąty, zaokrąglenia, obramowania, linie, clip, tekst,
   **obrazy** `Scene::image`/`ImageData`) i rasteryzator CPU z antyaliasingiem; tekst przez
   `fontdue` (font Adwaita Sans).
 - `libluna-platform`: okno `xdg-shell` z CSD, bufor `wl_shm`, pętla `calloop`, **zdarzenia
   wejścia** (wskaźnik, klawiatura, scroll) w `Frame`, odświeżanie na żądanie, zarządzanie
   motywem przez `Frame::set_preference` / `set_accent` (zapis + natychmiastowe przerysowanie).
-  `Frame::close/minimize/toggle_maximize` to **realne akcje okna** (`xdg_toplevel`).
+  `Frame::close/minimize/toggle_maximize` to **realne akcje okna** (`xdg_toplevel`),
+  a `Frame::set_title` pozwala zmienić tytuł okna bez restartu (np. po zmianie języka).
   **Klatki animacji**: aplikacja czyta `Frame::delta_time()` i woła `Frame::request_frame()`,
   dopóki trwa animacja — okno odświeża się wtedy płynnie (~60 Hz), a bez tego tylko na zdarzenia.
 - `libluna-widgets`: **widgety wielokrotnego użycia** w modelu immediate — `ViewSwitcher`
@@ -432,7 +513,7 @@ Minimalny przykład (`apps/luna-demo/src/bin/layout.rs`) buduje kartę ustawień
 z drzewa i renderuje ją headless:
 
 ```sh
-cargo run -p luna-demo --bin layout     # → docs/images/layout.png
+cargo run --manifest-path apps/luna-demo/Cargo.toml --bin layout     # → docs/images/layout.png
 ```
 
 ## Zrzuty ekranu
@@ -450,19 +531,39 @@ Style instalowane z plików (`examples/luna/themes/nord.theme`, `paper.theme`) �
 ![Ustawienia — styl Nord](docs/images/settings-nord.png)
 ![Ustawienia — styl Paper](docs/images/settings-paper.png)
 
-Podgląd kilku motywów (headless, `cargo run -p luna-demo --bin styles`) — ten sam realny
+Podgląd kilku motywów (headless, `cargo run --manifest-path apps/luna-demo/Cargo.toml --bin styles`) — ten sam realny
 interfejs w każdym stylu:
 
 ![Podgląd stylów](docs/images/styles.png)
 
-Nowe widgety — `Banner`, `Spinner`, `Tooltip` (`cargo run -p luna-demo --bin widgets`):
+Nowe widgety — `Banner`, `Spinner`, `Tooltip` (`cargo run --manifest-path apps/luna-demo/Cargo.toml --bin widgets`):
 
 ![Banner, Spinner, Tooltip](docs/images/widgets.png)
 
-Pełna galeria nowych widgetów libLuny (cz. 5–12) — kontenery, tabele, kalendarz, chooser’y,
-kreator kroków, pasek stanu itd. (`cargo run -p luna-demo --bin gallery`):
+Galeria deweloperska — **wszystkie widgety** libLuny. Lista z wyszukiwarką po lewej,
+po prawej działający przykład (kliknięcia i klawiatura), przycisk
+„Pokaż przykładowy kod” oraz „Kopiuj” (systemowy schowek Wayland)
+(`cargo run --manifest-path apps/luna-demo/Cargo.toml --bin gallery` albo pozycja „Widgety” w demo):
 
 ![Galeria widgetów](docs/images/gallery.png)
+
+Ekran logowania Luna (`luna-greeter`) — frontend greetd na tapecie: górny pasek
+(data, zasilanie, ustawienia, sieć), wąska karta z awatarem, polem hasła i stopką
+(`Opcje systemu` · `Sesja` · `Wyłącz`) oraz osobny ekran akcji systemowych
+(wyłączenie, restart, tryb awaryjny, konsola). Obsługuje PAM przez daemon i wybór
+sesji/kompozytora (Wayland/X11). Tapetę, motyw i zegar zmienia się w
+**Ustawienia → Ekran logowania** (`/etc/luna/greeter.conf`; szczegóły:
+[`docs/greeter.md`](docs/greeter.md)):
+
+![Luna Greeter](docs/images/greeter.png)
+
+Terminal Luny (`luna-terminal`) — emulator VT100/xterm na libLunie, bez GTK/VTE:
+`posix_openpt` + `fork`/`exec`, scrollback, 16/256/truecolor, kursory aplikacji,
+tryb alternatywny (`vim`, `less`, `htop`), zakładki, zaznaczanie i schowek
+(`Ctrl+Shift+C`/`V`) oraz Ustawienia kolorystyki i pisma (`Ctrl+,`).
+Szczegóły: [`docs/terminal.md`](docs/terminal.md).
+
+![Luna Terminal](docs/images/luna-terminal.png)
 
 Przebieg interakcji (headless `simulate`) — m.in. menu `☰`, dolny panel, powiadomienie (`Toast`)
 karta 12 i ekran stanu („Brak wyników”) klatka 14:

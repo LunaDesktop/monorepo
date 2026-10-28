@@ -9,7 +9,7 @@ use std::error::Error;
 
 use crate::ui::{self, Demo};
 use libluna_core::ThemeSettings;
-use libluna_i18n::{set_locale, Locale};
+use libluna_i18n::set_locale;
 use libluna_platform::{run as run_app, AppConfig, Frame};
 
 /// Otwiera okno pełnego demo i uruchamia pętlę zdarzeń (start: „Wygląd”).
@@ -23,7 +23,7 @@ pub fn run_widgets() -> Result<(), Box<dyn Error>> {
 }
 
 fn run_with_start(start_nav: Option<usize>) -> Result<(), Box<dyn Error>> {
-    set_locale(Locale::from_env());
+    set_locale(libluna_i18n::preferred_locale());
     // Doładuj języki ze standardowych katalogów (nadpisują wbudowane).
     libluna_i18n::load_catalogs_from_dirs();
 
@@ -58,6 +58,20 @@ fn run_with_start(start_nav: Option<usize>) -> Result<(), Box<dyn Error>> {
             frame.text,
             &mut demo,
         );
+
+        // „Kopiuj” w galerii widgetów → systemowy schowek (wl_data_device).
+        if let Some(text) = demo.gallery.copy_request.take() {
+            frame.copy_to_clipboard(text);
+        }
+        // Ctrl+C/X w polach tekstowych → systemowy schowek.
+        if let Some(text) = demo.clipboard_text.take() {
+            frame.copy_to_clipboard(text);
+        }
+        // Ctrl+V → odczyt schowka; wynik wróci do UI jako `Event::Paste`.
+        if demo.paste_requested {
+            demo.paste_requested = false;
+            frame.paste_from_clipboard();
+        }
 
         // Akcje okna zgłoszone przez HeaderBar (kontrolki).
         if demo.pending_close {

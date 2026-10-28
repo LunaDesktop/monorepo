@@ -2,19 +2,19 @@
 
 use std::error::Error;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use libluna_core::{Point, ThemePreference, ThemeSettings};
+use libluna_core::{Point, Rect, ThemePreference, ThemeSettings};
 use libluna_i18n::{set_locale, tr, tr_args, Locale};
 use libluna_platform::{run as run_app, AppConfig, Frame};
 use libluna_render::ImageData;
 use libluna_widgets::{
-    AlertDialog, Entry as TextEntry, ItemView, Menu, NavEntry, NavList, PaintCtx, ScrollView,
-    SearchEntry, Toast, ViewMode, WindowControl,
+    AlertDialog, Entry as TextEntry, IconName, ItemView, Menu, NavEntry, NavList, PaintCtx,
+    ScrollView, SearchEntry, Toast, ViewMode, WindowControl,
 };
 
-use crate::model::{human_size, now_secs, DirView, Entry, Kind, SortKey};
+use crate::model::{format_mtime, human_size, now_secs, DirView, Entry, Kind, SortKey};
 use crate::ops::{Job, Ops, OpsEvent};
 use crate::places::{self, Mount, Place};
 use crate::prefs::Prefs;
@@ -64,8 +64,28 @@ impl EditState {
 pub enum Preview {
     Text(String),
     Image(Arc<ImageData>),
-    /// Brak podglądu (np. JPG bez dekodera) — pokazujemy metadane.
     None,
+}
+
+/// Informacje do dymka po najechaniu na kafelek/wiersz.
+pub struct HoverTip {
+    pub entry: Entry,
+    pub since: Instant,
+}
+
+/// Rozmiar katalogu liczony w tle (nie blokuje UI).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DirSize {
+    pub bytes: u64,
+    pub files: u64,
+    pub dirs: u64,
+}
+
+/// Obliczanie rozmiaru katalogu w toku.
+pub struct PendingProperties {
+    pub name: String,
+    pub modified: Option<i64>,
+    pub result: Arc<Mutex<Option<DirSize>>>,
 }
 
 /// Jedna zakładka/panel z własną ścieżką i stanem widoku.
@@ -192,7 +212,10 @@ pub enum MenuCmd {
     Refresh,
     EmptyTrash,
     Unmount(usize),
+    Mount(usize),
     OpenDevice(usize),
+    /// Włącza/wyłącza panel podglądu (obraz lub tekst).
+    TogglePreview,
     /// Otwiera okno Ustawień.
     Settings,
     /// Otwiera okno „O aplikacji”.
@@ -208,6 +231,38 @@ pub enum MenuCmd {
 pub struct Clipboard {
     pub paths: Vec<PathBuf>,
     pub cut: bool,
+}
+
+/// Pole tekstowe, do którego trafi tekst z systemowego schowka.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextPasteTarget {
+    Edit,
+    Search,
+}
+
+/// Cel upuszczenia przeciąganych plików.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DropTarget {
+    /// Katalog, do którego przenosimy/kopiujemy.
+    Directory(PathBuf),
+    /// Kosz (przeniesienie do XDG Trash).
+    Trash,
+}
+
+/// Trwające przeciąganie plików z panelu.
+#[derive(Debug, Clone)]
+pub struct DragState {
+    pub paths: Vec<PathBuf>,
+    /// Punkt wciśnięcia (do progu rozpoczęcia przeciągania).
+    pub start: Point,
+    /// Czy przekroczono próg ruchu (dopiero wtedy rysujemy „ducha”).
+    pub active: bool,
+    /// Ctrl = kopiuj, bez Ctrl = przenieś.
+    pub copy: bool,
+    /// Aktualny cel pod kursorem.
+    pub target: Option<DropTarget>,
+    /// Prostokąt podświetlenia celu.
+    pub target_rect: Option<Rect>,
 }
 
 impl Clone for Clipboard {
@@ -270,7 +325,21 @@ pub struct App {
     op_sample: Option<(Instant, u64)>,
     op_started: Option<Instant>,
     pub toast: Toast,
+    /// Kiedy schować toast (po operacji); `None` = toast nie jest widoczny.
+    pub toast_until: Option<Instant>,
+    /// Dymek z informacjami o elemencie pod kursorem (po chwili najechania).
+    pub tooltip: Option<HoverTip>,
+    /// Rozmiar katalogu liczony w tle dla okna Właściwości.
+    pub pending_properties: Option<PendingProperties>,
+    /// Przeciąganie plików (portal wewnętrzny, nie Wayland DnD).
+    pub drag: Option<DragState>,
     pub clipboard: Option<Clipboard>,
+    /// Tekst do systemowego schowka (odbierany przez pętlę klatki).
+    pub text_clipboard: Option<String>,
+    /// Prośba o odczyt systemowego schowka; wynik wróci jako `Event::Paste`.
+    pub text_paste_requested: bool,
+    /// Pole, do którego trafi wklejony tekst.
+    pub text_paste_target: Option<TextPasteTarget>,
     pub last_click: Option<(usize, Instant)>,
     pub last_mount_refresh: Instant,
     pub status: String,
@@ -331,7 +400,14 @@ impl App {
             op_sample: None,
             op_started: None,
             toast: Toast::new(""),
+            toast_until: None,
+            tooltip: None,
+            pending_properties: None,
+            drag: None,
             clipboard: None,
+            text_clipboard: None,
+            text_paste_requested: false,
+            text_paste_target: None,
             last_click: None,
             last_mount_refresh: Instant::now() - Duration::from_secs(10),
             status: String::new(),
@@ -360,7 +436,10 @@ impl App {
     /// Ustawia język i odświeża wszystkie napisy zależne od katalogu tłumaczeń.
     pub fn set_language(&mut self, code: &str) {
         self.prefs.language = code.to_owned();
-        set_locale(Locale::new(code));
+        let locale = Locale::new(code);
+        set_locale(locale.clone());
+        // Język jest wspólny dla całego środowiska — zapisujemy go też globalnie.
+        let _ = libluna_i18n::save_preferred_locale(&locale);
         self.rebuild_sidebar();
         self.status = self.status_text();
         self.save_prefs();
@@ -729,12 +808,12 @@ impl App {
     }
 
     pub fn refresh_devices(&mut self) {
-        let mounts = places::mounts();
+        let mounts = places::devices();
         let changed = mounts.len() != self.mounts.len()
             || mounts
                 .iter()
                 .zip(self.mounts.iter())
-                .any(|(a, b)| a.dev != b.dev || a.mount != b.mount);
+                .any(|(a, b)| a.dev != b.dev || a.mount != b.mount || a.mounted != b.mounted);
         self.mounts = mounts;
         if changed {
             self.rebuild_sidebar();
@@ -752,39 +831,84 @@ impl App {
 
     pub fn rebuild_sidebar(&mut self) {
         self.places = places::places();
+        let home = places::home();
+        let dirs = places::user_dirs();
+        let place_icon = |path: &Path| -> IconName {
+            if path == home.as_path() {
+                IconName::Home
+            } else if dirs.get("DESKTOP").is_some_and(|dir| dir.as_path() == path) {
+                IconName::Monitor
+            } else if dirs
+                .get("DOCUMENTS")
+                .is_some_and(|dir| dir.as_path() == path)
+            {
+                IconName::Document
+            } else if dirs
+                .get("DOWNLOAD")
+                .is_some_and(|dir| dir.as_path() == path)
+            {
+                IconName::Archive
+            } else if dirs
+                .get("PICTURES")
+                .is_some_and(|dir| dir.as_path() == path)
+            {
+                IconName::Image
+            } else if dirs.get("MUSIC").is_some_and(|dir| dir.as_path() == path) {
+                IconName::Music
+            } else if dirs.get("VIDEOS").is_some_and(|dir| dir.as_path() == path) {
+                IconName::Video
+            } else {
+                IconName::Files
+            }
+        };
+
         let mut entries = Vec::new();
         let mut actions = Vec::new();
         let mut mapping = Vec::new();
+        let mut icons = Vec::new();
 
         entries.push(NavEntry::Section(tr("Places")));
         mapping.push(None);
+        icons.push(None);
         for place in &self.places {
             entries.push(NavEntry::Item(place.label.clone()));
             actions.push(SideAction::Go(place.path.clone()));
             mapping.push(Some(actions.len() - 1));
+            icons.push(Some(place_icon(&place.path)));
         }
         entries.push(NavEntry::Item(tr("Trash")));
         actions.push(SideAction::Go(trash::trash_root().join("files")));
         mapping.push(Some(actions.len() - 1));
+        icons.push(Some(IconName::Archive));
 
         if !self.mounts.is_empty() {
             entries.push(NavEntry::Section(tr("Devices")));
             mapping.push(None);
+            icons.push(None);
             for (i, m) in self.mounts.iter().enumerate() {
-                let free = human_size(m.free);
-                let label = tr_args(
-                    "{name} — {free} free",
-                    &[("name", &m.label), ("free", &free)],
-                );
+                let label = if m.mounted {
+                    let free = human_size(m.free);
+                    tr_args(
+                        "{name} — {free} free",
+                        &[("name", &m.label), ("free", &free)],
+                    )
+                } else {
+                    let size = human_size(m.size);
+                    tr_args("{name} — {size}", &[("name", &m.label), ("size", &size)])
+                };
                 entries.push(NavEntry::Item(label));
-                actions.push(SideAction::Go(m.mount.clone()));
+                actions.push(if m.mounted {
+                    SideAction::Go(m.mount.clone())
+                } else {
+                    SideAction::Mount(i)
+                });
                 mapping.push(Some(actions.len() - 1));
-                // Lewy klik nawiguje; odmontowanie jest w menu kontekstowym.
-                let _ = (i, SideAction::Unmount(i));
+                icons.push(Some(IconName::Archive));
             }
         }
 
         self.sidebar = NavList::new(entries);
+        self.sidebar.set_icons(icons);
         self.sidebar_actions = actions;
         self.sidebar_entry_action = mapping;
     }
@@ -824,6 +948,79 @@ impl App {
     pub fn show_toast(&mut self, message: impl Into<String>) {
         self.toast = Toast::new(message);
         self.toast.show_animated();
+        // Toast jest informacyjny (bez akcji) — po chwili sam się chowa.
+        self.toast_until = Some(Instant::now() + Duration::from_secs(4));
+    }
+
+    /// Pokazuje Właściwości. Rozmiar katalogu liczy wątek w tle — duże drzewa
+    /// nie mogą blokować klatki.
+    pub fn show_properties(&mut self, path: &Path) {
+        let Ok(meta) = std::fs::metadata(path) else {
+            return;
+        };
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        let modified = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64);
+        if !meta.is_dir() {
+            self.pending_properties = None;
+            self.show_toast(properties_message(
+                &name,
+                "File",
+                meta.len(),
+                None,
+                modified,
+            ));
+            self.toast_until = Some(Instant::now() + Duration::from_secs(8));
+            return;
+        }
+
+        let slot = Arc::new(Mutex::new(None));
+        let result = Arc::clone(&slot);
+        let dir = path.to_path_buf();
+        std::thread::spawn(move || {
+            let size = dir_size(&dir);
+            if let Ok(mut guard) = result.lock() {
+                *guard = Some(size);
+            }
+        });
+        self.pending_properties = Some(PendingProperties {
+            name,
+            modified,
+            result: slot,
+        });
+        self.show_toast(tr("Calculating folder size…"));
+    }
+
+    /// Odbiera wynik obliczeń rozmiaru katalogu (wywoływane co klatkę).
+    pub fn poll_properties(&mut self) {
+        let Some(pending) = &self.pending_properties else {
+            return;
+        };
+        let Some(size) = pending
+            .result
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.take())
+        else {
+            return;
+        };
+        let name = pending.name.clone();
+        let modified = pending.modified;
+        self.pending_properties = None;
+        self.show_toast(properties_message(
+            &name,
+            "Folder",
+            size.bytes,
+            Some((size.files, size.dirs)),
+            modified,
+        ));
+        self.toast_until = Some(Instant::now() + Duration::from_secs(8));
     }
 
     /// Status w dolnej belce.
@@ -894,27 +1091,99 @@ pub fn debug() -> bool {
     std::env::var("LUNA_FILES_DEBUG").is_ok()
 }
 
+fn properties_message(
+    name: &str,
+    kind: &str,
+    bytes: u64,
+    items: Option<(u64, u64)>,
+    modified: Option<i64>,
+) -> String {
+    let kind = tr(kind);
+    let size = human_size(bytes);
+    let date = format_mtime(modified);
+    match items {
+        Some((files, dirs)) => tr_args(
+            "{name} · {kind} · {size} · {files} files, {dirs} folders · {date}",
+            &[
+                ("name", name),
+                ("kind", &kind),
+                ("size", &size),
+                ("files", &files.to_string()),
+                ("dirs", &dirs.to_string()),
+                ("date", &date),
+            ],
+        ),
+        None => tr_args(
+            "{name} · {kind} · {size} · {date}",
+            &[
+                ("name", name),
+                ("kind", &kind),
+                ("size", &size),
+                ("date", &date),
+            ],
+        ),
+    }
+}
+
+/// Rekurencyjny rozmiar katalogu; nie podąża za dowiązaniami symbolicznymi.
+fn dir_size(path: &Path) -> DirSize {
+    let mut out = DirSize::default();
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(read) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in read.flatten() {
+            let path = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            let file_type = meta.file_type();
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                out.dirs += 1;
+                stack.push(path);
+            } else if file_type.is_file() {
+                out.files += 1;
+                out.bytes += meta.len();
+            }
+        }
+    }
+    out
+}
+
 fn preview_for(entry: &Entry) -> Preview {
     if entry.is_dir {
         return Preview::None;
     }
     match entry.kind {
         Kind::Image => {
-            // Dekoder PNG jest w libluna-render; inne formaty → metadane.
-            if entry
+            // Duże pliki pomijamy — podgląd nie może zamrozić klatki.
+            let size = std::fs::metadata(&entry.path).map(|m| m.len()).unwrap_or(0);
+            if size > 64 * 1024 * 1024 {
+                return Preview::None;
+            }
+            let extension = entry
                 .path
                 .extension()
                 .and_then(|e| e.to_str())
-                .map(|e| e.eq_ignore_ascii_case("png"))
-                .unwrap_or(false)
-            {
-                if let Ok(bytes) = std::fs::read(&entry.path) {
-                    if let Some(img) = libluna_render::wallpaper::decode_png(&bytes) {
-                        return Preview::Image(Arc::new(img));
-                    }
-                }
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let bytes = match std::fs::read(&entry.path) {
+                Ok(bytes) => bytes,
+                Err(_) => return Preview::None,
+            };
+            let image = match extension.as_str() {
+                "png" => libluna_render::wallpaper::decode_png(&bytes),
+                "jpg" | "jpeg" => decode_jpeg(&bytes),
+                _ => None,
+            };
+            match image {
+                Some(image) => Preview::Image(Arc::new(fit_preview(image, 1400))),
+                None => Preview::None,
             }
-            Preview::None
         }
         Kind::Text | Kind::Code => {
             use std::io::Read;
@@ -931,6 +1200,73 @@ fn preview_for(entry: &Entry) -> Preview {
         }
         _ => Preview::None,
     }
+}
+
+/// Dekoduje JPEG do RGBA8 (bez EXIF-owej orientacji).
+fn decode_jpeg(bytes: &[u8]) -> Option<ImageData> {
+    use jpeg_decoder::PixelFormat;
+    let mut decoder = jpeg_decoder::Decoder::new(bytes);
+    // Najpierw metadane, potem dekodowanie ze skalowaniem DCT — duże zdjęcia
+    // (12 Mpx) nie zajmują wtedy kilkudziesięciu megabajtów na podgląd.
+    decoder.read_info().ok()?;
+    let original = decoder.info()?;
+    const MAX_SIDE: u16 = 1400;
+    if original.width > MAX_SIDE || original.height > MAX_SIDE {
+        let scale = MAX_SIDE as f32 / original.width.max(original.height) as f32;
+        let _ = decoder.scale(
+            (original.width as f32 * scale).max(1.0) as u16,
+            (original.height as f32 * scale).max(1.0) as u16,
+        );
+    }
+    let pixels = decoder.decode().ok()?;
+    let info = decoder.info()?;
+    let (width, height) = (info.width as usize, info.height as usize);
+    let mut rgba = Vec::with_capacity(width * height * 4);
+    match info.pixel_format {
+        PixelFormat::RGB24 => {
+            for px in pixels.chunks_exact(3) {
+                rgba.extend_from_slice(&[px[0], px[1], px[2], 0xff]);
+            }
+        }
+        PixelFormat::L8 => {
+            for value in pixels {
+                rgba.extend_from_slice(&[value, value, value, 0xff]);
+            }
+        }
+        PixelFormat::CMYK32 => {
+            for px in pixels.chunks_exact(4) {
+                let (c, m, y, k) = (px[0] as u16, px[1] as u16, px[2] as u16, px[3] as u16);
+                let r = ((255 - c) * (255 - k) / 255) as u8;
+                let g = ((255 - m) * (255 - k) / 255) as u8;
+                let b = ((255 - y) * (255 - k) / 255) as u8;
+                rgba.extend_from_slice(&[r, g, b, 0xff]);
+            }
+        }
+        PixelFormat::L16 => return None,
+    }
+    Some(ImageData::new(info.width as u32, info.height as u32, rgba))
+}
+
+/// Zmniejsza podgląd do `max` pikseli na dłuższym boku (najbliższy sąsiad).
+fn fit_preview(image: ImageData, max: u32) -> ImageData {
+    let (w, h) = (image.width.max(1), image.height.max(1));
+    if w <= max && h <= max {
+        return image;
+    }
+    let scale = max as f64 / w.max(h) as f64;
+    let nw = (w as f64 * scale).round().max(1.0) as u32;
+    let nh = (h as f64 * scale).round().max(1.0) as u32;
+    let mut out = vec![0u8; nw as usize * nh as usize * 4];
+    for y in 0..nh {
+        let sy = (y as u64 * h as u64 / nh as u64) as usize;
+        for x in 0..nw {
+            let sx = (x as u64 * w as u64 / nw as u64) as usize;
+            let src = (sy * w as usize + sx) * 4;
+            let dst = (y as usize * nw as usize + x as usize) * 4;
+            out[dst..dst + 4].copy_from_slice(&image.rgba[src..src + 4]);
+        }
+    }
+    ImageData::new(nw, nh, out)
 }
 
 fn spawn_terminal(program: &str, dir: &str) -> bool {
@@ -953,9 +1289,10 @@ pub fn run(title_key: &str, app_id: &str) -> Result<(), Box<dyn Error>> {
     // Język z konfiguracji aplikacji ma pierwszeństwo nad `LANG` — jego wybór
     // w Ustawieniach ma być trwały między uruchomieniami.
     let prefs = Prefs::load();
-    set_locale(Locale::new(prefs.language.clone()));
+    set_locale(libluna_i18n::preferred_locale());
     libluna_i18n::load_catalogs_from_dirs();
-    let title = tr(title_key);
+    let title_key = title_key.to_owned();
+    let title = tr(&title_key);
 
     let settings = ThemeSettings::load();
     let system_dark = std::env::var("LUNA_SYSTEM_DARK")
@@ -977,14 +1314,34 @@ pub fn run(title_key: &str, app_id: &str) -> Result<(), Box<dyn Error>> {
 
     let mut app = App::with_prefs(start, prefs);
     app.status = app.status_text();
+    // Język może się zmienić w Ustawieniach w trakcie działania — sidebar ma
+    // zapisane etykiety, więc przebudowujemy go po wykryciu nowego katalogu.
+    let mut ui_language = libluna_i18n::locale().language().to_owned();
 
     run_app(config, move |frame: &mut Frame| {
+        let language = libluna_i18n::locale().language().to_owned();
+        if language != ui_language {
+            ui_language = language.clone();
+            app.prefs.language = language;
+            app.save_prefs();
+            app.rebuild_sidebar();
+            frame.set_title(tr(&title_key));
+        }
         let theme = frame.settings().resolve_themed(frame.system_dark());
         app.theme_pref = frame.settings().preference();
         app.drain_ops();
         app.refresh_devices_if_needed();
 
         ui::handle_events(&mut app, frame.events, frame.size, &theme, frame.text);
+
+        // Ctrl+C/X w polach tekstowych → systemowy schowek; Ctrl+V → odczyt.
+        if let Some(text) = app.text_clipboard.take() {
+            frame.copy_to_clipboard(text);
+        }
+        if app.text_paste_requested {
+            app.text_paste_requested = false;
+            frame.paste_from_clipboard();
+        }
 
         if app.pending_close {
             frame.close();
@@ -1007,6 +1364,7 @@ pub fn run(title_key: &str, app_id: &str) -> Result<(), Box<dyn Error>> {
         }
 
         app.update_preview();
+        app.poll_properties();
         app.status = app.status_text();
 
         ui::paint(&app, frame.scene, frame.size, &theme, frame.text);
@@ -1015,9 +1373,19 @@ pub fn run(title_key: &str, app_id: &str) -> Result<(), Box<dyn Error>> {
             app.toast.advance(frame.delta_time(), 0.3);
             frame.request_frame();
         }
+        if let Some(until) = app.toast_until {
+            if Instant::now() >= until {
+                app.toast.set_open_animated(false);
+                app.toast_until = None;
+            }
+            frame.request_frame();
+        }
         if app.ops.busy() {
             frame.request_frame();
         }
+        // Budzimy aplikacje cyklicznie: podłączone USB ma się pojawić samo (bez
+        // ruchu myszy), a dymek podpowiedzi ma się pokazać po chwili najechania.
+        frame.request_frame_after(Duration::from_millis(500));
     })
 }
 
@@ -1033,4 +1401,84 @@ pub fn paint_ctx<'a>(
 /// Na potrzeby UI: bieżący czas do animacji/migań.
 pub fn tick() -> i64 {
     now_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn toast_gets_an_expiry_deadline() {
+        let mut app = App::new(std::env::temp_dir());
+        app.show_toast("Skopiowano");
+        assert!(app.toast.is_open());
+        assert!(app.toast_until.is_some());
+    }
+
+    #[test]
+    fn dir_size_counts_nested_files() {
+        let dir = std::env::temp_dir().join("luna-files-dir-size-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("podkatalog/glebiej")).unwrap();
+        std::fs::write(dir.join("a.txt"), b"12345").unwrap();
+        std::fs::write(dir.join("podkatalog/b.bin"), vec![0u8; 7]).unwrap();
+        std::fs::write(dir.join("podkatalog/glebiej/c"), vec![0u8; 3]).unwrap();
+        let size = dir_size(&dir);
+        assert_eq!(size.files, 3);
+        assert_eq!(size.bytes, 15);
+        assert_eq!(size.dirs, 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn folder_properties_finish_in_background() {
+        let dir = std::env::temp_dir().join("luna-files-properties-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("plik"), vec![0u8; 9]).unwrap();
+        let mut app = App::new(std::env::temp_dir());
+        app.show_properties(&dir);
+        assert!(app.pending_properties.is_some());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.pending_properties.is_some() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+            app.poll_properties();
+        }
+        assert!(
+            app.pending_properties.is_none(),
+            "obliczanie nie zakończyło się"
+        );
+        assert!(app.toast.message().contains("Folder") || app.toast.message().contains("Katalog"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn preview_downscale_keeps_aspect_ratio() {
+        let image = ImageData::new(400, 200, vec![255; 400 * 200 * 4]);
+        let small = fit_preview(image, 100);
+        assert_eq!((small.width, small.height), (100, 50));
+    }
+
+    #[test]
+    fn decodes_a_small_jpeg() {
+        // 2×1, czerwony — minimalny poprawny JPEG (wygenerowany ImageMagickiem).
+        const JPEG: &[u8] = &[
+            255, 216, 255, 224, 0, 16, 74, 70, 73, 70, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 255, 219, 0,
+            67, 0, 3, 2, 2, 2, 2, 2, 3, 2, 2, 2, 3, 3, 3, 3, 4, 6, 4, 4, 4, 4, 4, 8, 6, 6, 5, 6, 9,
+            8, 10, 10, 9, 8, 9, 9, 10, 12, 15, 12, 10, 11, 14, 11, 9, 9, 13, 17, 13, 14, 15, 16,
+            16, 17, 16, 10, 12, 18, 19, 18, 16, 19, 15, 16, 16, 16, 255, 219, 0, 67, 1, 3, 3, 3, 4,
+            3, 4, 8, 4, 4, 8, 16, 11, 9, 11, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+            16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+            16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 255, 192, 0, 17, 8, 0,
+            1, 0, 2, 3, 1, 17, 0, 2, 17, 1, 3, 17, 1, 255, 196, 0, 20, 0, 1, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 8, 255, 196, 0, 20, 16, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 255, 196, 0, 21, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 9,
+            255, 196, 0, 20, 17, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 218, 0,
+            12, 3, 1, 0, 2, 17, 3, 17, 0, 63, 0, 58, 3, 21, 77, 255, 217,
+        ];
+        let image = decode_jpeg(JPEG).expect("JPEG powinien się zdekodować");
+        assert_eq!((image.width, image.height), (2, 1));
+        assert_eq!(image.rgba.len(), 2 * 4);
+        assert!(image.rgba[3] == 255, "kanał alfa");
+    }
 }

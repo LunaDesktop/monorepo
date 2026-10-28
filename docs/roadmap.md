@@ -12,7 +12,7 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   wejście (`seat`, `xkbcommon`), resize/skala, zamknięcie okna.
 - **Efekt:** okno z HeaderBar-em (tytuł + `[—] [□] [✕]` + „burger”), rysowane CSD, oraz scena
   makiety Ustawień. Render offline do PNG w obu motywach: `docs/images/settings-*.png`.
-- Do weryfikacji na żywo: uruchomienie na kompozytorze Selene (`cargo run -p luna-demo`).
+- Do weryfikacji na żywo: uruchomienie na kompozytorze Selene (`cargo run --manifest-path apps/luna-demo/Cargo.toml`).
 
 ## M0.5 — Wielojęzyczność i wygląd — ✅ UKOŃCZONE
 - `libluna-i18n`: system tłumaczeń bez gettext (klucz = angielski napis). **Każdy język w osobnym
@@ -61,12 +61,15 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   `StackSwitcher` = `ViewSwitcher`, `Notebook` = `TabView`, `ListBox` = `NavList`.
   Doszły odpowiedniki GTK4: `InfoBar` (4 rodzaje + zamknięcie), `Picture` (`ContentFit`:
   contain/cover/fill/fit-width/fit-height) i `MediaControls` (play/pauza + pasek postępu +
-  czasy); podgląd: `cargo run -p luna-demo --bin new-widgets` → `docs/images/new-widgets.png`.
+  czasy); podgląd: `cargo run --manifest-path apps/luna-demo/Cargo.toml --bin new-widgets` → `docs/images/new-widgets.png`.
 - **Pakiet ikon symbolicznych** (`libluna-widgets::icon`): `IconName` + `paint_icon`,
-  28 ikon rysowanych wektorowo w naszym stylu (Menu/Search/Files/Settings/Terminal/Music/
-  Star/Clock/Store/Edit/Wifi/Volume/Battery/Power/Grid/List/Carousel/…). Zestaw jest
-  **wyliczalny** (`IconName::ALL` + `IconName::name()`), a cały pakiet ma galerię-podgląd:
-  `cargo run -p luna-demo --bin icons` → `docs/images/icons.png` (motyw jasny i ciemny).
+  47 ikon rysowanych wektorowo w naszym stylu — domyślnie **pastelowych**
+  (Menu/Search/Files/Settings/Terminal/Music/Star/Clock/Store/Edit/Wifi/Volume/Battery/
+  Power/Grid/List/Carousel/…). Zestaw jest **wyliczalny** (`IconName::ALL` +
+  `IconName::name()`), a cały pakiet ma galerię-podgląd:
+  `cargo run --manifest-path apps/luna-demo/Cargo.toml --bin icons` → `docs/images/icons.png` (motyw jasny i ciemny).
+  Styl opisuje [`docs/icons.md`](icons.md): kształty i paleta per rodzina, tryb
+  `Monochrome` oraz zestawy zewnętrzne.
   Renderer zyskał prymitywy: `fill_circle`, `stroke_circle`, `stroke_polyline`, `fill_polygon`
   (z zaokrąglonymi końcami). Ikony użyte w panelu, launcherze oraz w OSD i powiadomieniach
   Luny (zamiast glifów fontu).
@@ -83,7 +86,13 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   przycisk „Opcje”, przełączniki, suwak, wybór języka, pasek tytułu, zakładki `TabBar`/`TabView`).
   Powiadomienie (`Toast`) w demo animuje się (wjazd + fade), zmiana zakładki
   to animowane przejście (`Stack` slide), a dolny panel wysuwa się i karuzela „przyciąga”.
-- **Galeria widgetów** headless: `cargo run -p luna-demo --bin gallery` → `docs/images/gallery.png`
+- **Galeria widgetów** headless: `cargo run --manifest-path apps/luna-demo/Cargo.toml --bin gallery` → `docs/images/gallery.png`
+  (lista widgetów z wyszukiwarką po lewej; działający przykład i przełączany kod po prawej,
+  z przyciskiem „Kopiuj” do systemowego schowka).
+- **Schowek systemowy**: `Frame::copy_to_clipboard()` w `libluna-platform` tworzy
+  `wl_data_source` (`text/plain;charset=utf-8`) i ustawia selekcję przez `wl_data_device`;
+  `Frame::paste_from_clipboard()` czyta schowek w tle (limit 4 MiB i czasu) i zwraca
+  tekst jako `Event::Paste`. Działa pod Selene bez zewnętrznych narzędzi (`wl-copy`).
   (kontenery, tabela, kalendarz, chooser’y, kreator kroków, pasek stanu z cz. 5–12).
 - Motywy: wariant (light/dark/auto) + akcent, z trwałością. **Component metrics**: rozmiary
   i paddingi kontrolek wyniesione z widgetów do tokenów (`Theme::metrics`), więc styl steruje
@@ -133,6 +142,9 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
 - **Luna Files** — HeaderBar z `PathBar` + wyszukiwarką + przełącznikiem widoku + kontrolkami
   okna, panel boczny (Miejsca/Urządzenia/Sieć), widok siatki, popover opcji/sortowania,
   bottom bar z wolnym miejscem.
+- **Luna Terminal** — ✅ emulator VT100/xterm na libLunie (`apps/luna-terminal`): PTY
+  (`posix_openpt` + `fork`/`exec`), scrollback 2000 linii, kolory 16/256/truecolor,
+  tryb alternatywny (`vim`/`less`/`htop`), kursory aplikacji i mapa klawiatury xterm-256color.
 
 ## M7 — Migracja z GTK4
 - Najpierw `karton-settings` (mniejszy, `window.c` ~590 linii + strony) — strona po stronie.
@@ -140,7 +152,7 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
 - Opcjonalnie ujednolicenie `karton-shell` na libLunę (dziś cairo/pango bezpośrednio).
 
 ## M8 — Kompozytor Selene + środowisko Luna (`de/`)
-- **Selene** (`de/selene`) — kompozytor Wayland w czystym Rust, **bez smithay**: własna warstwa
+- **Selene** (`selene`) — kompozytor Wayland w czystym Rust, **bez smithay**: własna warstwa
   na `wayland-server` (rdzeń + xdg-shell) i bezpośrednia pętla `poll` po gnieździe i backendzie.
   ✅ M-K0: globale `wl_compositor`, `wl_shm`, `xdg_wm_base`, `wl_seat`; cykl życia powierzchni
   + frame-callbacki, `xdg_surface.configure`, i18n, profil release z LTO.
@@ -158,7 +170,7 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   oraz **`wlr-layer-shell`** (panele/docki: kotwice, marginesy, strefa wyłączna, warstwy,
   wybór monitora) — fundament pulpitu Luna.
   ✅ M-K5: **wiele monitorów** — model `OutputInfo` z pozycją, global `wl_output` per monitor,
-  przenośne **wykrywanie DRM/KMS** (`de/selene/src/drm.rs`, ioctl `GETRESOURCES`/`GETCONNECTOR`)
+  przenośne **wykrywanie DRM/KMS** (`selene/src/drm.rs`, ioctl `GETRESOURCES`/`GETCONNECTOR`)
   z fallbackiem na wyjście nested; okna maksymalizują się na swoim monitorze.
   ✅ M-K6: **schowek** (`wl_data_device_manager`: `data_source`/`data_offer`/`selection`,
   kopiuj/wklej między klientami) oraz **układy klawiatury** z otoczenia
@@ -171,19 +183,19 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   (wskaźnik względny z wirtualnym kursorem, przyciski, kółko, klawiatura) — rodzime wejście
   dla trybu DRM. Wymaga grupy `input`/root.
   ✅ Optymalizacje: cache `mmap` puli `wl_shm` i zero-copy w rendererze (`PixmapRef::from_bytes`).
-  Uruchomienie: `cargo run -p selene` (szczegóły: `de/README.md`).
+  Uruchomienie: `cargo run --manifest-path selene/Cargo.toml` (szczegóły: `de/README.md`).
 - Dalej: GLES/akceleracja, hotplug monitorów (`zwlr_output_manager`), `libinput` (gesty),
   selekcja pierwotna, IME (`text-input`).
-- **Luna** (`de/luna`) — powłoka środowiska na `libluna-widgets`. ✅ start: **panel górny**
+- **Luna** (`luna`) — powłoka środowiska na `libluna-widgets`. ✅ start: **panel górny**
   (sam **burger** — bez etykiety, który otwiera launcher; tytuł okna, zegar/data,
   przełączniki, przestrzenie, użytkownik) i **launcher** w trzech widokach
   (**Lista / Siatka / Karuzela** z segmentowym przełącznikiem); render headless do
   `docs/images/luna-panel-idle.png`, `docs/images/luna-launcher-{list,grid,carousel}.png`
-  i `docs/images/luna-popup-*.png` (`cargo run -p luna --bin luna-panel`).
+  i `docs/images/luna-popup-*.png` (`cargo run --manifest-path luna/Cargo.toml --bin luna-panel`).
   Dane (`PanelState`, `App`, `Launcher`) oddzielone od rysowania (`PaintCtx`) — ten sam kod do
   podglądów i sesji na żywo. ✅ **Prawdziwe aplikacje**: `apps.rs` skanuje pliki `.desktop`
   (XDG), parsuje `[Desktop Entry]` z lokalizacją nazw i filtrowaniem `NoDisplay`/`Hidden`;
-  klik w pozycję uruchamia polecenie. Podgląd listy: `cargo run -p luna --bin luna-apps`.
+  klik w pozycję uruchamia polecenie. Podgląd listy: `cargo run --manifest-path luna/Cargo.toml --bin luna-apps`.
   ✅ **Przewijanie** listy/siatki (scroll + klip zawartości). ✅ **Nawigacja klawiaturą**:
   strzałki (lista ±1, siatka kolumny/wiersze, karuzela karty), `Enter` uruchamia zaznaczoną
   pozycję, `Esc` zamyka; zaznaczenie automatycznie przewija się do widoku
@@ -192,11 +204,29 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   warstwową** (`wlr-layer-shell` po stronie klienta w `libluna-platform`); bez kompozytora
   kończy się czytelnym `NoCompositor`. ✅ **OSD** (`osd.rs`) i **powiadomienia** (`notifications.rs`)
   — pokazywane pod paskiem na powierzchni „chrome”; oba korzystają z pakietu ikon
-  (`IconName`) zamiast glifów tekstowych. Dalej: usługa D-Bus
-  `org.freedesktop.Notifications`, centrum powiadomień, menu kontekstowe.
+  (`IconName`) zamiast glifów tekstowych. ✅ **Usługa D-Bus**
+  `org.freedesktop.Notifications` (`dbus_notifications.rs`): akcje, `replaces_id`,
+  `CloseNotification`, powiadomienia trwałe (`expire_timeout = 0`) i poprawne
+  `NotificationClosed`/`ActionInvoked`, a także
+  **centrum powiadomień** przy zegarze (historia, „Wyczyść”, wpisy przy trybie
+  „nie przeszkadzać”) i **menu kontekstowe** taskbara (schowaj/pokaż, zamknij,
+  przenieś na przestrzeń). Kropka przy zegarze sygnalizuje historię powiadomień.
+  ✅ **Ekran blokady** `luna-lock`: overlay `wlr-layer-shell` z klawiaturą wyłączną,
+  wspólny dla wszystkich monitorów; hasło przez helper polkit. Restart/wyłączenie
+  w menu sesji idą przez `systemctl` (poprzednie `loginctl reboot`/`poweroff`
+  nie istnieją i dlatego nic nie robiły).
+- **Luna Settings** (`apps/luna-settings`) — centrum ustawień środowiska i systemu
+  (wygląd, język, dźwięk, ekrany, zasilanie, powiadomienia, informacje o systemie):
+  pierwsza wersja działa; plan i zakres w **[`docs/settings.md`](settings.md)**.
 
 ## Później (poza MVP)
-- Dostępność AT-SPI, IME, schowek, drag & drop, animacje, backend GPU, mini-CSS dla motywów.
+- **Pakiety ikon** (kolejny krok razem z centrum ustawień): manifest `icons.toml`
+  (`id`, `name`, `version`, `license`, mapowanie nazw symbolicznych → pliki SVG/PNG),
+  instalacja przez rozpakowanie do `~/.local/share/luna/icons/<id>/` (bez wykonywania
+  kodu; limity rozmiaru i walidacja ścieżek), rasteryzacja SVG **przy instalacji** do
+  cache PNG (żeby sesja nie ciągnęła parsera SVG), wybór aktywnego pakietu i podgląd
+  w ustawieniach oraz fallback do wbudowanego `IconName`.
+- Dostępność AT-SPI, IME, drag & drop, animacje, backend GPU, mini-CSS dla motywów.
 - Renderer: ✅ **klip obejmuje tekst** (`DrawCommand::Text` respektuje `ClipRect`) — naprawione,
   `ScrollView` i inne przewijane widoki przycinają też napisy.
 

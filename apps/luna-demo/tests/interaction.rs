@@ -498,6 +498,76 @@ fn key(keysym: u32, text: Option<String>, modifiers: Modifiers) -> Event {
 }
 
 #[test]
+fn ctrl_c_copies_and_ctrl_v_pastes_into_focused_search() {
+    let mut settings = ThemeSettings::default();
+    let mut demo = Demo::default();
+    let theme = settings.resolve(false);
+    let text = TextEngine::system();
+
+    let search_rect = layout(&settings, &demo).search;
+    ui::handle_events(
+        &mut settings,
+        &[press(search_rect.center())],
+        size(),
+        &theme,
+        &text,
+        &mut demo,
+    );
+    assert!(demo.search.is_focused());
+
+    for c in ['a', 'b', 'c'] {
+        let e = key(c as u32, Some(c.to_string()), Modifiers::NONE);
+        ui::handle_events(&mut settings, &[e], size(), &theme, &text, &mut demo);
+    }
+    let ctrl = Modifiers {
+        ctrl: true,
+        ..Modifiers::NONE
+    };
+    ui::handle_events(
+        &mut settings,
+        &[key(0x61, None, ctrl)],
+        size(),
+        &theme,
+        &text,
+        &mut demo,
+    );
+
+    // Ctrl+C → tekst trafia do żądania schowka (pętla aplikacji wyśle je do Frame).
+    ui::handle_events(
+        &mut settings,
+        &[key(0x63, None, ctrl)],
+        size(),
+        &theme,
+        &text,
+        &mut demo,
+    );
+    assert_eq!(demo.clipboard_text.as_deref(), Some("abc"));
+
+    // Ctrl+V → prośba o odczyt i zapamiętany cel.
+    ui::handle_events(
+        &mut settings,
+        &[key(0x76, None, ctrl)],
+        size(),
+        &theme,
+        &text,
+        &mut demo,
+    );
+    assert!(demo.paste_requested);
+    assert_eq!(demo.paste_target, Some(ui::PasteTarget::Search));
+
+    // Odpowiedź platformy zastępuje zaznaczenie.
+    ui::handle_events(
+        &mut settings,
+        &[Event::Paste("xyz".to_owned())],
+        size(),
+        &theme,
+        &text,
+        &mut demo,
+    );
+    assert_eq!(demo.search.text(), "xyz");
+}
+
+#[test]
 fn ctrl_a_selects_all_and_typing_replaces() {
     let mut settings = ThemeSettings::default();
     let mut demo = Demo::default();

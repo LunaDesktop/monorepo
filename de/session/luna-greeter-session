@@ -1,0 +1,83 @@
+#!/bin/sh
+# Sesja greetera Luny: uruchamia Selene i ekran logowania `luna-greeter`.
+#
+# Ten skrypt jest poleceniem `default_session` w greetd. Po udanym logowaniu
+# `luna-greeter` kończy pracę, greetd startuje właściwą sesję (`luna-session`),
+# a ten skrypt sprząta greeterowy kompozytor i zwalnia DRM.
+#
+# Wymagania dla użytkownika `greeter`: dostęp do /dev/dri (grupa `video` lub
+# `render`) oraz /dev/input (grupa `input`) w trybie DRM. W trybie nested
+# (`SELENE_BACKEND=nested`) wystarczy dostęp do Waylanda nadrzędnego.
+set -eu
+
+export XDG_CURRENT_DESKTOP=Luna
+export XDG_SESSION_TYPE=wayland
+export XDG_SESSION_DESKTOP=Luna
+export PATH="/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin${PATH:+:$PATH}"
+
+# XDG_RUNTIME_DIR zwykle ustawia greetd/logind. Gdy go brak — ten sam fallback
+# co w luna-session, żeby Selene i greeter miały gdzie założyć gniazdo.
+if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
+    if [ -d "/run/user/$(id -u)" ]; then
+        XDG_RUNTIME_DIR="/run/user/$(id -u)"
+    else
+        XDG_RUNTIME_DIR="${TMPDIR:-/tmp}/luna-greeter-runtime-$(id -u)"
+        mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null || true
+        chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
+    fi
+    export XDG_RUNTIME_DIR
+fi
+
+: "${SELENE_BACKEND:=drm}"
+: "${SELENE_INPUT:=evdev}"
+export SELENE_BACKEND SELENE_INPUT
+# Greeter nie potrzebuje Xwaylanda ani tapety — mniej procesów i szybszy start.
+export SELENE_NO_XWAYLAND=1
+export SELENE_NO_WALLPAPER=1
+
+rt="${XDG_RUNTIME_DIR:-/tmp}"
+if [ ! -d "$rt" ]; then
+    echo "luna-greeter-session: brak katalogu runtime: $rt" >&2
+    exit 1
+fi
+marker="$rt/luna-wayland"
+rm -f "$marker" 2>/dev/null || true
+rm -f "$rt"/wayland-*.lock 2>/dev/null || true
+
+cleanup() {
+    if [ -n "${selene_pid:-}" ]; then
+        kill "$selene_pid" 2>/dev/null || true
+        wait "$selene_pid" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT INT TERM
+
+# Selene potrzebuje deskryptora terminala sesji, żeby przejąć pierwszy plan VT
+# (Ctrl+C na konsoli nie może trafiać do `greetd`). Tło dostaje stdin=/dev/null,
+# więc przekazujemy kopię naszego stdin jawnie.
+if [ -t 0 ]; then
+    exec 3<&0
+    selene 0<&3 &
+    selene_pid=$!
+    exec 3<&-
+else
+    selene &
+    selene_pid=$!
+fi
+
+# Czekamy na marker gotowości Selene (nie na sam plik gniazda — mógł zostać
+# po poprzedniej sesji).
+i=0
+while [ "$i" -lt 100 ] && [ ! -f "$marker" ]; do
+    sleep 0.05
+    i=$((i + 1))
+done
+if [ ! -f "$marker" ]; then
+    echo "luna-greeter-session: Selene nie zgłosił gotowości w 5 s" >&2
+    exit 1
+fi
+sock="$(cat "$marker" 2>/dev/null)"
+export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-${sock:-wayland-0}}"
+
+# `luna-greeter` kończy się po przekazaniu `start_session` do greetd.
+luna-greeter "$@"

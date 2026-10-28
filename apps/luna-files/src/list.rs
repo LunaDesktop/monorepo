@@ -218,7 +218,13 @@ fn draw_kind(
     file: libluna_core::Color,
 ) {
     match kind {
-        Kind::Folder => icon::folder(ctx, folder, rect),
+        Kind::Folder => {
+            // Najpierw pastelowy `places/folder.png` z aktywnego zestawu Luna-Icons;
+            // wektorowy folder zostaje jako fallback bez zainstalowanych ikon.
+            if !icon::paint_named_icon(ctx, Some("folder"), rect) {
+                icon::folder(ctx, folder, rect);
+            }
+        }
         Kind::Image => icon::paint_icon(ctx, IconName::Image, rect, file),
         Kind::Audio => icon::paint_icon(ctx, IconName::Music, rect, file),
         Kind::Video => icon::paint_icon(ctx, IconName::Video, rect, file),
@@ -226,7 +232,11 @@ fn draw_kind(
         Kind::Document => icon::paint_icon(ctx, IconName::Document, rect, file),
         Kind::Code => icon::paint_icon(ctx, IconName::Code, rect, file),
         Kind::Text => icon::paint_icon(ctx, IconName::Document, rect, file),
-        Kind::Other => icon::file(ctx, file, rect),
+        Kind::Other => {
+            if !icon::paint_named_icon(ctx, Some("application-x-executable"), rect) {
+                icon::file(ctx, file, rect);
+            }
+        }
     }
 }
 

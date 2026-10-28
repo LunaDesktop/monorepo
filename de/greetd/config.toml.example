@@ -1,0 +1,21 @@
+# Przykładowa konfiguracja greetd dla Luny.
+#
+# Skopiuj do /etc/greetd/config.toml po zainstalowaniu greetd i Luny:
+#   sudo install -D -m 644 /usr/share/luna/greetd/config.toml.example /etc/greetd/config.toml
+# (w drzewie źródeł ten sam plik leży w de/greetd/config.toml.example)
+#
+# Użytkownik `greeter` musi istnieć i mieć dostęp do urządzeń potrzebnych
+# Selene w trybie DRM (grupy `video`, `render`, `input`).
+
+[terminal]
+vt = 1
+
+[default_session]
+# Skrypt uruchamia Selene (kompozytor greetera) i `luna-greeter`.
+command = "luna-greeter-session"
+user = "greeter"
+
+# Opcjonalnie: automatyczne logowanie wybranego użytkownika po starcie.
+# [initial_session]
+# command = "luna-session"
+# user = "patryk"

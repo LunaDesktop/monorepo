@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Selene — kompozytor Wayland Luny: pastelowe, nachodzące okna bez tła. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="12 12 104 104">
+  <rect x="22" y="34" width="64" height="50" rx="9"
+        fill="#B5D5F1" stroke="#527FAE" stroke-width="4"/>
+  <rect x="44" y="54" width="62" height="46" rx="9"
+        fill="#FBF9F3" stroke="#7B67AB" stroke-width="4"/>
+  <circle cx="96" cy="30" r="8"
+          fill="#F3D27C" stroke="#D8B25B" stroke-width="1.5"/>
+</svg>

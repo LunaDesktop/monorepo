@@ -20,7 +20,9 @@ pliki instalowane do `${PKGDIR}`.
 | `de/selene/selene.desktop` | wpis do `/usr/share/wayland-sessions` |
 | `make-tarball.sh` | generuje tarball i składa gotowy katalog `out/` z uzupełnionymi sha256 |
 
-Oba pakiety budują się z **tego samego** tarballa (wspólny workspace). Katalog w tarballu to
+Oba pakiety budują się z **tego samego** tarballa, ale każdy z **własnego workspace'u**
+(`libluna/`, `selene/`, `apps/luna-demo`) — dzięki temu można je wydawać i aktualizować
+niezależnie. Katalog w tarballu to
 `luna-${pkgver}/`, stąd `cd luna-${pkgver}` w fazach `build:`.
 
 ## Jak zrobić wydanie receptur

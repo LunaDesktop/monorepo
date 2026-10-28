@@ -6,6 +6,9 @@
 # nested — ustaw wtedy SELENE_BACKEND=nested (albo wyloguj bieżącą sesję).
 set -eu
 
+# Ctrl+C / Ctrl+\ w terminalu nie mogą kończyć sesji (patrz de/session/luna-session).
+trap '' INT QUIT
+
 export XDG_CURRENT_DESKTOP=Luna
 # Pełny, przewidywalny PATH: menedżery logowania potrafią go obciąć (bez `/usr/sbin`
 # nie uruchomi się np. `thunar` czy `xclock`, bo ich binarki tam leżą).

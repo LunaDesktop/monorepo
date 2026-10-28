@@ -1,16 +1,33 @@
 [package]
 name = "luna-demo"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-rust-version.workspace = true
-authors.workspace = true
+version = "0.0.4"
+edition = "2021"
+license = "MPL-2.0"
+rust-version = "1.80"
+authors = ["Patryk Szkudlarek / libLuna contributors"]
 description = "Demo aplikacji dla środowiska Luna zbudowane na libLunie (HeaderBar CSD, panel wyglądu, i18n)."
+# Po utworzeniu osobnego repozytorium ustaw np.:
+# repository = "https://github.com/mijsys/luna-demo"
+
+[workspace]
+resolver = "2"
 
 [dependencies]
-libluna-core.workspace = true
-libluna-i18n.workspace = true
-libluna-render.workspace = true
-libluna-platform.workspace = true
-libluna-widgets.workspace = true
-tiny-skia.workspace = true
+libluna-core = { path = "../../libluna/crates/libluna-core", version = "0.0.4" }
+libluna-i18n = { path = "../../libluna/crates/libluna-i18n", version = "0.0.4" }
+libluna-render = { path = "../../libluna/crates/libluna-render", version = "0.0.4" }
+libluna-platform = { path = "../../libluna/crates/libluna-platform", version = "0.0.4" }
+libluna-widgets = { path = "../../libluna/crates/libluna-widgets", version = "0.0.4" }
+tiny-skia = "0.11"
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

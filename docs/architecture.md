@@ -16,12 +16,12 @@ Nazewnictwo projektu (analogia do GTK / GNOME / Mutter):
 | Rysowanie 2D, buforowanie, clip | Gsk (+Cairo) | `libluna-render` | ✅ M0 |
 | Tekst: shaping, metryki, rasteryzacja | Pango | `libluna-render::text` (fontdue) | ✅ M0 (docelowo cosmic-text) |
 | Warstwa platformy / okna / wejście | GDK | `libluna-platform` | ✅ M0 |
-| Silnik układu (measure/allocate) | GtkLayoutManager | `libluna-layout` | ⏳ M2 |
+| Silnik układu (measure/allocate) | GtkLayoutManager | `libluna-layout` (docelowo; dziś `libluna-widgets::layout`) | ⏳ M2 |
 | Widgety bazowe | Gtk* | `libluna-widgets` | ⏳ M2–M3 |
-| Zestaw „libadwaita” (Card, HeaderBar, Sidebar…) | libadwaita | `libluna-adwaita` | ⏳ M4–M5 |
-| Pętla zdarzeń i aplikacja | GtkApplication / GMainLoop | `libluna-app` | ⏳ M4 |
+| Zestaw „libadwaita” (Card, HeaderBar, Sidebar…) | libadwaita | `libluna-adwaita` (docelowo) | ⏳ M4–M5 |
+| Pętla zdarzeń i aplikacja | GtkApplication / GMainLoop | `libluna-app` (docelowo; dziś `libluna-platform::run`) | ⏳ M4 |
 
-Fasada `libluna` (crate `crates/libluna`) zbiera warstwy w jedno wejście dla aplikacji.
+Fasada `libluna` (crate `libluna/crates/libluna`) zbiera warstwy w jedno wejście dla aplikacji.
 
 ## 2. Decyzja (podjęta): czysty Rust
 
@@ -42,8 +42,12 @@ Rozważane, odrzucone alternatywy:
 ## 3. Rysowanie i tekst
 
 - **Graf sceny** (`libluna-render::scene`) jest niezależny od backendu; budują go widgety.
+- **Kontrakt backendu**: `libluna_render::Renderer` (`renderer.rs`) — `resize`, `draw`,
+  `data`, `encode_png`, `text_engine`; platforma trzyma `Box<dyn Renderer>`.
+  Dzięki temu backend GPU może dojść bez zmian w widgetach (szczegóły i pomiary:
+  [`docs/rendering.md`](rendering.md)).
 - **Backend M0**: CPU (`tiny-skia`) z antyaliasingiem — kształty, zaokrąglenia, obramowania,
-  linie, clip. Bufor RGBA8888 trafia w `wl_shm` (konwersja do BGRA/`Argb8888`).
+  linie, clip. Bufor RGBA8888 trafia do `wl_shm` (konwersja do BGRA/`Argb8888`).
 - **Tekst M0**: `fontdue` (font Adwaita Sans z systemu). To świadome uproszczenie — bez
   kerningu i pism złożonych. Docelowo `cosmic-text` (shaping, fallback fontów), bez zmiany
   kontraktu `measure`/`draw`.
@@ -85,5 +89,11 @@ Widget:
 
 - Dostępność: AT-SPI (przez D-Bus) — niezbędna dla realnego pulpitu, ale faza późniejsza.
 - IME / `text-input-v3`, klawiatura wirtualna.
-- Schowek (`wl_data_device`), drag & drop.
+- Schowek: **kopiowanie i wklejanie** działają (`Frame::copy_to_clipboard`,
+  `Frame::paste_from_clipboard` → `Event::Paste`, `wl_data_device`). Pola tekstowe
+  korzystają z tego przez `libluna-widgets::clipboard_command` (Ctrl+C/X/V),
+  a aplikacja wysyła tekst do `Frame` i kieruje `Event::Paste` do aktywnego pola
+  (terminal, demo, Ustawienia, Pliki). Drag & drop — później.
 - Animacje i easing, backend GPU.
+- Stabilność API i zasady wersjonowania: [`docs/api-stability.md`](api-stability.md).
+- Testy (jednostkowe, integracyjne, dymna sesja): [`docs/testing.md`](testing.md).

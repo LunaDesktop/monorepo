@@ -1,4 +1,12 @@
 /target
+/target-user
+**/target
 **/*.rs.bk
 *.pdb
 .selene-runtime/
+/tmp_build
+/web
+/packaging
+/Cargo.lock
+/.tmp/
+/docs/luna-*.png

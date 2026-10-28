@@ -12,15 +12,18 @@ use libluna_core::{
 };
 use libluna_render::{Scene, TextEngine};
 use libluna_widgets::{
-    icon, AlertDialog, Button, ControlsSide, Entry as TextEntry, HeaderBar, IconName, Menu,
-    MenuEntry, PaintCtx, PathBar, PreferencesDialog, Switch, Tab, TabBar, TextInput, ViewMode,
-    ViewSwitcher, WindowControl,
+    clipboard_command, icon, AlertDialog, Button, ControlsSide, Entry as TextEntry, HeaderBar,
+    IconName, Menu, MenuEntry, PaintCtx, PathBar, PreferencesDialog, Switch, Tab, TabBar,
+    TextClipboardCommand, TextInput, ViewMode, ViewSwitcher, WindowControl,
 };
 
-use crate::app::{App, ContextMenu, EditState, MenuCmd, MenuTarget, Pane, SideAction, SPLIT_GAP};
+use crate::app::{
+    App, ContextMenu, DragState, DropTarget, EditState, HoverTip, MenuCmd, MenuTarget, Pane,
+    SideAction, TextPasteTarget, SPLIT_GAP,
+};
 use crate::archive;
 use crate::list;
-use crate::model::{format_mtime, human_size, Kind, SortKey};
+use crate::model::{format_mtime, human_size, SortKey};
 use crate::ops::Job;
 use crate::places;
 use crate::prefs;
@@ -291,6 +294,8 @@ pub fn paint(app: &App, scene: &mut Scene, size: Size, theme: &Theme, text: &Tex
     paint_sidebar(&mut ctx, app, &lay);
     paint_panes(&mut ctx, app, &lay);
     paint_status(&mut ctx, app, &lay);
+    paint_hover_tip(&mut ctx, app, size);
+    paint_drag(&mut ctx, app, size);
 
     if let Some(context) = &app.context {
         context.menu.paint(&mut ctx, context.panel);
@@ -523,6 +528,167 @@ fn paint_panes(ctx: &mut PaintCtx, app: &App, lay: &Layout) {
         if let Some(prect) = pr.preview {
             paint_preview(ctx, pane, prect);
         }
+    }
+}
+
+/// Podświetlenie celu i „duch” przeciąganych plików.
+fn paint_drag(ctx: &mut PaintCtx, app: &App, size: Size) {
+    let Some(drag) = &app.drag else {
+        return;
+    };
+    if !drag.active {
+        return;
+    }
+    if let Some(rect) = drag.target_rect {
+        let color = if matches!(drag.target, Some(DropTarget::Trash)) {
+            ctx.theme.colors.error
+        } else {
+            ctx.theme.colors.accent
+        };
+        ctx.scene
+            .fill_rounded_rect(rect, 6.0, color.scale_alpha(0.16));
+        ctx.scene.stroke_rounded_rect(rect, 6.0, 1.5, color);
+    }
+    let Some(pointer) = app.pointer else {
+        return;
+    };
+    let caption = ctx.theme.typography.caption.size;
+    let n = drag.paths.len();
+    let mut label = if n == 1 {
+        drag.paths[0]
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| drag.paths[0].display().to_string())
+    } else {
+        libluna_i18n::tr_args("{n} items", &[("n", &n.to_string())])
+    };
+    if drag.copy {
+        label = format!("{} · {label}", libluna_i18n::tr("Copy"));
+    }
+    let label = libluna_widgets::display::ellipsize(&label, 260.0, caption, ctx.text);
+    let w = ctx.text.measure(&label, caption, weight::NORMAL).width + 24.0;
+    let h = caption * 1.6 + 12.0;
+    let rect = Rect::from_xywh(
+        (pointer.x + 16.0).clamp(8.0, (size.width - w - 8.0).max(8.0)),
+        (pointer.y + 18.0).clamp(8.0, (size.height - h - 8.0).max(8.0)),
+        w,
+        h,
+    );
+    ctx.scene
+        .fill_rounded_rect(rect, 6.0, ctx.theme.colors.accent);
+    ctx.label_center(
+        rect.center().x,
+        rect.center().y,
+        &label,
+        caption,
+        weight::MEDIUM,
+        ctx.theme.colors.accent_fg,
+    );
+}
+
+/// Dymek z informacjami o elemencie pod kursorem (po chwili najechania).
+fn paint_hover_tip(ctx: &mut PaintCtx, app: &App, size: Size) {
+    let Some(tip) = &app.tooltip else {
+        return;
+    };
+    if tip.since.elapsed() < Duration::from_millis(650)
+        || app.context.is_some()
+        || app.settings_open
+        || app.about.is_some()
+        || app.conflict.is_some()
+        || app.confirm_empty.is_some()
+    {
+        return;
+    }
+    let Some(pointer) = app.pointer else {
+        return;
+    };
+    let theme = *ctx.theme;
+    let body = theme.typography.body.size;
+    let caption = theme.typography.caption.size;
+    let pad = theme.spacing.md;
+    let line_h = caption * 1.5;
+    let max_w = 420.0;
+    let entry = &tip.entry;
+    let kind = if entry.is_dir {
+        libluna_i18n::tr("Folder")
+    } else {
+        entry.kind.label()
+    };
+    let size_text = if entry.is_dir {
+        String::new()
+    } else {
+        human_size(entry.size)
+    };
+    let second = if size_text.is_empty() {
+        kind
+    } else {
+        format!("{kind} · {size_text}")
+    };
+    let lines: [(String, f64, u16, Color); 4] = [
+        (entry.name.clone(), body, weight::BOLD, theme.colors.text),
+        (second, caption, weight::NORMAL, theme.colors.dim_text),
+        (
+            format!(
+                "{}: {}",
+                libluna_i18n::tr("Modified"),
+                format_mtime(entry.modified)
+            ),
+            caption,
+            weight::NORMAL,
+            theme.colors.dim_text,
+        ),
+        (
+            entry.path.display().to_string(),
+            caption,
+            weight::NORMAL,
+            theme.colors.dim_text,
+        ),
+    ];
+    let content_w = (max_w - 2.0 * pad).max(1.0);
+    let lines: Vec<(String, f64, u16, Color)> = lines
+        .into_iter()
+        .map(|(text, size, weight, color)| {
+            (
+                libluna_widgets::display::ellipsize(&text, content_w, size, ctx.text),
+                size,
+                weight,
+                color,
+            )
+        })
+        .collect();
+    let measured = lines
+        .iter()
+        .map(|(text, size, weight, _)| ctx.text.measure(text, *size, *weight).width)
+        .fold(0.0_f64, f64::max);
+    let w = (measured + 2.0 * pad).clamp(180.0, max_w);
+    let h = 2.0 * pad + line_h * lines.len() as f64;
+    let mut x = pointer.x + 16.0;
+    let mut y = pointer.y + 22.0;
+    if x + w > size.width - 8.0 {
+        x = (pointer.x - w - 12.0).max(8.0);
+    }
+    if y + h > size.height - 8.0 {
+        y = (pointer.y - h - 12.0).max(8.0);
+    }
+    let rect = Rect::from_xywh(
+        x.clamp(8.0, (size.width - w - 8.0).max(8.0)),
+        y.clamp(8.0, (size.height - h - 8.0).max(8.0)),
+        w,
+        h,
+    );
+    ctx.scene.fill_rounded_rect(rect, 8.0, theme.colors.card_bg);
+    ctx.scene
+        .stroke_rounded_rect(rect, 8.0, 1.0, theme.colors.border);
+    for (i, (text, size, weight, color)) in lines.iter().enumerate() {
+        ctx.label_left(
+            rect.x() + pad,
+            rect.y() + pad + line_h * (i as f64 + 0.75),
+            text,
+            *size,
+            *weight,
+            *color,
+        );
     }
 }
 
@@ -1081,6 +1247,9 @@ pub fn handle_events(
                 (PointerButton::Left, ButtonState::Pressed) => {
                     on_left_press(app, pe.position, pe.modifiers, &lay, &ch, size, theme, text)
                 }
+                (PointerButton::Left, ButtonState::Released) => {
+                    on_left_release(app, pe.position, pe.modifiers, &lay, size, theme)
+                }
                 (PointerButton::Right, ButtonState::Pressed) => {
                     on_right_press(app, pe.position, &lay, size, theme, text)
                 }
@@ -1092,9 +1261,38 @@ pub fn handle_events(
                 (_, ButtonState::Released) => {}
                 _ => {}
             },
-            Event::PointerMotion { position, .. } => {
+            Event::PointerMotion {
+                position,
+                modifiers,
+            } => {
                 let p = *position;
                 app.pointer = Some(p);
+                // Przeciąganie plików ma pierwszeństwo nad podświetleniami.
+                if let Some(drag) = &mut app.drag {
+                    drag.copy = modifiers.ctrl;
+                    if !drag.active {
+                        let dx = p.x - drag.start.x;
+                        let dy = p.y - drag.start.y;
+                        if dx * dx + dy * dy > 16.0 {
+                            drag.active = true;
+                        }
+                    }
+                }
+                if app.drag.as_ref().is_some_and(|d| d.active) {
+                    let (target, rect) = drop_target_at(app, &lay, p, theme);
+                    if let Some(drag) = &mut app.drag {
+                        drag.target = target;
+                        drag.target_rect = rect;
+                    }
+                    app.tooltip = None;
+                    app.controls_hover = None;
+                    app.tab_hover = None;
+                    app.sidebar.set_hovered(None);
+                    for pane in &mut app.panes {
+                        pane.view.set_hovered(None);
+                    }
+                    continue;
+                }
                 // Podświetlenie kontrolek okna (— □ ✕): `HeaderBar::paint` rysuje je
                 // tylko dla kontrolki przekazanej jako `hovered`.
                 app.controls_hover = if lay.top.contains(p) {
@@ -1106,6 +1304,7 @@ pub fn handle_events(
                 };
                 if let Some(context) = app.context.as_mut() {
                     context.menu.hover_at(context.panel, Some(p), theme);
+                    app.tooltip = None;
                     continue;
                 }
                 let tab_hover = if app.pane().tabs.len() > 1 && lay.tabs.contains(p) {
@@ -1118,26 +1317,51 @@ pub fn handle_events(
                     app.sidebar
                         .index_at(lay.sidebar.deflate(Insets::splat(6.0)), p, theme);
                 app.sidebar.set_hovered(_hovered);
+                let mut hover_entry = None;
                 for i in 0..if app.split { 2 } else { 1 } {
                     let pr = pane_rects(app, &lay, i, theme);
                     let rows = file_rows(&app.panes[i], pr.items);
                     let hovered = hit_index(&app.panes[i], rows, p, theme);
                     app.panes[i].view.set_hovered(hovered);
+                    if rows.contains(p) {
+                        if let Some(index) = hovered {
+                            if let Some(entry) = app.panes[i].dir.entry(index).cloned() {
+                                hover_entry = Some(entry);
+                            }
+                        }
+                    }
                     app.panes[i]
                         .search
                         .set_hover_clear(app.panes[i].search.clear_at(ch.path, theme, p));
+                }
+                // Dymek pokazujemy po chwili najechania na ten sam element; ruch
+                // w obrębie kafelka nie resetuje licznika.
+                let same = match (&app.tooltip, &hover_entry) {
+                    (Some(tip), Some(entry)) => tip.entry.path == entry.path,
+                    _ => false,
+                };
+                if !same {
+                    app.tooltip = hover_entry.map(|entry| HoverTip {
+                        entry,
+                        since: Instant::now(),
+                    });
                 }
             }
             Event::PointerLeave => {
                 app.pointer = None;
                 app.controls_hover = None;
                 app.tab_hover = None;
+                app.tooltip = None;
+                if !app.drag.as_ref().is_some_and(|drag| drag.active) {
+                    app.drag = None;
+                }
                 app.sidebar.set_hovered(None);
                 for pane in &mut app.panes {
                     pane.view.set_hovered(None);
                 }
             }
             Event::Scroll(se) => {
+                app.tooltip = None;
                 let count = if app.split { 2 } else { 1 };
                 for i in 0..count {
                     let pr = pane_rects(app, &lay, i, theme);
@@ -1158,6 +1382,7 @@ pub fn handle_events(
             Event::Key(ke) if ke.state == ButtonState::Pressed => {
                 on_key(app, ke, &lay, &ch, size, theme, text)
             }
+            Event::Paste(text) => paste_text_into(app, &text),
             _ => {}
         }
     }
@@ -1173,6 +1398,8 @@ fn on_left_press(
     theme: &Theme,
     text: &TextEngine,
 ) {
+    app.tooltip = None;
+    app.drag = None;
     // Anulowanie trwającej operacji ma pierwszeństwo.
     if app.op_progress.is_some() && op_cancel_rect(lay).contains(p) {
         app.cancel_op();
@@ -1308,12 +1535,14 @@ fn on_left_press(
                         if let Some(m) = app.mounts.get(*i) {
                             places::unmount_device(&m.dev);
                             app.show_toast(libluna_i18n::tr("Unmounting…"));
+                            app.last_mount_refresh = Instant::now() - Duration::from_secs(10);
                         }
                     }
                     SideAction::Mount(i) => {
                         if let Some(m) = app.mounts.get(*i) {
                             places::mount_device(&m.dev);
                             app.show_toast(libluna_i18n::tr("Mounting…"));
+                            app.last_mount_refresh = Instant::now() - Duration::from_secs(10);
                         }
                     }
                 }
@@ -1394,6 +1623,18 @@ fn on_left_press(
                     app.panes[i].view.set_selected(Some(index));
                 }
                 app.panes[i].preview_cache = None;
+                // Kandydat do przeciągania; aktywuje się dopiero po ruchu > 4 px.
+                let paths = app.panes[i].selection();
+                if !paths.is_empty() {
+                    app.drag = Some(DragState {
+                        paths,
+                        start: p,
+                        active: false,
+                        copy: mods.ctrl,
+                        target: None,
+                        target_rect: None,
+                    });
+                }
             }
             return;
         }
@@ -1401,6 +1642,133 @@ fn on_left_press(
         app.panes[i].view.clear_selection();
         app.panes[i].preview_cache = None;
         return;
+    }
+}
+
+fn on_left_release(
+    app: &mut App,
+    p: Point,
+    mods: Modifiers,
+    lay: &Layout,
+    size: Size,
+    theme: &Theme,
+) {
+    let Some(drag) = app.drag.take() else {
+        return;
+    };
+    if !drag.active || !Rect::from_size(size).contains(p) {
+        return;
+    }
+    // Cel liczymy ponownie na pozycji puszczenia — ostatni ruch mógł nie dotrzeć.
+    let (target, _) = drop_target_at(app, lay, p, theme);
+    let Some(target) = target else {
+        return;
+    };
+    if let Some(job) = drag_job(target, drag.paths, mods.ctrl) {
+        app.submit(job);
+    }
+}
+
+/// Co znajduje się pod kursorem podczas przeciągania (katalog/kosz + prostokąt podświetlenia).
+fn drop_target_at(
+    app: &App,
+    lay: &Layout,
+    p: Point,
+    theme: &Theme,
+) -> (Option<DropTarget>, Option<Rect>) {
+    if lay.sidebar.contains(p) {
+        let sidebar = lay.sidebar.deflate(Insets::splat(6.0));
+        let Some(entry) = app.sidebar.index_at(sidebar, p, theme) else {
+            return (None, None);
+        };
+        let action = app
+            .sidebar_entry_action
+            .get(entry)
+            .copied()
+            .flatten()
+            .and_then(|ai| app.sidebar_actions.get(ai));
+        let Some(SideAction::Go(path)) = action else {
+            return (None, None);
+        };
+        let trash = trash::trash_root().join("files");
+        let target = if path == &trash {
+            DropTarget::Trash
+        } else {
+            DropTarget::Directory(path.clone())
+        };
+        let rect = app
+            .sidebar
+            .rows(sidebar, theme)
+            .into_iter()
+            .find(|row| row.entry == entry)
+            .map(|row| row.rect);
+        return (Some(target), rect);
+    }
+
+    let count = if app.split { 2 } else { 1 };
+    for i in 0..count {
+        if !lay.panes[i].contains(p) {
+            continue;
+        }
+        let pr = pane_rects(app, lay, i, theme);
+        let rows = file_rows(&app.panes[i], pr.items);
+        if let Some(index) = hit_index(&app.panes[i], rows, p, theme) {
+            if let Some(entry) = app.panes[i].dir.entry(index) {
+                if !entry.is_dir {
+                    return (None, None);
+                }
+                let slot = app.panes[i].view.slot_rect(rows, index, theme);
+                return (Some(DropTarget::Directory(entry.path.clone())), Some(slot));
+            }
+            return (None, None);
+        }
+        if rows.contains(p) {
+            // Upuszczenie na tło panelu = do jego bieżącego katalogu.
+            let dir = app.panes[i].dir.path.clone();
+            return (Some(DropTarget::Directory(dir)), Some(rows));
+        }
+    }
+    (None, None)
+}
+
+/// Buduje zadanie dla upuszczenia; `copy` (Ctrl) decyduje o kopiowaniu.
+fn drag_job(target: DropTarget, paths: Vec<PathBuf>, copy: bool) -> Option<Job> {
+    match target {
+        DropTarget::Trash => {
+            let trash = trash::trash_root().join("files");
+            let paths: Vec<PathBuf> = paths
+                .into_iter()
+                .filter(|path| !path.starts_with(&trash))
+                .collect();
+            (!paths.is_empty()).then_some(Job::Trash { paths })
+        }
+        DropTarget::Directory(dst) => {
+            if !dst.is_dir() {
+                return None;
+            }
+            let srcs: Vec<PathBuf> = paths
+                .into_iter()
+                .filter(|src| {
+                    // Nie przenosimy katalogu do niego samego ani do jego wnętrza.
+                    if dst == *src || dst.starts_with(src) {
+                        return false;
+                    }
+                    // Przenoszenie do tego samego katalogu nic nie zmienia.
+                    if !copy && src.parent() == Some(dst.as_path()) {
+                        return false;
+                    }
+                    true
+                })
+                .collect();
+            if srcs.is_empty() {
+                return None;
+            }
+            Some(if copy {
+                Job::Copy { srcs, dst }
+            } else {
+                Job::Move { srcs, dst }
+            })
+        }
     }
 }
 
@@ -1412,6 +1780,8 @@ fn on_right_press(
     theme: &Theme,
     text: &TextEngine,
 ) {
+    app.tooltip = None;
+    app.drag = None;
     if let Some(context) = &app.context {
         if context.panel.contains(p) {
             return;
@@ -1427,11 +1797,22 @@ fn on_right_press(
         if let Some(entry) = entry {
             app.sidebar.set_selected(Some(entry));
             if let Some(ai) = app.sidebar_entry_action.get(entry).copied().flatten() {
-                if let Some(SideAction::Go(path)) = app.sidebar_actions.get(ai) {
-                    if let Some(mi) = app.mounts.iter().position(|m| &m.mount == path) {
-                        open_menu(app, p, MenuTarget::Device(mi), size, theme, text);
+                match app.sidebar_actions.get(ai) {
+                    Some(SideAction::Go(path)) => {
+                        if let Some(mi) = app
+                            .mounts
+                            .iter()
+                            .position(|m| m.mounted && &m.mount == path)
+                        {
+                            open_menu(app, p, MenuTarget::Device(mi), size, theme, text);
+                            return;
+                        }
+                    }
+                    Some(SideAction::Mount(i)) | Some(SideAction::Unmount(i)) => {
+                        open_menu(app, p, MenuTarget::Device(*i), size, theme, text);
                         return;
                     }
+                    _ => {}
                 }
             }
         }
@@ -1469,6 +1850,8 @@ fn on_right_press(
 /// Środkowy przycisk myszy: otwiera folder (albo miejsce z panelu bocznego)
 /// w nowej karcie — jak w Nautilusie. Dla plików nic nie robi.
 fn on_middle_press(app: &mut App, p: Point, lay: &Layout, theme: &Theme) {
+    app.tooltip = None;
+    app.drag = None;
     let count = if app.split { 2 } else { 1 };
     for i in 0..count {
         if !lay.panes[i].contains(p) {
@@ -1511,6 +1894,7 @@ fn on_key(
     theme: &Theme,
     text: &TextEngine,
 ) {
+    app.tooltip = None;
     // Menu kontekstowe: Escape zamyka.
     if app.context.is_some() {
         if ke.keysym == 0xff1b {
@@ -1540,6 +1924,15 @@ fn on_key(
             apply_edit(app);
             return;
         }
+        let clipboard = {
+            let pane = app.pane_mut();
+            let edit = pane.edit.as_mut().unwrap();
+            clipboard_command(&mut edit.entry, ke)
+        };
+        if let Some(cmd) = clipboard {
+            apply_text_clipboard(app, cmd, TextPasteTarget::Edit);
+            return;
+        }
         let handled = {
             let pane = app.pane_mut();
             let edit = pane.edit.as_mut().unwrap();
@@ -1559,6 +1952,18 @@ fn on_key(
             pane.search.clear();
             pane.dir.set_filter("");
             pane.sync_view();
+            return;
+        }
+        let clipboard = {
+            let pane = app.pane_mut();
+            clipboard_command(&mut pane.search, ke)
+        };
+        if let Some(cmd) = clipboard {
+            let cut = matches!(cmd, TextClipboardCommand::Cut(_));
+            apply_text_clipboard(app, cmd, TextPasteTarget::Search);
+            if cut {
+                refresh_search(app);
+            }
             return;
         }
         let handled = {
@@ -1747,6 +2152,47 @@ fn handle_text_key<T: TextInput>(entry: &mut T, ke: &KeyEvent) -> bool {
         _ => return false,
     }
     true
+}
+
+fn apply_text_clipboard(app: &mut App, cmd: TextClipboardCommand, target: TextPasteTarget) {
+    match cmd {
+        TextClipboardCommand::Copy(text) | TextClipboardCommand::Cut(text) => {
+            if let Some(text) = text {
+                app.text_clipboard = Some(text);
+            }
+        }
+        TextClipboardCommand::Paste => {
+            app.text_paste_target = Some(target);
+            app.text_paste_requested = true;
+        }
+    }
+}
+
+fn refresh_search(app: &mut App) {
+    let query = app.pane().search.text().to_owned();
+    let pane = app.pane_mut();
+    pane.dir.set_filter(query);
+    pane.sync_view();
+}
+
+/// Wpisuje tekst z systemowego schowka do pola zapamiętanego przy Ctrl+V.
+fn paste_text_into(app: &mut App, text: &str) {
+    let Some(target) = app.text_paste_target.take() else {
+        return;
+    };
+    match target {
+        TextPasteTarget::Edit => {
+            if let Some(edit) = app.pane_mut().edit.as_mut() {
+                edit.entry.paste(text);
+            }
+        }
+        TextPasteTarget::Search => {
+            if app.pane().search_active {
+                app.pane_mut().search.paste(text);
+                refresh_search(app);
+            }
+        }
+    }
 }
 
 fn apply_edit(app: &mut App) {
@@ -1964,6 +2410,7 @@ fn menu_entries(app: &App, target: &MenuTarget) -> (Vec<MenuEntry>, Vec<Option<M
     match target {
         MenuTarget::Item(..) => {
             m.action(tr("Open"), Some("Enter"), MenuCmd::Open);
+            m.action(tr("Preview"), Some("Space"), MenuCmd::TogglePreview);
             m.action(tr("Open in Terminal"), Some("F4"), MenuCmd::OpenTerminal);
             m.sep();
             m.action(tr("Compress to ZIP"), None, MenuCmd::Compress);
@@ -1998,8 +2445,12 @@ fn menu_entries(app: &App, target: &MenuTarget) -> (Vec<MenuEntry>, Vec<Option<M
             m.action(tr("Properties"), None, MenuCmd::Properties);
         }
         MenuTarget::Device(i) => {
-            m.action(tr("Unmount"), None, MenuCmd::Unmount(*i));
-            m.action(tr("Open"), None, MenuCmd::OpenDevice(*i));
+            if app.mounts.get(*i).map(|m| m.mounted).unwrap_or(false) {
+                m.action(tr("Open"), None, MenuCmd::OpenDevice(*i));
+                m.action(tr("Unmount"), None, MenuCmd::Unmount(*i));
+            } else {
+                m.action(tr("Mount"), None, MenuCmd::Mount(*i));
+            }
         }
         MenuTarget::Background | MenuTarget::AppMenu => {
             let pane = app.pane();
@@ -2014,6 +2465,15 @@ fn menu_entries(app: &App, target: &MenuTarget) -> (Vec<MenuEntry>, Vec<Option<M
             }
             m.action(tr("New Folder"), Some("Ctrl+N"), MenuCmd::NewFolder);
             m.action(tr("New Tab"), Some("Ctrl+T"), MenuCmd::NewTab);
+            m.action(
+                if pane.preview {
+                    tr("Hide Preview")
+                } else {
+                    tr("Preview")
+                },
+                Some("Space"),
+                MenuCmd::TogglePreview,
+            );
             m.action(
                 if app.split {
                     tr("Single Pane")
@@ -2141,8 +2601,13 @@ fn run_menu(app: &mut App, index: usize) {
         }
         MenuCmd::Properties => {
             if let Some((path, _)) = target {
-                show_properties(app, &path);
+                app.show_properties(&path);
             }
+        }
+        MenuCmd::TogglePreview => {
+            let pane = app.pane_mut();
+            pane.preview = !pane.preview;
+            pane.preview_cache = None;
         }
         MenuCmd::Paste => paste(app),
         MenuCmd::SelectAll => app.pane_mut().view.select_all(),
@@ -2176,12 +2641,22 @@ fn run_menu(app: &mut App, index: usize) {
             if let Some(m) = app.mounts.get(i) {
                 places::unmount_device(&m.dev);
                 app.show_toast(libluna_i18n::tr("Unmounting…"));
+                app.last_mount_refresh = Instant::now() - Duration::from_secs(10);
+            }
+        }
+        MenuCmd::Mount(i) => {
+            if let Some(m) = app.mounts.get(i) {
+                places::mount_device(&m.dev);
+                app.show_toast(libluna_i18n::tr("Mounting…"));
+                app.last_mount_refresh = Instant::now() - Duration::from_secs(10);
             }
         }
         MenuCmd::OpenDevice(i) => {
             if let Some(m) = app.mounts.get(i) {
-                let mount = m.mount.clone();
-                app.navigate(app.active, mount);
+                if m.mounted {
+                    let mount = m.mount.clone();
+                    app.navigate(app.active, mount);
+                }
             }
         }
         MenuCmd::Settings => app.settings_open = true,
@@ -2211,47 +2686,23 @@ fn set_sort(app: &mut App, key: SortKey) {
     pane.sync_view();
 }
 
-fn show_properties(app: &mut App, path: &Path) {
-    let Ok(meta) = std::fs::metadata(path) else {
-        return;
-    };
-    let kind = if meta.is_dir() {
-        Kind::Folder.label()
-    } else {
-        libluna_i18n::tr("File")
-    };
-    let modified = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64);
-    let msg = libluna_i18n::tr_args(
-        "{name} · {kind} · {size} · {date}",
-        &[
-            (
-                "name",
-                &path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-            ),
-            ("kind", &kind),
-            (
-                "size",
-                &human_size(if meta.is_dir() { 0 } else { meta.len() }),
-            ),
-            ("date", &format_mtime(modified)),
-        ],
-    );
-    app.show_toast(msg);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn app() -> App {
         App::new(std::env::temp_dir())
+    }
+
+    #[test]
+    fn pasted_text_goes_to_active_search_field() {
+        let mut app = app();
+        app.panes[0].search_active = true;
+        app.panes[0].search.set_focused(true);
+        app.text_paste_target = Some(TextPasteTarget::Search);
+        paste_text_into(&mut app, "luna");
+        assert_eq!(app.panes[0].search.text(), "luna");
+        assert!(app.text_paste_target.is_none());
     }
 
     #[test]
@@ -2275,6 +2726,27 @@ mod tests {
             px(panel.center().x as usize, panel.center().y as usize),
             px(10, 700)
         );
+    }
+
+    #[test]
+    #[ignore = "generuje podgląd do docs/images (uruchom ręcznie)"]
+    fn render_files_preview() {
+        let icons = libluna_core::IconSettings::load();
+        libluna_core::icons::set_active_icon_set(icons.external);
+        libluna_core::icons::set_active_icon_theme(icons.theme);
+        let mut app = app();
+        app.sidebar_visible = true;
+        let theme = Theme::dark();
+        let text = TextEngine::system();
+        let size = Size::new(1120.0, 720.0);
+        let mut scene = Scene::new();
+        paint(&app, &mut scene, size, &theme, &text);
+        let mut renderer = libluna_render::SoftwareRenderer::new(1120, 720);
+        renderer.draw(&scene, 1.0, theme.colors.window_bg);
+        let png = renderer.encode_png().expect("PNG");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/images/luna-files.png");
+        std::fs::write(path, png).expect("zapis PNG");
     }
 
     #[test]
@@ -2408,5 +2880,210 @@ mod tests {
             .iter()
             .flatten()
             .all(|c| !matches!(c, MenuCmd::ExtractHere | MenuCmd::ExtractTo)));
+    }
+
+    #[test]
+    fn item_menu_offers_preview() {
+        let app = app();
+        let dir = std::env::temp_dir();
+        let (_, cmds) = menu_entries(&app, &MenuTarget::Item(dir.join("foto.jpg"), false));
+        assert!(cmds
+            .iter()
+            .flatten()
+            .any(|c| matches!(c, MenuCmd::TogglePreview)));
+    }
+
+    fn usb_mount() -> crate::places::Mount {
+        crate::places::Mount {
+            dev: "/dev/sdz1".to_owned(),
+            label: "PENDRIVE".to_owned(),
+            mount: std::path::PathBuf::new(),
+            fs: "vfat".to_owned(),
+            total: 0,
+            free: 0,
+            size: 16_000_000_000,
+            mounted: false,
+        }
+    }
+
+    #[test]
+    fn unmounted_device_is_listed_and_can_be_mounted() {
+        let mut app = app();
+        app.mounts = vec![usb_mount()];
+        app.rebuild_sidebar();
+        assert!(
+            app.sidebar_actions
+                .iter()
+                .any(|a| matches!(a, SideAction::Mount(0))),
+            "niezamontowany nośnik powinien wywoływać Mount"
+        );
+        let (_, cmds) = menu_entries(&app, &MenuTarget::Device(0));
+        assert!(cmds
+            .iter()
+            .flatten()
+            .any(|c| matches!(c, MenuCmd::Mount(0))));
+        assert!(cmds
+            .iter()
+            .flatten()
+            .all(|c| !matches!(c, MenuCmd::OpenDevice(0))));
+    }
+
+    #[test]
+    fn drag_job_handles_move_copy_self_and_trash() {
+        let root = std::env::temp_dir().join("luna-files-drag-job-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("podkatalog")).unwrap();
+        std::fs::write(root.join("a.txt"), b"x").unwrap();
+        let file = root.join("a.txt");
+
+        let moved = drag_job(
+            DropTarget::Directory(root.join("podkatalog")),
+            vec![file.clone()],
+            false,
+        );
+        assert!(matches!(moved, Some(Job::Move { .. })));
+
+        // Przenoszenie do tego samego katalogu = brak akcji; Ctrl kopiuje.
+        assert!(drag_job(
+            DropTarget::Directory(root.clone()),
+            vec![file.clone()],
+            false
+        )
+        .is_none());
+        assert!(matches!(
+            drag_job(
+                DropTarget::Directory(root.clone()),
+                vec![file.clone()],
+                true
+            ),
+            Some(Job::Copy { .. })
+        ));
+
+        // Katalog nie może trafić sam do siebie.
+        assert!(drag_job(
+            DropTarget::Directory(root.join("podkatalog")),
+            vec![root.join("podkatalog")],
+            false
+        )
+        .is_none());
+
+        assert!(matches!(
+            drag_job(DropTarget::Trash, vec![file], false),
+            Some(Job::Trash { .. })
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn mouse_drag_selects_folder_as_drop_target() {
+        let root = std::env::temp_dir().join("luna-files-drag-e2e-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("podkatalog")).unwrap();
+        std::fs::write(root.join("a.txt"), b"x").unwrap();
+        let mut app = App::new(root.clone());
+        let theme = Theme::light();
+        let text = TextEngine::system();
+        let size = Size::new(1120.0, 720.0);
+        let lay = layout(&app, size, &theme, &text);
+        let pr = pane_rects(&app, &lay, 0, &theme);
+        let rows = file_rows(&app.panes[0], pr.items);
+        let entries = app.panes[0].dir.visible_entries();
+        let file_index = entries.iter().position(|e| e.name == "a.txt").unwrap();
+        let dir_index = entries.iter().position(|e| e.name == "podkatalog").unwrap();
+        let file_pos = app.panes[0]
+            .view
+            .slot_rect(rows, file_index, &theme)
+            .center();
+        let dir_pos = app.panes[0]
+            .view
+            .slot_rect(rows, dir_index, &theme)
+            .center();
+        let press = Event::PointerButton(libluna_core::PointerEvent {
+            position: file_pos,
+            button: PointerButton::Left,
+            state: ButtonState::Pressed,
+            modifiers: Modifiers::default(),
+        });
+        let away = Event::PointerMotion {
+            position: Point::new(file_pos.x + 12.0, file_pos.y + 6.0),
+            modifiers: Modifiers::default(),
+        };
+        let over = Event::PointerMotion {
+            position: dir_pos,
+            modifiers: Modifiers::default(),
+        };
+        handle_events(&mut app, &[press, away, over], size, &theme, &text);
+        let drag = app.drag.as_ref().expect("przeciąganie powinno być aktywne");
+        assert!(drag.active);
+        assert_eq!(
+            drag.target,
+            Some(DropTarget::Directory(root.join("podkatalog")))
+        );
+        // Sprzątanie bez wykonywania zadania.
+        app.drag = None;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn dropping_file_on_folder_moves_it() {
+        let root = std::env::temp_dir().join("luna-files-drag-drop-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("podkatalog")).unwrap();
+        std::fs::write(root.join("a.txt"), b"x").unwrap();
+        let mut app = App::new(root.clone());
+        let theme = Theme::light();
+        let text = TextEngine::system();
+        let size = Size::new(1120.0, 720.0);
+        let lay = layout(&app, size, &theme, &text);
+        let pr = pane_rects(&app, &lay, 0, &theme);
+        let rows = file_rows(&app.panes[0], pr.items);
+        let entries = app.panes[0].dir.visible_entries();
+        let file_index = entries.iter().position(|e| e.name == "a.txt").unwrap();
+        let dir_index = entries.iter().position(|e| e.name == "podkatalog").unwrap();
+        let file_pos = app.panes[0]
+            .view
+            .slot_rect(rows, file_index, &theme)
+            .center();
+        let dir_pos = app.panes[0]
+            .view
+            .slot_rect(rows, dir_index, &theme)
+            .center();
+        let none = Modifiers::default();
+        handle_events(
+            &mut app,
+            &[
+                Event::PointerButton(libluna_core::PointerEvent {
+                    position: file_pos,
+                    button: PointerButton::Left,
+                    state: ButtonState::Pressed,
+                    modifiers: none,
+                }),
+                Event::PointerMotion {
+                    position: Point::new(file_pos.x + 12.0, file_pos.y + 6.0),
+                    modifiers: none,
+                },
+                Event::PointerMotion {
+                    position: dir_pos,
+                    modifiers: none,
+                },
+                Event::PointerButton(libluna_core::PointerEvent {
+                    position: dir_pos,
+                    button: PointerButton::Left,
+                    state: ButtonState::Released,
+                    modifiers: none,
+                }),
+            ],
+            size,
+            &theme,
+            &text,
+        );
+        let target = root.join("podkatalog/a.txt");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && !target.exists() {
+            std::thread::sleep(Duration::from_millis(10));
+            app.drain_ops();
+        }
+        assert!(target.exists(), "plik powinien zostać przeniesiony");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

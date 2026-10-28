@@ -12,12 +12,14 @@ use libluna_i18n::{tr, Locale};
 use libluna_render::TextEngine;
 use libluna_widgets::layout::{Layout as Tree, LayoutCtx, Node};
 use libluna_widgets::{
-    ActionRow, BottomSheet, Button, Card, CheckButton, ControlsLayout, ControlsSide, DropDown,
-    Entry, HeaderBar, Item, ItemView, Menu, MenuEntry, NavEntry, NavList, Pager, PaintCtx, PathBar,
-    RadioGroup, ScrollView, SearchEntry, Slider, Stack, StackTransition, StatusPage, Stepper,
-    StepperSide, Switch, Tab, TabBar, TabView, TextInput, Toast, ViewMode, ViewSwitcher,
-    WindowControl,
+    clipboard_command, ActionRow, BottomSheet, Button, Card, CheckButton, ControlsLayout,
+    ControlsSide, DropDown, Entry, HeaderBar, Item, ItemView, Menu, MenuEntry, NavEntry, NavList,
+    Pager, PaintCtx, PathBar, RadioGroup, ScrollView, SearchEntry, Slider, Stack, StackTransition,
+    StatusPage, Stepper, StepperSide, Switch, Tab, TabBar, TabView, TextClipboardCommand,
+    TextInput, Toast, ViewMode, ViewSwitcher, WindowControl,
 };
+
+use crate::gallery_page::GalleryState;
 
 const STATUS_H: f64 = 28.0;
 const PAD: f64 = 12.0;
@@ -113,6 +115,25 @@ pub struct Demo {
     /// Powiadomienie (nakładka) oraz akcent sprzed ostatniej zmiany (do „Cofnij”).
     pub toast: Toast,
     pub prev_accent: Accent,
+    /// Stan strony „Widgety” (galeria deweloperska).
+    pub gallery: GalleryState,
+    /// Tekst do wysłania do systemowego schowka (odbierany przez pętlę aplikacji).
+    pub clipboard_text: Option<String>,
+    /// Prośba o odczyt schowka; wynik wróci jako `Event::Paste`.
+    pub paste_requested: bool,
+    /// Pole, do którego trafi wklejony tekst.
+    pub paste_target: Option<PasteTarget>,
+}
+
+/// Pole, które ma odebrać wklejony tekst.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasteTarget {
+    Search,
+    SheetEntry,
+    GallerySearch,
+    GalleryEntry,
+    GalleryPassword,
+    GalleryExampleSearch,
 }
 
 impl Default for Demo {
@@ -185,6 +206,10 @@ impl Default for Demo {
             options_check_hover: false,
             toast: Toast::new(""),
             prev_accent: Accent::default(),
+            gallery: GalleryState::default(),
+            clipboard_text: None,
+            paste_requested: false,
+            paste_target: None,
         }
     }
 }
@@ -813,10 +838,18 @@ pub fn handle_events(
                             // Pasek tytułu poza kontrolkami i przyciskami — przeciąganie okna.
                             demo.pending_move = true;
                         } else if is_gallery(demo) {
-                            // Na stronie galerii jedynymi aktywnymi elementami są
-                            // sidebar (zmiana strony) i pasek tytułu.
-                            if let Some(i) = nav.index_at(lay.sidebar, p, theme) {
-                                demo.nav_selected = Some(i);
+                            // Galeria ma własne zakładki kategorii i pasek przewijania.
+                            let used = crate::gallery_page::pointer_pressed(
+                                &mut demo.gallery,
+                                lay.area,
+                                theme,
+                                text,
+                                p,
+                            );
+                            if !used {
+                                if let Some(i) = nav.index_at(lay.sidebar, p, theme) {
+                                    demo.nav_selected = Some(i);
+                                }
                             }
                         } else if let Some(i) = theme_vs.index_at(lay.theme_switcher, p) {
                             settings.set_preference(ThemePreference::ALL[i]);
@@ -887,6 +920,7 @@ pub fn handle_events(
                             demo.files_scroll.end_drag();
                             demo.scroll_dragging = false;
                         }
+                        crate::gallery_page::pointer_released(&mut demo.gallery);
                         if demo.sheet.is_open() {
                             demo.sheet.end_drag(theme);
                         }
@@ -940,6 +974,17 @@ pub fn handle_events(
                     demo.search
                         .set_hover_clear(demo.search.clear_at(lay.search, theme, position));
                     demo.controls_hover = header.control_at(header_rect, theme, position);
+                    if is_gallery(demo) {
+                        crate::gallery_page::pointer_motion(
+                            &mut demo.gallery,
+                            lay.area,
+                            theme,
+                            text,
+                            position,
+                        );
+                    } else {
+                        crate::gallery_page::pointer_left(&mut demo.gallery);
+                    }
                 }
             }
             Event::PointerLeave => {
@@ -959,16 +1004,38 @@ pub fn handle_events(
                 demo.search.set_hover_clear(false);
                 demo.sheet.set_hover_close(false);
                 demo.controls_hover = None;
+                crate::gallery_page::pointer_left(&mut demo.gallery);
             }
             Event::Scroll(se) => {
-                if !demo.sheet.is_open() && lay.items.contains(se.position) {
-                    let step = theme.metrics.itemview.row_h;
-                    if demo.files_scroll.on_scroll(se.dy * step, lay.items) {
-                        demo.items.set_scroll(demo.files_scroll.offset());
+                if !demo.sheet.is_open() {
+                    if is_gallery(demo) && lay.area.contains(se.position) {
+                        crate::gallery_page::scroll(
+                            &mut demo.gallery,
+                            lay.area,
+                            theme,
+                            text,
+                            se.position,
+                            se.dy * 60.0,
+                        );
+                    } else if lay.items.contains(se.position) {
+                        let step = theme.metrics.itemview.row_h;
+                        if demo.files_scroll.on_scroll(se.dy * step, lay.items) {
+                            demo.items.set_scroll(demo.files_scroll.offset());
+                        }
                     }
                 }
             }
             Event::Key(ke) if ke.state == ButtonState::Pressed => {
+                // Schowek dla aktywnego pola tekstowego (przed skrótami demo/galerii).
+                if handle_clipboard_key(demo, ke) {
+                    continue;
+                }
+                // Galeria widgetów: pola tekstowe przykładów i nawigacja listy.
+                if is_gallery(demo)
+                    && crate::gallery_page::key(&mut demo.gallery, lay.area, theme, text, ke)
+                {
+                    continue;
+                }
                 // Gdy pole wyszukiwania ma fokus, klawisze idą do niego.
                 if demo.search.is_focused() && handle_text_key(&mut demo.search, ke) {
                     continue;
@@ -1014,8 +1081,85 @@ pub fn handle_events(
                     _ => {}
                 }
             }
+            Event::Paste(text) => paste_into(demo, &text),
             _ => {}
         }
+    }
+}
+
+/// Pole tekstowe, które ma pierwszeństwo przy Ctrl+C/X/V.
+fn active_paste_target(demo: &Demo) -> Option<PasteTarget> {
+    if is_gallery(demo) {
+        if demo.gallery.search.is_focused() {
+            return Some(PasteTarget::GallerySearch);
+        }
+        match demo.gallery.example.focus {
+            crate::gallery_interactive::Focus::Entry => return Some(PasteTarget::GalleryEntry),
+            crate::gallery_interactive::Focus::Password => {
+                return Some(PasteTarget::GalleryPassword)
+            }
+            crate::gallery_interactive::Focus::Search => {
+                return Some(PasteTarget::GalleryExampleSearch)
+            }
+            crate::gallery_interactive::Focus::None => {}
+        }
+    }
+    if demo.sheet.is_open() && demo.sheet_entry.is_focused() {
+        return Some(PasteTarget::SheetEntry);
+    }
+    if !is_gallery(demo) && demo.search.is_focused() {
+        return Some(PasteTarget::Search);
+    }
+    None
+}
+
+/// Obsługuje Ctrl+C/X/V dla aktywnego pola. Zwraca `true`, gdy skrót został zużyty.
+fn handle_clipboard_key(demo: &mut Demo, ke: &KeyEvent) -> bool {
+    let Some(target) = active_paste_target(demo) else {
+        return false;
+    };
+    let command = match target {
+        PasteTarget::Search => clipboard_command(&mut demo.search, ke),
+        PasteTarget::SheetEntry => clipboard_command(&mut demo.sheet_entry, ke),
+        PasteTarget::GallerySearch => clipboard_command(&mut demo.gallery.search, ke),
+        PasteTarget::GalleryEntry => clipboard_command(&mut demo.gallery.example.entry, ke),
+        PasteTarget::GalleryPassword => clipboard_command(&mut demo.gallery.example.password, ke),
+        PasteTarget::GalleryExampleSearch => {
+            clipboard_command(&mut demo.gallery.example.search, ke)
+        }
+    };
+    let Some(command) = command else {
+        return false;
+    };
+    match command {
+        TextClipboardCommand::Copy(text) | TextClipboardCommand::Cut(text) => {
+            if let Some(text) = text {
+                demo.clipboard_text = Some(text);
+            }
+        }
+        TextClipboardCommand::Paste => {
+            demo.paste_target = Some(target);
+            demo.paste_requested = true;
+        }
+    }
+    true
+}
+
+/// Wpisuje tekst z systemowego schowka do pola zapamiętanego przy Ctrl+V.
+fn paste_into(demo: &mut Demo, text: &str) {
+    let Some(target) = demo.paste_target.take() else {
+        return;
+    };
+    match target {
+        PasteTarget::Search => demo.search.paste(text),
+        PasteTarget::SheetEntry => demo.sheet_entry.paste(text),
+        PasteTarget::GallerySearch => {
+            demo.gallery.search.paste(text);
+            crate::gallery_page::search_changed(&mut demo.gallery);
+        }
+        PasteTarget::GalleryEntry => demo.gallery.example.entry.paste(text),
+        PasteTarget::GalleryPassword => demo.gallery.example.password.paste(text),
+        PasteTarget::GalleryExampleSearch => demo.gallery.example.search.paste(text),
     }
 }
 
@@ -1133,7 +1277,7 @@ pub fn build_scene(
         draw_sidebar(&mut paint, &lay, demo);
     }
     if is_gallery(demo) {
-        crate::gallery_page::paint(&mut paint, lay.area);
+        crate::gallery_page::paint(&mut paint, lay.area, &demo.gallery);
     } else {
         draw_content(&mut paint, lay.area, &lay, demo, preference, accent);
     }

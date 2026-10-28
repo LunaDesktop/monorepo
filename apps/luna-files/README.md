@@ -20,8 +20,13 @@ Dostępne binarki:
   sortowania (strzałka pokazuje kierunek), **siatka** kafelków z ikonami typów plików;
 - sortowanie (nazwa/rozmiar/data/typ, rosnąco/malejąco), ukrywanie plików (`Ctrl+H`),
   filtr na żywo (`Ctrl+F`), panel boczny chowany `F9`;
-- zakładki (`Ctrl+T`, `Ctrl+W`, `Tab`), widok dzielony (`F3`), podgląd pliku (`Space`:
-  tekst/kod oraz PNG, dla reszty metadane);
+- zakładki (`Ctrl+T`, `Ctrl+W`, `Tab`), widok dzielony (`F3`), podgląd pliku
+  (`Space` lub menu → „Podgląd”: tekst/kod, PNG i **JPEG**; dla reszty metadane);
+- **kafelki z uciętymi nazwami** (wielokropek, bez nachodzenia na sąsiednie kafelki)
+  i **dymek z informacjami** po chwili najechania (nazwa, typ, rozmiar, data, ścieżka);
+- **przeciąganie plików** myszą: upuszczenie na folder (w tym na drugi panel),
+  miejsce w panelu bocznym, zamontowany nośnik albo Kosz przenosi zaznaczenie;
+  `Ctrl` podczas przeciągania kopiuje, a cel jest podświetlany (Kosz na czerwono);
 - wielokrotne zaznaczanie: `Ctrl+klik`, `Shift+klik` (zakres), `Shift+↑/↓`, `Ctrl+A`;
   belka statusu pokazuje liczbę **i łączny rozmiar** zaznaczonych;
 - menu kontekstowe (prawy przycisk) i menu główne (☰) — wszystkie napisy przez i18n.
@@ -33,7 +38,9 @@ Dostępne binarki:
   (`Shift+Delete`), **przywracanie z kosza** na pierwotną ścieżkę oraz opróżnianie
   kosza z potwierdzeniem;
 - zmiana nazwy (`F2`), nowy folder (`Ctrl+N`), odświeżanie (`F5`/`Ctrl+R`),
-  otwieranie plików przez `xdg-open`, terminal w katalogu (`F4`).
+  otwieranie plików przez `xdg-open`, terminal w katalogu (`F4`);
+- **Właściwości** pokazują rozmiar katalogu liczony rekurencyjnie w tle
+  (liczba plików i podkatalogów), bez blokowania UI.
 
 **Archiwa**
 - pakowanie zaznaczenia do **ZIP** (menu kontekstowe → „Skompresuj do ZIP”),
@@ -51,10 +58,13 @@ Dostępne binarki:
 - **O aplikacji** — nazwa, wersja, licencja.
 
 **Urządzenia**
-- panel boczny: miejsca XDG (z `~/.config/user-dirs.dirs`), kosz, zamontowane dyski
-  z wolnym miejscem (rozmiar z `statvfs`);
-- montowanie/odmontowanie przez UDisks2 (`udisksctl` → D-Bus, hasło pyta `luna-polkit`);
-- lista odświeża się co 2 s, więc podłączenie pendrive'a pojawia się „samo”.
+- panel boczny: miejsca XDG (z `~/.config/user-dirs.dirs`), kosz, **wymienne nośniki
+  także przed zamontowaniem** (np. świeżo podpięty pendrive — `lsblk`, UDisks2)
+  oraz zamontowane dyski z wolnym miejscem (`statvfs`);
+- kliknięcie niezamontowanego nośnika montuje go przez UDisks2 (`udisksctl` → D-Bus,
+  hasło pyta `luna-polkit`), a menu kontekstowe daje „Zamontuj”/„Odmontuj”;
+- lista odświeża się co 2 s (i po akcji montowania), więc podłączenie USB pojawia się
+  „samo”, bez ruchu myszy.
 
 **Operacje w tle**
 - kolejka zadań w osobnym wątku (`ops.rs`): postęp w belce statusu z **prędkością

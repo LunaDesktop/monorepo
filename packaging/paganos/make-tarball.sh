@@ -7,12 +7,24 @@ set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(git -C "$here" rev-parse --show-toplevel)"
-ver="$(grep -m1 '^version =' "$root/Cargo.toml" | sed -E 's/.*"([^"]+)".*/\1/')"
+ver="$(grep -m1 '^version =' "$root/libluna/Cargo.toml" | sed -E 's/.*"([^"]+)".*/\1/')"
 tarball="luna-${ver}.tar.gz"
 
 out="$here/out/de"
 rm -rf "$here/out"
 mkdir -p "$out/libluna" "$out/selene"
+
+# `git archive HEAD` widzi tylko zacommitowane pliki — bez Cargo.lock build --locked padnie.
+missing=""
+for lock in libluna/Cargo.lock luna/Cargo.lock selene/Cargo.lock luna-greeter/Cargo.lock \
+            apps/luna-demo/Cargo.lock apps/luna-files/Cargo.lock \
+            apps/luna-settings/Cargo.lock apps/luna-terminal/Cargo.lock; do
+    git -C "$root" ls-files --error-unmatch "$lock" >/dev/null 2>&1 || missing="$missing $lock"
+done
+if [ -n "$missing" ]; then
+    echo "UWAGA: nieśledzone Cargo.lock (tarball ich nie zawiera):$missing" >&2
+    echo "        zacommituj je przed wydaniem — receptury budują z --locked." >&2
+fi
 
 # Tarball z bieżącego HEAD (tylko pliki zacommitowane), katalog nadrzędny: luna-${ver}/
 git -C "$root" archive --format=tar.gz --prefix="luna-${ver}/" \

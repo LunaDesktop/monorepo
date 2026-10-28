@@ -106,10 +106,187 @@ pub fn places() -> Vec<Place> {
 pub struct Mount {
     pub dev: String,
     pub label: String,
+    /// Punkt montowania; pusty, gdy urządzenie nie jest zamontowane.
     pub mount: PathBuf,
     pub fs: String,
     pub total: u64,
     pub free: u64,
+    /// Rozmiar nośnika (z `lsblk`); dla montowań bez `lsblk` równy `total`.
+    pub size: u64,
+    pub mounted: bool,
+}
+
+/// Urządzenia widoczne w panelu: **wszystkie** wymienne nośniki (także
+/// niezamontowane, np. świeżo podpięty pendrive) plus zamontowane wolumeny
+/// użytkowe z `/proc/self/mountinfo`.
+pub fn devices() -> Vec<Mount> {
+    let mut out = block_devices();
+    for mount in mounts() {
+        let duplicate = out.iter().any(|d| {
+            d.dev == mount.dev || (!mount.mount.as_os_str().is_empty() && d.mount == mount.mount)
+        });
+        if !duplicate {
+            out.push(mount);
+        }
+    }
+    out.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
+    out
+}
+
+/// Wymienne nośniki z `lsblk` — również te bez punktu montowania.
+fn block_devices() -> Vec<Mount> {
+    let rows = match lsblk_rows() {
+        Some(rows) => rows,
+        None => return Vec::new(),
+    };
+    let removable_disks: std::collections::HashSet<String> = rows
+        .iter()
+        .filter(|row| {
+            row_value(row, "TYPE") == "disk"
+                && (row_value(row, "RM") == "1" || row_value(row, "TRAN") == "usb")
+        })
+        .map(|row| row_value(row, "NAME"))
+        .collect();
+
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for row in &rows {
+        let kind = row_value(row, "TYPE");
+        if kind != "disk" && kind != "part" {
+            continue;
+        }
+        let name = row_value(row, "NAME");
+        let fs = row_value(row, "FSTYPE");
+        let removable = row_value(row, "RM") == "1"
+            || row_value(row, "TRAN") == "usb"
+            || removable_disks.contains(&row_value(row, "PKNAME"));
+        // Niezamontowany dysk z tablicą partycji ma puste FSTYPE — pokazujemy
+        // jego partycje. Dysk bez partycji („superfloppy”) ma FSTYPE i też jest wart wpisu.
+        if !removable || (kind == "disk" && fs.is_empty()) {
+            continue;
+        }
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        let dev = format!("/dev/{name}");
+        let mut mounted_at = row_value(row, "MOUNTPOINT");
+        if let Some((first, _)) = mounted_at.split_once(',') {
+            mounted_at = first.to_owned();
+        }
+        let mounted = !mounted_at.is_empty()
+            && !mounted_at.starts_with('[')
+            && Path::new(&mounted_at).is_dir();
+        let mount = if mounted {
+            PathBuf::from(&mounted_at)
+        } else {
+            PathBuf::new()
+        };
+        let (total, free) = if mounted {
+            statvfs(&mount).unwrap_or((0, 0))
+        } else {
+            (0, 0)
+        };
+        let size = row_value(row, "SIZE")
+            .parse::<u64>()
+            .unwrap_or(total)
+            .max(total);
+        let label = {
+            let from_lsblk = row_value(row, "LABEL");
+            if !from_lsblk.is_empty() {
+                from_lsblk
+            } else {
+                mount_label(&dev).unwrap_or(name)
+            }
+        };
+        out.push(Mount {
+            dev,
+            label,
+            mount,
+            fs,
+            total,
+            free,
+            size,
+            mounted,
+        });
+    }
+    out
+}
+
+fn row_value(row: &std::collections::HashMap<String, String>, key: &str) -> String {
+    row.get(key).cloned().unwrap_or_default()
+}
+
+/// Uruchamia `lsblk -P` i parsuje wiersze `KLUCZ="wartość"`.
+fn lsblk_rows() -> Option<Vec<std::collections::HashMap<String, String>>> {
+    let output = Command::new("lsblk")
+        .args([
+            "-b",
+            "-P",
+            "-o",
+            "NAME,FSTYPE,LABEL,SIZE,MOUNTPOINT,RM,TYPE,TRAN,PKNAME",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let rows: Vec<_> = text.lines().filter_map(parse_lsblk_line).collect();
+    (!rows.is_empty()).then_some(rows)
+}
+
+/// Parsuje jedną linię `lsblk -P` (wartości w cudzysłowach mogą zawierać spacje).
+fn parse_lsblk_line(line: &str) -> Option<std::collections::HashMap<String, String>> {
+    let mut map = std::collections::HashMap::new();
+    let mut chars = line.chars().peekable();
+    loop {
+        while chars.peek().is_some_and(|c| c.is_whitespace()) {
+            chars.next();
+        }
+        let mut key = String::new();
+        while let Some(&c) = chars.peek() {
+            if c == '=' || c.is_whitespace() {
+                break;
+            }
+            key.push(c);
+            chars.next();
+        }
+        if key.is_empty() {
+            break;
+        }
+        while chars.peek().is_some_and(|c| c.is_whitespace()) {
+            chars.next();
+        }
+        if chars.peek() != Some(&'=') {
+            break;
+        }
+        chars.next();
+        let mut value = String::new();
+        if chars.peek() == Some(&'"') {
+            chars.next();
+            while let Some(c) = chars.next() {
+                match c {
+                    '\\' => {
+                        if let Some(escaped) = chars.next() {
+                            value.push(escaped);
+                        }
+                    }
+                    '"' => break,
+                    _ => value.push(c),
+                }
+            }
+        } else {
+            while let Some(&c) = chars.peek() {
+                if c.is_whitespace() {
+                    break;
+                }
+                value.push(c);
+                chars.next();
+            }
+        }
+        map.insert(key, value);
+    }
+    (!map.is_empty()).then_some(map)
 }
 
 /// Lista montowań „użytkowych” (pomija pseudosystemy i montowania systemowe).
@@ -142,6 +319,8 @@ pub fn mounts() -> Vec<Mount> {
             fs: m.fs,
             total,
             free,
+            size: total,
+            mounted: true,
         });
     }
     out.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
@@ -276,5 +455,24 @@ mod tests {
     #[test]
     fn octal_sequences_are_unescaped() {
         assert_eq!(unescape("a\\040b\\134c"), "a b\\c");
+    }
+
+    #[test]
+    fn lsblk_line_parses_quoted_values() {
+        let line = "NAME=\"sdb1\" FSTYPE=\"vfat\" LABEL=\"PEN DRIVE\" SIZE=\"15600000000\" MOUNTPOINT=\"/run/media/x/PEN DRIVE\" RM=\"1\" TYPE=\"part\" TRAN=\"\" PKNAME=\"sdb\"";
+        let row = parse_lsblk_line(line).expect("row");
+        assert_eq!(row["NAME"], "sdb1");
+        assert_eq!(row["LABEL"], "PEN DRIVE");
+        assert_eq!(row["MOUNTPOINT"], "/run/media/x/PEN DRIVE");
+        assert_eq!(row["RM"], "1");
+        assert_eq!(row["PKNAME"], "sdb");
+    }
+
+    #[test]
+    fn lsblk_parser_handles_missing_and_escaped_values() {
+        let row = parse_lsblk_line("NAME=\"sda\" FSTYPE=\"\" LABEL=\"A\\\\B\"").expect("row");
+        assert_eq!(row["NAME"], "sda");
+        assert_eq!(row["FSTYPE"], "");
+        assert_eq!(row["LABEL"], "A\\B");
     }
 }

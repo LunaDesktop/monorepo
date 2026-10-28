@@ -1,0 +1,18 @@
+[package]
+name = "libluna-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Warstwa platformy libLuny: okna Wayland (xdg-shell) i wejście."
+
+[dependencies]
+libluna-core.workspace = true
+libluna-i18n.workspace = true
+libluna-render.workspace = true
+
+smithay-client-toolkit = "0.19"
+wayland-client = "0.31"
+calloop = "0.13"
+libc = "0.2"

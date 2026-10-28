@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/libluna",
+    "crates/libluna-core",
+    "crates/libluna-i18n",
+    "crates/libluna-render",
+    "crates/libluna-platform",
+    "crates/libluna-widgets",
+]
+
+[workspace.package]
+version = "0.0.4"
+edition = "2021"
+license = "MPL-2.0"
+rust-version = "1.80"
+authors = ["Patryk Szkudlarek / libLuna contributors"]
+repository = "https://github.com/mijsys/libLuna"
+
+[workspace.dependencies]
+libluna-core = { path = "crates/libluna-core", version = "0.0.4" }
+libluna-i18n = { path = "crates/libluna-i18n", version = "0.0.4" }
+libluna-render = { path = "crates/libluna-render", version = "0.0.4" }
+libluna-platform = { path = "crates/libluna-platform", version = "0.0.4" }
+libluna-widgets = { path = "crates/libluna-widgets", version = "0.0.4" }
+libluna = { path = "crates/libluna", version = "0.0.4" }
+
+tiny-skia = "0.11"
+# Ikony aplikacji często istnieją tylko jako SVG (Adwaita, Papirus).
+# Wyłączamy tekst i obrazy rastrowe — ikonom to niepotrzebne.
+resvg = { version = "0.44", default-features = false }
+
+[profile.dev.package."*"]
+opt-level = 2
+
+# Profil `dev` (cargo run/test domyślnie): bez optymalizacji kod rysujący potrafi chodzić
+# setki razy wolniej (panel spada do 1–5 FPS), co łatwo pomylić z błędem wydajności.
+# Lekka optymalizacja usuwa tę pułapkę, a kompilacja zostaje szybka.
+[profile.dev]
+opt-level = 1
+
+# Optymalizacja wydania: pełny LTO i jedna jednostka kodegenu (mniejszy, szybszy binarny
+# kompozytor + środowisko). `panic = "unwind"` świadomie zostawione — panika klienta nie
+# powinna zabijać całej sesji.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -1,7 +1,8 @@
 # Receptura PaganOS (pagbuild) — Selene (kompozytor Wayland środowiska Luna).
 # Target w repo receptur: de/selene/PAGBUILD.yaml
 #
-# Buduje się z TEGO SAMEGO tarballa co libluna (wspólny workspace), więc `source`
+# Buduje się z TEGO SAMEGO tarballa co libluna, ale z własnego workspace'u `selene/`,
+# więc `source`
 # wskazuje ten sam plik `luna-${pkgver}.tar.gz` — w repo receptur trzymamy jego kopię
 # również w tym katalogu (pagbuild kopiuje pliki z katalogu receptury do katalogu budowy).
 
@@ -29,8 +30,8 @@ sha256sums:
 build: |
   cd luna-${pkgver}
 
-  cargo build --release --locked -p selene
-  install -Dm755 target/release/selene "${PKGDIR}/usr/bin/selene"
+  ( cd selene && cargo build --release --locked )
+  install -Dm755 selene/target/release/selene "${PKGDIR}/usr/bin/selene"
 
   # Skrypt sesji + wpis wyboru sesji (SDDM/GDM → /usr/share/wayland-sessions).
   install -Dm755 ../luna-session "${PKGDIR}/usr/bin/luna-session"
@@ -38,7 +39,7 @@ build: |
 
   # Tłumaczenia kompozytora (doładowywane w runtime z /usr/share/luna/i18n).
   install -d "${PKGDIR}/usr/share/luna/i18n"
-  install -m644 crates/libluna-i18n/i18n/*.lang "${PKGDIR}/usr/share/luna/i18n/"
+  install -m644 libluna/crates/libluna-i18n/i18n/*.lang "${PKGDIR}/usr/share/luna/i18n/"
 
   install -Dm644 LICENSE "${PKGDIR}/usr/share/licenses/${pkgname}/LICENSE"
   install -Dm644 README.md "${PKGDIR}/usr/share/doc/${pkgname}/README.md"

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- libLuna — pastelowe warstwy toolkitu (core / render / widgety) bez tła. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="12 12 104 104">
+  <rect x="24" y="30" width="80" height="18" rx="7"
+        fill="#B2E1C9" stroke="#4C9274" stroke-width="4"/>
+  <rect x="24" y="55" width="80" height="18" rx="7"
+        fill="#B5D5F1" stroke="#527FAE" stroke-width="4"/>
+  <rect x="24" y="80" width="80" height="18" rx="7"
+        fill="#CBBEE8" stroke="#7B67AB" stroke-width="4"/>
+</svg>
