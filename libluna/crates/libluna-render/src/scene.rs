@@ -8,6 +8,8 @@ use libluna_core::{Color, Point, Rect};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::Arc;
 
+use crate::text::TextEngine;
+
 /// Gotowy obraz (premultiplied RGBA8) — np. skomponowany bufor okna z `wl_shm`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImageData {
@@ -382,6 +384,34 @@ impl Scene {
                 .zip(&other.commands)
                 .all(|(a, b)| same_command(a, b))
     }
+
+    /// Konserwatywny prostokąt, w którym `self` i `next` mogą się różnić.
+    ///
+    /// `Some(Rect::ZERO)` = brak różnic, `None` = nie da się zawęzić (zmiana tła
+    /// albo struktury clipów) i wołający musi przyjąć całą powierzchnię.
+    ///
+    /// Prostokąty są **nadmiarowe**, nigdy za małe: nadmiar kosztuje odczyt kilku
+    /// dodatkowych pikseli, a zbyt wąski prostokąt zostawiłby na ekranie stare piksele.
+    pub fn damage_bounds(&self, next: &Scene, text: &TextEngine) -> Option<Rect> {
+        if self.commands.len() != next.commands.len() {
+            return None;
+        }
+        let mut acc: Option<Rect> = None;
+        for (a, b) in self.commands.iter().zip(next.commands.iter()) {
+            if same_command(a, b) {
+                continue;
+            }
+            let (Some(ra), Some(rb)) = (command_area(a, text), command_area(b, text)) else {
+                return None;
+            };
+            let area = ra.union(&rb);
+            acc = Some(match acc {
+                Some(r) => r.union(&area),
+                None => area,
+            });
+        }
+        Some(acc.unwrap_or(Rect::ZERO))
+    }
 }
 
 fn same_command(a: &DrawCommand, b: &DrawCommand) -> bool {
@@ -398,6 +428,95 @@ fn same_command(a: &DrawCommand, b: &DrawCommand) -> bool {
         }
         _ => a == b,
     }
+}
+
+/// Nadmiarowy prostokąt zajmowany przez pojedyncze polecenie.
+///
+/// `None` = polecenie może zmienić dowolny piksel (tło pulpitu, struktura clipów).
+pub(crate) fn command_area(cmd: &DrawCommand, text: &TextEngine) -> Option<Rect> {
+    match cmd {
+        DrawCommand::Background { .. } | DrawCommand::PopClip => None,
+        DrawCommand::FillRect { rect, .. }
+        | DrawCommand::FillRoundedRect { rect, .. }
+        | DrawCommand::Image { rect, .. }
+        | DrawCommand::ImageDmabuf { rect, .. }
+        | DrawCommand::PushClip { rect }
+        | DrawCommand::PushClipRounded { rect, .. } => Some(*rect),
+        DrawCommand::StrokeRoundedRect { rect, width, .. } => {
+            Some(pad_rect(*rect, width * 0.5 + 1.0))
+        }
+        DrawCommand::StrokeLine {
+            from, to, width, ..
+        } => {
+            let pad = width * 0.5 + 2.0;
+            let (x0, x1) = (from.x.min(to.x), from.x.max(to.x));
+            let (y0, y1) = (from.y.min(to.y), from.y.max(to.y));
+            Some(Rect::from_xywh(
+                x0 - pad,
+                y0 - pad,
+                x1 - x0 + 2.0 * pad,
+                y1 - y0 + 2.0 * pad,
+            ))
+        }
+        DrawCommand::FillCircle { center, radius, .. } => Some(circle_rect(*center, *radius)),
+        DrawCommand::StrokeCircle {
+            center,
+            radius,
+            width,
+            ..
+        } => Some(circle_rect(*center, radius + width * 0.5 + 1.0)),
+        DrawCommand::StrokePolyline { points, width, .. } => {
+            points_bounds(points, width * 0.5 + 2.0)
+        }
+        DrawCommand::FillPolygon { points, .. } => points_bounds(points, 2.0),
+        DrawCommand::Text(run) => {
+            let m = text.measure(&run.text, run.size, run.weight);
+            // `origin.y` to linia bazowa; zapas na akcenty, ogonki i podkreślenia.
+            let top = run.origin.y - run.size * 1.5;
+            let h = m.height.max(run.size) + run.size * 0.9;
+            Some(Rect::from_xywh(run.origin.x - 3.0, top, m.width + 6.0, h))
+        }
+    }
+}
+
+fn pad_rect(r: Rect, pad: f64) -> Rect {
+    Rect::from_xywh(
+        r.x() - pad,
+        r.y() - pad,
+        r.width() + 2.0 * pad,
+        r.height() + 2.0 * pad,
+    )
+}
+
+fn circle_rect(center: Point, radius: f64) -> Rect {
+    Rect::from_xywh(
+        center.x - radius,
+        center.y - radius,
+        2.0 * radius,
+        2.0 * radius,
+    )
+}
+
+fn points_bounds(points: &[Point], pad: f64) -> Option<Rect> {
+    let mut x0 = f64::INFINITY;
+    let mut y0 = f64::INFINITY;
+    let mut x1 = f64::NEG_INFINITY;
+    let mut y1 = f64::NEG_INFINITY;
+    for p in points {
+        x0 = x0.min(p.x);
+        y0 = y0.min(p.y);
+        x1 = x1.max(p.x);
+        y1 = y1.max(p.y);
+    }
+    if !x0.is_finite() {
+        return None;
+    }
+    Some(Rect::from_xywh(
+        x0 - pad,
+        y0 - pad,
+        x1 - x0 + 2.0 * pad,
+        y1 - y0 + 2.0 * pad,
+    ))
 }
 
 #[cfg(test)]
@@ -457,5 +576,38 @@ mod tests {
         let mut e = Scene::new();
         e.background(image);
         assert!(d.same_as(&e));
+    }
+
+    #[test]
+    fn damage_bounds_narrows_to_changed_commands() {
+        let text = TextEngine::none();
+        let scene = |second: Color| {
+            let mut s = Scene::new();
+            s.fill_rect(Rect::from_xywh(0.0, 0.0, 10.0, 10.0), Color::BLACK);
+            s.fill_rect(Rect::from_xywh(50.0, 50.0, 10.0, 10.0), second);
+            s
+        };
+        let a = scene(Color::BLACK);
+        assert_eq!(a.damage_bounds(&a.clone(), &text), Some(Rect::ZERO));
+
+        let b = scene(Color::WHITE);
+        let d = a.damage_bounds(&b, &text).expect("zawężony prostokąt");
+        assert_eq!(
+            (d.x(), d.y(), d.width(), d.height()),
+            (50.0, 50.0, 10.0, 10.0),
+            "tylko zmienione polecenie"
+        );
+
+        // Inna liczba poleceń = nie da się zawęzić.
+        let mut c = a.clone();
+        c.fill_rect(Rect::from_xywh(0.0, 0.0, 1.0, 1.0), Color::BLACK);
+        assert_eq!(a.damage_bounds(&c, &text), None);
+
+        // Zmiana tła może zmienić dowolny piksel.
+        let mut bg1 = Scene::new();
+        bg1.background(Arc::new(ImageData::empty(4, 4)));
+        let mut bg2 = Scene::new();
+        bg2.background(Arc::new(ImageData::empty(4, 4)));
+        assert_eq!(bg1.damage_bounds(&bg2, &text), None);
     }
 }

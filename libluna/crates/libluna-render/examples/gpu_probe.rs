@@ -115,11 +115,24 @@ fn main() {
     let readback = f64::from(gpu.readback_ms());
     let cpu_desktop = run(&desktop, &mut cpu);
 
+    // Ten sam pulpit, ale odczyt z GPU ograniczony do małego prostokąta — tak
+    // wygląda typowa zmiana (zegar w panelu, kursor tekstowy, podświetlenie).
+    let small = Rect::from_xywh(240.0, 160.0, 320.0, 160.0);
+    let gpu_damage = {
+        let t = std::time::Instant::now();
+        for _ in 0..iters {
+            gpu.draw_damage(&desktop, 1.0, bg, Some(small));
+        }
+        t.elapsed().as_secs_f64() * 1000.0 / f64::from(iters)
+    };
+    let damage_readback = f64::from(gpu.readback_ms());
+
     if json {
         println!(
             "{{\"ok\":true,\"gpu\":{},\"gl\":{},\"egl\":{},\"dmabuf_import\":{},\
              \"windows_gpu_ms\":{gpu_windows:.2},\"windows_cpu_ms\":{cpu_windows:.2},\
-             \"desktop_gpu_ms\":{gpu_desktop:.2},\"desktop_cpu_ms\":{cpu_desktop:.2}}}",
+             \"desktop_gpu_ms\":{gpu_desktop:.2},\"desktop_cpu_ms\":{cpu_desktop:.2},\
+             \"desktop_damage_gpu_ms\":{gpu_damage:.2}}}",
             json_str(&info.renderer),
             json_str(&info.version),
             json_str(&info.egl_version),
@@ -148,6 +161,10 @@ fn main() {
         "  z tego readback (glReadPixels, bez zero-copy): {:.2} ms, sam render ≈ {:.2} ms",
         readback,
         (gpu_desktop - readback).max(0.0)
+    );
+    println!(
+        "  desktop + damage 320×160 (tylko ten prostokąt z GPU): {:6.2} ms (readback {:.2} ms)",
+        gpu_damage, damage_readback
     );
     println!(
         "  GPU desktop → {:.1} fps, CPU desktop → {:.1} fps",

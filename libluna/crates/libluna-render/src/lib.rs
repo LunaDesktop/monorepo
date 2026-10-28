@@ -25,7 +25,7 @@ pub mod svg;
 pub mod text;
 pub mod wallpaper;
 
-pub use damage::{diff_bounds, DamageRect};
+pub use damage::{diff_bounds, diff_bounds_in, DamageRect};
 pub use renderer::Renderer;
 pub use scene::{DmabufImage, DmabufPlane, DrawCommand, ImageData, Scene, TextRun};
 pub use software::SoftwareRenderer;

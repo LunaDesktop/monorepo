@@ -170,9 +170,13 @@ Dlatego kolejność to **damage → mniej komend → ewentualnie GPU**.
       Round-trip testowany w `libluna-render` (eksport MESA → import → piksele).
 - [ ] Test z realnym klientem GPU (Zed) i formaty wieloplanowe (wideo).
 - [ ] Ścieżki natywnie (ikony, kursor) — ostatnie warstwy CPU.
-- [ ] Readback z damage, kompozycja GPU w trybie DRM i zero-copy na Mesa.
-- [ ] Pełny damage tracking: `Scene`/widgety raportują prostokąty uszkodzeń, renderer
-      nie rysuje całej sceny (dziś nadal budujemy ją od zera).
+- [x] **Readback z damage**: `Scene::damage_bounds` wylicza konserwatywny prostokąt
+      różnicy scen, `Renderer::draw_damage` czyta z GPU tylko ten region, a
+      `libluna-platform` kopiuje do `wl_shm` tylko zmieniony prostokąt. Pulpit
+      1,66 → **0,48 ms** przy damage 320×160.
+- [ ] Ten sam mechanizm w ścieżce DRM (`present` z prostokątem) i zero-copy na Mesa.
+- [ ] Pełny damage tracking: widgety raportują prostokąty uszkodzeń i renderer nie
+      rysuje całej sceny (dziś nadal budujemy ją od zera; zawężamy tylko odczyt).
 - [ ] Cache ścieżek między klatkami (dziś `tiny-skia` buduje ścieżki od nowa;
       glify są już cache'owane w atlasie `GpuRenderer`).
 - [ ] Benchmark w CI z progiem (`--json` + porównanie do baseline).

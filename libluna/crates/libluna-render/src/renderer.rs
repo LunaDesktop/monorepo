@@ -11,7 +11,7 @@
 //! pikseli/tekstu. Wszystko, co specyficzne dla GPU (tekstury, dmabuf, synchronizacja),
 //! zostaje po stronie implementacji.
 
-use libluna_core::Color;
+use libluna_core::{Color, Rect};
 
 use crate::text::TextEngine;
 use crate::Scene;
@@ -34,6 +34,23 @@ pub trait Renderer {
     /// Rasteryzuje scenę. `background` wypełnia całą powierzchnię przed komendami
     /// (dla powierzchni przezroczystych podawany jest kolor z alfą 0).
     fn draw(&mut self, scene: &Scene, scale: f64, background: Color);
+
+    /// Jak [`Renderer::draw`], ale wołający wie z góry, który obszar się zmienił.
+    ///
+    /// Backend GPU odczyta z pamięci tylko ten prostokąt — piksele poza nim zostają
+    /// z poprzedniej klatki, co jest poprawne, bo nic ich nie zmieniło. `None` =
+    /// cała powierzchnia. Domyślna implementacja ignoruje podpowiedź (CPU i tak ma
+    /// cały bufor w pamięci).
+    fn draw_damage(&mut self, scene: &Scene, scale: f64, background: Color, damage: Option<Rect>) {
+        let _ = damage;
+        self.draw(scene, scale, background);
+    }
+
+    /// Prostokąt (w pikselach fizycznych) odczytany z GPU w ostatniej klatce.
+    /// `None` = cała powierzchnia, `Some(Rect::ZERO)` = nic nie odczytano.
+    fn last_readback(&self) -> Option<Rect> {
+        None
+    }
 
     /// Koduje bieżący bufor do PNG (diagnostyka, zrzuty headless).
     fn encode_png(&self) -> Option<Vec<u8>>;

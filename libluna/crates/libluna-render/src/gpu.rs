@@ -769,6 +769,12 @@ pub struct GpuRenderer {
     textures: HashMap<usize, Tex>,
     frame: u64,
     pixels: Vec<u8>,
+    /// Bufor pomocniczy na odczyt fragmentu klatki (bez odstępu wierszy).
+    scratch: Vec<u8>,
+    /// Damage podany przez `draw_damage` (piksele logiczne), czeka na `finish`.
+    next_damage: Option<Rect>,
+    /// Region faktycznie odczytany z GPU w ostatniej klatce (piksele fizyczne).
+    last_readback: Option<Rect>,
     /// Czas `glReadPixels` z ostatniej klatki (diagnostyka).
     readback_ms: f32,
 }
@@ -827,6 +833,9 @@ impl GpuRenderer {
             glyphs: HashMap::new(),
             frame: 0,
             pixels: Vec::new(),
+            scratch: Vec::new(),
+            next_damage: None,
+            last_readback: None,
             readback_ms: 0.0,
         };
         renderer.create_targets();
@@ -1402,23 +1411,74 @@ impl GpuRenderer {
         unsafe { (self.gl.delete_textures)(1, &tex) };
     }
 
-    fn finish(&mut self) {
-        // `glReadPixels` z FBO i tak czeka na zakończenie rysowania do tego bufora,
-        // więc `glFinish` był tylko dodatkowym pełnym płotem (droższy przy dmabuf,
-        // gdzie GPU ma jeszcze własną pracę). Docelowo jawne `EGL_KHR_fence_sync`,
-        // gdy dojdzie zero-copy wyjście.
+    /// Kończy klatkę: odczyt z GPU do `data()`. Gdy znany jest damage, czyta tylko
+    /// jego prostokąt — reszta `pixels` zostaje z poprzedniej klatki.
+    fn finish(&mut self, damage: Option<Rect>, k: f64) {
         let t = std::time::Instant::now();
-        unsafe {
-            (self.gl.bind_framebuffer)(GL_FRAMEBUFFER, self.fbo);
-            (self.gl.read_pixels)(
-                0,
-                0,
-                self.width as i32,
-                self.height as i32,
-                GL_RGBA,
-                GL_UNSIGNED_BYTE,
-                self.pixels.as_mut_ptr() as *mut c_void,
-            );
+        let full = Rect::from_xywh(0.0, 0.0, self.width as f64, self.height as f64);
+        // `None` = brak wiedzy o zmianach → cała klatka.
+        let region = match damage {
+            None => Some(full),
+            Some(d) => phys_rect(&d, k).intersection(&full),
+        };
+        let Some(region) = region else {
+            // Zmiana poza powierzchnią — nic nie trzeba odczytywać.
+            self.last_readback = Some(Rect::ZERO);
+            self.readback_ms = 0.0;
+            return;
+        };
+        let x0 = region.x().floor().max(0.0) as i32;
+        let y0 = region.y().floor().max(0.0) as i32;
+        let x1 = region.right().ceil().min(self.width as f64) as i32;
+        let y1 = region.bottom().ceil().min(self.height as f64) as i32;
+        let (w, h) = ((x1 - x0).max(0), (y1 - y0).max(0));
+        if w == 0 || h == 0 {
+            self.last_readback = Some(Rect::ZERO);
+            self.readback_ms = 0.0;
+            return;
+        }
+        if w == self.width as i32 && h == self.height as i32 {
+            unsafe {
+                (self.gl.bind_framebuffer)(GL_FRAMEBUFFER, self.fbo);
+                (self.gl.read_pixels)(
+                    0,
+                    0,
+                    w,
+                    h,
+                    GL_RGBA,
+                    GL_UNSIGNED_BYTE,
+                    self.pixels.as_mut_ptr() as *mut c_void,
+                );
+            }
+            self.last_readback = Some(full);
+        } else {
+            let (wu, hu) = (w as usize, h as usize);
+            self.scratch.clear();
+            self.scratch.resize(wu * hu * 4, 0);
+            unsafe {
+                (self.gl.bind_framebuffer)(GL_FRAMEBUFFER, self.fbo);
+                (self.gl.read_pixels)(
+                    x0,
+                    y0,
+                    w,
+                    h,
+                    GL_RGBA,
+                    GL_UNSIGNED_BYTE,
+                    self.scratch.as_mut_ptr() as *mut c_void,
+                );
+            }
+            let stride = self.width as usize * 4;
+            for row in 0..hu {
+                let dst = (y0 as usize + row) * stride + x0 as usize * 4;
+                let src = row * wu * 4;
+                self.pixels[dst..dst + wu * 4].copy_from_slice(&self.scratch[src..src + wu * 4]);
+            }
+            self.last_readback = Some(Rect::from_xywh(
+                f64::from(x0),
+                f64::from(y0),
+                f64::from(w),
+                f64::from(h),
+            ));
         }
         self.readback_ms = t.elapsed().as_secs_f32() * 1000.0;
     }
@@ -1432,6 +1492,15 @@ impl GpuRenderer {
 impl Renderer for GpuRenderer {
     fn name(&self) -> &'static str {
         "gpu"
+    }
+
+    fn draw_damage(&mut self, scene: &Scene, scale: f64, background: Color, damage: Option<Rect>) {
+        self.next_damage = damage;
+        self.draw(scene, scale, background);
+    }
+
+    fn last_readback(&self) -> Option<Rect> {
+        self.last_readback
     }
 
     fn resize(&mut self, width: u32, height: u32) {
@@ -1456,6 +1525,8 @@ impl Renderer for GpuRenderer {
     }
 
     fn draw(&mut self, scene: &Scene, scale: f64, background: Color) {
+        let damage = self.next_damage.take();
+        self.last_readback = None;
         unsafe { (self.gl.bind_framebuffer)(GL_FRAMEBUFFER, self.fbo) };
         if !self.target_ok() {
             return;
@@ -1499,7 +1570,7 @@ impl Renderer for GpuRenderer {
                 DrawCommand::StrokeLine { .. }
                 | DrawCommand::StrokePolyline { .. }
                 | DrawCommand::FillPolygon { .. } => {
-                    extend(&mut run_bounds, command_bounds(cmd, &self.text));
+                    extend(&mut run_bounds, crate::scene::command_area(cmd, &self.text));
                     run.push(cmd.clone());
                 }
                 // Reszta idzie na GPU; bieżący bieg CPU musi być najpierw wstawiony.
@@ -1626,7 +1697,7 @@ impl Renderer for GpuRenderer {
             }
         }
         self.flush_run(&mut run, &mut run_bounds, k, &clip_stack);
-        self.finish();
+        self.finish(damage, k);
         self.evict_textures();
         if self.gl.error() != 0 {
             // Błąd GL nie może zatrzymać sesji — raportujemy raz na klatkę w `LUNA_GPU_STATS`.
@@ -1851,58 +1922,6 @@ fn translate(cmd: &DrawCommand, dx: f64, dy: f64) -> DrawCommand {
 }
 
 /// Przybliżone granice polecenia (piksele logiczne) — do rozmiaru warstwy CPU.
-fn command_bounds(cmd: &DrawCommand, text: &TextEngine) -> Option<Rect> {
-    match cmd {
-        DrawCommand::Text(run) => {
-            let m = text.measure(&run.text, run.size, run.weight);
-            // `origin.y` to linia bazowa; góra/dół z zapasem na akcenty i ogonki.
-            let top = run.origin.y - run.size * 1.25;
-            let h = m.height.max(run.size) + run.size * 0.6;
-            Some(Rect::from_xywh(run.origin.x - 2.0, top, m.width + 4.0, h))
-        }
-        DrawCommand::StrokeLine {
-            from, to, width, ..
-        } => {
-            let pad = width * 0.5 + 2.0;
-            let (x0, x1) = (from.x.min(to.x), from.x.max(to.x));
-            let (y0, y1) = (from.y.min(to.y), from.y.max(to.y));
-            Some(Rect::from_xywh(
-                x0 - pad,
-                y0 - pad,
-                x1 - x0 + 2.0 * pad,
-                y1 - y0 + 2.0 * pad,
-            ))
-        }
-        DrawCommand::StrokePolyline { points, width, .. } => {
-            bounds_of_points(points, width * 0.5 + 2.0)
-        }
-        DrawCommand::FillPolygon { points, .. } => bounds_of_points(points, 2.0),
-        _ => None,
-    }
-}
-
-fn bounds_of_points(points: &[Point], pad: f64) -> Option<Rect> {
-    let mut x0 = f64::INFINITY;
-    let mut y0 = f64::INFINITY;
-    let mut x1 = f64::NEG_INFINITY;
-    let mut y1 = f64::NEG_INFINITY;
-    for p in points {
-        x0 = x0.min(p.x);
-        y0 = y0.min(p.y);
-        x1 = x1.max(p.x);
-        y1 = y1.max(p.y);
-    }
-    if !x0.is_finite() {
-        return None;
-    }
-    Some(Rect::from_xywh(
-        x0 - pad,
-        y0 - pad,
-        x1 - x0 + 2.0 * pad,
-        y1 - y0 + 2.0 * pad,
-    ))
-}
-
 fn extend(acc: &mut Option<Rect>, r: Option<Rect>) {
     let Some(r) = r else { return };
     *acc = match *acc {
@@ -2182,6 +2201,53 @@ mod tests {
     fn pixel(gpu: &GpuRenderer, x: usize, y: usize) -> (u8, u8, u8) {
         let i = (y * 64 + x) * 4;
         (gpu.data()[i], gpu.data()[i + 1], gpu.data()[i + 2])
+    }
+
+    /// Odczyt z damage: tylko wskazany prostokąt trafia do bufora, reszta zostaje
+    /// z poprzedniej klatki (tak działa kompozycja przy małych zmianach).
+    #[test]
+    fn partial_readback_keeps_previous_pixels() {
+        if !available() {
+            eprintln!("pominięto: brak EGL/GPU");
+            return;
+        }
+        let mut gpu = match GpuRenderer::new(64, 64) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("pominięto: {e}");
+                return;
+            }
+        };
+        let red = Color::from_rgba8(0xff, 0x00, 0x00, 0xff);
+        let blue = Color::from_rgba8(0x00, 0x00, 0xff, 0xff);
+        let mut first = Scene::new();
+        first.fill_rect(Rect::from_xywh(4.0, 4.0, 16.0, 16.0), red);
+        gpu.draw(&first, 1.0, Color::BLACK);
+        assert_eq!(pixel(&gpu, 8, 8), (0xff, 0x00, 0x00));
+
+        // Druga klatka zmienia tylko prawy dolny róg.
+        let mut second = Scene::new();
+        second.fill_rect(Rect::from_xywh(4.0, 4.0, 16.0, 16.0), red);
+        second.fill_rect(Rect::from_xywh(40.0, 40.0, 8.0, 8.0), blue);
+        gpu.draw_damage(
+            &second,
+            1.0,
+            Color::BLACK,
+            Some(Rect::from_xywh(36.0, 36.0, 16.0, 16.0)),
+        );
+        assert_eq!(pixel(&gpu, 44, 44), (0x00, 0x00, 0xff), "nowy piksel");
+        assert_eq!(
+            pixel(&gpu, 8, 8),
+            (0xff, 0x00, 0x00),
+            "piksel poza damage musi zostać z poprzedniej klatki"
+        );
+        let region = gpu.last_readback().expect("region odczytu");
+        assert!(region.width() <= 16.0 && region.height() <= 16.0);
+
+        // Pusty damage = brak odczytu, bufor bez zmian.
+        gpu.draw_damage(&second, 1.0, Color::BLACK, Some(Rect::ZERO));
+        assert_eq!(pixel(&gpu, 8, 8), (0xff, 0x00, 0x00));
+        assert_eq!(gpu.last_readback(), Some(Rect::ZERO));
     }
 
     /// Tekst musi iść z atlasu glifów (bez warstwy CPU) i być widoczny także

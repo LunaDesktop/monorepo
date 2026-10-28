@@ -29,8 +29,9 @@ GLES 3.2, **EGL surfaceless** (bez X11/Waylanda), 1920×1080:
 
 Wniosek: przy 30 oknach GPU jest ~36× szybsze, a realistyczny pulpit z tekstem
 (paski SSD) ~8× — mimo że **tekst** jest już rysowany glifami z atlasu (bez warstw
-CPU), a wektory nadal idą przez małe warstwy CPU. Sam render to ~0,40 ms; pozostałe
-~1,09 ms to `glReadPixels` (wyjście bez zero-copy) — patrz sekcja 4.
+CPU), a wektory nadal idą przez małe warstwy CPU. Sam render to ~0,4–0,6 ms; reszta
+to `glReadPixels` (wyjście bez zero-copy). Zawężenie odczytu do zmian (damage
+320×160) zbija całą klatkę pulpitu z 1,66 do **0,48 ms** — patrz sekcja 4.
 
 ### Dostępne rozszerzenia (ta maszyna)
 
@@ -66,6 +67,7 @@ klienci Wayland (wl_shm; dmabuf — etap 2)
               ├─ GPU: tekst z atlasu glifów (krycie w alfie, kolor z uniformu)
               ├─ CPU: wektory (ikony, kursor) → małe warstwy wstawiane w kolejności z
               └─ wyjście: glReadPixels → wl_shm (nested) / dumb buffer (DRM)
+                        (tylko region damage, gdy wołający go zna)
 ```
 
 Widgety i aplikacje **nie wiedzą** o EGL. Backend wchodzi wyłącznie za `Renderer`,
@@ -172,12 +174,16 @@ własny uniform `round_r`, a rozmiar clipu idzie w `zw`; pilnuje tego test
    zamiast readbacku.
 2. Na NVIDIA bez GBM: pozostaje readback (1,09 ms na 1080p — akceptowalne) albo
    `libnvidia-egl-gbm`, gdy dostępne.
-3. **Readback tylko z regionu uszkodzenia** (damage): dziś `glReadPixels` czyta całą
-   klatkę (~1,09 ms przy 1080p, ~4× więcej przy 4K), choć panel/tytuł zmieniają
-   kilkaset pikseli. Wymaga podania damage **przed** rysowaniem (z różnicy scen,
-   nie z porównania pikseli) i `present` z prostokątem w backendzie DRM.
-4. Kryterium: brak kopii klatki przez CPU na Intel/AMD; tear-free przez page-flip;
-   przy samym ruchu kursora i animacji panelu odczyt ≤ 10% klatki.
+3. [x] **Readback tylko z regionu uszkodzenia** (platforma/nested): `Renderer::draw_damage`
+   + `Scene::damage_bounds` (konserwatywny prostokąt różnicy scen, tekst mierzony
+   silnikiem tekstu). `GpuRenderer` czyta z FBO tylko ten prostokąt, a
+   `libluna-platform` kopiuje potem **tylko ten region** do `wl_shm` i aktualizuje
+   `last_frame` lokalnie. Pomiar: pulpit 1,66 ms → **0,48 ms** przy damage 320×160
+   (readback 1,08 → 0,22 ms). Zmiana rozmiaru, skali albo **tła** (poza sceną)
+   wymusza pełną klatkę — inaczej zostałby stary obraz.
+4. Do zrobienia: ten sam mechanizm w ścieżce DRM (`present` z prostokątem na
+   dumb bufferze). Kryterium: przy animacji panelu odczyt ≤ 10% klatki.
+   Brak kopii klatki przez CPU na Intel/AMD (zero-copy) i tear-free przez page-flip.
 
 ## 4. Ryzyka i zasady
 
@@ -202,8 +208,9 @@ własny uniform `round_r`, a rozmiar clipu idzie w `zw`; pilnuje tego test
    z modyfikatorem NVIDII zaimportowany i wyświetlony.
 5. [x] Kompozycja GPU w trybie DRM (kontekst per monitor, render sekwencyjny,
    readback do dumb buffera, zrzuty z aktywnego backendu).
-6. [x] Atlas glifów: tekst bez warstw CPU (render pulpitu 0,40 ms; readback 1,09 ms).
+6. [x] Atlas glifów: tekst bez warstw CPU (render pulpitu 0,40 ms; readback 1,08 ms).
 7. [ ] Ścieżki natywnie (ikony, kursor) — ostatnie warstwy CPU.
-8. [ ] Readback z damage + zero-copy DRM (etap 4) na Mesa; NVIDIA — readback.
-9. [ ] Fence (`EGL_KHR_fence_sync`) zamiast synchronicznego readbacku, formaty
-   wieloplanowe (wideo), dmabuf dla `wlr-layer-shell`.
+8. [x] Readback z damage w platformie/nested (pulpit 1,66 → 0,48 ms przy 320×160).
+9. [ ] Readback z damage w DRM + zero-copy na Mesa; NVIDIA — readback.
+10. [ ] Fence (`EGL_KHR_fence_sync`) zamiast synchronicznego readbacku, formaty
+    wieloplanowe (wideo), dmabuf dla `wlr-layer-shell`.

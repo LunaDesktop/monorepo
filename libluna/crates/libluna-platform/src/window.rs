@@ -21,7 +21,8 @@ use libluna_core::{
     PointerEvent, Rect, ScrollEvent, Size, Theme, ThemePreference, ThemeSettings, WindowEvent,
 };
 use libluna_render::{
-    diff_bounds, gpu::GpuRenderer, Renderer, Scene, SoftwareRenderer, TextEngine,
+    diff_bounds, diff_bounds_in, gpu::GpuRenderer, DamageRect, Renderer, Scene, SoftwareRenderer,
+    TextEngine,
 };
 
 use smithay_client_toolkit::reexports::calloop::{EventLoop, LoopHandle};
@@ -101,6 +102,13 @@ impl WakeHandle {
     /// Budzi pętlę zdarzeń (bezpieczne z dowolnego wątku).
     pub fn wake(&self) {
         self.ping.ping();
+    }
+
+    /// Uchwyt bez podłączonej pętli — dla testów i trybów headless.
+    #[doc(hidden)]
+    pub fn detached() -> Self {
+        let (ping, _source) = calloop::ping::make_ping().expect("calloop ping");
+        Self { ping }
     }
 }
 
@@ -734,6 +742,7 @@ where
         last_scene: Scene::new(),
         last_scene_key: None,
         settings: config.settings,
+        theme_cache: None,
         scene: Scene::new(),
         render: Box::new(render),
         pending_events: Vec::new(),
@@ -875,6 +884,8 @@ struct App {
     /// Rozmiar/skala/tło, dla których `last_scene` jest aktualna.
     last_scene_key: Option<(u32, u32, u64, Color)>,
     settings: ThemeSettings,
+    /// Rozwiązany motyw razem ze stylem z pliku; `None` = trzeba przeliczyć.
+    theme_cache: Option<Theme>,
     scene: Scene,
     render: Box<RenderFn>,
     pending_events: Vec<Event>,
@@ -955,6 +966,7 @@ impl App {
         if stamp.is_some() && stamp != self.theme_stamp {
             self.theme_stamp = stamp;
             self.settings = ThemeSettings::load();
+            self.theme_cache = None;
             self.needs_redraw = true;
             if self.stats {
                 eprintln!("luna-platform: przeładowano motyw z pliku");
@@ -963,6 +975,7 @@ impl App {
         let effective = self.system_dark_config || libluna_core::appearance::system_dark();
         if effective != self.system_dark {
             self.system_dark = effective;
+            self.theme_cache = None;
             self.needs_redraw = true;
             if self.stats {
                 eprintln!("luna-platform: system dark = {effective}");
@@ -1010,6 +1023,19 @@ impl App {
         }
     }
 
+    /// Rozwiązuje motyw bieżących ustawień (z ewentualnym stylem z pliku).
+    ///
+    /// Wynik jest cache'owany, bo `resolve_themed` czyta katalogi stylów i plik
+    /// `.theme`; bez tego każda klatka (także panelu) robiłaby I/O.
+    fn resolved_theme(&mut self) -> Theme {
+        if let Some(theme) = self.theme_cache {
+            return theme;
+        }
+        let theme = self.settings.resolve_themed(self.system_dark);
+        self.theme_cache = Some(theme);
+        theme
+    }
+
     fn redraw(&mut self) {
         let now = Instant::now();
         let dt = (now - self.last_tick).as_secs_f64().clamp(0.0, 0.1);
@@ -1021,7 +1047,7 @@ impl App {
         self.frame_requested = false;
 
         self.settings.clear_dirty();
-        let mut theme = self.settings.resolve(self.system_dark);
+        let mut theme = self.resolved_theme();
         let t_draw = Instant::now();
         self.render_frame(theme, &events, dt);
 
@@ -1029,7 +1055,8 @@ impl App {
         let mut guard = 0;
         while self.settings.is_dirty() && guard < 4 {
             self.settings.clear_dirty();
-            theme = self.settings.resolve(self.system_dark);
+            self.theme_cache = None;
+            theme = self.resolved_theme();
             self.render_frame(theme, &[], dt);
             guard += 1;
         }
@@ -1296,9 +1323,19 @@ impl App {
         // Scena identyczna z poprzednią (i ten sam rozmiar/skala/tło) → nie ma po co
         // rasteryzować. `present` i tak pominie commit, ale to oszczędza `draw`.
         let key = (phys_w, phys_h, scale.to_bits(), bg);
-        let same = self.last_scene_key == Some(key) && self.scene.same_as(&self.last_scene);
+        let same_key = self.last_scene_key == Some(key);
+        let same = same_key && self.scene.same_as(&self.last_scene);
         if !same {
-            self.renderer.draw(&self.scene, scale, bg);
+            // Zawężenie odczytu z GPU: konserwatywny prostokąt różnicy scen.
+            // Gdy zmienił się rozmiar, skala albo **tło** (kolor nie jest częścią
+            // `Scene`), bierzemy całą klatkę — inaczej zostałby stary obraz.
+            let damage = if same_key {
+                self.last_scene
+                    .damage_bounds(&self.scene, self.renderer.text_engine())
+            } else {
+                None
+            };
+            self.renderer.draw_damage(&self.scene, scale, bg, damage);
             std::mem::swap(&mut self.scene, &mut self.last_scene);
             self.last_scene_key = Some(key);
         }
@@ -1313,7 +1350,20 @@ impl App {
         // Damage lite: porównanie z poprzednią klatką pozwala pominąć commit,
         // gdy nic się nie zmieniło, i zawęzić `damage_buffer` do realnego obszaru.
         let pixels = self.renderer.data();
-        let Some(damage) = diff_bounds(&self.last_frame, pixels, phys_w, phys_h) else {
+        // Backend mógł odczytać z GPU tylko fragment klatki — wtedy i diff robimy
+        // w tym fragmencie (reszta bufora jest identyczna z poprzednią klatką).
+        let damage = match self.renderer.last_readback() {
+            Some(r) if r.width() < 1.0 || r.height() < 1.0 => None,
+            Some(r) => diff_bounds_in(
+                &self.last_frame,
+                pixels,
+                phys_w,
+                phys_h,
+                readback_region(r, phys_w, phys_h),
+            ),
+            None => diff_bounds(&self.last_frame, pixels, phys_w, phys_h),
+        };
+        let Some(damage) = damage else {
             // Klatka identyczna — bez kopiowania i bez nowego bufora. Commit jest
             // potrzebny tylko wtedy, gdy zmienił się inny stan powierzchni (np. region
             // wejścia), bo inaczej zmiana czekałaby do najbliższej zmiany pikseli.
@@ -1374,37 +1424,17 @@ impl App {
             .min(canvas.len() / 4)
             .min(pixels.len() / 4);
         let direct = matches!(format, wl_shm::Format::Abgr8888 | wl_shm::Format::Xbgr8888);
-        if direct {
-            // Pamięć już w kolejności RGBA — kopiujemy całość jednym `memcpy`.
-            canvas[..count * 4].copy_from_slice(&pixels[..count * 4]);
-        } else {
-            #[cfg(target_endian = "little")]
-            {
-                // Po 4 bajty naraz (u32): podmiana R↔B to kilka operacji bitowych.
-                // Bajt-po-bajcie na 1920×680 zajmowało ~2.5 ms **na każdą klatkę**.
-                let src32 =
-                    unsafe { std::slice::from_raw_parts(pixels.as_ptr() as *const u32, count) };
-                let dst32 = unsafe {
-                    std::slice::from_raw_parts_mut(canvas.as_mut_ptr() as *mut u32, count)
-                };
-                for (d, &s) in dst32.iter_mut().zip(src32.iter()) {
-                    *d = (s & 0xFF00_FF00) | ((s & 0x00FF_0000) >> 16) | ((s & 0x0000_00FF) << 16);
-                }
+        // Kopiujemy tylko zmieniony prostokąt — reszta bufora shm jest już aktualna.
+        let rows = (count / phys_w.max(1) as usize) as u32;
+        let damage = clamp_damage(damage, phys_w, rows);
+        if damage.width == 0 || damage.height == 0 {
+            if force_commit {
+                self.target.commit();
             }
-            #[cfg(not(target_endian = "little"))]
-            {
-                for (dst, src) in canvas
-                    .chunks_exact_mut(4)
-                    .zip(pixels.chunks_exact(4))
-                    .take(count)
-                {
-                    dst[0] = src[2];
-                    dst[1] = src[1];
-                    dst[2] = src[0];
-                    dst[3] = src[3];
-                }
-            }
+            self.last_present = Instant::now();
+            return false;
         }
+        copy_region(canvas, pixels, phys_w, damage, direct);
 
         let surface = self.target.surface();
         surface.damage_buffer(
@@ -1415,8 +1445,12 @@ impl App {
         );
         buffer.attach_to(surface).expect("buffer attach");
         self.target.commit();
-        self.last_frame.clear();
-        self.last_frame.extend_from_slice(pixels);
+        if self.last_frame.len() == pixels.len() {
+            copy_region(&mut self.last_frame, pixels, phys_w, damage, true);
+        } else {
+            self.last_frame.clear();
+            self.last_frame.extend_from_slice(pixels);
+        }
         self.last_present = Instant::now();
         true
     }
@@ -1455,6 +1489,69 @@ impl App {
                 .pending_events
                 .iter()
                 .all(|e| matches!(e, Event::PointerMotion { .. } | Event::PointerLeave))
+    }
+}
+
+/// Zamienia prostokąt odczytu z backendu (piksele fizyczne) na `DamageRect`
+/// ograniczony do powierzchni.
+fn readback_region(rect: libluna_core::Rect, width: u32, height: u32) -> DamageRect {
+    clamp_damage(
+        DamageRect {
+            x: rect.x().max(0.0) as u32,
+            y: rect.y().max(0.0) as u32,
+            width: rect.width().max(0.0) as u32,
+            height: rect.height().max(0.0) as u32,
+        },
+        width,
+        height,
+    )
+}
+
+/// Ogranicza prostokąt do rozmiaru bufora (nigdy poza pamięć).
+fn clamp_damage(d: DamageRect, width: u32, height: u32) -> DamageRect {
+    let x = d.x.min(width);
+    let y = d.y.min(height);
+    DamageRect {
+        x,
+        y,
+        width: d.width.min(width - x),
+        height: d.height.min(height - y),
+    }
+}
+
+/// Kopiuje z `src` do `dst` tylko prostokąt `damage` (RGB(A) → docelowa kolejność).
+fn copy_region(dst: &mut [u8], src: &[u8], width: u32, damage: DamageRect, direct: bool) {
+    let stride = width as usize;
+    for row in damage.y as usize..(damage.y + damage.height) as usize {
+        let start = row * stride + damage.x as usize;
+        let end = start + damage.width as usize;
+        let (Some(d), Some(s)) = (dst.get_mut(start * 4..end * 4), src.get(start * 4..end * 4))
+        else {
+            return;
+        };
+        if direct {
+            d.copy_from_slice(s);
+            continue;
+        }
+        #[cfg(target_endian = "little")]
+        {
+            // Po 4 bajty naraz (u32): podmiana R↔B to kilka operacji bitowych.
+            let s32 = unsafe { std::slice::from_raw_parts(s.as_ptr() as *const u32, end - start) };
+            let d32 =
+                unsafe { std::slice::from_raw_parts_mut(d.as_mut_ptr() as *mut u32, end - start) };
+            for (dd, &ss) in d32.iter_mut().zip(s32.iter()) {
+                *dd = (ss & 0xFF00_FF00) | ((ss & 0x00FF_0000) >> 16) | ((ss & 0x0000_00FF) << 16);
+            }
+        }
+        #[cfg(not(target_endian = "little"))]
+        {
+            for (dd, ss) in d.chunks_exact_mut(4).zip(s.chunks_exact(4)) {
+                dd[0] = ss[2];
+                dd[1] = ss[1];
+                dd[2] = ss[0];
+                dd[3] = ss[3];
+            }
+        }
     }
 }
 

@@ -727,10 +727,10 @@ Categories=Network;WebBrowser;
 
     #[test]
     fn hides_entries_with_missing_exec_binary() {
-        // Tak wygląda wpis Chrome na tej maszynie: `Exec` na brakującą binarkę,
-        // bez `TryExec`.
+        // `Exec` na binarkę, której nie ma na tej maszynie (nie hardkodujemy
+        // `/usr/bin/google-chrome-stable` — po instalacji Chrome test padał).
         let chrome = parse(
-            "[Desktop Entry]\nType=Application\nName=Chrome\nExec=/usr/bin/google-chrome-stable %U\n",
+            "[Desktop Entry]\nType=Application\nName=Chrome\nExec=/usr/bin/__luna_brak_tego_programu__ %U\n",
             None,
         )
         .unwrap();
