@@ -108,6 +108,76 @@ fn paint_wallpaper_control(
     }
 }
 
+/// Podgląd motywu: miniaturowe okno w barwach akcentu i kilka ikon.
+fn paint_theme_preview(
+    ctx: &mut PaintCtx,
+    rect: Rect,
+    accent: libluna_core::Accent,
+    icons: &[IconName],
+    theme: &Theme,
+    icon_theme: IconTheme,
+) {
+    let radius = theme.radius.medium;
+    ctx.scene
+        .fill_rounded_rect(rect, radius, theme.colors.card_bg);
+    ctx.scene
+        .stroke_rounded_rect(rect, radius, 1.0, theme.colors.border);
+
+    let bar = Rect::from_xywh(rect.x() + 6.0, rect.y() + 6.0, 6.0, rect.height() - 12.0);
+    ctx.scene.fill_rounded_rect(bar, 3.0, accent.color());
+
+    let win = Rect::from_xywh(rect.x() + 20.0, rect.y() + 8.0, 76.0, rect.height() - 16.0);
+    ctx.scene
+        .fill_rounded_rect(win, theme.radius.small, theme.colors.shade);
+    ctx.scene.fill_rect(
+        Rect::from_xywh(win.x() + 8.0, win.y() + 8.0, 30.0, 3.0),
+        theme.colors.text.scale_alpha(0.55),
+    );
+    for index in 0..2 {
+        ctx.scene.fill_rect(
+            Rect::from_xywh(
+                win.x() + 8.0,
+                win.y() + 17.0 + index as f64 * 7.0,
+                44.0 - index as f64 * 10.0,
+                3.0,
+            ),
+            theme.colors.dim_text.scale_alpha(0.5),
+        );
+    }
+    ctx.scene.fill_rounded_rect(
+        Rect::from_xywh(win.x() + 8.0, win.bottom() - 14.0, 24.0, 8.0),
+        theme.radius.small,
+        accent.color(),
+    );
+
+    let shown = icons.len().min(4) as f64;
+    let size = 18.0;
+    let gap = 8.0;
+    let total = shown * size + (shown - 1.0).max(0.0) * gap;
+    let left = rect.right() - 8.0 - total;
+    let mono = icon_theme.is_monochrome() || libluna_core::icons::active_icon_set().is_some();
+    for (index, icon) in icons.iter().take(4).enumerate() {
+        let r = Rect::from_xywh(
+            left + index as f64 * (size + gap),
+            rect.center().y - size / 2.0,
+            size,
+            size,
+        );
+        if mono {
+            paint_icon(ctx, *icon, r, theme.colors.text);
+        } else {
+            ctx.scene
+                .fill_rounded_rect(r, theme.radius.small, accent.color().scale_alpha(0.16));
+            paint_icon(
+                ctx,
+                *icon,
+                Rect::from_xywh(r.x() + 4.0, r.y() + 4.0, 10.0, 10.0),
+                accent.color(),
+            );
+        }
+    }
+}
+
 /// Prostokąty okna.
 pub struct Layout {
     pub header: Rect,
@@ -162,6 +232,28 @@ pub fn layout(size: Size, theme: &Theme) -> Layout {
     }
 }
 
+/// Szerokość przycisku „Info” w nagłówku.
+const INFO_BUTTON_W: f64 = 64.0;
+
+/// Prostokąt przycisku „Info” w nagłówku (na lewo od kontrolek okna).
+fn info_button_rect(lay: &Layout, theme: &Theme) -> Rect {
+    let content = HeaderBar::new()
+        .controls(ControlsSide::Right)
+        .controls_layout(lay.header, theme)
+        .content;
+    let height = theme
+        .metrics
+        .button
+        .height
+        .min((lay.header.height() - 8.0).max(20.0));
+    Rect::from_xywh(
+        (content.right() - INFO_BUTTON_W - 4.0).max(content.x()),
+        lay.header.center().y - height / 2.0,
+        INFO_BUTTON_W,
+        height,
+    )
+}
+
 /// Rysuje całą klatkę.
 pub fn paint(app: &SettingsApp, scene: &mut Scene, size: Size, theme: &Theme, text: &TextEngine) {
     let lay = layout(size, theme);
@@ -191,10 +283,21 @@ pub fn paint(app: &SettingsApp, scene: &mut Scene, size: Size, theme: &Theme, te
 
     // Nagłówek okna (kontrolki po prawej).
     HeaderBar::new()
-        .title(tr("Settings"))
+        .title(app.title.clone())
         .title_align(TitleAlign::Start)
         .controls(ControlsSide::Right)
         .paint(&mut ctx, lay.header, app.hover_control);
+
+    // Przejrzysty dostęp do technicznych informacji bieżącej strony.
+    let info_rect = info_button_rect(&lay, theme);
+    let info_variant = if app.info_sheet.is_open() {
+        ButtonVariant::Suggested
+    } else {
+        ButtonVariant::Default
+    };
+    Button::new(tr("Info"))
+        .variant(info_variant)
+        .paint(&mut ctx, info_rect);
 
     // Nawigacja.
     app.nav.paint(&mut ctx, lay.nav);
@@ -227,7 +330,7 @@ pub fn paint(app: &SettingsApp, scene: &mut Scene, size: Size, theme: &Theme, te
     );
 
     // Zawartość strony.
-    let groups = pages::groups(app);
+    let groups = pages::content_groups(app);
     let page = preferences_page(&groups);
     let row_h = ROW_H;
     let mut scroll = app.scroll;
@@ -258,16 +361,26 @@ pub fn paint(app: &SettingsApp, scene: &mut Scene, size: Size, theme: &Theme, te
     ctx.scene.pop_clip();
     scroll.paint_scrollbar(&mut ctx, lay.viewport);
 
-    app.status.paint(&mut ctx, size);
+    if app.info_sheet.is_open() || app.info_sheet.progress() > 0.001 {
+        app.info_sheet.paint(&mut ctx, size);
+        paint_info_sheet(app, &mut ctx, size);
+    }
     if app.picker.is_some() {
         paint_picker(app, &mut ctx, size);
     }
     if app.editor.is_some() {
         paint_editor(app, &mut ctx, size);
     }
+    if app.wallpaper_picker.is_some() {
+        paint_wallpaper_picker(app, &mut ctx, size);
+    }
+    if app.wifi_prompt.is_some() {
+        paint_wifi_prompt(app, &mut ctx, size);
+    }
     if app.admin.is_some() {
         paint_admin(app, &mut ctx, size);
     }
+    app.status.paint(&mut ctx, size);
 }
 
 fn preferences_page(groups: &[Group]) -> PreferencesPage {
@@ -403,6 +516,9 @@ fn paint_row(ctx: &mut PaintCtx, row: &pages::Row, rect: Rect, last: bool, icon_
                 }
             }
         }
+        Control::ThemePreview { accent, icons } => {
+            paint_theme_preview(ctx, control, *accent, icons, &theme, icon_theme);
+        }
         Control::Wallpaper { path, selected } => {
             paint_wallpaper_control(ctx, control, path, *selected, &theme);
         }
@@ -466,6 +582,7 @@ fn control_width(control: &Control, theme: &Theme, text: &TextEngine) -> f64 {
             let n = icons.len() as f64;
             n * 20.0 + (n - 1.0).max(0.0) * 8.0
         }
+        Control::ThemePreview { .. } => 248.0,
         Control::Wallpaper { .. } => 96.0,
         Control::Button { label, .. } => Button::new(label.clone()).width(text, theme),
     }
@@ -531,6 +648,12 @@ fn control_rect(control: &Control, rect: Rect, theme: &Theme, text: &TextEngine)
             suffix.center().y - 12.0,
             width,
             24.0,
+        ),
+        Control::ThemePreview { .. } => Rect::from_xywh(
+            suffix.right() - width,
+            suffix.center().y - 26.0,
+            width,
+            52.0,
         ),
         Control::Wallpaper { .. } => Rect::from_xywh(
             suffix.right() - width,
@@ -613,6 +736,14 @@ pub fn handle_events(
         handle_admin_events(app, events, size, theme);
         return;
     }
+    if app.wifi_prompt.is_some() {
+        handle_wifi_events(app, events, size, theme);
+        return;
+    }
+    if app.wallpaper_picker.is_some() {
+        handle_wallpaper_events(app, events, size, theme);
+        return;
+    }
     if app.picker.is_some() {
         handle_picker_events(app, events, size, theme);
         return;
@@ -621,10 +752,14 @@ pub fn handle_events(
         handle_editor_events(app, events, size, theme);
         return;
     }
+    if app.info_sheet.is_open() {
+        handle_info_events(app, events, size, theme, text);
+        return;
+    }
 
     let lay = layout(size, theme);
     let header_bar = HeaderBar::new().controls(ControlsSide::Right);
-    let groups = pages::groups(app);
+    let groups = pages::content_groups(app);
     let page = preferences_page(&groups);
     app.scroll
         .set_content_height(page.content_height(ROW_H, theme));
@@ -657,6 +792,15 @@ pub fn handle_events(
                         WindowControl::Minimize => app.pending.minimize = true,
                         WindowControl::Maximize => app.pending.maximize = true,
                         WindowControl::Close => app.pending.close = true,
+                    }
+                    continue;
+                }
+                let info_rect = info_button_rect(&lay, theme);
+                if Button::new(tr("Info")).click_at(info_rect, p) {
+                    if app.info_sheet.is_open() {
+                        app.close_info_sheet();
+                    } else {
+                        app.open_info_sheet();
                     }
                     continue;
                 }
@@ -712,6 +856,7 @@ fn apply_paste(app: &mut SettingsApp, events: &[Event]) {
             TextPasteTarget::PickerQuery => picker_insert(app, text),
             TextPasteTarget::EditorEntry => editor_insert(app, text),
             TextPasteTarget::AdminPassword => admin_insert(app, text),
+            TextPasteTarget::WifiPassword => wifi_insert(app, text),
         }
     }
 }
@@ -743,6 +888,7 @@ fn handle_click(app: &mut SettingsApp, hit: RowHit, p: Point, theme: &Theme) {
             }
         }
         Control::IconStrip(_) => {}
+        Control::ThemePreview { .. } => {}
         Control::Switch(_) => {
             // Klik w cały wiersz jest wygodniejszy niż trafianie w mały przełącznik.
             if hit.rect.contains(p) || hit.control.contains(p) {
@@ -924,7 +1070,7 @@ fn handle_picker_events(app: &mut SettingsApp, events: &[Event], size: Size, the
             Event::Scroll(scroll) if lay.list.contains(scroll.position) => {
                 let max = picker_max_scroll(app, &lay);
                 if let Some(picker) = &mut app.picker {
-                    picker.scroll = (picker.scroll - scroll.dy * PICKER_ROW_H).clamp(0.0, max);
+                    picker.scroll = (picker.scroll + scroll.dy * PICKER_ROW_H).clamp(0.0, max);
                 }
             }
             Event::Key(key) if key.state == ButtonState::Pressed => {
@@ -1381,10 +1527,532 @@ fn paint_editor(app: &SettingsApp, ctx: &mut PaintCtx, size: Size) {
     Button::new(tr("Cancel")).paint(ctx, lay.cancel);
 }
 
+// ── Panel Info (BottomSheet) ──
+
+/// Wewnętrzny obszar treści panelu Info.
+fn info_content_rect(app: &SettingsApp, size: Size, theme: &Theme) -> Rect {
+    let content = app.info_sheet.content_rect(size, theme);
+    Rect::from_xywh(
+        content.x() + 20.0,
+        content.y() + 8.0,
+        (content.width() - 40.0).max(0.0),
+        (content.height() - 16.0).max(0.0),
+    )
+}
+
+fn paint_info_sheet(app: &SettingsApp, ctx: &mut PaintCtx, size: Size) {
+    let theme = *ctx.theme;
+    let content = info_content_rect(app, size, &theme);
+    let groups = pages::info_groups(app);
+    if groups.is_empty() {
+        ctx.label_center(
+            content.center().x,
+            content.center().y,
+            &tr("No additional information for this page"),
+            theme.typography.body.size,
+            weight::NORMAL,
+            theme.colors.dim_text,
+        );
+        return;
+    }
+
+    let page = preferences_page(&groups);
+    let mut scroll = app.info_scroll;
+    scroll.set_content_height(page.content_height(ROW_H, &theme));
+    let offset = scroll.offset().min(scroll.max_offset(content));
+    let area = Rect::from_xywh(
+        content.x(),
+        content.y() - offset,
+        content.width(),
+        scroll.content_height().max(content.height()),
+    );
+
+    ctx.scene.push_clip(content);
+    let contents = page.paint(ctx, area, ROW_H);
+    for (group, group_rect) in groups.iter().zip(contents.iter()) {
+        for (index, row) in group.rows.iter().enumerate() {
+            let rect = PreferencesGroup::row_rect(*group_rect, index, ROW_H);
+            paint_row(
+                ctx,
+                row,
+                rect,
+                index + 1 == group.rows.len(),
+                app.icons.theme,
+            );
+        }
+    }
+    ctx.scene.pop_clip();
+    scroll.paint_scrollbar(ctx, content);
+}
+
+fn handle_info_events(
+    app: &mut SettingsApp,
+    events: &[Event],
+    size: Size,
+    theme: &Theme,
+    text: &TextEngine,
+) {
+    let groups = pages::info_groups(app);
+    let page = preferences_page(&groups);
+    let content = info_content_rect(app, size, theme);
+    app.info_scroll
+        .set_content_height(page.content_height(ROW_H, theme));
+    app.info_scroll
+        .set_offset(app.info_scroll.offset(), content);
+
+    for event in events {
+        match event {
+            Event::PointerMotion { position, .. } => {
+                app.info_sheet.update_drag(position.y);
+            }
+            Event::PointerButton(button)
+                if button.state == ButtonState::Pressed && button.button == PointerButton::Left =>
+            {
+                let p = button.position;
+                if app.info_sheet.close_at(size, theme, p)
+                    || app.info_sheet.scrim_at(size, theme, p)
+                {
+                    app.close_info_sheet();
+                } else if app.info_sheet.drag_zone_at(size, theme, p) {
+                    app.info_sheet.begin_drag(p.y);
+                } else if content.contains(p) {
+                    let hits = row_hits(&groups, content, theme, text, app.info_scroll.offset());
+                    for hit in hits {
+                        handle_click(app, hit, p, theme);
+                    }
+                }
+            }
+            Event::PointerButton(button)
+                if button.state == ButtonState::Released
+                    && button.button == PointerButton::Left =>
+            {
+                if app.info_sheet.end_drag(theme) {
+                    app.close_info_sheet();
+                }
+            }
+            Event::Scroll(scroll) if content.contains(scroll.position) => {
+                app.info_scroll.on_scroll(scroll.dy * SCROLL_STEP, content);
+            }
+            Event::Key(key) if key.state == ButtonState::Pressed && key.keysym == 0xff1b => {
+                app.close_info_sheet();
+            }
+            _ => {}
+        }
+    }
+}
+
+// ── Wybór tapety z dysku ──
+
+const WALLPAPER_ROW_H: f64 = 34.0;
+
+struct WallpaperLayout {
+    card: Rect,
+    title: Rect,
+    path: Rect,
+    list: Rect,
+    hint: Rect,
+    choose: Rect,
+    cancel: Rect,
+}
+
+fn wallpaper_layout(size: Size, theme: &Theme) -> WallpaperLayout {
+    let w = (size.width - 120.0).clamp(360.0, 640.0);
+    let h = (size.height - 120.0).clamp(320.0, 540.0);
+    let card = Rect::from_xywh((size.width - w) / 2.0, (size.height - h) / 2.0, w, h);
+    let title = Rect::from_xywh(card.x() + 20.0, card.y() + 14.0, card.width() - 40.0, 28.0);
+    let path = Rect::from_xywh(
+        card.x() + 20.0,
+        title.bottom() + 2.0,
+        card.width() - 40.0,
+        20.0,
+    );
+    let button_h = theme.metrics.button.height;
+    let choose = Rect::from_xywh(
+        card.right() - 20.0 - 96.0,
+        card.bottom() - 16.0 - button_h,
+        96.0,
+        button_h,
+    );
+    let cancel = Rect::from_xywh(choose.x() - 8.0 - 96.0, choose.y(), 96.0, button_h);
+    let hint = Rect::from_xywh(
+        card.x() + 20.0,
+        choose.y() - 26.0,
+        card.width() - 40.0,
+        18.0,
+    );
+    let list = Rect::from_xywh(
+        card.x() + 12.0,
+        path.bottom() + 8.0,
+        card.width() - 24.0,
+        (hint.y() - path.bottom() - 14.0).max(0.0),
+    );
+    WallpaperLayout {
+        card,
+        title,
+        path,
+        list,
+        hint,
+        choose,
+        cancel,
+    }
+}
+
+fn wallpaper_row_at(app: &SettingsApp, lay: &WallpaperLayout, p: Point) -> Option<usize> {
+    let picker = app.wallpaper_picker.as_ref()?;
+    if !lay.list.contains(p) {
+        return None;
+    }
+    let index = ((p.y - lay.list.y() + picker.scroll) / WALLPAPER_ROW_H).floor() as usize;
+    (index < picker.entries.len()).then_some(index)
+}
+
+fn wallpaper_max_scroll(app: &SettingsApp, lay: &WallpaperLayout) -> f64 {
+    let count = app
+        .wallpaper_picker
+        .as_ref()
+        .map(|picker| picker.entries.len())
+        .unwrap_or(0) as f64;
+    (count * WALLPAPER_ROW_H - lay.list.height()).max(0.0)
+}
+
+fn handle_wallpaper_events(app: &mut SettingsApp, events: &[Event], size: Size, theme: &Theme) {
+    let lay = wallpaper_layout(size, theme);
+    for event in events {
+        match event {
+            Event::PointerMotion { position, .. } => {
+                let hover = wallpaper_row_at(app, &lay, *position);
+                if let Some(picker) = &mut app.wallpaper_picker {
+                    picker.hover = hover;
+                }
+            }
+            Event::PointerLeave => {
+                if let Some(picker) = &mut app.wallpaper_picker {
+                    picker.hover = None;
+                }
+            }
+            Event::PointerButton(button)
+                if button.state == ButtonState::Pressed && button.button == PointerButton::Left =>
+            {
+                let p = button.position;
+                if lay.cancel.contains(p) || !lay.card.contains(p) {
+                    app.wallpaper_picker = None;
+                } else if lay.choose.contains(p) {
+                    app.choose_wallpaper();
+                } else if let Some(index) = wallpaper_row_at(app, &lay, p) {
+                    app.wallpaper_pick(index);
+                }
+            }
+            Event::Scroll(scroll) if lay.list.contains(scroll.position) => {
+                let max = wallpaper_max_scroll(app, &lay);
+                if let Some(picker) = &mut app.wallpaper_picker {
+                    picker.scroll = (picker.scroll + scroll.dy * WALLPAPER_ROW_H).clamp(0.0, max);
+                }
+            }
+            Event::Key(key) if key.state == ButtonState::Pressed => match key.keysym {
+                0xff1b => app.wallpaper_picker = None,
+                0xff0d | 0xff8d => app.choose_wallpaper(),
+                0xff52 => wallpaper_move(app, -1, lay.list.height()),
+                0xff54 => wallpaper_move(app, 1, lay.list.height()),
+                0xff50 => wallpaper_move(app, -8, lay.list.height()),
+                0xff57 => wallpaper_move(app, 8, lay.list.height()),
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+}
+
+fn wallpaper_move(app: &mut SettingsApp, delta: i64, view_h: f64) {
+    let Some(picker) = &mut app.wallpaper_picker else {
+        return;
+    };
+    if picker.entries.is_empty() {
+        return;
+    }
+    let next = (picker.selected as i64 + delta).clamp(0, picker.entries.len() as i64 - 1) as usize;
+    picker.selected = next;
+    let top = next as f64 * WALLPAPER_ROW_H;
+    if top < picker.scroll {
+        picker.scroll = top;
+    } else if top + WALLPAPER_ROW_H > picker.scroll + view_h {
+        picker.scroll = (top + WALLPAPER_ROW_H - view_h).max(0.0);
+    }
+}
+
+fn paint_wallpaper_picker(app: &SettingsApp, ctx: &mut PaintCtx, size: Size) {
+    let Some(picker) = &app.wallpaper_picker else {
+        return;
+    };
+    let theme = *ctx.theme;
+    let lay = wallpaper_layout(size, &theme);
+    ctx.scene
+        .fill_rect(Rect::from_size(size), Color::rgba(0.0, 0.0, 0.0, 0.45));
+    ctx.scene
+        .fill_rounded_rect(lay.card, theme.radius.large, theme.colors.card_bg);
+    ctx.scene
+        .stroke_rounded_rect(lay.card, theme.radius.large, 1.0, theme.colors.border);
+
+    ctx.label_left(
+        lay.title.x(),
+        lay.title.center().y,
+        &tr("Choose a wallpaper"),
+        theme.typography.heading.size,
+        weight::BOLD,
+        theme.colors.text,
+    );
+    let path = fit_text(
+        &picker.dir.display().to_string(),
+        lay.path.width(),
+        theme.typography.caption.size,
+        weight::NORMAL,
+        ctx.text,
+    );
+    ctx.label_left(
+        lay.path.x(),
+        lay.path.center().y,
+        &path,
+        theme.typography.caption.size,
+        weight::NORMAL,
+        theme.colors.dim_text,
+    );
+
+    if picker.entries.is_empty() {
+        ctx.label_center(
+            lay.list.center().x,
+            lay.list.center().y,
+            &tr("No PNG images in this folder"),
+            theme.typography.body.size,
+            weight::NORMAL,
+            theme.colors.dim_text,
+        );
+    } else {
+        ctx.scene.push_clip(lay.list);
+        for (index, entry) in picker.entries.iter().enumerate() {
+            let row = Rect::from_xywh(
+                lay.list.x() + 4.0,
+                lay.list.y() + index as f64 * WALLPAPER_ROW_H - picker.scroll,
+                lay.list.width() - 8.0,
+                WALLPAPER_ROW_H,
+            );
+            if row.bottom() < lay.list.y() || row.y() > lay.list.bottom() {
+                continue;
+            }
+            if index == picker.selected {
+                ctx.scene.fill_rounded_rect(
+                    row,
+                    theme.radius.small,
+                    theme.colors.accent.scale_alpha(0.18),
+                );
+                ctx.scene
+                    .stroke_rounded_rect(row, theme.radius.small, 1.5, theme.colors.accent);
+            } else if picker.hover == Some(index) {
+                ctx.scene.fill_rounded_rect(
+                    row,
+                    theme.radius.small,
+                    theme.colors.shade.scale_alpha(1.8),
+                );
+            }
+
+            let is_parent = index == 0 && picker.dir.parent().is_some();
+            let is_dir = entry.is_dir();
+            let label = if is_parent {
+                "..".to_owned()
+            } else if is_dir {
+                format!(
+                    "{}/",
+                    entry
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("?")
+                )
+            } else {
+                entry
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("wallpaper.png")
+                    .to_owned()
+            };
+            let icon = if is_dir || is_parent {
+                IconName::Files
+            } else {
+                IconName::Image
+            };
+            let icon_rect = Rect::from_xywh(row.x() + 8.0, row.center().y - 8.0, 16.0, 16.0);
+            paint_icon(ctx, icon, icon_rect, theme.colors.dim_text);
+            ctx.label_left(
+                row.x() + 32.0,
+                row.center().y,
+                &fit_text(
+                    &label,
+                    (row.width() - 40.0).max(0.0),
+                    theme.typography.body.size,
+                    weight::NORMAL,
+                    ctx.text,
+                ),
+                theme.typography.body.size,
+                weight::NORMAL,
+                theme.colors.text,
+            );
+        }
+        ctx.scene.pop_clip();
+    }
+
+    ctx.label_left(
+        lay.hint.x(),
+        lay.hint.center().y,
+        &tr("Only PNG images are supported by the login screen"),
+        theme.typography.caption.size,
+        weight::NORMAL,
+        theme.colors.dim_text,
+    );
+    let selected_is_dir = picker
+        .selected_path()
+        .map(|path| path.is_dir())
+        .unwrap_or(false);
+    Button::new(if selected_is_dir {
+        tr("Open")
+    } else {
+        tr("Choose")
+    })
+    .variant(ButtonVariant::Suggested)
+    .paint(ctx, lay.choose);
+    Button::new(tr("Cancel")).paint(ctx, lay.cancel);
+}
+
+// ── Formularz hasła Wi-Fi ──
+
+fn wifi_insert(app: &mut SettingsApp, text: &str) {
+    let plain: String = text.chars().filter(|c| !c.is_control()).collect();
+    if plain.is_empty() {
+        return;
+    }
+    if let Some(prompt) = &mut app.wifi_prompt {
+        if !prompt.is_pending() {
+            prompt.password.insert_str(&plain);
+        }
+    }
+}
+
+fn handle_wifi_events(app: &mut SettingsApp, events: &[Event], size: Size, theme: &Theme) {
+    let lay = admin_layout(size, theme);
+    for event in events {
+        match event {
+            Event::PointerButton(button)
+                if button.state == ButtonState::Pressed && button.button == PointerButton::Left =>
+            {
+                let p = button.position;
+                if lay.save.contains(p) {
+                    app.submit_wifi_password();
+                } else if lay.cancel.contains(p) || !lay.card.contains(p) {
+                    app.wifi_prompt = None;
+                } else if lay.entry.contains(p) {
+                    if let Some(prompt) = &mut app.wifi_prompt {
+                        prompt.password.set_focused(true);
+                    }
+                }
+            }
+            Event::Key(key) if key.state == ButtonState::Pressed => {
+                let clipboard = app
+                    .wifi_prompt
+                    .as_mut()
+                    .filter(|prompt| !prompt.is_pending())
+                    .and_then(|prompt| clipboard_command(&mut prompt.password, key));
+                if let Some(cmd) = clipboard {
+                    apply_text_clipboard(app, cmd, TextPasteTarget::WifiPassword);
+                    continue;
+                }
+                match key.keysym {
+                    0xff1b => app.wifi_prompt = None,
+                    0xff0d | 0xff8d => app.submit_wifi_password(),
+                    0xff08 => {
+                        if let Some(prompt) = &mut app.wifi_prompt {
+                            if !prompt.is_pending() {
+                                prompt.password.backspace();
+                            }
+                        }
+                    }
+                    0x61 if key.modifiers.ctrl => {
+                        if let Some(prompt) = &mut app.wifi_prompt {
+                            if !prompt.is_pending() {
+                                prompt.password.select_all();
+                            }
+                        }
+                    }
+                    _ => {
+                        if !key.modifiers.ctrl {
+                            if let Some(text) = &key.text {
+                                wifi_insert(app, text);
+                            }
+                        }
+                    }
+                }
+            }
+            Event::Text(text) => wifi_insert(app, text),
+            _ => {}
+        }
+    }
+}
+
+fn paint_wifi_prompt(app: &SettingsApp, ctx: &mut PaintCtx, size: Size) {
+    let Some(prompt) = &app.wifi_prompt else {
+        return;
+    };
+    let theme = *ctx.theme;
+    let lay = admin_layout(size, &theme);
+    ctx.scene
+        .fill_rect(Rect::from_size(size), Color::rgba(0.0, 0.0, 0.0, 0.45));
+    ctx.scene
+        .fill_rounded_rect(lay.card, theme.radius.large, theme.colors.card_bg);
+    ctx.scene
+        .stroke_rounded_rect(lay.card, theme.radius.large, 1.0, theme.colors.border);
+    ctx.label_left(
+        lay.title.x(),
+        lay.title.center().y,
+        &tr("Wi-Fi password"),
+        theme.typography.heading.size,
+        weight::BOLD,
+        theme.colors.text,
+    );
+    ctx.label_left(
+        lay.subtitle.x(),
+        lay.subtitle.center().y,
+        &format!("{}: {}", tr("Network"), prompt.ssid),
+        theme.typography.caption.size,
+        weight::NORMAL,
+        theme.colors.dim_text,
+    );
+    let mut password = prompt.password.clone();
+    password.set_focused(true);
+    password.paint(ctx, lay.entry);
+    if let Some(error) = &prompt.error {
+        ctx.label_left(
+            lay.error.x(),
+            lay.error.center().y,
+            error,
+            theme.typography.caption.size,
+            weight::NORMAL,
+            theme.colors.warning,
+        );
+    } else if prompt.is_pending() {
+        ctx.label_left(
+            lay.error.x(),
+            lay.error.center().y,
+            &tr("Connecting…"),
+            theme.typography.caption.size,
+            weight::NORMAL,
+            theme.colors.dim_text,
+        );
+    }
+    Button::new(tr("Connect"))
+        .variant(ButtonVariant::Suggested)
+        .paint(ctx, lay.save);
+    Button::new(tr("Cancel")).paint(ctx, lay.cancel);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use libluna_core::{KeyEvent, Modifiers, Theme, ThemeSettings};
+    use libluna_core::{KeyEvent, Modifiers, PointerEvent, Theme, ThemeSettings};
 
     fn key(keysym: u32, text: Option<&str>) -> Event {
         Event::Key(KeyEvent {
@@ -1395,6 +2063,40 @@ mod tests {
             modifiers: Modifiers::NONE,
             repeat: false,
         })
+    }
+
+    #[test]
+    fn info_button_opens_sheet_and_escape_closes() {
+        let theme = Theme::dark();
+        let text = TextEngine::none();
+        let size = Size::new(1080.0, 760.0);
+        let mut app = SettingsApp::new(&ThemeSettings::load());
+        app.page = pages::Page::Workspaces;
+        let lay = layout(size, &theme);
+        let rect = info_button_rect(&lay, &theme);
+        let click = Event::PointerButton(PointerEvent {
+            position: rect.center(),
+            button: PointerButton::Left,
+            state: ButtonState::Pressed,
+            modifiers: Modifiers::NONE,
+        });
+        handle_events(&mut app, &[click], size, &theme, &text);
+        assert!(app.info_sheet.is_open(), "przycisk Info ma otworzyć panel");
+        handle_events(&mut app, &[key(0xff1b, None)], size, &theme, &text);
+        assert!(!app.info_sheet.is_open(), "Esc ma zamknąć panel Info");
+    }
+
+    #[test]
+    fn wallpaper_picker_and_info_sheet_paint() {
+        let theme = Theme::dark();
+        let text = TextEngine::none();
+        let size = Size::new(1080.0, 760.0);
+        let mut app = SettingsApp::new(&ThemeSettings::load());
+        app.open_wallpaper_picker();
+        app.info_sheet.set_open(true);
+        let mut scene = Scene::new();
+        paint(&app, &mut scene, size, &theme, &text);
+        assert!(!scene.is_empty());
     }
 
     #[test]

@@ -32,6 +32,9 @@ pub struct SurfaceData {
     /// **podwójnym** zwolnieniem bufora — GTK pada wtedy na asercji cairo
     /// (`cairo_surface_destroy`). Zwolnienie musi być dokładnie raz na `attach`.
     pub release_needed: Mutex<bool>,
+    /// Poprzedni bufor `dmabuf` tej powierzchni — zwalniamy go przy **następnym**
+    /// commicie, gdy GPU na pewno skończyło czytać poprzednią klatkę.
+    pub pending_dmabuf_release: Mutex<Option<wl_buffer::WlBuffer>>,
     /// Slot okna w modelu (przydzielany przy pierwszym commicie).
     pub slot: Mutex<Option<usize>>,
     /// Powiązana powierzchnia warstwowa (`wlr-layer-shell`), jeśli klient ją utworzył.
@@ -61,6 +64,7 @@ impl SurfaceData {
             xdg_surface: Mutex::new(None),
             buffer: Mutex::new(None),
             release_needed: Mutex::new(false),
+            pending_dmabuf_release: Mutex::new(None),
             slot: Mutex::new(None),
             layer: Mutex::new(None),
             toplevel: Mutex::new(None),
@@ -407,15 +411,27 @@ fn composite(
         return;
     };
     let (bw, bh) = (buf_data.width, buf_data.height);
-    let Some(rgba) = buf_data.to_rgba() else {
-        return;
+    // Bufory GPU (`dmabuf`) nie mają pikseli na CPU: trzymamy tylko atrapę 1×1,
+    // a rozmiar obrazu bierze `Window::image_size()` z `DmabufImage`.
+    let dmabuf = buf_data.dmabuf.clone();
+    let image = if dmabuf.is_some() {
+        std::sync::Arc::new(ImageData::empty(1, 1).with_sparse(true))
+    } else {
+        let Some(rgba) = buf_data.to_rgba() else {
+            return;
+        };
+        std::sync::Arc::new(ImageData::new(bw as u32, bh as u32, rgba))
     };
-    let image = std::sync::Arc::new(ImageData::new(bw as u32, bh as u32, rgba));
     // Powierzchnie potomne (`wl_subsurface`) składamy na własny bufor rodzica:
     // najpierw aplikujemy stan oczekujący (`sync`), potem nakładamy obrazy dzieci.
+    // Dla `dmabuf` nie ma bufora CPU, więc dzieci pomijamy.
     crate::subsurface::apply_pending(surface);
-    *data.base_image.lock_or_recover() = Some(image.clone());
-    let image = crate::subsurface::overlay_children(surface, image);
+    let image = if dmabuf.is_some() {
+        image
+    } else {
+        *data.base_image.lock_or_recover() = Some(image.clone());
+        crate::subsurface::overlay_children(surface, image)
+    };
     let z = state.next_z();
     let title = if is_x11 {
         x11_title
@@ -566,7 +582,19 @@ fn composite(
     let mut pos = (px, py);
     if let Some(win) = state.windows.lock_or_recover().get_mut(slot) {
         win.image_offset = (off_x, off_y);
+        // Bufor GPU bywa zmieniany na shm i odwrotnie — pole musi być aktualne.
+        win.dmabuf = dmabuf.clone();
         pos = (win.x, win.y);
+    }
+    if created {
+        if let Some(db) = &dmabuf {
+            if std::env::var("SELENE_STATS").is_ok() {
+                eprintln!(
+                    "selene/dmabuf: okno \"{title}\" {}x{} format=0x{:08x} modifier=0x{:016x}",
+                    db.width, db.height, db.format, db.modifier
+                );
+            }
+        }
     }
     let geom = (w, h, bw, bh, (off_x, off_y));
     if prev_geom.is_some() && prev_geom != Some(geom) && std::env::var("SELENE_STATS").is_ok() {
@@ -642,7 +670,17 @@ fn composite(
         crate::seat::send_configure(state, slot, f64::from(w), f64::from(h));
     }
     // Pozwól klientowi ponownie użyć bufora — **raz na `attach`**, nie na każdy `commit`.
-    if data.take_release() {
+    // Dla `dmabuf` zwalniamy bufor **następny** raz: GPU czyta poprzednią klatkę
+    // jeszcze po `commit`, więc natychmiastowy `release` dałby tearing.
+    if dmabuf.is_some() {
+        let old = data
+            .pending_dmabuf_release
+            .lock_or_recover()
+            .replace(buffer.clone());
+        if let Some(old) = old {
+            let _ = old.send_event(wl_buffer::Event::Release);
+        }
+    } else if data.take_release() {
         let _ = buffer.send_event(wl_buffer::Event::Release);
     }
 }
@@ -1025,6 +1063,7 @@ mod ssd_tests {
             fullscreen: false,
             ssd: true,
             saved: None,
+            dmabuf: None,
             data: Arc::new(ImageData::empty(10, 10)),
         };
         let windows = vec![
@@ -1147,6 +1186,7 @@ fn upsert_window_at(
                 ssd,
                 saved: None,
                 data: image,
+                dmabuf: None,
             });
             *slot = Some(i);
             created = true;

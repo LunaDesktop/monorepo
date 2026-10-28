@@ -11,16 +11,17 @@ use std::time::Duration;
 
 use libluna_core::theme_file::StyledTheme;
 use libluna_core::{
-    Accent, GreeterSettings, IconSet, IconSettings, LockSettings, Rect, RegionSettings,
-    ThemePreference, ThemeSettings, WorkspaceLayout,
+    Accent, GreeterSettings, IconSet, IconSettings, InputSettings, LockSettings, Rect,
+    RegionSettings, ThemePreference, ThemeSettings, WorkspaceLayout,
 };
 use libluna_i18n::{set_locale, tr, tr_args, Locale};
 use libluna_platform::{run as run_app, AppConfig, Frame};
 use libluna_widgets::{
-    Entry, EntryIcon, NavEntry, NavList, PasswordEntry, ScrollView, Toast, WindowControl,
+    BottomSheet, Entry, EntryIcon, NavEntry, NavList, PasswordEntry, ScrollView, Toast,
+    WindowControl,
 };
 use luna::notifications::{self, Placement};
-use luna::system::{self, BatteryStatus};
+use luna::system::{self, BatteryStatus, WifiNetwork, WifiScan};
 
 use crate::pages::{self, Action, Page, PickerKind, SliderKind};
 use crate::ui;
@@ -97,6 +98,123 @@ pub struct TextEditor {
     pub workspace: usize,
 }
 
+/// Modalne pytanie o hasło do sieci Wi-Fi.
+pub struct WifiPrompt {
+    pub ssid: String,
+    pub password: PasswordEntry,
+    pub error: Option<String>,
+    pub pending: Option<mpsc::Receiver<Result<(), String>>>,
+}
+
+impl WifiPrompt {
+    fn new(ssid: String) -> Self {
+        let mut password = PasswordEntry::new(tr("Wi-Fi password"));
+        password.set_focused(true);
+        Self {
+            ssid,
+            password,
+            error: None,
+            pending: None,
+        }
+    }
+
+    pub fn is_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+}
+
+/// Prosty wybór tapety z dysku: katalogi + pliki PNG, bez GTK i portali.
+#[derive(Debug, Clone)]
+pub struct WallpaperPicker {
+    pub dir: PathBuf,
+    /// Pozycja 0 to zawsze katalog nadrzędny (jeśli istnieje).
+    pub entries: Vec<PathBuf>,
+    pub selected: usize,
+    pub scroll: f64,
+    pub hover: Option<usize>,
+}
+
+impl WallpaperPicker {
+    fn new() -> Self {
+        let dir = default_pictures_dir();
+        let mut picker = Self {
+            dir: dir.clone(),
+            entries: Vec::new(),
+            selected: 0,
+            scroll: 0.0,
+            hover: None,
+        };
+        picker.navigate(dir);
+        picker
+    }
+
+    /// Wchodzi do katalogu i odświeża listę (katalogi + PNG).
+    pub fn navigate(&mut self, dir: PathBuf) {
+        self.dir = dir;
+        self.entries = scan_wallpaper_dir(&self.dir);
+        self.selected = 0;
+        self.scroll = 0.0;
+        self.hover = None;
+    }
+
+    pub fn selected_path(&self) -> Option<&PathBuf> {
+        self.entries.get(self.selected)
+    }
+}
+
+/// Katalog startowy wyboru tapety.
+fn default_pictures_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("XDG_PICTURES_DIR") {
+        if !dir.trim().is_empty() && PathBuf::from(&dir).is_dir() {
+            return PathBuf::from(dir);
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let pictures = PathBuf::from(&home).join("Pictures");
+        if pictures.is_dir() {
+            return pictures;
+        }
+        return PathBuf::from(home);
+    }
+    PathBuf::from("/")
+}
+
+/// Katalogi oraz pliki PNG; pierwszy wpis to katalog nadrzędny.
+fn scan_wallpaper_dir(dir: &std::path::Path) -> Vec<PathBuf> {
+    let parent = dir.parent().map(|parent| parent.to_path_buf());
+    let mut dirs = Vec::new();
+    let mut files = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if name.starts_with('.') {
+                continue;
+            }
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("png"))
+            {
+                files.push(path);
+            }
+        }
+    }
+    dirs.sort();
+    files.sort();
+    let mut out = Vec::new();
+    if let Some(parent) = parent {
+        out.push(parent);
+    }
+    out.extend(dirs);
+    out.extend(files);
+    out
+}
+
 /// Stan aplikacji.
 pub struct SettingsApp {
     pub page: Page,
@@ -108,6 +226,8 @@ pub struct SettingsApp {
     pub system: system::Shared,
     pub system_ready: bool,
     pub user: String,
+    /// Tytuł okna z nazwą systemu (np. „Ustawienia — Pagan Linux”).
+    pub title: String,
     pub volume: Option<(u8, bool)>,
     pub audio_sink: Option<String>,
     pub brightness: Option<u8>,
@@ -127,6 +247,7 @@ pub struct SettingsApp {
     pub lock: LockSettings,
     pub region: RegionSettings,
     pub workspace_layout: WorkspaceLayout,
+    pub input: InputSettings,
     pub notification_placement: Placement,
     /// Locale i strefy wykryte w systemie (dla wyszukiwanego wyboru).
     pub locales: Vec<String>,
@@ -135,6 +256,11 @@ pub struct SettingsApp {
     pub picker: Option<Picker>,
     pub picker_hover: Option<usize>,
     pub editor: Option<TextEditor>,
+    /// Wybór tapety ekranu logowania z dysku.
+    pub wallpaper_picker: Option<WallpaperPicker>,
+    /// Panel techniczny („Configuration”/„Information”) otwierany przyciskiem Info.
+    pub info_sheet: BottomSheet,
+    pub info_scroll: ScrollView,
     /// Formularz hasła do zmian wymagających uprawnień administratora.
     pub admin: Option<AdminPrompt>,
     /// Czy ekran logowania ma niezapisane zmiany (wybory są szkicem).
@@ -142,6 +268,17 @@ pub struct SettingsApp {
 
     pub dnd: bool,
     pub power_saver: bool,
+    /// Stan synchronizacji czasu (NTP) w systemie.
+    pub ntp: Option<bool>,
+
+    /// Ostatni skan Wi-Fi (lista sieci) i stan adaptera.
+    pub wifi: Vec<WifiNetwork>,
+    pub wifi_on: bool,
+    pub wifi_scan: WifiScan,
+    pub wifi_next_scan: std::time::Instant,
+    pub wifi_prompt: Option<WifiPrompt>,
+    /// Łączenie z siecią otwartą (bez formularza hasła).
+    pub wifi_pending: Option<mpsc::Receiver<Result<(), String>>>,
 
     /// Ustawienia ekranu logowania (`/etc/luna/greeter.conf`).
     pub greeter: GreeterSettings,
@@ -168,6 +305,7 @@ pub enum TextPasteTarget {
     PickerQuery,
     EditorEntry,
     AdminPassword,
+    WifiPassword,
 }
 
 impl SettingsApp {
@@ -204,6 +342,7 @@ impl SettingsApp {
             user: std::env::var("USER")
                 .or_else(|_| std::env::var("LOGNAME"))
                 .unwrap_or_else(|_| "?".to_owned()),
+            title: app_title(),
             volume: system::read_volume(),
             audio_sink: None,
             brightness: system::read_brightness(),
@@ -220,16 +359,27 @@ impl SettingsApp {
             lock: LockSettings::load(),
             region: RegionSettings::load(),
             workspace_layout: WorkspaceLayout::load(),
+            input: InputSettings::load(),
             notification_placement: notifications::load_placement(),
             locales: libluna_core::region::system_locales(),
             timezones: libluna_core::region::system_timezones(),
             picker: None,
             picker_hover: None,
             editor: None,
+            wallpaper_picker: None,
+            info_sheet: BottomSheet::new(),
+            info_scroll: ScrollView::new(),
             admin: None,
             greeter_dirty: false,
             dnd: system::dnd(),
             power_saver: system::power_saver(),
+            ntp: system::ntp_enabled(),
+            wifi: Vec::new(),
+            wifi_on: false,
+            wifi_scan: WifiScan::spawn(),
+            wifi_next_scan: std::time::Instant::now(),
+            wifi_prompt: None,
+            wifi_pending: None,
             greeter: GreeterSettings::load(),
             wallpapers: pages::wallpapers(),
             status: Toast::default(),
@@ -269,9 +419,31 @@ impl SettingsApp {
         if self.page != page {
             self.page = page;
             self.scroll = ScrollView::new();
+            self.info_scroll = ScrollView::new();
             let selected = self.nav_pages.iter().position(|p| *p == Some(page));
             self.nav.set_selected(selected);
+            if page == Page::Network {
+                self.wifi_next_scan = std::time::Instant::now();
+                self.wifi_scan.refresh();
+            }
         }
+    }
+
+    /// Otwiera panel Info z grupami technicznymi bieżącej strony.
+    pub fn open_info_sheet(&mut self) {
+        self.info_scroll = ScrollView::new();
+        self.info_sheet
+            .set_title(Some(tr("Configuration and information")));
+        self.info_sheet.set_open_animated(true);
+    }
+
+    pub fn close_info_sheet(&mut self) {
+        self.info_sheet.set_open_animated(false);
+    }
+
+    /// Otwiera wybór tapety z dysku (ekran logowania).
+    pub fn open_wallpaper_picker(&mut self) {
+        self.wallpaper_picker = Some(WallpaperPicker::new());
     }
 
     /// Odświeża dane z wątku systemowego i plików powłoki.
@@ -295,9 +467,17 @@ impl SettingsApp {
             }
             self.battery = sys.battery;
             self.power_profile = sys.power_profile.clone();
+            self.wifi_on = sys.wifi.as_ref().map(|(on, _)| *on).unwrap_or(false);
         }
         self.dnd = system::dnd();
         self.power_saver = system::power_saver();
+        if self.page == Page::Network {
+            if std::time::Instant::now() >= self.wifi_next_scan {
+                self.wifi_scan.refresh();
+                self.wifi_next_scan = std::time::Instant::now() + Duration::from_secs(5);
+            }
+            self.wifi = self.wifi_scan.current();
+        }
     }
 
     /// Otwiera wyszukiwany wybór dla języka, locale albo strefy.
@@ -488,6 +668,166 @@ impl SettingsApp {
         }
     }
 
+    /// Zapisuje ustawienia wejścia i przekazuje je działającemu Selene.
+    fn save_input(&mut self) {
+        match self.input.save() {
+            Ok(()) => {
+                let repeat = control_send(&format!(
+                    "input repeat {} {}",
+                    self.input.repeat_delay(),
+                    self.input.repeat_rate()
+                ));
+                let scroll = control_send(&format!(
+                    "input natural-scroll {}",
+                    u8::from(self.input.natural_scroll())
+                ));
+                self.show_status(if repeat && scroll {
+                    tr("Input settings applied")
+                } else {
+                    tr("Input settings saved — restart Selene to apply")
+                });
+            }
+            Err(err) => self.show_status(format!("{}: {err}", tr("Could not save input settings"))),
+        }
+    }
+
+    /// Zatwierdza wybór z przeglądarki tapet (katalog = wejście, plik = wybór).
+    pub fn choose_wallpaper(&mut self) {
+        let Some(path) = self
+            .wallpaper_picker
+            .as_ref()
+            .and_then(WallpaperPicker::selected_path)
+            .cloned()
+        else {
+            return;
+        };
+        if path.is_dir() {
+            if let Some(picker) = &mut self.wallpaper_picker {
+                picker.navigate(path);
+            }
+            return;
+        }
+        self.greeter.wallpaper = Some(path);
+        self.greeter_dirty = true;
+        self.wallpaper_picker = None;
+    }
+
+    /// Wybiera wpis w przeglądarce tapet (katalog otwiera się od razu).
+    pub fn wallpaper_pick(&mut self, index: usize) {
+        let Some(picker) = &mut self.wallpaper_picker else {
+            return;
+        };
+        if index >= picker.entries.len() {
+            return;
+        }
+        picker.selected = index;
+        let path = picker.entries[index].clone();
+        if path.is_dir() {
+            picker.navigate(path);
+        }
+    }
+
+    /// Łączy z siecią; sieci zabezpieczone otwierają formularz hasła.
+    fn connect_wifi(&mut self, ssid: String, secured: bool) {
+        if secured {
+            self.wifi_prompt = Some(WifiPrompt::new(ssid));
+        } else {
+            self.spawn_wifi_connect(ssid, None);
+        }
+    }
+
+    fn spawn_wifi_connect(&mut self, ssid: String, password: Option<String>) {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = system::connect_wifi(&ssid, password.as_deref());
+            let _ = tx.send(result);
+        });
+        if let Some(prompt) = &mut self.wifi_prompt {
+            prompt.pending = Some(rx);
+        } else {
+            self.wifi_pending = Some(rx);
+        }
+        self.show_status(tr("Connecting…"));
+    }
+
+    /// Zatwierdza hasło Wi-Fi z formularza.
+    pub fn submit_wifi_password(&mut self) {
+        let Some(prompt) = &mut self.wifi_prompt else {
+            return;
+        };
+        if prompt.is_pending() {
+            return;
+        }
+        let password = prompt.password.text().to_owned();
+        if password.is_empty() {
+            prompt.error = Some(tr("Enter the Wi-Fi password"));
+            return;
+        }
+        prompt.password.clear();
+        prompt.error = None;
+        let ssid = prompt.ssid.clone();
+        self.spawn_wifi_connect(ssid, Some(password));
+    }
+
+    /// Odbiera wynik łączenia z siecią (bez blokowania UI).
+    pub fn poll_wifi(&mut self) {
+        let open_result = {
+            let Some(rx) = &self.wifi_pending else {
+                return;
+            };
+            match rx.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    Some(Err(tr("NetworkManager did not respond")))
+                }
+            }
+        };
+        if let Some(result) = open_result {
+            self.wifi_pending = None;
+            self.finish_wifi(result, true);
+        }
+        let result = {
+            let Some(prompt) = &mut self.wifi_prompt else {
+                return;
+            };
+            let Some(rx) = prompt.pending.as_ref() else {
+                return;
+            };
+            match rx.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    Some(Err(tr("NetworkManager did not respond")))
+                }
+            }
+        };
+        if let Some(result) = result {
+            self.finish_wifi(result, false);
+        }
+    }
+
+    fn finish_wifi(&mut self, result: Result<(), String>, toast: bool) {
+        match result {
+            Ok(()) => {
+                self.wifi_prompt = None;
+                self.wifi_scan.refresh();
+                self.wifi_next_scan = std::time::Instant::now() + Duration::from_secs(2);
+                self.show_status(tr("Connected to Wi-Fi"));
+            }
+            Err(err) => {
+                if !toast {
+                    if let Some(prompt) = &mut self.wifi_prompt {
+                        prompt.pending = None;
+                        prompt.error = Some(err);
+                        return;
+                    }
+                }
+                self.show_status(format!("{}: {err}", tr("Could not connect")));
+            }
+        }
+    }
+
     /// Stosuje odłożone zmiany do okna (motyw, kontrolki okna).
     pub fn apply_pending(&mut self, frame: &mut Frame) {
         if let Some(preference) = self.pending.preference.take() {
@@ -560,6 +900,7 @@ impl SettingsApp {
                 set_locale(locale.clone());
                 libluna_i18n::load_catalogs_from_dirs();
                 let _ = libluna_i18n::save_preferred_locale(&locale);
+                self.title = app_title();
                 self.rebuild_nav();
                 self.show_status(tr("Language changed — all Luna apps switch automatically"));
             }
@@ -644,8 +985,12 @@ impl SettingsApp {
                     Ok(()) => {
                         // Selene dodaje/usuwa uchwyty `ext_workspace_v1` od razu,
                         // więc panel i podgląd `Super+Tab` widzą nowy zestaw.
-                        control_send(&format!("workspace-count {count}"));
-                        self.show_status(tr("Workspace count updated"));
+                        let live = control_send(&format!("workspace-count {count}"));
+                        self.show_status(if live {
+                            tr("Workspace count updated")
+                        } else {
+                            tr("Workspace count saved — restart Selene to apply")
+                        });
                     }
                     Err(err) => {
                         self.show_status(format!("{}: {err}", tr("Could not save workspaces")))
@@ -653,6 +998,84 @@ impl SettingsApp {
                 }
             }
             Action::EditWorkspaceName(index) => self.open_workspace_editor(index),
+            Action::ToggleWorkspaceCorner => {
+                let enabled = !self.workspace_layout.corner_switch();
+                self.workspace_layout.set_corner_switch(enabled);
+                match self.workspace_layout.save() {
+                    Ok(()) => {
+                        let live = control_send(&format!("workspace-corner {}", u8::from(enabled)));
+                        self.show_status(if !live {
+                            tr("Corner switching saved — restart Selene to apply")
+                        } else if enabled {
+                            tr("Workspaces switch at screen corners")
+                        } else {
+                            tr("Corner switching turned off")
+                        });
+                    }
+                    Err(err) => {
+                        self.workspace_layout.set_corner_switch(!enabled);
+                        self.show_status(format!("{}: {err}", tr("Could not save workspaces")));
+                    }
+                }
+            }
+            Action::OpenWallpaperPicker => self.open_wallpaper_picker(),
+            Action::SetGreeterWallpaperPath(path) => {
+                if !path.is_file() {
+                    self.show_status(tr("The selected file does not exist"));
+                    return;
+                }
+                if self.greeter.wallpaper.as_deref() == Some(path.as_path()) {
+                    return;
+                }
+                if !self.wallpapers.iter().any(|item| item == &path) {
+                    self.wallpapers.insert(0, path.clone());
+                }
+                self.greeter.wallpaper = Some(path);
+                self.greeter_dirty = true;
+            }
+            Action::ToggleNtp => {
+                let enabled = !self.ntp.unwrap_or(false);
+                self.ntp = Some(enabled);
+                match std::process::Command::new("pkexec")
+                    .args([
+                        "timedatectl",
+                        "set-ntp",
+                        if enabled { "true" } else { "false" },
+                    ])
+                    .spawn()
+                {
+                    Ok(_) => {
+                        self.show_status(tr("Authorization requested — check the system dialog"))
+                    }
+                    Err(err) => self
+                        .show_status(format!("{}: {err}", tr("Could not change automatic time"))),
+                }
+            }
+            Action::ToggleWifi => {
+                self.wifi_on = !self.wifi_on;
+                system::set_wifi(self.wifi_on);
+                self.wifi_scan.refresh();
+                self.wifi_next_scan = std::time::Instant::now() + Duration::from_secs(2);
+            }
+            Action::RefreshWifi => {
+                self.wifi_scan.refresh();
+                self.wifi_next_scan = std::time::Instant::now() + Duration::from_secs(2);
+                self.show_status(tr("Scanning for networks…"));
+            }
+            Action::ConnectWifi { ssid, secured } => self.connect_wifi(ssid, secured),
+            Action::SetRepeatDelay(delay) => {
+                self.input.set_repeat_delay(delay);
+                self.save_input();
+            }
+            Action::SetRepeatRate(rate) => {
+                self.input.set_repeat_rate(rate);
+                self.save_input();
+            }
+            Action::ToggleNaturalScroll => {
+                let enabled = !self.input.natural_scroll();
+                self.input.set_natural_scroll(enabled);
+                self.save_input();
+            }
             Action::ApplySystemTimezone => self.apply_system_timezone(),
             Action::SetVolume(percent) => {
                 let muted = self.volume.map(|(_, m)| m).unwrap_or(false);
@@ -874,13 +1297,20 @@ impl SettingsApp {
     }
 }
 
+/// Tytuł aplikacji z nazwą systemu z `/etc/os-release`.
+///
+/// Przykład: `Pagan Linux Settings` / `Ustawienia — Pagan Linux`.
+pub fn app_title() -> String {
+    let system = libluna_core::os_name();
+    tr_args("{system} Settings", &[("system", &system)])
+}
+
 fn nav_entries() -> (NavList, Vec<Option<Page>>) {
     let sections: Vec<(&str, Vec<Page>)> = vec![
         (
             "Environment",
             vec![
                 Page::Appearance,
-                Page::Icons,
                 Page::Login,
                 Page::LockScreen,
                 Page::Notifications,
@@ -888,7 +1318,16 @@ fn nav_entries() -> (NavList, Vec<Option<Page>>) {
                 Page::Workspaces,
             ],
         ),
-        ("Hardware", vec![Page::Displays, Page::Sound, Page::Power]),
+        (
+            "Hardware",
+            vec![
+                Page::Network,
+                Page::Input,
+                Page::Displays,
+                Page::Sound,
+                Page::Power,
+            ],
+        ),
         ("Information", vec![Page::System, Page::About]),
     ];
     let mut entries = Vec::new();
@@ -910,14 +1349,18 @@ fn nav_entries() -> (NavList, Vec<Option<Page>>) {
 }
 
 /// Wysyła polecenie do Selene (`$XDG_RUNTIME_DIR/luna-control`).
-fn control_send(line: &str) {
+///
+/// `false` = brak gniazda/połączenia (np. Selene nie działa), więc wywołujący
+/// może powiedzieć użytkownikowi, że zmiana zadziała po restarcie kompozytora.
+fn control_send(line: &str) -> bool {
     use std::io::Write;
     let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") else {
-        return;
+        return false;
     };
     let path = std::path::Path::new(&runtime).join("luna-control");
-    if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(path) {
-        let _ = writeln!(stream, "{line}");
+    match std::os::unix::net::UnixStream::connect(path) {
+        Ok(mut stream) => writeln!(stream, "{line}").is_ok(),
+        Err(_) => false,
     }
 }
 
@@ -936,13 +1379,14 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let system_dark = std::env::var("LUNA_SYSTEM_DARK")
         .map(|v| !v.is_empty() && v != "0")
         .unwrap_or(false);
-    let config = AppConfig::new(tr("Settings"))
+    let mut app = SettingsApp::new(&settings);
+    // Tytuł okna pochodzi z nazwy systemu (`/etc/os-release`), nie z „Luna”.
+    let config = AppConfig::new(app.title.clone())
         .app_id("eu.luna.Settings")
         .initial_size(1080, 760)
         .settings(settings.clone())
         .system_dark(system_dark);
 
-    let mut app = SettingsApp::new(&settings);
     app.apply_icon_theme_globally();
     // Język może zmienić inna aplikacja (np. luna-files) — nawigacja trzyma
     // gotowe etykiety, więc odświeżamy ją po zmianie katalogu.
@@ -952,12 +1396,14 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         if language != ui_language {
             ui_language = language.clone();
             app.language = language;
+            app.title = app_title();
             app.rebuild_nav();
-            frame.set_title(tr("Settings"));
+            frame.set_title(app.title.clone());
         }
         app.apply_pending(frame);
         app.sync_system();
         app.poll_admin();
+        app.poll_wifi();
 
         ui::handle_events(&mut app, frame.events, frame.size, &frame.theme, frame.text);
 
@@ -978,6 +1424,15 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         }
         if app.admin.as_ref().is_some_and(|admin| admin.is_pending()) {
             frame.request_frame_after(Duration::from_millis(50));
+        }
+        if app.wifi_prompt.as_ref().is_some_and(WifiPrompt::is_pending)
+            || app.wifi_pending.is_some()
+        {
+            frame.request_frame_after(Duration::from_millis(100));
+        }
+        if app.info_sheet.is_animating() {
+            app.info_sheet.advance(frame.delta_time(), 0.22);
+            frame.request_frame();
         }
         if let Some(until) = app.status_until {
             if std::time::Instant::now() >= until {
@@ -1056,6 +1511,46 @@ mod tests {
         assert_eq!(app.accent, Accent::Purple);
         app.on_action(Action::SetStyle(0));
         assert_eq!(app.style, None);
+    }
+
+    #[test]
+    fn wallpaper_tree_lists_dirs_then_png_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "luna-wallpaper-picker-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let sub = dir.join("Obrazy");
+        std::fs::create_dir_all(&sub).expect("katalog");
+        std::fs::write(dir.join("lato.png"), b"png").expect("png");
+        std::fs::write(dir.join("zima.jpg"), b"jpg").expect("jpg");
+
+        let entries = scan_wallpaper_dir(&dir);
+        assert!(entries.first().is_some_and(|path| path.is_dir()));
+        assert!(entries.iter().any(|path| path.ends_with("Obrazy")));
+        assert!(entries.iter().any(|path| path.ends_with("lato.png")));
+        assert!(!entries.iter().any(|path| path.ends_with("zima.jpg")));
+
+        let mut picker = WallpaperPicker {
+            dir,
+            entries,
+            selected: 0,
+            scroll: 0.0,
+            hover: None,
+        };
+        let png = picker
+            .entries
+            .iter()
+            .position(|path| path.ends_with("lato.png"))
+            .expect("png");
+        picker.selected = png;
+        assert!(picker.selected_path().is_some_and(|path| {
+            path.file_name().and_then(|name| name.to_str()) == Some("lato.png")
+        }));
+        let _ = std::fs::remove_dir_all(&picker.dir);
     }
 
     #[test]

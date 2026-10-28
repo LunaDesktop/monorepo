@@ -8,7 +8,7 @@ use std::error::Error;
 
 use libluna_core::{Color, Size, Theme, ThemePreference, ThemeSettings};
 use libluna_render::{Scene, SoftwareRenderer, TextEngine};
-use luna::system::BatteryStatus;
+use luna::system::{BatteryStatus, WifiNetwork};
 use luna_settings::app::SettingsApp;
 use luna_settings::pages::{Page, PickerKind};
 use luna_settings::ui;
@@ -35,15 +35,37 @@ fn main() -> Result<(), Box<dyn Error>> {
     });
     app.dnd = false;
     app.power_saver = false;
+    app.wifi_on = true;
+    app.wifi = vec![
+        WifiNetwork {
+            ssid: "Dom".to_owned(),
+            signal: 92,
+            active: true,
+            security: "WPA2".to_owned(),
+        },
+        WifiNetwork {
+            ssid: "PaganNet".to_owned(),
+            signal: 74,
+            active: false,
+            security: "WPA3".to_owned(),
+        },
+        WifiNetwork {
+            ssid: "Kawiarnia".to_owned(),
+            signal: 41,
+            active: false,
+            security: String::new(),
+        },
+    ];
 
     for (name, page) in [
         ("appearance", Page::Appearance),
-        ("icons", Page::Icons),
         ("notifications", Page::Notifications),
         ("language", Page::Language),
         ("login", Page::Login),
         ("lock-screen", Page::LockScreen),
         ("workspaces", Page::Workspaces),
+        ("network", Page::Network),
+        ("input", Page::Input),
         ("displays", Page::Displays),
         ("sound", Page::Sound),
         ("power", Page::Power),
@@ -103,6 +125,43 @@ fn main() -> Result<(), Box<dyn Error>> {
     let png = renderer.encode_png().ok_or("failed to encode PNG")?;
     std::fs::write("docs/images/luna-settings-language-picker.png", png)?;
     println!("saved docs/images/luna-settings-language-picker.png ({W}x{H})");
+
+    // Panel Info (techniczne szczegóły strony w dolnym panelu).
+    app.picker = None;
+    app.go_to(Page::Workspaces);
+    app.open_info_sheet();
+    app.info_sheet.set_open(true);
+    let mut scene = Scene::new();
+    ui::paint(
+        &app,
+        &mut scene,
+        Size::new(W as f64, H as f64),
+        &theme,
+        &text,
+    );
+    let mut renderer = SoftwareRenderer::new(W, H);
+    renderer.draw(&scene, 1.0, Color::from_rgba8(0x1a, 0x1d, 0x27, 0xff));
+    let png = renderer.encode_png().ok_or("failed to encode PNG")?;
+    std::fs::write("docs/images/luna-settings-info-sheet.png", png)?;
+    println!("saved docs/images/luna-settings-info-sheet.png ({W}x{H})");
+
+    // Wybór tapety z dysku.
+    app.info_sheet.set_open(false);
+    app.go_to(Page::Login);
+    app.open_wallpaper_picker();
+    let mut scene = Scene::new();
+    ui::paint(
+        &app,
+        &mut scene,
+        Size::new(W as f64, H as f64),
+        &theme,
+        &text,
+    );
+    let mut renderer = SoftwareRenderer::new(W, H);
+    renderer.draw(&scene, 1.0, Color::from_rgba8(0x1a, 0x1d, 0x27, 0xff));
+    let png = renderer.encode_png().ok_or("failed to encode PNG")?;
+    std::fs::write("docs/images/luna-settings-wallpaper-picker.png", png)?;
+    println!("saved docs/images/luna-settings-wallpaper-picker.png ({W}x{H})");
 
     Ok(())
 }

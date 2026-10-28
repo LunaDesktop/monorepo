@@ -278,10 +278,9 @@ check_stale() {
 }
 if [ -f "$lib/selene" ]; then
     check_stale "$lib/selene" "$root/selene/src"
+    # Jeden crate `luna` buduje wszystkie binarki (shell, keyring, lock, polkit) —
+    # sprawdzamy `luna-shell`, żeby nie zgłaszać fałszywych alarmów o keyring/lock/polkit.
     check_stale "$lib/luna-shell" "$root/luna/src"
-    check_stale "$lib/luna-keyring" "$root/luna/src"
-    check_stale "$lib/luna-lock" "$root/luna/src"
-    check_stale "$lib/luna-polkit" "$root/luna/src"
     check_stale "$lib/luna-greeter" "$root/luna-greeter/src"
     for app in demo files settings terminal; do
         check_stale "$lib/luna-$app" "$root/apps/luna-$app/src"

@@ -636,9 +636,16 @@ impl App {
                 .current_dir(dir)
                 .spawn()
                 .is_ok(),
-            _ => ["xfce4-terminal", "foot", "alacritty", "kitty", "wezterm"]
-                .iter()
-                .any(|t| spawn_terminal(t, &dir_arg)),
+            _ => [
+                "luna-terminal",
+                "xfce4-terminal",
+                "foot",
+                "alacritty",
+                "kitty",
+                "wezterm",
+            ]
+            .iter()
+            .any(|t| spawn_terminal(t, &dir_arg)),
         };
         if !spawned {
             self.show_toast(tr("No terminal emulator found"));
@@ -1271,6 +1278,9 @@ fn fit_preview(image: ImageData, max: u32) -> ImageData {
 
 fn spawn_terminal(program: &str, dir: &str) -> bool {
     let args: &[&str] = match program {
+        // `luna-terminal` startuje w `current_dir` (zob. `pty.rs`), więc katalog
+        // przekazujemy przez `current_dir`, a nie argumentem.
+        "luna-terminal" => &[],
         "xfce4-terminal" => &["--working-directory", dir],
         "gnome-terminal" => &["--working-directory", dir],
         "kitty" => &["--directory", dir],

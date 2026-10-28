@@ -37,6 +37,8 @@ pub struct Incoming {
     pub actions: Vec<(String, String)>,
     /// `hint urgency = 2` (critical) — takich powiadomień nie wygaszamy automatycznie.
     pub critical: bool,
+    /// Ikona aplikacji (`app_icon` albo hint `image-path`/`desktop-entry`).
+    pub icon: Option<String>,
 }
 
 impl Incoming {
@@ -65,8 +67,79 @@ type LiveIds = Arc<Mutex<HashSet<u32>>>;
 
 /// Co serwer potrafi (patrz `GetCapabilities`).
 ///
-/// `persistence` = powiadomienia z `expire_timeout = 0` nie znikają same.
-const CAPABILITIES: [&str; 3] = ["actions", "body", "persistence"];
+/// `persistence` = powiadomienia z `expire_timeout = 0` nie znikają same;
+/// `body-markup` pozwala klientom (np. edytorom) używać prostego znacznika HTML —
+/// treść i tak sprowadzamy do czystego tekstu, żeby nasz renderer jej nie zgubił.
+const CAPABILITIES: [&str; 6] = [
+    "actions",
+    "body",
+    "body-markup",
+    "icon-static",
+    "persistence",
+    "sound",
+];
+
+/// Wartość tekstowa hinta (np. `image-path`, `desktop-entry`).
+fn hint_string(hints: &std::collections::HashMap<String, OwnedValue>, key: &str) -> Option<String> {
+    hints
+        .get(key)
+        .and_then(|value| String::try_from(value.clone()).ok())
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+/// Sprowadza treść z `body-markup` do czystego tekstu.
+///
+/// Usuwamy wyłącznie wyglądające na HTML znaczniki (nazwa zaczyna się od litery),
+/// więc zwykły tekst w rodzaju `x < y` zostaje bez zmian. Encje zamieniamy na znaki.
+fn plain_text(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '<' {
+            out.push(ch);
+            continue;
+        }
+        let mut probe = String::new();
+        let mut closed = false;
+        while let Some(&next) = chars.peek() {
+            chars.next();
+            if next == '>' {
+                closed = true;
+                break;
+            }
+            probe.push(next);
+            if probe.len() > 256 {
+                break;
+            }
+        }
+        let body = probe.trim_start_matches('/').trim();
+        let name = body.split_whitespace().next().unwrap_or("");
+        // Tylko znaczniki znane z powiadomień (nie dowolny `<T>` z kodu/tytułu).
+        const TAGS: [&str; 14] = [
+            "b", "i", "u", "a", "img", "span", "br", "tt", "big", "small", "font", "sub", "sup",
+            "em",
+        ];
+        let lower = name.to_ascii_lowercase();
+        let looks_like_tag = closed
+            && probe.chars().next().is_some_and(|c| !c.is_whitespace())
+            && TAGS.contains(&lower.as_str());
+        if looks_like_tag {
+            continue;
+        }
+        out.push('<');
+        out.push_str(&probe);
+        if closed {
+            out.push('>');
+        }
+    }
+    out.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+}
 
 /// Przydziela ID: `replaces_id` tylko wtedy, gdy wskazuje żywe powiadomienie.
 fn allocate_id(live: &mut HashSet<u32>, next: &AtomicU32, replaces_id: u32) -> u32 {
@@ -102,7 +175,7 @@ impl Server {
         &self,
         app_name: String,
         replaces_id: u32,
-        _app_icon: String,
+        app_icon: String,
         summary: String,
         body: String,
         actions: Vec<String>,
@@ -115,6 +188,10 @@ impl Server {
             .collect();
         // `urgency`: 0 = low, 1 = normal, 2 = critical.
         let critical = hints.get("urgency").and_then(|v| u8::try_from(v).ok()) == Some(2);
+        let icon = (!app_icon.trim().is_empty())
+            .then(|| app_icon.trim().to_owned())
+            .or_else(|| hint_string(&hints, "image-path"))
+            .or_else(|| hint_string(&hints, "desktop-entry"));
         let id = {
             let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
             let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
@@ -122,11 +199,12 @@ impl Server {
             queue.push(Incoming {
                 id,
                 app_name,
-                summary,
-                body,
+                summary: plain_text(&summary),
+                body: plain_text(&body),
                 expire_ms,
                 actions: acts,
                 critical,
+                icon,
             });
             id
         };
@@ -299,6 +377,25 @@ mod tests {
     fn capabilities_match_what_ui_supports() {
         assert!(CAPABILITIES.contains(&"actions"), "przyciski akcji");
         assert!(CAPABILITIES.contains(&"body"), "treść powiadomienia");
+        assert!(
+            CAPABILITIES.contains(&"body-markup"),
+            "prosty znacznik HTML"
+        );
         assert!(CAPABILITIES.contains(&"persistence"), "timeout = 0");
+    }
+
+    #[test]
+    fn markup_is_reduced_to_plain_text() {
+        assert_eq!(
+            plain_text("<b>Gotowe</b> — <i>3</i> błędy"),
+            "Gotowe — 3 błędy"
+        );
+        assert_eq!(plain_text("x < y oraz a &amp; b"), "x < y oraz a & b");
+        assert_eq!(plain_text("x < y > z"), "x < y > z");
+        assert_eq!(
+            plain_text("Błąd w Vec<String> — <b>sprawdź</b>"),
+            "Błąd w Vec<String> — sprawdź"
+        );
+        assert_eq!(plain_text("<a href=\"https://x\">link</a>"), "link");
     }
 }

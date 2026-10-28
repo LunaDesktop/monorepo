@@ -18,12 +18,13 @@ use crate::app::SettingsApp;
 pub enum Page {
     #[default]
     Appearance,
-    Icons,
     Login,
     LockScreen,
     Notifications,
     Language,
     Workspaces,
+    Network,
+    Input,
     Displays,
     Sound,
     Power,
@@ -32,14 +33,15 @@ pub enum Page {
 }
 
 impl Page {
-    pub const ALL: [Page; 12] = [
+    pub const ALL: [Page; 13] = [
         Page::Appearance,
-        Page::Icons,
         Page::Login,
         Page::LockScreen,
         Page::Notifications,
         Page::Language,
         Page::Workspaces,
+        Page::Network,
+        Page::Input,
         Page::Displays,
         Page::Sound,
         Page::Power,
@@ -50,13 +52,14 @@ impl Page {
     /// Klucz tłumaczenia tytułu.
     pub fn title_key(self) -> &'static str {
         match self {
-            Page::Appearance => "Appearance",
-            Page::Icons => "Icons",
+            Page::Appearance => "Appearance and Icons",
             Page::Login => "Login Screen",
             Page::LockScreen => "Lock Screen",
             Page::Notifications => "Notifications",
             Page::Language => "Language and Region",
             Page::Workspaces => "Workspaces",
+            Page::Network => "Network",
+            Page::Input => "Keyboard and Mouse",
             Page::Displays => "Displays",
             Page::Sound => "Sound",
             Page::Power => "Power",
@@ -68,13 +71,14 @@ impl Page {
     /// Klucz tłumaczenia opisu strony.
     pub fn subtitle_key(self) -> &'static str {
         match self {
-            Page::Appearance => "Personalize the look and feel of Luna",
-            Page::Icons => "Icon style and preview",
+            Page::Appearance => "Theme, colors and icons in one place",
             Page::Login => "Wallpaper and colors of the sign-in screen",
             Page::LockScreen => "Look of your lock screen (no administrator needed)",
             Page::Notifications => "Control notifications and history",
             Page::Language => "Language, formats and time zone",
-            Page::Workspaces => "Number and names of workspaces",
+            Page::Workspaces => "Number, names and switching of workspaces",
+            Page::Network => "Wi-Fi and wired connections (NetworkManager)",
+            Page::Input => "Key repeat, scrolling and touchpad",
             Page::Displays => "Displays, resolution and brightness",
             Page::Sound => "Output volume and devices",
             Page::Power => "Battery and power management",
@@ -86,12 +90,13 @@ impl Page {
     pub fn icon(self) -> IconName {
         match self {
             Page::Appearance => IconName::Brightness,
-            Page::Icons => IconName::Image,
             Page::Login => IconName::User,
             Page::LockScreen => IconName::Star,
             Page::Notifications => IconName::Info,
             Page::Language => IconName::Globe,
-            Page::Workspaces => IconName::Monitor,
+            Page::Workspaces => IconName::Grid,
+            Page::Network => IconName::Wifi,
+            Page::Input => IconName::Sliders,
             Page::Displays => IconName::Monitor,
             Page::Sound => IconName::Volume,
             Page::Power => IconName::Battery,
@@ -141,8 +146,28 @@ pub enum Action {
     TestNotification,
     SetWorkspaceCount(usize),
     EditWorkspaceName(usize),
+    /// Włącza/wyłącza przełączanie przestrzeni przez dolne rogi ekranu.
+    ToggleWorkspaceCorner,
+    /// Otwiera wybór tapety ekranu logowania z dysku (własny piksel).
+    OpenWallpaperPicker,
+    /// Ustawia tapetę ekranu logowania z konkretnej ścieżki (wybór z dysku).
+    SetGreeterWallpaperPath(PathBuf),
     /// Ustawia strefę systemową przez `pkexec timedatectl` (wymaga autoryzacji).
     ApplySystemTimezone,
+    /// Włącza/wyłącza synchronizację czasu (NTP) w systemie.
+    ToggleNtp,
+    // — Sieć (NetworkManager przez `nmcli`) —
+    ToggleWifi,
+    RefreshWifi,
+    /// Połącz z siecią; `secured` oznacza, że trzeba zapytać o hasło.
+    ConnectWifi {
+        ssid: String,
+        secured: bool,
+    },
+    // — Wejście (klawiatura i mysz) —
+    SetRepeatDelay(u32),
+    SetRepeatRate(u32),
+    ToggleNaturalScroll,
 }
 
 /// Rodzaj wyszukiwanego wyboru.
@@ -203,6 +228,11 @@ pub enum Control {
     },
     /// Pasek podglądu ikon (styl ikon).
     IconStrip(Vec<IconName>),
+    /// Podgląd motywu: karta w barwach akcentu z kilkoma ikonami.
+    ThemePreview {
+        accent: Accent,
+        icons: Vec<IconName>,
+    },
     /// Miniatura tapety z zaznaczeniem.
     Wallpaper {
         path: PathBuf,
@@ -228,6 +258,9 @@ pub struct Row {
 pub struct Group {
     pub title: String,
     pub rows: Vec<Row>,
+    /// Grupa techniczna („Configuration”/„Information”) — pokazywana w panelu Info,
+    /// a nie w głównej treści strony.
+    pub info: bool,
 }
 
 fn row(title: impl Into<String>, control: Control, action: Action) -> Row {
@@ -265,6 +298,15 @@ fn group(title: impl Into<String>, rows: Vec<Row>) -> Group {
     Group {
         title: title.into(),
         rows,
+        info: false,
+    }
+}
+
+fn info_group(title: impl Into<String>, rows: Vec<Row>) -> Group {
+    Group {
+        title: title.into(),
+        rows,
+        info: true,
     }
 }
 
@@ -272,18 +314,32 @@ fn group(title: impl Into<String>, rows: Vec<Row>) -> Group {
 pub fn groups(app: &SettingsApp) -> Vec<Group> {
     match app.page {
         Page::Appearance => appearance(app),
-        Page::Icons => icons(app),
         Page::Notifications => notifications(app),
         Page::Language => language(app),
         Page::Login => login(app),
         Page::LockScreen => lock_screen(app),
         Page::Workspaces => workspaces(app),
+        Page::Network => network(app),
+        Page::Input => input(app),
         Page::Displays => displays(app),
         Page::Sound => sound(app),
         Page::Power => power(app),
         Page::System => system(),
         Page::About => about(),
     }
+}
+
+/// Grupy widoczne w głównej treści strony (bez technicznych szczegółów).
+pub fn content_groups(app: &SettingsApp) -> Vec<Group> {
+    groups(app)
+        .into_iter()
+        .filter(|group| !group.info)
+        .collect()
+}
+
+/// Grupy techniczne dla panelu Info (konfiguracja, ścieżki, backendy).
+pub fn info_groups(app: &SettingsApp) -> Vec<Group> {
+    groups(app).into_iter().filter(|group| group.info).collect()
 }
 
 fn appearance(app: &SettingsApp) -> Vec<Group> {
@@ -299,7 +355,7 @@ fn appearance(app: &SettingsApp) -> Vec<Group> {
         ThemePreference::System => 2,
     };
 
-    let mut rows = vec![
+    let mut theme_rows = vec![
         row_sub(
             tr("Theme mode"),
             tr("System colors are used when Auto is selected"),
@@ -334,7 +390,7 @@ fn appearance(app: &SettingsApp) -> Vec<Group> {
                 selected = i + 1;
             }
         }
-        rows.push(row(
+        theme_rows.push(row(
             tr("Style"),
             Control::Segmented {
                 options,
@@ -345,7 +401,90 @@ fn appearance(app: &SettingsApp) -> Vec<Group> {
         ));
     }
 
-    vec![group(tr("Appearance"), rows)]
+    theme_rows.push(row_sub(
+        tr("Preview"),
+        tr("A live sample of the selected colors and icons"),
+        Control::ThemePreview {
+            accent: app.accent,
+            icons: vec![
+                IconName::Files,
+                IconName::Terminal,
+                IconName::Settings,
+                IconName::Globe,
+                IconName::Music,
+                IconName::Image,
+            ],
+        },
+        Action::None,
+    ));
+
+    let selected = IconTheme::ALL
+        .iter()
+        .position(|theme| *theme == app.icons.theme)
+        .unwrap_or(0);
+    let options = vec![tr("Luna (pastel)"), tr("Monochrome")];
+    let actions = IconTheme::ALL
+        .iter()
+        .map(|theme| Action::SetIconTheme(*theme))
+        .collect();
+    let preview = vec![
+        IconName::Files,
+        IconName::Terminal,
+        IconName::Settings,
+        IconName::Globe,
+        IconName::Music,
+        IconName::Image,
+        IconName::Wifi,
+        IconName::Moon,
+    ];
+    let external = match &app.icons.external {
+        Some(name) => libluna_core::icons::find_icon_set(name)
+            .map(|set| libluna_core::icons::icon_set_display_name(&set))
+            .unwrap_or_else(|| name.clone()),
+        None => tr("Vector icons (Luna)"),
+    };
+    let dirs = libluna_core::icons::icon_search_dirs()
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(" · ");
+
+    vec![
+        group(tr("Theme"), theme_rows),
+        group(
+            tr("Icons"),
+            vec![
+                row_sub(
+                    tr("Icon style"),
+                    tr("Pastel illustrations or monochrome icons"),
+                    Control::Segmented {
+                        options,
+                        selected,
+                        actions,
+                    },
+                    Action::None,
+                ),
+                row_sub(
+                    tr("External icon set"),
+                    tr("Global for the whole environment; installed in the icon directories below"),
+                    Control::Select { value: external },
+                    Action::OpenPicker(PickerKind::IconSet),
+                ),
+                row(tr("Preview"), Control::IconStrip(preview), Action::None),
+            ],
+        ),
+        info_group(
+            tr("Information"),
+            vec![
+                info_row(
+                    tr("Icons are vector-based"),
+                    tr("The style changes colors; an external set replaces application and place icons"),
+                ),
+                value_row(tr("Installed icon sets"), app.icon_sets.len().to_string()),
+                info_row(tr("Icon directories"), dirs),
+            ],
+        ),
+    ]
 }
 
 fn notifications(app: &SettingsApp) -> Vec<Group> {
@@ -403,11 +542,11 @@ fn notifications(app: &SettingsApp) -> Vec<Group> {
                 value_row(tr("Notification daemon"), "luna-shell"),
                 info_row(
                     tr("Supported features"),
-                    tr("Actions, replaces_id, CloseNotification, persistent notifications"),
+                    tr("Actions, replaces_id, CloseNotification, markup, icons, persistent notifications"),
                 ),
             ],
         ),
-        group(
+        info_group(
             tr("Information"),
             vec![info_row(
                 tr("Provided by luna-shell over D-Bus"),
@@ -465,6 +604,12 @@ fn language(app: &SettingsApp) -> Vec<Group> {
                     Action::OpenPicker(PickerKind::Timezone),
                 ),
                 row_sub(
+                    tr("Automatic time"),
+                    tr("Synchronize the clock over the network (NTP)"),
+                    Control::Switch(app.ntp.unwrap_or(false)),
+                    Action::ToggleNtp,
+                ),
+                row_sub(
                     tr("Apply time zone to the system"),
                     tr("Requires administrator approval (polkit)"),
                     Control::Button {
@@ -475,7 +620,7 @@ fn language(app: &SettingsApp) -> Vec<Group> {
                 ),
             ],
         ),
-        group(
+        info_group(
             tr("Configuration"),
             vec![
                 value_row(
@@ -498,75 +643,6 @@ fn language(app: &SettingsApp) -> Vec<Group> {
                     tr("Other applications"),
                     tr("Luna apps switch immediately; other programs pick up the language after restart"),
                 ),
-            ],
-        ),
-    ]
-}
-
-fn icons(app: &SettingsApp) -> Vec<Group> {
-    let selected = IconTheme::ALL
-        .iter()
-        .position(|theme| *theme == app.icons.theme)
-        .unwrap_or(0);
-    let options = vec![tr("Luna (pastel)"), tr("Monochrome")];
-    let actions = IconTheme::ALL
-        .iter()
-        .map(|theme| Action::SetIconTheme(*theme))
-        .collect();
-    let preview = vec![
-        IconName::Files,
-        IconName::Terminal,
-        IconName::Settings,
-        IconName::Globe,
-        IconName::Music,
-        IconName::Image,
-        IconName::Wifi,
-        IconName::Moon,
-    ];
-    let external = match &app.icons.external {
-        Some(name) => libluna_core::icons::find_icon_set(name)
-            .map(|set| libluna_core::icons::icon_set_display_name(&set))
-            .unwrap_or_else(|| name.clone()),
-        None => tr("Vector icons (Luna)"),
-    };
-    let dirs = libluna_core::icons::icon_search_dirs()
-        .iter()
-        .map(|path| path.display().to_string())
-        .collect::<Vec<_>>()
-        .join(" · ");
-
-    vec![
-        group(
-            tr("Icons"),
-            vec![
-                row_sub(
-                    tr("Icon style"),
-                    tr("Pastel illustrations or monochrome icons"),
-                    Control::Segmented {
-                        options,
-                        selected,
-                        actions,
-                    },
-                    Action::None,
-                ),
-                row_sub(
-                    tr("External icon set"),
-                    tr("Global for the whole environment; installed in the icon directories below"),
-                    Control::Select { value: external },
-                    Action::OpenPicker(PickerKind::IconSet),
-                ),
-                row(tr("Preview"), Control::IconStrip(preview), Action::None),
-            ],
-        ),
-        group(
-            tr("Information"),
-            vec![
-                info_row(
-                    tr("Icons are vector-based"),
-                    tr("The style changes colors; an external set replaces application and place icons"),
-                ),
-                value_row(tr("Installed icon sets"), app.icon_sets.len().to_string()),
-                info_row(tr("Icon directories"), dirs),
             ],
         ),
     ]
@@ -636,7 +712,7 @@ fn lock_screen(app: &SettingsApp) -> Vec<Group> {
                 ),
             ],
         ),
-        group(
+        info_group(
             tr("Configuration"),
             vec![
                 value_row(
@@ -679,19 +755,27 @@ fn workspaces(app: &SettingsApp) -> Vec<Group> {
     vec![
         group(
             tr("Workspaces"),
-            vec![row_sub(
-                tr("Number of workspaces"),
-                tr("The panel and Super+Tab update immediately"),
-                Control::Segmented {
-                    options,
-                    selected,
-                    actions,
-                },
-                Action::None,
-            )],
+            vec![
+                row_sub(
+                    tr("Number of workspaces"),
+                    tr("The panel and Super+Tab update immediately"),
+                    Control::Segmented {
+                        options,
+                        selected,
+                        actions,
+                    },
+                    Action::None,
+                ),
+                row_sub(
+                    tr("Switch at screen corners"),
+                    tr("Move the pointer or drag a window to a bottom corner to change workspace"),
+                    Control::Switch(app.workspace_layout.corner_switch()),
+                    Action::ToggleWorkspaceCorner,
+                ),
+            ],
         ),
         group(tr("Names"), name_rows),
-        group(
+        info_group(
             tr("Information"),
             vec![info_row(
                 tr("Names and count update immediately"),
@@ -765,6 +849,16 @@ fn login(app: &SettingsApp) -> Vec<Group> {
         ));
     }
 
+    wallpaper_rows.push(row_sub(
+        tr("Choose from disk"),
+        tr("Pick any PNG image from your computer"),
+        Control::Button {
+            label: tr("Browse…"),
+            suggested: false,
+        },
+        Action::OpenWallpaperPicker,
+    ));
+
     if app.wallpapers.is_empty() {
         wallpaper_rows.push(info_row(
             tr("No wallpapers found"),
@@ -820,7 +914,7 @@ fn login(app: &SettingsApp) -> Vec<Group> {
         group(tr("Appearance"), appearance),
         group(tr("Apply changes"), apply),
         group(tr("Wallpaper"), wallpaper_rows),
-        group(
+        info_group(
             tr("Configuration"),
             vec![value_row(
                 tr("Configuration file"),
@@ -908,6 +1002,168 @@ fn scan_png(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     }
 }
 
+fn network(app: &SettingsApp) -> Vec<Group> {
+    let mut rows = vec![row_sub(
+        tr("Wi-Fi"),
+        tr("Wireless networks are managed by NetworkManager"),
+        Control::Switch(app.wifi_on),
+        Action::ToggleWifi,
+    )];
+
+    if app.wifi_on {
+        if app.wifi.is_empty() {
+            rows.push(info_row(
+                tr("No networks found"),
+                tr("Use Refresh to scan again"),
+            ));
+        } else {
+            for net in &app.wifi {
+                let secured = !net.security.is_empty() && net.security != "--";
+                let subtitle = if net.active {
+                    tr("Connected").to_owned()
+                } else {
+                    format!(
+                        "{}% · {}",
+                        net.signal,
+                        if secured {
+                            net.security.clone()
+                        } else {
+                            tr("Open")
+                        }
+                    )
+                };
+                let action = if net.active {
+                    Action::None
+                } else {
+                    Action::ConnectWifi {
+                        ssid: net.ssid.clone(),
+                        secured,
+                    }
+                };
+                rows.push(row_sub(
+                    net.ssid.clone(),
+                    subtitle,
+                    Control::Button {
+                        label: if net.active {
+                            tr("Connected")
+                        } else {
+                            tr("Connect")
+                        },
+                        suggested: false,
+                    },
+                    action,
+                ));
+            }
+        }
+        rows.push(row(
+            tr("Scan again"),
+            Control::Button {
+                label: tr("Refresh"),
+                suggested: false,
+            },
+            Action::RefreshWifi,
+        ));
+    }
+
+    vec![
+        group(tr("Wi-Fi"), rows),
+        info_group(
+            tr("Configuration"),
+            vec![
+                value_row(tr("Backend"), "NetworkManager (D-Bus)"),
+                info_row(
+                    tr("Passwords are sent to NetworkManager only"),
+                    tr("Luna Settings does not store Wi-Fi passwords"),
+                ),
+            ],
+        ),
+    ]
+}
+
+fn input(app: &SettingsApp) -> Vec<Group> {
+    let delays = [200_u32, 400, 600, 800, 1000];
+    let delay_labels: Vec<String> = delays.iter().map(|delay| format!("{delay} ms")).collect();
+    let delay_selected = delays
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, delay)| delay.abs_diff(app.input.repeat_delay()))
+        .map(|(index, _)| index)
+        .unwrap_or(2);
+    let rates = [15_u32, 25, 35, 50];
+    let rate_labels: Vec<String> = rates.iter().map(|rate| format!("{rate}/s")).collect();
+    let rate_selected = rates
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, rate)| rate.abs_diff(app.input.repeat_rate()))
+        .map(|(index, _)| index)
+        .unwrap_or(1);
+
+    vec![
+        group(
+            tr("Keyboard"),
+            vec![
+                row_sub(
+                    tr("Key repeat delay"),
+                    tr("How long a key must be held before it repeats"),
+                    Control::Segmented {
+                        options: delay_labels,
+                        selected: delay_selected,
+                        actions: delays.iter().copied().map(Action::SetRepeatDelay).collect(),
+                    },
+                    Action::None,
+                ),
+                row_sub(
+                    tr("Key repeat speed"),
+                    tr("Repeats per second while a key is held"),
+                    Control::Segmented {
+                        options: rate_labels,
+                        selected: rate_selected,
+                        actions: rates.iter().copied().map(Action::SetRepeatRate).collect(),
+                    },
+                    Action::None,
+                ),
+            ],
+        ),
+        group(
+            tr("Mouse and touchpad"),
+            vec![row_sub(
+                tr("Natural scrolling"),
+                tr("Move content in the direction of your fingers"),
+                Control::Switch(app.input.natural_scroll()),
+                Action::ToggleNaturalScroll,
+            )],
+        ),
+        group(
+            tr("In development"),
+            vec![
+                info_row(
+                    tr("Tap to click"),
+                    tr("Tap-to-click and touchpad gestures are planned after the beta"),
+                ),
+                info_row(
+                    tr("Pointer speed"),
+                    tr("Pointer acceleration is not configurable yet"),
+                ),
+            ],
+        ),
+        info_group(
+            tr("Configuration"),
+            vec![
+                value_row(
+                    tr("Input configuration"),
+                    libluna_core::InputSettings::config_path()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|| "—".to_owned()),
+                ),
+                info_row(
+                    tr("Changes apply immediately"),
+                    tr("Selene receives repeat and scrolling settings through luna-control"),
+                ),
+            ],
+        ),
+    ]
+}
+
 fn displays(app: &SettingsApp) -> Vec<Group> {
     let mons = monitors();
     let mut rows = Vec::new();
@@ -951,7 +1207,7 @@ fn displays(app: &SettingsApp) -> Vec<Group> {
     vec![
         group(tr("Monitor"), rows),
         group(tr("Brightness"), vec![brightness]),
-        group(
+        info_group(
             tr("Resolution"),
             vec![info_row(
                 tr("Adjusting resolution and layout requires Selene output management"),
@@ -1074,7 +1330,7 @@ fn about() -> Vec<Group> {
                 value_row(tr("License"), "MPL-2.0"),
             ],
         ),
-        group(
+        info_group(
             tr("Information"),
             vec![
                 info_row(
@@ -1212,5 +1468,19 @@ mod tests {
             names,
             list.iter().map(|m| m.name.clone()).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn technical_groups_are_split_for_the_info_sheet() {
+        let mut app = SettingsApp::new(&libluna_core::ThemeSettings::load());
+        for page in Page::ALL {
+            app.page = page;
+            let all = groups(&app);
+            let content = content_groups(&app);
+            let info = info_groups(&app);
+            assert_eq!(content.len() + info.len(), all.len(), "{page:?}");
+            assert!(content.iter().all(|group| !group.info), "{page:?}");
+            assert!(info.iter().all(|group| group.info), "{page:?}");
+        }
     }
 }

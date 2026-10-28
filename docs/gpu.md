@@ -89,24 +89,53 @@ Zakres (zrobione):
 6. Kryterium: renderer desktop 12,63 → **1,56 ms**; `luna-panel` z `LUNA_GPU=1`
    daje obrazy zgodne z CPU (różnice tylko antyaliasing zaokrągleń).
 
-Pozostało w tym etapie: przenieść kompozycję DRM na GPU (dziś ścieżka DRM ma
-osobny `SoftwareRenderer` i wątki per monitor — potrzebny jeden kontekst per wątek)
-i dodać pomiar w realnej sesji na słabym sprzęcie.
+Pozostało w tym etapie: pomiar w realnej sesji na słabym sprzęcie.
+
+**Ścieżka DRM też używa GPU** (`SELENE_GPU=1`): każdy monitor dostaje własny
+kontekst (EGL jest przypięty do wątku), render jest sekwencyjny — przy ~1,5 ms na
+klatkę to wciąż szybciej niż równoległy CPU (7–10 ms na monitor). Klatka wraca do
+`dumb buffer` przez `glReadPixels`, bo na tej maszynie nie ma `EGL_PLATFORM_GBM`.
+Zrzuty ekranu (`Super+F12`) idą z aktywnego backendu, więc z GPU widać także okna
+`dmabuf`.
 
 ### ETAP 2 — `zwp_linux_dmabuf_v1` (klienci GPU)
 
-Zakres:
-1. Global `zwp_linux_dmabuf_v1` v3 + `zwp_linux_buffer_params_v1`
-   (`create`/`create_immed`, `add`, `created`/`failed`).
-2. Dla każdego `wl_buffer`: `eglCreateImage` z `EGL_LINUX_DMA_BUF_EXT`
-   (+ modyfikatory), `glEGLImageTargetTexture2DOES` → tekstura.
-3. `wl_buffer.release` dopiero po fence (`EGL_KHR_fence_sync`) — bez tego klient
-   rysuje po zwolnionym buforze.
-4. Import tylko formatów, które faktycznie obsługujemy; inaczej `failed`
-   (klient wybierze shm). Lista formatów/modyfikatorów z
-   `eglQueryDmaBufFormatsEXT`/`eglQueryDmaBufModifiersEXT`.
-5. Kryterium: Zed/Chrome/Electron startują **natywnie na Waylandzie**
-   (bez `LUNA_X11_APPS`), wideo sprzętowe nie kopiuje klatek przez CPU.
+**Status: ✅ zaimplementowany (zakres etapu 2).**
+
+Zakres (zrobione):
+1. Global `zwp_linux_dmabuf_v1` **v3** + `zwp_linux_buffer_params_v1`
+   (`create` → `created`, `create_immed`, `add`, `destroy`). Global powstaje
+   **tylko** gdy `LUNA_GPU=1` i EGL potrafi zaimportować dmabuf.
+2. Formaty **jednoplanowe** `ARGB/XRGB/ABGR/XBGR8888`, modyfikatory z
+   `eglQueryDmaBufFormatsEXT`/`eglQueryDmaBufModifiersEXT` (odfiltrowane do
+   tego, co naprawdę importujemy). Inne formaty → `failed`; klient zostaje przy shm.
+3. Import: `eglCreateImageKHR(EGL_LINUX_DMA_BUF_EXT)` +
+   `glEGLImageTargetTexture2DOES` → tekstura w cache `GpuRenderer`
+   (klucz `Arc<DmabufImage>`, zwalniana razem z `EGLImage`).
+4. `wl_buffer.release` jest wysyłany **przy następnym commicie** tej powierzchni
+   (GPU czyta poprzednią klatkę jeszcze po `commit`); renderer kończy klatkę
+   `glFinish`. Jawne fence (`EGL_KHR_fence_sync`) to optymalizacja na później.
+5. Weryfikacja: test round-trip w `libluna-render` (tekstura GL → eksport MESA
+   do dmabuf → import → identyczne piksele), testy walidacji parametrów
+   w `selene/src/dmabuf.rs` oraz `luna-control dmabuf` w teście sesji
+   (`enabled=true` tylko z GPU).
+6. **Zed natywnie na Waylandzie** (bez `LUNA_X11_APPS`) w zagnieżdżonym Selene
+   z `SELENE_GPU=1` — log potwierdza rzeczywisty dmabuf klienta:
+
+   ```text
+   selene/dmabuf: okno "tmp" 1536x1095 format=0x34325258 modifier=0x0300000000e08014
+   libluna-render: dmabuf 1536x1095 (…, premultiplied) → tekstura 3
+   ```
+
+   Format `XR24` z modyfikatorem liniowym NVIDII — czyli kompozycja okna GPU
+   działa end-to-end, bez pośredniego shm.
+
+Ograniczenia etapu 2: brak formatów wieloplanowych (YUV/wideo), brak
+`y_invert`/`interlaced`, brak `feedback` z v4, powierzchnie warstwowe
+(`wlr-layer-shell`) nadal wymagają shm.
+
+Kryterium na kolejny krok: klient GPU (Zed/Chrome) startuje natywnie na
+Waylandzie bez `LUNA_X11_APPS` — **spełnione dla Zed** (patrz pkt 6).
 
 ### ETAP 3 — pełny GPU dla `Scene` (ścieżki, tekst, clip)
 
@@ -121,6 +150,13 @@ Pozostało:
 3. **Clip stencil** dla wielu zaokrąglonych clipów jednocześnie (dziś ostatni).
 4. Kryterium: te same scenariusze co `render_bench`, p95 ≤ 8 ms przy 2560×1440,
    pamięć ≤ +20%, fallback CPU gdy brak EGL.
+
+Zrobione: **clip zaokrąglony na GPU**. Uniform `round` pakował `(x, y, szerokość,
+promień)`, a shader czytał z tego `(szerokość, wysokość)` i promień — czyli
+odrzucał całe okno, bo „wysokość” clipu była równa promieniowi. Objaw: GPU rysował
+tapetę i pasek SSD, ale **żadnej treści okna** (także `dmabuf`). Promień ma teraz
+własny uniform `round_r`, a rozmiar clipu idzie w `zw`; pilnuje tego test
+`gpu_draws_shm_image` oraz `window_content_is_visible_in_render` w Selene.
 
 ### ETAP 4 — wyjście zero-copy (DRM/Mesa)
 
@@ -147,6 +183,12 @@ Pozostało:
 1. [x] Sonda EGL + benchmark (`gpu_probe`), potwierdzenie dmabuf/fence.
 2. [x] `GpuRenderer` (etap 1) — `LUNA_GPU=1`/`SELENE_GPU=1`, fallback CPU, warstwy
    CPU dla tekstu/wektorów, pomiar 12,6 → 1,6 ms na scenie pulpitu.
-3. [ ] Kompozycja GPU w trybie DRM (kontekst per wątek wyjścia).
-4. [ ] `zwp_linux_dmabuf_v1` (etap 2) + test z klientem GPU w izolowanej sesji.
-5. [ ] Zero-copy DRM (etap 4) na Mesa; NVIDIA — readback.
+3. [x] `zwp_linux_dmabuf_v1` v3 (etap 2): formaty jednoplanowe + modyfikatory,
+   `create_immed`/`create`, cache `EGLImage`, release przy następnym commicie.
+4. [x] Test z realnym klientem GPU (Zed w osobnej instancji) — dmabuf `XR24`
+   z modyfikatorem NVIDII zaimportowany i wyświetlony.
+5. [x] Kompozycja GPU w trybie DRM (kontekst per monitor, render sekwencyjny,
+   readback do dumb buffera, zrzuty z aktywnego backendu).
+6. [ ] Zero-copy DRM (etap 4) na Mesa; NVIDIA — readback.
+7. [ ] Fence (`EGL_KHR_fence_sync`) zamiast `glFinish`, formaty wieloplanowe
+   (wideo), dmabuf dla `wlr-layer-shell`.

@@ -10,6 +10,7 @@ Exec=luna-files
 Icon=system-file-manager
 Terminal=false
 Categories=System;FileManager;
+MimeType=inode/directory;
 Keywords=files;folders;manager;
 Keywords[pl]=pliki;foldery;menedżer;
 Keywords[de]=Dateien;Ordner;Dateimanager;

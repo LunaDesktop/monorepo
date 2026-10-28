@@ -9,6 +9,7 @@ mod compositor;
 mod control;
 mod data;
 mod decoration;
+mod dmabuf;
 mod drm;
 mod evdev;
 mod foreign_toplevel;
@@ -36,6 +37,7 @@ use std::sync::Arc;
 
 use libluna_core::Event;
 use wayland_protocols::ext::workspace::v1::server::ext_workspace_manager_v1::ExtWorkspaceManagerV1;
+use wayland_protocols::wp::linux_dmabuf::zv1::server::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1;
 use wayland_protocols::xdg::decoration::zv1::server::zxdg_decoration_manager_v1;
 use wayland_protocols::xdg::shell::server::xdg_wm_base;
 use wayland_protocols::xwayland::shell::v1::server::xwayland_shell_v1::XwaylandShellV1;
@@ -90,6 +92,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut state = State::default();
     state.apply_workspace_layout();
+    state.apply_input_settings();
     // Diagnostyka: skryptowane wejście (`SELENE_INPUT_SCRIPT`) — używane w testach
     // izolowanej sesji, aby odtworzyć kliknięcia bez fizycznej myszy.
     let mut script_input = test_input::ScriptInput::open();
@@ -109,13 +112,26 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
     let output_count = state.outputs.lock_or_recover().len();
-    let ws_count = state.ws_count;
+    let ws_count = std::sync::Arc::clone(&state.ws_count_model);
     state.display_handle = Some(handle.clone());
 
     // Globalne interfejsy protokołu.
     handle.create_global::<State, wl_compositor::WlCompositor, ()>(4, ());
     handle.create_global::<State, wl_subcompositor::WlSubcompositor, ()>(1, ());
     handle.create_global::<State, wl_shm::WlShm, ()>(1, ());
+    // Bufory GPU klientów (`zwp_linux_dmabuf_v1`) ogłaszamy **tylko** z backendem GPU:
+    // bez EGL nie umiemy ich wyświetlić, a obietnica bez pokrycia psuje aplikacje.
+    let gpu_on = std::env::var("LUNA_GPU")
+        .map(|v| !v.is_empty() && v != "0")
+        .unwrap_or(false);
+    if gpu_on && dmabuf::available() {
+        handle.create_global::<State, ZwpLinuxDmabufV1, ()>(3, ());
+        dmabuf::enable();
+        if std::env::var("SELENE_STATS").is_ok() {
+            let formats = libluna_render::gpu::dmabuf_formats();
+            eprintln!("selene/dmabuf: global v3 ({} formatów EGL)", formats.len());
+        }
+    }
     // Jeden global `wl_output` na monitor.
     for index in 0..output_count {
         handle.create_global::<State, wl_output::WlOutput, usize>(4, index);

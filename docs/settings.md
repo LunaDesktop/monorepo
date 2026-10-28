@@ -9,13 +9,16 @@ język, użytkownicy, sterowniki).
 
 - Działa `apps/luna-settings` na libLunie (`NavList` z sekcjami, `PreferencesPage`,
   `ActionRow`, `Switch`, `Slider`, `ViewSwitcher`, `Button`, `HeaderBar`).
-- Sekcja **Środowisko**: **Wygląd** (tryb, akcent, styl), **Ikony** (styl + zestawy
-  zewnętrzne, np. Papirus, z podglądem), **Ekran logowania** (tapety z miniaturami,
-  formularz hasła administratora), **Ekran blokady** (per użytkownik),
+- Sekcja **Środowisko**: **Wygląd i ikony** (motyw, akcent, styl, ikony i podgląd
+  w jednym miejscu), **Ekran logowania** (tapety z miniaturami, **wybór dowolnego PNG
+  z dysku**, formularz hasła administratora), **Ekran blokady** (per użytkownik),
   **Powiadomienia** (DND + róg ekranu + test), **Język i region** (wyszukiwany wybór
-  języka, locale i strefy) oraz **Przestrzenie robocze** (liczba + nazwy na żywo).
-- Sekcja **Sprzęt**: **Ekrany**, **Dźwięk**, **Zasilanie**. Sekcja **Informacje**:
-  **System**, **O Luna**.
+  języka, locale i strefy, NTP) oraz **Przestrzenie robocze** (liczba, nazwy i
+  przełączanie dolnymi rogami ekranu).
+- Sekcja **Sprzęt**: **Sieć** (Wi-Fi przez NetworkManager), **Ekrany**, **Dźwięk**,
+  **Zasilanie**. Sekcja **Informacje**: **System**, **O Luna**.
+- Szczegóły techniczne (ścieżki konfiguracji, backendy, ograniczenia) nie zaśmiecają
+  treści stron — są w panelu **Info** (przycisk w nagłówku okna, `BottomSheet`).
 - Wejście: Quick Panel na pasku (ikona koła zębatego), wpis `.desktop`, `scripts/install.sh`.
 - Podglądy headless: `cargo run --manifest-path apps/luna-settings/Cargo.toml --bin preview` →
   `docs/images/luna-settings-*.png` (w tym `luna-settings-language-picker.png`).
@@ -25,8 +28,11 @@ język, użytkownicy, sterowniki).
 ## Aplikacja
 
 - `apps/luna-settings` (bin + logika w libce) oraz `de/session/eu.luna.Settings.desktop`.
+- **Nazwa w tytule okna i nagłówku pochodzi z systemu** (`/etc/os-release`,
+  `NAME` → `PRETTY_NAME` → `ID`), np. „Ustawienia — Pagan Linux”. Nie ma zaszytej
+  nazwy „Luna Settings”; ta sama zasada działa na PaganOS, Pagix i innych systemach.
 - UI na `libluna-widgets`: `NavList` (sekcje + strony), `PreferencesPage`/`PreferencesGroup`,
-  `ActionRow`, `Switch`, `Slider`, `ViewSwitcher`, `Button`, `HeaderBar`, `Toast`.
+  `ActionRow`, `Switch`, `Slider`, `ViewSwitcher`, `Button`, `HeaderBar`, `Toast`, `BottomSheet`.
 - Ten sam podział co w panelu: **model** (`SettingsApp`, `Page`, dane strony) oddzielony
   od rysowania (`PaintCtx`). Dzięki temu strony mają testy i podglądy headless.
 - Wejścia: Quick Panel na pasku (ikona koła zębatego), wpis w launcherze
@@ -39,20 +45,19 @@ język, użytkownicy, sterowniki).
 | Strona | Zakres | Backend / zależność | Stan |
 |---|---|---|---|
 | **O systemie** | host, kernel, architektura, użytkownik, wersje Luny/Selene | `/proc`, `/etc/os-release` | ✅ |
-| **Wygląd** | jasny/ciemny/auto, akcent, styl z pliku | `ThemeSettings`, `theme_file` | ✅ |
-| **Ikony** | domyślnie dołączony **Luna-Icons** (pastelowe PNG 16–512 px + SVG), styl wektorowy (pastel/monochrom) i **zewnętrzne zestawy freedesktop** (Papirus, Adwaita…) z podglądem; wybór globalny dla środowiska | `~/.config/luna/icons.conf`, `libluna-widgets::paint_icon`, launcher/taskbar | ✅ |
-| **Ekran logowania** | tapety PNG z miniaturami, tryb/akcent, zegar greetera; **szkic zmian + „Zastosuj zmiany” + formularz hasła administratora** (`sudo`) | `/etc/luna/greeter.conf`, `luna-greeter-config` | ✅ |
+| **Wygląd i ikony** | jasny/ciemny/auto, akcent, styl z pliku oraz **ikony** (dołączony Luna-Icons, styl wektorowy i zewnętrzne zestawy freedesktop) z podglądem | `ThemeSettings`, `theme_file`, `~/.config/luna/icons.conf` | ✅ |
+| **Ekran logowania** | tapety PNG z miniaturami, **wybór pliku z dysku** (własna przeglądarka katalogów), tryb/akcent, zegar greetera; **szkic zmian + „Zastosuj zmiany” + formularz hasła administratora** (`sudo`) | `/etc/luna/greeter.conf`, `luna-greeter-config` | ✅ |
 | **Ekran blokady** | tryb/akcent, zegar, tapeta pulpitu lub jednolite tło | `~/.config/luna/lock.conf`, `luna-lock` (bez roota) | ✅ |
-| **Język i region** | wyszukiwany wybór języka, locale (`locale -a`/`SUPPORTED`) i strefy (`zone.tab`/`timedatectl`); zapis `locale.conf` + `region.conf`; język działa **na żywo** we wszystkich aplikacjach Luny | `libluna-i18n`, `libluna-platform`, sesja (`LC_TIME`, `TZ`) | ✅ |
+| **Język i region** | wyszukiwany wybór języka, locale (`locale -a`/`SUPPORTED`) i strefy (`zone.tab`/`timedatectl`); zapis `locale.conf` + `region.conf`; język działa **na żywo** we wszystkich aplikacjach Luny; przełącznik NTP | `libluna-i18n`, `libluna-platform`, sesja (`LC_TIME`, `TZ`), `timedatectl` | ✅ |
 | **Powiadomienia** | DND, pozycja toastów w jednym z czterech rogów, **przycisk „Wyślij test”** (D-Bus), status daemona | `~/.config/luna/notifications.conf`, `luna-shell` | ✅ |
-| **Przestrzenie robocze** | liczba (na żywo przez `luna-control workspace-count`) i nazwy; panel oraz podgląd `Super+Tab` aktualizują się od razu | `~/.config/luna/workspaces.conf`, Selene (`ext_workspace_v1`) | ✅ |
+| **Przestrzenie robocze** | liczba (na żywo przez `luna-control workspace-count`) i nazwy; panel, pulpit oraz podgląd `Super+Tab` aktualizują się od razu; opcjonalne **przełączanie dolnymi rogami** (także podczas przeciągania okna) | `~/.config/luna/workspaces.conf`, Selene (`ext_workspace_v1`, `luna-control workspace-corner`) | ✅ |
+| **Sieć** | Wi‑Fi: skanowanie, łączenie (także z hasłem), włączanie/wyłączanie radia; połączenie przewodowe obsługuje NetworkManager | NetworkManager (D-Bus; skanowanie `nmcli`) | ✅ |
 | **Dźwięk** | głośność, wyciszenie, domyślne wyjście (wejście/profile później) | `wpctl` / PipeWire | ✅ |
 | **Ekrany** | odczyt złączy DRM + jasność | `/sys/class/drm`, `/sys/class/backlight` | ◐ |
 | **Zasilanie** | bateria, profil power-saver (usypianie/wieko później) | `power-profiles-daemon`, `/sys` | ✅ |
-| **Sieć** | Wi‑Fi (lista, połączenie), przewód, VPN później | `nmcli` / NetworkManager | ⏳ |
 | **Bluetooth** | adapter, urządzenia, parowanie | BlueZ D-Bus / `bluetoothctl` | ⏳ |
 | **Monitory** | rozdzielczość, skala, układ, obrót, monitor główny | **wymaga Selene** (`zwlr_output_manager_v1` lub rozszerzenie `luna-control`) | ⏳ |
-| **Klawiatura i mysz** | powtarzanie, przewijanie naturalne, tap-to-click, tempo kursora | `luna-control` + wejście Selene | ⏳ |
+| **Klawiatura i mysz** | opóźnienie i szybkość powtarzania klawiszy, naturalne przewijanie (na żywo przez `luna-control input …`); tap-to-click, gesty i akceleracja — jasno oznaczone jako „w trakcie rozwoju” | `~/.config/luna/input.conf`, wejście Selene | ◐ |
 | **Użytkownicy** | konto, awatar, hasło, sesje | `loginctl`, polkit | ⏳ |
 | **Aplikacje** | domyślne aplikacje, autostart, uprawnienia/portale | `xdg-mime`, XDG autostart | ⏳ |
 | **Pakiety ikon** | wybór **zainstalowanych** zestawów freedesktop działa (globalnie); pobieranie/instalacja nowych i usuwanie — kolejny krok | `~/.config/luna/icons.conf`, katalogi `icons` | ◐ |
@@ -91,9 +96,16 @@ Legenda: ✅ działa, ◐ tylko odczyt/częściowo, ⏳ zaplanowane.
 - **Powiadomienia**: pozycja jest liczona w obszarze powierzchni „chrome” powłoki
   (pasek + launcher). Górne rogi są dokładnie na ekranie; dla dolnych potrzebna będzie
   osobna powierzchnia overlay na cały ekran (kolejny krok).
+  Usługa D-Bus deklaruje teraz `body-markup`, `icon-static` i `sound`; znaczniki HTML
+  są sprowadzane do czystego tekstu, a hint `image-path`/`desktop-entry` wybiera ikonę
+  toasta. Powłoka co sekundę odczytuje też plik DND, więc przełącznik w Ustawieniach
+  działa bez restartu sesji.
 - **Przestrzenie robocze**: nazwy i liczba działają od razu (`luna-control
   workspace-name` / `workspace-count`); Selene dodaje i usuwa uchwyty
-  `ext_workspace_v1`, więc panel oraz podgląd `Super+Tab` nie wymagają wylogowania.
+  `ext_workspace_v1` (z wymaganym `done`), więc panel oraz podgląd `Super+Tab` nie
+  wymagają wylogowania. Liczba jest współdzielona z wątkiem wyjścia i wchodzi do
+  sygnatury klatki — pulpit nie zostaje przy starej liczbie kropek. Opcja
+  `workspace-corner` włącza przełączanie dolnymi rogami ekranu.
 - **Ikony zewnętrzne**: zestawy muszą być w formacie freedesktop w
   `/usr/share/icons`, `~/.local/share/icons` lub `~/.icons` (z `index.theme`).
   libLuna czyta z nich pliki **PNG i SVG** (SVG jest rasteryzowane przez
@@ -123,8 +135,8 @@ Legenda: ✅ działa, ◐ tylko odczyt/częściowo, ⏳ zaplanowane.
 - Preferujemy D-Bus/portale/`/sys`; polecenia systemowe dostają timeouty i czytelne błędy.
 - Wspólny moduł konfiguracji w `~/.config/luna/` (`libluna-core::config`):
   `theme.conf`, `locale.conf`, `region.conf`, `icons.conf`, `lock.conf`,
-  `notifications.conf`, `workspaces.conf`. Powłoka, locker i ustawienia czytają
-  ten sam format `klucz = wartość`.
+  `notifications.conf`, `workspaces.conf`, `input.conf`. Powłoka, locker i ustawienia
+  czytają ten sam format `klucz = wartość`.
 
 ## Język — przełączanie na żywo
 
@@ -164,12 +176,16 @@ Legenda: ✅ działa, ◐ tylko odczyt/częściowo, ⏳ zaplanowane.
   D-Bus; powłoka zamienia żądanie na toast i wpis w centrum powiadomień.
 - Jeśli nazwę trzyma inny daemon (np. `dunst`/`mako` w innej sesji), `NotificationsBus::spawn`
   zwraca `None` i Luna nic nie przejmuje.
-- Obsługiwane: `actions`, `body`, `persistence` (`expire_timeout = 0`), `replaces_id`
-  (zastąpienie istniejącego wpisu) i `CloseNotification` (powód 3). Powłoka wysyła
-  `ActionInvoked` i `NotificationClosed`; wygaśnięcie to powód 1, klik użytkownika — 2.
-- Pozostałe ograniczenia: brak hintów ikony/dźwięku (`image-path`, `image_data`,
-  `sound-name`) i `body-markup`; przy `LUNA_PANELS=all` nazwę przejmuje tylko pierwsza
-  instancja powłoki, a historia żyje w jej procesie.
+- Obsługiwane: `actions`, `body`, `body-markup`, `icon-static`, `sound`, `persistence`
+  (`expire_timeout = 0`), `replaces_id` (zastąpienie istniejącego wpisu) i
+  `CloseNotification` (powód 3). Powłoka wysyła `ActionInvoked` i `NotificationClosed`;
+  wygaśnięcie to powód 1, klik użytkownika — 2.
+- Treść `body-markup` jest sprowadzana do czystego tekstu (renderer libLuny nie rysuje
+  HTML), a hint `image-path`/`desktop-entry` lub `app_icon` wybiera ikonę toasta.
+- Pozostałe ograniczenia: `image_data` i `sound-name` nie są jeszcze rysowane/odtwarzane;
+  przy `LUNA_PANELS=all` nazwę przejmuje tylko pierwsza instancja powłoki, a historia
+  żyje w jej procesie. Aplikacje spakowane w Flatpak/Snap wymagają działającego
+  `xdg-desktop-portal` (on przekazuje powiadomienia do `org.freedesktop.Notifications`).
 - Dalej: jeśli powiadomienia mają działać niezależnie od powłoki i spójnie na wielu
   monitorach — wydzielić `luna-notifyd`: jeden właściciel usługi, historia i DND w jednym
   miejscu, a powłoki subskrybują zdarzenia i rysują toasty/centrum.

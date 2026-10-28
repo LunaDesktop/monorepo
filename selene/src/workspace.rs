@@ -192,6 +192,9 @@ pub fn sync_workspace_handles(state: &mut State) {
             });
             state.ws_handles.push(handle);
         }
+        // Protokół wymaga `done` po serii zmian (dodanie/usunięcie uchwytów) —
+        // klienci (pasek, podgląd) stosują zmiany dopiero po tym zdarzeniu.
+        let _ = manager.send_event(manager::Event::Done);
     }
     broadcast_workspace_states(state);
 }

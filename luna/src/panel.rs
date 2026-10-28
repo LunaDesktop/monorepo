@@ -4852,6 +4852,7 @@ mod tests {
             ssid: "TestNet".into(),
             signal: 80,
             active: false,
+            security: "WPA2".into(),
         }];
         let whit = wifi_popup_hit(
             wrect,

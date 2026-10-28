@@ -18,6 +18,8 @@ pub const MAX_WORKSPACES: usize = 8;
 pub struct WorkspaceLayout {
     count: usize,
     names: Vec<String>,
+    /// Włączanie przestrzeni przez najechanie/przeciągnięcie do dolnego rogu ekranu.
+    corner_switch: bool,
 }
 
 impl Default for WorkspaceLayout {
@@ -25,6 +27,7 @@ impl Default for WorkspaceLayout {
         Self {
             count: 4,
             names: Vec::new(),
+            corner_switch: false,
         }
     }
 }
@@ -34,11 +37,21 @@ impl WorkspaceLayout {
         Self {
             count: count.clamp(MIN_WORKSPACES, MAX_WORKSPACES),
             names: Vec::new(),
+            corner_switch: false,
         }
     }
 
     pub fn count(&self) -> usize {
         self.count
+    }
+
+    /// Czy dolne rogi ekranu przełączają przestrzenie (opcja użytkownika).
+    pub fn corner_switch(&self) -> bool {
+        self.corner_switch
+    }
+
+    pub fn set_corner_switch(&mut self, enabled: bool) {
+        self.corner_switch = enabled;
     }
 
     pub fn set_count(&mut self, count: usize) {
@@ -91,6 +104,8 @@ impl WorkspaceLayout {
                 if let Ok(count) = value.parse::<usize>() {
                     layout.set_count(count);
                 }
+            } else if key == "corner_switch" {
+                layout.set_corner_switch(!matches!(value.as_str(), "false" | "0" | "no"));
             } else if let Some(index) = key
                 .strip_prefix("name")
                 .and_then(|rest| rest.parse::<usize>().ok())
@@ -108,6 +123,7 @@ impl WorkspaceLayout {
              # count: 1..8. nameN: własna nazwa (puste = numer).\n",
         );
         out.push_str(&format!("count = {}\n", self.count));
+        out.push_str(&format!("corner_switch = {}\n", self.corner_switch));
         for index in 0..self.count {
             if let Some(name) = self.names.get(index).filter(|name| !name.is_empty()) {
                 out.push_str(&format!("name{} = {name}\n", index + 1));
@@ -134,8 +150,10 @@ mod tests {
 
     #[test]
     fn parses_count_and_names() {
-        let layout = WorkspaceLayout::parse("count = 3\nname1 = Kod\nname3 = Gry\n");
+        let layout =
+            WorkspaceLayout::parse("count = 3\ncorner_switch = true\nname1 = Kod\nname3 = Gry\n");
         assert_eq!(layout.count(), 3);
+        assert!(layout.corner_switch());
         assert_eq!(layout.name(0), "Kod");
         assert_eq!(layout.name(1), "2");
         assert_eq!(layout.name(2), "Gry");

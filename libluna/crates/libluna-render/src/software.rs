@@ -298,6 +298,20 @@ impl SoftwareRenderer {
                         pixmap.draw_pixmap(0, 0, src, &paint, t, mask.as_ref());
                     }
                 }
+                DrawCommand::ImageDmabuf { rect, .. } => {
+                    // CPU nie potrafi odczytać dmabuf — rysujemy neutralny zastępczy
+                    // prostokąt. W praktyce Selene ogłasza dmabuf tylko z GPU.
+                    if rect.width() > 0.0 && rect.height() > 0.0 {
+                        if let Some(r) = ts_rect(*rect) {
+                            pixmap.fill_rect(
+                                r,
+                                &paint(Color::from_rgba8(0x22, 0x24, 0x2c, 0xff)),
+                                transform,
+                                mask.as_ref(),
+                            );
+                        }
+                    }
+                }
                 DrawCommand::Background { data } => {
                     // Tło pulpitu: pełnoekranowy obraz kopiujemy wprost (jeden `memcpy`)
                     // zamiast mieszać 2 mln pikseli. Gdy rozmiar nie zgadza się z buforem

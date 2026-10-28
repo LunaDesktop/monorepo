@@ -206,14 +206,13 @@ impl Dispatch<wl_seat::WlSeat, ()> for State {
                         size,
                     });
                 }
-                // Powtarzanie klawiszy: 25/s po 600 ms. `repeat_info` istnieje dopiero
-                // od wersji 4 `wl_keyboard` — wysłanie go do klienta, który związał
-                // starszą wersję, kończy klienta twardym przerwaniem (brak funkcji
-                // obsługi zdarzenia).
+                // Powtarzanie klawiszy z `~/.config/luna/input.conf`. `repeat_info`
+                // istnieje dopiero od wersji 4 `wl_keyboard` — wysłanie go do klienta,
+                // który związał starszą wersję, kończy klienta twardym przerwaniem.
                 if kb.version() >= 4 {
                     let _ = kb.send_event(wl_keyboard::Event::RepeatInfo {
-                        rate: 25,
-                        delay: 600,
+                        rate: state.repeat_rate as i32,
+                        delay: state.repeat_delay as i32,
                     });
                 }
                 state.keyboards.retain(|k| k.is_alive());
@@ -279,7 +278,13 @@ pub fn handle_input(state: &mut State, handle: &DisplayHandle, event: &Event) {
         Event::PointerMotion { position, .. } => pointer_motion(state, handle, *position),
         Event::PointerButton(pe) => pointer_button(state, handle, pe.position, pe.button, pe.state),
         Event::PointerLeave => pointer_leave(state),
-        Event::Scroll(se) => pointer_axis(state, se.dx, se.dy),
+        Event::Scroll(mut se) => {
+            if state.natural_scroll {
+                se.dx = -se.dx;
+                se.dy = -se.dy;
+            }
+            pointer_axis(state, se.dx, se.dy)
+        }
         Event::Key(ke) => keyboard_key(state, ke.keysym, ke.keycode, ke.state),
         _ => {}
     }
@@ -617,6 +622,9 @@ fn pointer_motion(state: &mut State, handle: &DisplayHandle, pos: Point) {
         // pojawiają się względem starego miejsca.
         sync_x11_geometry(state, drag.slot);
     }
+    // Dolne rogi ekranu mogą przełączać przestrzenie (opcja w Ustawieniach).
+    // Działa też w trakcie przeciągania okna — okno przenosi się razem z kursorem.
+    maybe_switch_at_corner(state, pos);
     // Przeciąganie danych (drag & drop) aktualizuje cel.
     if state.dnd.is_some() {
         data::dnd_motion(state, handle, (pos.x, pos.y));
@@ -1113,6 +1121,44 @@ fn output_rect_at(state: &State, pos: Point) -> (f64, f64, f64, f64) {
         Some(o) => (o.x as f64, o.y as f64, o.width as f64, o.height as f64),
         None => (0.0, 0.0, 1280.0, 800.0),
     }
+}
+
+/// Bok strefy „gorącego rogu” w dolnej części ekranu.
+const CORNER: f64 = 24.0;
+
+/// Przełącza przestrzeń, gdy kursor wchodzi w dolny róg ekranu.
+///
+/// Zapadka (`ws_corner_latch`) sprawia, że jedno wejście w róg to jedno
+/// przełączenie — dopiero wyjście i ponowne wejście działają znowu.
+fn maybe_switch_at_corner(state: &mut State, pos: Point) {
+    if !state.ws_corner_switch || state.locked {
+        state.ws_corner_latch = false;
+        return;
+    }
+    let (ox, oy, ow, oh) = output_rect_at(state, pos);
+    let left = pos.x <= ox + CORNER && pos.y >= oy + oh - CORNER;
+    let right = pos.x >= ox + ow - CORNER && pos.y >= oy + oh - CORNER;
+    if !left && !right {
+        state.ws_corner_latch = false;
+        return;
+    }
+    if state.ws_corner_latch {
+        return;
+    }
+    state.ws_corner_latch = true;
+    let current = *state.ws_current.lock_or_recover();
+    let target = if left {
+        current.checked_sub(1)
+    } else {
+        (current + 1 < state.ws_count).then_some(current + 1)
+    };
+    let Some(target) = target else {
+        return;
+    };
+    if let Some(drag) = state.drag {
+        move_window_to_workspace(state, drag.slot, target);
+    }
+    switch_workspace(state, target);
 }
 
 /// Prostokąt monitora, na którym leży okno (x, y, szerokość, wysokość).
@@ -2358,6 +2404,7 @@ mod tests {
             fullscreen: false,
             ssd: true,
             saved: None,
+            dmabuf: None,
             data: Arc::new(ImageData::empty(200, 120)),
         }
     }

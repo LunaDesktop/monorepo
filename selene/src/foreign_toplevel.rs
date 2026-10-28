@@ -372,6 +372,7 @@ mod tests {
             fullscreen: false,
             ssd: false,
             saved: None,
+            dmabuf: None,
             data: std::sync::Arc::new(libluna_render::ImageData::new(1, 1, vec![0, 0, 0, 0])),
         });
         let bytes = state_bytes(&s, 0);

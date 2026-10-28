@@ -17,12 +17,14 @@ kompozytora, na którym codzienna praca nie wymaga obejść.
 | `xdg_wm_base` v1 | toplevel, popup, pełny `xdg_positioner` (kotwica, grawitacja, flip/slide) |
 | `zxdg_decoration_manager_v1` | polityka: zawsze SSD (albo `LUNA_CLIENT_DECORATIONS=1`) |
 | `zwlr_layer_shell_v1` v4 | panele, tło, OSD; region wejścia z alfy |
+| `zwp_linux_dmabuf_v1` v3 | bufory GPU klientów (`ARGB/XRGB/ABGR/XBGR8888`, modyfikatory EGL); tylko z `SELENE_GPU=1`/`LUNA_GPU=1`, import w `GpuRenderer` |
 | `zwlr_foreign_toplevel_manager_v1` v3 | pasek zadań: tytuł, stan, aktywacja, zamknięcie |
 | `ext_workspace_manager_v1` | przestrzenie robocze |
 | ekran blokady (`luna-lock`) | overlay + `keyboard_interactivity=exclusive`; jedna powierzchnia na wszystkie wyjścia |
 | `xwayland_shell_v1` + XWM | okna X11, `_NET_WM_STATE`, ramki, menu X11 |
 | diagnostyka X11 | `luna-control x11` — ekran, właściciel WM, liczba okien i treść każdego okna (`content=WxH border=N`) |
 | diagnostyka monitorów | `luna-control outputs` — nazwa, `WxH`, pozycja; testy sesji liczą z tego współrzędne |
+| diagnostyka dmabuf | `luna-control dmabuf` — czy global jest ogłoszony i ile formatów/modyfikatorów |
 | **GPU (nested)** | `SELENE_GPU=1` → `libluna_render::gpu::GpuRenderer` (EGL surfaceless) zamiast CPU; brak EGL = automatyczny fallback, sesja żyje. Szczegóły: [`docs/gpu.md`](gpu.md) |
 | test X11 | `scripts/x11-smoke.sh` (`make smoke-x11`): Xwayland + `xclock`, SSD maksymalizacja i zamknięcie |
 | X11 CSD (Firefox itd.) | ruch: `_NET_WM_MOVERESIZE` w `_NET_SUPPORTED` **oraz** self-move przez `ConfigureRequest`; maksymalizacja: `_NET_WM_STATE` z akcją 2 i dwoma atomami — cel liczony raz na komunikat |
@@ -40,10 +42,7 @@ kompozytora, na którym codzienna praca nie wymaga obejść.
    blokada kursora.
 5. **`zwp_text_input_v3` + input-method** — IME (CJK, kompozycja znaków).
 6. **`wp_viewporter` + `wp_fractional_scale_v1`** — skalowanie 1,25/1,5× bez rozmycia.
-7. **`zwp_linux_dmabuf_v1`** — zero-copy z GPU. **Największa luka:** klienty Vulkan/EGL
-   (Zed natywnie na Waylandzie, hardware video) potrzebują importu dmabuf (GBM/EGL),
-   a nasz renderer jest CPU. Do zaplanowania razem z back-endem GPU.
-8. **`zwp_idle_inhibit_v1`** — odtwarzacze wideo i prezentacje nie pozwalają wygasić ekranu.
+7. **`zwp_idle_inhibit_v1`** — odtwarzacze wideo i prezentacje nie pozwalają wygasić ekranu.
 9. **`wp_tearing_control_v1`** — brak vsync dla gier (opcjonalnie).
 10. **`xdg_toplevel` v2+** — `wm_capabilities`, `configure_bounds`, stan `tiled`;
     dziś ogłaszamy v1, więc klienty nie dostają pełnej informacji o kafelkowaniu.

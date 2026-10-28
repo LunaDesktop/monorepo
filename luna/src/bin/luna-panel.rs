@@ -96,16 +96,19 @@ fn main() -> Result<(), Box<dyn Error>> {
             ssid: "PaganNet".to_owned(),
             signal: 92,
             active: true,
+            security: "WPA2".into(),
         },
         WifiNetwork {
             ssid: "Dom".to_owned(),
             signal: 71,
             active: false,
+            security: "WPA2".into(),
         },
         WifiNetwork {
             ssid: "Sąsiad_5G".to_owned(),
             signal: 44,
             active: false,
+            security: "WPA3".into(),
         },
     ];
     save(&theme, "docs/images/luna-popup-wifi.png", |ctx| {

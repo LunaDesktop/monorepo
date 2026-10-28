@@ -10,14 +10,16 @@ use std::time::Duration;
 
 use libluna_core::{Color, Point, Rect, Size, Theme, ThemeSettings};
 use libluna_platform::{run, AppConfig, Frame};
-use libluna_render::{ImageData, Scene, SoftwareRenderer, TextEngine, TextRun};
+use libluna_render::gpu::GpuRenderer;
+use libluna_render::{ImageData, Renderer, Scene, SoftwareRenderer, TextEngine, TextRun};
 use libluna_widgets::{ControlsSide, HeaderBar, PaintCtx};
 
 use crate::drm::{DrmBackend, DrmError};
 use crate::input::{self, Events};
 use crate::monitors::{layout_horizontal, OutputInfo, Outputs};
 use crate::state::{
-    CursorModel, Overview, OverviewModel, ScreenshotModel, Window, WindowModel, WorkspaceModel,
+    CursorModel, Overview, OverviewModel, ScreenshotModel, Window, WindowModel,
+    WorkspaceCountModel, WorkspaceModel,
 };
 use crate::sync::LockExt;
 
@@ -30,7 +32,7 @@ pub fn spawn(
     ws: WorkspaceModel,
     overview: OverviewModel,
     screenshot: ScreenshotModel,
-    ws_count: usize,
+    ws_count: WorkspaceCountModel,
     width: u32,
     height: u32,
 ) {
@@ -44,6 +46,9 @@ pub fn spawn(
             .settings(ThemeSettings::load());
         let theme = user_theme();
         let text = TextEngine::system();
+        // Zrzut nested: trzymamy jeden renderer przez całą sesję — tworzenie
+        // kontekstu EGL przy każdym zrzucie to kilkadziesiąt ms i zbędny churn.
+        let mut shot: Option<Box<dyn Renderer>> = None;
         let result = run(config, move |frame: &mut Frame| {
             // Zgłoś bieżący rozmiar monitora (okno może być zmieniane przez rodzica).
             {
@@ -59,6 +64,7 @@ pub fn spawn(
             let size = frame.size;
             let cur_ws = *ws.lock_or_recover();
             let ov = *overview.lock_or_recover();
+            let ws_count = ws_count.load(std::sync::atomic::Ordering::Relaxed);
             build_scene(
                 frame.scene,
                 size,
@@ -77,7 +83,14 @@ pub fn spawn(
             // Zrzut ekranu także w trybie nested: kompozytor nie ma tu skanouta,
             // więc kodujemy bieżącą scenę bezpośrednio do PNG.
             if screenshot.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                let mut renderer = SoftwareRenderer::new(size.width as u32, size.height as u32);
+                let (w, h) = (size.width as u32, size.height as u32);
+                // Zrzut przez GPU, gdy dostępne: tylko wtedy widać okna `dmabuf`
+                // (CPU renderer rysuje dla nich zastępczy prostokąt).
+                let renderer = shot.get_or_insert_with(|| match GpuRenderer::new(w, h) {
+                    Ok(r) => Box::new(r) as Box<dyn Renderer>,
+                    Err(_) => Box::new(SoftwareRenderer::new(w, h)),
+                });
+                renderer.resize(w, h);
                 renderer.draw(frame.scene, frame.scale, Color::TRANSPARENT);
                 if let Some(png) = renderer.encode_png() {
                     let stamp = std::time::SystemTime::now()
@@ -177,7 +190,7 @@ pub fn spawn_drm(
     night_light: crate::state::NightLightModel,
     power_saver: crate::state::PowerSaverModel,
     outputs: Outputs,
-    ws_count: usize,
+    ws_count: WorkspaceCountModel,
 ) {
     std::thread::spawn(move || {
         let mut backend = match open_drm_waiting() {
@@ -262,6 +275,40 @@ pub fn spawn_drm(
             .iter()
             .map(|(w, h)| SoftwareRenderer::new(*w, *h))
             .collect();
+        let mut gpu_renderers: Vec<GpuRenderer> = Vec::new();
+        // Backend wyjścia: GPU, gdy poproszono (`SELENE_GPU`/`LUNA_GPU`) i EGL działa.
+        // GPU komponuje okna `dmabuf` sprzętowo (CPU rysuje dla nich tylko zaślepkę),
+        // a każdy monitor dostaje własny kontekst — render jest sekwencyjny, bo
+        // kontekstu EGL nie można przenosić między wątkami.
+        let use_gpu = if gpu_requested() {
+            let mut gpu = Vec::with_capacity(sizes.len());
+            let mut error = None;
+            for (w, h) in &sizes {
+                match GpuRenderer::new(*w, *h) {
+                    Ok(r) => gpu.push(r),
+                    Err(e) => {
+                        error = Some(e);
+                        break;
+                    }
+                }
+            }
+            if gpu.len() == sizes.len() {
+                renderers.clear();
+                gpu_renderers = gpu;
+                true
+            } else {
+                eprintln!(
+                    "selene/drm: GPU niedostępne ({}), zostaję przy CPU",
+                    error.as_deref().unwrap_or("brak kontekstu EGL")
+                );
+                false
+            }
+        } else {
+            false
+        };
+        if use_gpu && std::env::var("SELENE_STATS").is_ok() {
+            eprintln!("selene/drm: backend gpu");
+        }
         let bg = Color::from_rgba8(0x1e, 0x20, 0x28, 0xff);
         // Motyw i silnik tekstu dla dekoracji (widget `HeaderBar` z libLuny).
         // Bierzemy **motyw użytkownika** (jasny/ciemny, akcent, styl z pliku), a nie
@@ -339,11 +386,21 @@ pub fn spawn_drm(
             // Zrzut ekranu (Super+F12): kompozytor trzyma gotowe klatki każdego monitora,
             // więc wystarczy je zapisać.
             if screenshot.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                save_screenshots(&renderers, &infos);
+                // Zrzut z aktywnego backendu — z GPU widać też okna `dmabuf`.
+                if use_gpu {
+                    let refs: Vec<&dyn Renderer> =
+                        gpu_renderers.iter().map(|r| r as &dyn Renderer).collect();
+                    save_screenshots(&refs, &infos);
+                } else {
+                    let refs: Vec<&dyn Renderer> =
+                        renderers.iter().map(|r| r as &dyn Renderer).collect();
+                    save_screenshots(&refs, &infos);
+                }
             }
             let cur = *cursor.lock_or_recover();
             let cur_ws = *ws.lock_or_recover();
             let ov = *overview.lock_or_recover();
+            let ws_count = ws_count.load(std::sync::atomic::Ordering::Relaxed);
 
             let cur_changed = last_cur != cur;
             let mut any_changed = false;
@@ -355,6 +412,7 @@ pub fn spawn_drm(
                 let sig = output_signature(
                     &model,
                     cur_ws,
+                    ws_count,
                     ov,
                     if hw_cursor { None } else { cur },
                     ox,
@@ -414,37 +472,66 @@ pub fn spawn_drm(
                 // jednej. Sekwencyjny render dwóch monitorów zjadał cały budżet klatki
                 // (7–10 ms każdy) i powłoka „zwalniała” do ~20 FPS.
                 let t_render = std::time::Instant::now();
-                let theme = &theme;
-                let text_engine = &text_engine;
-                std::thread::scope(|scope| {
-                    for (i, renderer) in renderers.iter_mut().enumerate() {
+                if use_gpu {
+                    // Sekwencyjnie: kontekst EGL jest przypięty do wątku tworzącego,
+                    // a i tak jest znacznie szybszy od równoległego CPU.
+                    for i in 0..sizes.len() {
                         if !changed[i] {
                             continue;
                         }
                         let (w, h) = sizes[i];
                         let (ox, oy) = origins[i];
-                        let model = &model;
-                        scope.spawn(move || {
-                            let mut scene = Scene::new();
-                            build_scene(
-                                &mut scene,
-                                Size::new(w as f64, h as f64),
-                                ox,
-                                oy,
-                                model,
-                                cur_ws,
-                                ws_count,
-                                ov,
-                                i == 0,
-                                cur,
-                                !hw_cursor,
-                                &theme,
-                                &text_engine,
-                            );
-                            renderer.draw(&scene, 1.0, bg);
-                        });
+                        let mut scene = Scene::new();
+                        build_scene(
+                            &mut scene,
+                            Size::new(w as f64, h as f64),
+                            ox,
+                            oy,
+                            &model,
+                            cur_ws,
+                            ws_count,
+                            ov,
+                            i == 0,
+                            cur,
+                            !hw_cursor,
+                            &theme,
+                            &text_engine,
+                        );
+                        gpu_renderers[i].draw(&scene, 1.0, bg);
                     }
-                });
+                } else {
+                    let theme = &theme;
+                    let text_engine = &text_engine;
+                    std::thread::scope(|scope| {
+                        for (i, renderer) in renderers.iter_mut().enumerate() {
+                            if !changed[i] {
+                                continue;
+                            }
+                            let (w, h) = sizes[i];
+                            let (ox, oy) = origins[i];
+                            let model = &model;
+                            scope.spawn(move || {
+                                let mut scene = Scene::new();
+                                build_scene(
+                                    &mut scene,
+                                    Size::new(w as f64, h as f64),
+                                    ox,
+                                    oy,
+                                    model,
+                                    cur_ws,
+                                    ws_count,
+                                    ov,
+                                    i == 0,
+                                    cur,
+                                    !hw_cursor,
+                                    &theme,
+                                    &text_engine,
+                                );
+                                renderer.draw(&scene, 1.0, bg);
+                            });
+                        }
+                    });
+                }
                 ms_render += t_render.elapsed().as_secs_f64() * 1000.0;
 
                 let mut num_flips = 0;
@@ -453,7 +540,12 @@ pub fn spawn_drm(
                         continue;
                     }
                     let t = std::time::Instant::now();
-                    let flipped = backend.present(i, renderers[i].data());
+                    let pixels = if use_gpu {
+                        gpu_renderers[i].data()
+                    } else {
+                        renderers[i].data()
+                    };
+                    let flipped = backend.present(i, pixels);
                     if !flipped && !flip_error_logged {
                         eprintln!(
                             "{}",
@@ -499,7 +591,7 @@ pub fn spawn_drm(
 }
 
 /// Zapisuje bieżące klatki (po jednej na monitor) jako PNG — obsługa `Super+F12`.
-pub fn save_screenshots(renderers: &[SoftwareRenderer], infos: &[(String, u32, u32, u32)]) {
+pub fn save_screenshots(renderers: &[&dyn Renderer], infos: &[(String, u32, u32, u32)]) {
     let dir = screenshot_dir();
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -519,6 +611,16 @@ pub fn save_screenshots(renderers: &[SoftwareRenderer], infos: &[(String, u32, u
             None => eprintln!("selene: nie udało się zakodować zrzutu"),
         }
     }
+}
+
+/// Czy wyjście ma używać GPU: `SELENE_GPU` lub `LUNA_GPU` ustawione na niepustą
+/// wartość inną niż `0`. Brak EGL wciąż spada do CPU (nigdy nie zabija sesji).
+fn gpu_requested() -> bool {
+    ["SELENE_GPU", "LUNA_GPU"].iter().any(|name| {
+        std::env::var(name)
+            .map(|v| !v.is_empty() && v != "0")
+            .unwrap_or(false)
+    })
 }
 
 /// Katalog na zrzuty: `XDG_PICTURES_DIR` → `~/.config/user-dirs.dirs` → `$HOME/Pictures`
@@ -583,6 +685,7 @@ fn cursor_image() -> (Vec<u8>, u32, u32) {
 fn output_signature(
     model: &WindowModel,
     current_ws: usize,
+    ws_count: usize,
     overview: Overview,
     cursor: Option<Point>,
     ox: f64,
@@ -596,6 +699,8 @@ fn output_signature(
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     };
     mix(current_ws as u64);
+    // Liczba przestrzeni zmienia pasek/podgląd, nawet gdy bieżąca przestrzeń się nie zmienia.
+    mix(ws_count as u64);
     mix(u64::from(overview.on));
     if let Some((slot, (px, py))) = overview.drag {
         mix(slot as u64);
@@ -758,7 +863,14 @@ fn build_scene(
             if radius > 0.0 {
                 scene.push_clip_rounded(sh(w.outer()), radius);
             }
-            scene.image(sh(w.buffer_rect()), w.data.clone());
+            match &w.dmabuf {
+                Some(db) => {
+                    scene.image_dmabuf(sh(w.buffer_rect()), std::sync::Arc::clone(db));
+                }
+                None => {
+                    scene.image(sh(w.buffer_rect()), w.data.clone());
+                }
+            }
             // Pasek tytułu rysujemy **tylko** oknom z naszym SSD (`w.ssd`). Klienty
             // z własnymi dekoracjami (GTK/libadwaita, CSD) nie mają `ssd`, a wcześniej
             // rysowaliśmy im mimo to tytuł i przyciski okna — lewitowały nad treścią.
@@ -917,7 +1029,10 @@ fn draw_overview(
             r.width(),
             (r.height() - title_h).max(1.0),
         );
-        scene.image(img, w.data.clone());
+        match &w.dmabuf {
+            Some(db) => scene.image_dmabuf(img, std::sync::Arc::clone(db)),
+            None => scene.image(img, w.data.clone()),
+        };
         scene.stroke_rounded_rect(*r, 8.0, 1.5, Color::from_rgba8(0x6c, 0x74, 0x86, 0xff));
         scene.text(
             TextRun::new(Point::new(r.x() + 10.0, r.y() + 18.0), &w.title, 13.0)
@@ -1037,6 +1152,69 @@ mod tests {
     }
 
     #[test]
+    fn window_content_is_visible_in_render() {
+        use std::sync::{Arc, Mutex};
+        let mut rgba = vec![0u8; 100 * 80 * 4];
+        for px in rgba.chunks_exact_mut(4) {
+            px.copy_from_slice(&[0xff, 0x00, 0x00, 0xff]);
+        }
+        let model: WindowModel = Arc::new(Mutex::new(vec![Window {
+            x: 10.0,
+            y: 10.0,
+            width: 100,
+            height: 80,
+            image_offset: (0.0, 0.0),
+            z: 1,
+            title: String::new(),
+            popup: false,
+            layer: false,
+            mapped: true,
+            focused: true,
+            workspace: 0,
+            input: None,
+            input_capture: false,
+            minimized: false,
+            maximized: false,
+            fullscreen: false,
+            ssd: false,
+            saved: None,
+            dmabuf: None,
+            data: Arc::new(ImageData::new(100, 80, rgba)),
+        }]));
+        let mut scene = Scene::new();
+        build_scene(
+            &mut scene,
+            Size::new(200.0, 150.0),
+            0.0,
+            0.0,
+            &model,
+            0,
+            1,
+            Overview::default(),
+            true,
+            None,
+            false,
+            &Theme::dark(),
+            &TextEngine::none(),
+        );
+        let mut renderer = SoftwareRenderer::new(200, 150);
+        renderer.draw(&scene, 1.0, Color::BLACK);
+        let px = &renderer.data()[(50 * 200 + 50) * 4..][..4];
+        assert_eq!(px, [0xff, 0x00, 0x00, 0xff], "treść okna musi być widoczna");
+
+        // Ten sam test na GPU — tu wychodziły różnice (treść okna bywała pomijana).
+        if let Ok(mut gpu) = libluna_render::gpu::GpuRenderer::new(200, 150) {
+            gpu.draw(&scene, 1.0, Color::BLACK);
+            let px = &gpu.data()[(50 * 200 + 50) * 4..][..4];
+            assert_eq!(
+                px,
+                [0xff, 0x00, 0x00, 0xff],
+                "GPU: treść okna musi być widoczna"
+            );
+        }
+    }
+
+    #[test]
     fn desktop_background_is_the_wallpaper() {
         use std::sync::{Arc, Mutex};
         let model: WindowModel = Arc::new(Mutex::new(Vec::new()));
@@ -1091,6 +1269,7 @@ mod tests {
             fullscreen: false,
             ssd: false,
             saved: None,
+            dmabuf: None,
             data: data.clone(),
         };
         let model: WindowModel = Arc::new(Mutex::new(vec![
@@ -1150,6 +1329,7 @@ mod tests {
             fullscreen: false,
             ssd: true,
             saved: None,
+            dmabuf: None,
             data,
         }];
         let model: WindowModel = Arc::new(Mutex::new(windows));
@@ -1238,6 +1418,7 @@ mod tests {
             fullscreen: false,
             ssd: true,
             saved: None,
+            dmabuf: None,
             data: Arc::new(ImageData::new(w, h, rgba)),
         }]));
         let mut scene = Scene::new();
@@ -1332,6 +1513,7 @@ mod tests {
             fullscreen: false,
             ssd: true,
             saved: None,
+            dmabuf: None,
             data,
         }];
         let model: WindowModel = Arc::new(Mutex::new(windows));
@@ -1404,6 +1586,7 @@ mod tests {
             fullscreen: false,
             ssd: true,
             saved: None,
+            dmabuf: None,
             data,
         }];
         let model: WindowModel = Arc::new(Mutex::new(windows));

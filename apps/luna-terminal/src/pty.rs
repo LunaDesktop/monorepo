@@ -90,8 +90,14 @@ impl Pty {
         let mut envp: Vec<*const libc::c_char> = env.iter().map(|item| item.as_ptr()).collect();
         envp.push(std::ptr::null());
 
-        let cwd = std::env::var_os("HOME")
-            .map(|home| home.as_bytes().to_vec())
+        // Katalog roboczy powłoki: ten, z którego uruchomiono `luna-terminal`
+        // (np. „Otwórz terminal tutaj” w Plikach ustawia `current_dir`), a gdy go
+        // brak — katalog domowy. Bez tego terminal zawsze startował w `$HOME`.
+        let cwd = std::env::current_dir()
+            .ok()
+            .filter(|dir| dir.is_absolute())
+            .map(|dir| dir.as_os_str().as_bytes().to_vec())
+            .or_else(|| std::env::var_os("HOME").map(|home| home.as_bytes().to_vec()))
             .filter(|bytes| bytes.len() < 4096)
             .and_then(|bytes| CString::new(bytes).ok())
             .unwrap_or_else(|| CString::new("/").unwrap());

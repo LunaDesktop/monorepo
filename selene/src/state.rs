@@ -91,6 +91,9 @@ pub struct Window {
     pub saved: Option<SavedGeom>,
     /// Piksele (premultiplied RGBA8) ostatnio zacommitowanego bufora.
     pub data: Arc<ImageData>,
+    /// Bufor GPU klienta (`zwp_linux_dmabuf_v1`); import robi backend rysujący.
+    /// Gdy jest ustawiony, `data` to pusta atrapa 1×1 (bez kopii pikseli na CPU).
+    pub dmabuf: Option<Arc<libluna_render::DmabufImage>>,
 }
 
 impl Window {
@@ -130,12 +133,21 @@ impl Window {
     /// przesuniętego o `image_offset`, a nie rozciągniętego do `content()`.
     pub fn buffer_rect(&self) -> Rect {
         let c = self.content();
+        let (iw, ih) = self.image_size();
         Rect::from_xywh(
             c.x() - self.image_offset.0,
             c.y() - self.image_offset.1,
-            self.data.width as f64,
-            self.data.height as f64,
+            iw as f64,
+            ih as f64,
         )
+    }
+
+    /// Rozmiar obrazu klienta: `dmabuf` albo bufor shm.
+    pub fn image_size(&self) -> (u32, u32) {
+        match &self.dmabuf {
+            Some(d) => (d.width, d.height),
+            None => (self.data.width, self.data.height),
+        }
     }
 
     /// Pasek tytułu (zerowy dla popupów).
@@ -239,6 +251,8 @@ pub type CursorModel = Arc<Mutex<Option<Point>>>;
 
 /// Współdzielony numer bieżącej przestrzeni roboczej (kompozytor ↔ wątek wyjścia).
 pub type WorkspaceModel = Arc<Mutex<usize>>;
+/// Liczba przestrzeni roboczych współdzielona z wątkiem wyjścia.
+pub type WorkspaceCountModel = Arc<std::sync::atomic::AtomicUsize>;
 
 /// Stan podglądu okien/przestrzeni (współdzielony z wątkiem wyjścia).
 #[derive(Debug, Clone, Copy, Default)]
@@ -397,8 +411,14 @@ pub struct State {
     // — Przestrzenie robocze (`ext_workspace_v1`) —
     /// Liczba przestrzeni roboczych.
     pub ws_count: usize,
+    /// Liczba przestrzeni współdzielona z wątkiem wyjścia (rysuje podgląd i pasek).
+    pub ws_count_model: Arc<std::sync::atomic::AtomicUsize>,
     /// Nazwy przestrzeni (puste = numer). Czytane z `~/.config/luna/workspaces.conf`.
     pub ws_names: Vec<String>,
+    /// Czy dolne rogi ekranu przełączają przestrzenie (opcja użytkownika).
+    pub ws_corner_switch: bool,
+    /// Zapadka: róg już przełączył przestrzeń, dopóki kursor z niego nie wyjdzie.
+    pub ws_corner_latch: bool,
     /// Bieżąca przestrzeń robocza (współdzielona z wątkiem wyjścia).
     pub ws_current: WorkspaceModel,
     /// Tryb podglądu okien/przestrzeni (`Super+Tab`), współdzielony z wątkiem wyjścia.
@@ -426,6 +446,11 @@ pub struct State {
     /// dawała kody nawigacji zamiast cyfr/przecinków.
     pub caps_lock: bool,
     pub num_lock: bool,
+    /// Ustawienia powtarzania klawiszy (ms / klawisze na sekundę).
+    pub repeat_delay: u32,
+    pub repeat_rate: u32,
+    /// Odwrócony kierunek przewijania (naturalne przewijanie).
+    pub natural_scroll: bool,
     /// Sesja zablokowana przez `luna-lock` (overlay + klawiatura wyłączna).
     /// Blokujemy wtedy globalne skróty kompozytora i podgląd okien.
     pub locked: bool,
@@ -479,7 +504,10 @@ impl Default for State {
             outputs: Arc::new(Mutex::new(vec![OutputInfo::default()])),
             toplevel_managers: Vec::new(),
             ws_count: 4,
+            ws_count_model: Arc::new(std::sync::atomic::AtomicUsize::new(4)),
             ws_names: Vec::new(),
+            ws_corner_switch: false,
+            ws_corner_latch: false,
             ws_current: Arc::new(Mutex::new(0)),
             overview: Arc::new(Mutex::new(Overview::default())),
             ws_managers: Vec::new(),
@@ -493,6 +521,9 @@ impl Default for State {
             sent_mods: Modifiers::NONE,
             caps_lock: false,
             num_lock: false,
+            repeat_delay: 600,
+            repeat_rate: 25,
+            natural_scroll: false,
             locked: false,
             selection: None,
             data_devices: Vec::new(),
@@ -547,7 +578,26 @@ impl State {
     pub fn apply_workspace_layout(&mut self) {
         let layout = libluna_core::WorkspaceLayout::load();
         self.ws_count = layout.count();
+        self.ws_count_model
+            .store(self.ws_count, std::sync::atomic::Ordering::Relaxed);
         self.ws_names = layout.names();
+        self.ws_corner_switch = layout.corner_switch();
+    }
+
+    /// Wczytuje ustawienia klawiatury i myszy (`~/.config/luna/input.conf`).
+    pub fn apply_input_settings(&mut self) {
+        let input = libluna_core::InputSettings::load();
+        self.repeat_delay = input.repeat_delay();
+        self.repeat_rate = input.repeat_rate();
+        self.natural_scroll = input.natural_scroll();
+    }
+
+    /// Włącza/wyłącza przełączanie przestrzeni dolnymi rogami ekranu.
+    pub fn set_workspace_corner_switch(&mut self, enabled: bool) {
+        self.ws_corner_switch = enabled;
+        if !enabled {
+            self.ws_corner_latch = false;
+        }
     }
 
     /// Zmienia liczbę przestrzeni bez restartu kompozytora.
@@ -560,6 +610,9 @@ impl State {
             return;
         }
         self.ws_count = count;
+        self.ws_count_model
+            .store(count, std::sync::atomic::Ordering::Relaxed);
+        self.ws_corner_latch = false;
         let current = *self.ws_current.lock_or_recover();
         if current >= count {
             crate::seat::switch_workspace(self, count.saturating_sub(1));
@@ -663,6 +716,7 @@ mod tests {
             fullscreen: false,
             ssd: true,
             saved: None,
+            dmabuf: None,
             data: std::sync::Arc::new(libluna_render::ImageData::empty(1, 1)),
         }
     }

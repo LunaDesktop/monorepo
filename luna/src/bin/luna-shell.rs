@@ -1446,11 +1446,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         });
 
         osd.advance(dt);
-        // Miejsce toastów może zmienić Ustawienia; sprawdzamy plik raz na sekundę.
+        // Miejsce toastów i tryb „nie przeszkadzać” mogą zmienić Ustawienia;
+        // sprawdzamy pliki raz na sekundę.
         if Instant::now() >= placement_check {
             let placement = load_placement();
             if placement != notes.placement() {
                 notes.set_placement(placement);
+            }
+            let file_dnd = luna::system::dnd();
+            if file_dnd != dnd {
+                dnd = file_dnd;
+                if dnd {
+                    for n in notes.clear_toasts() {
+                        if n.id != 0 {
+                            with_notifications(&bus_slot, |b| b.signal_closed(n.id, 2));
+                        }
+                    }
+                }
             }
             let icons = IconSettings::load();
             if icons.theme != icon_theme {
@@ -1988,7 +2000,9 @@ fn tray_menu_for(
 
 /// Zamienia powiadomienie z magistrali D-Bus na toast Luny.
 fn notification_from(inc: Incoming) -> Notification {
-    let icon = icon_for(&inc.app_name);
+    // `app_icon`/`desktop-entry` z D-Busa bywa dokładniejszy niż sama nazwa aplikacji
+    // (np. „Zed” wysyła `dev.zed.Zed`), więc przekazujemy go do doboru ikony.
+    let icon = icon_for(inc.icon.as_deref().unwrap_or(&inc.app_name));
     let timeout = inc.timeout_secs();
     let mut n = Notification::new(inc.app_name, inc.summary, inc.body)
         .with_icon(icon)
@@ -2011,6 +2025,8 @@ fn icon_for(app: &str) -> IconName {
         IconName::Settings
     } else if a.contains("browser") || a.contains("przegl") {
         IconName::Search
+    } else if a.contains("zed") || a.contains("code") || a.contains("editor") {
+        IconName::Code
     } else {
         IconName::Info
     }
@@ -2266,6 +2282,7 @@ fn apply_display(cmd: &mut std::process::Command) {
 
 /// Emulatory terminala, których używamy dla wpisów `Terminal=true` (w kolejności).
 const TERMINALS: &[&str] = &[
+    "luna-terminal",
     "xfce4-terminal",
     "karton-terminal",
     "gnome-terminal",

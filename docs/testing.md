@@ -88,6 +88,9 @@ więc test nie zależy od języka ani motywu z `~/.config`.
 
 1. **Start kompozytora** — Selene tworzy `wayland-0` i gniazdo `luna-control`.
 2. **Panel** — `luna-shell` mapuje powierzchnię warstwową (`layer=true`).
+3. **dmabuf** — `luna-control dmabuf`: `enabled=true` tylko przy GPU
+   (`SELENE_GPU=1`/`LUNA_GPU=1`), `enabled=false` na CPU. Global nie może się
+   pojawić bez backendu, który potrafi go wyświetlić.
 3. **Launcher + przypinanie** — klik w burger otwiera launcher, a PPM na pierwszym
    kaflu zapisuje `pinned=` do `$XDG_CONFIG_HOME/luna/launcher.conf`; drugi PPM
    (ta sama pozycja, bo przypięta aplikacja przeskakuje na początek) usuwa wpis.

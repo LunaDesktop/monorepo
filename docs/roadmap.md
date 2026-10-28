@@ -191,6 +191,9 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   **diagnostyka** `luna-control x11` i test end-to-end `scripts/x11-smoke.sh`
   (`make smoke-x11`). Model okna X11 używa **treści** (bez `border_width`), więc
   maksymalizacja daje dokładnie szerokość monitora.
+  ✅ **GPU + dmabuf**: `GpuRenderer` (`LUNA_GPU`/`SELENE_GPU`), `zwp_linux_dmabuf_v1`
+  v3 z modyfikatorami i importem `EGLImage`, `luna-control dmabuf`. Szczegóły
+  i pomiary: [`docs/gpu.md`](gpu.md).
   ✅ Optymalizacje: cache `mmap` puli `wl_shm` i zero-copy w rendererze (`PixmapRef::from_bytes`).
   Uruchomienie: `cargo run --manifest-path selene/Cargo.toml` (szczegóły: `de/README.md`).
 - Dalej: GLES/akceleracja, hotplug monitorów (`zwlr_output_manager`), `libinput` (gesty),

@@ -174,7 +174,9 @@ Selene.
 - **Wejście evdev** (`evdev.rs`): zaimplementowane i sterowane `SELENE_INPUT=evdev`, ale
   wymaga dostępu do `/dev/input` (grupa `input`/root); bez tego Selene zgłasza
   `evdev input unavailable`.
-- GLES/akceleracja, hotplug monitorów (`zwlr_output_manager`), `libinput` (gesty touchpada,
+- GLES/akceleracja: ✅ kompozycja **nested** przez EGL (`SELENE_GPU=1`), bufory GPU
+  klientów (`zwp_linux_dmabuf_v1`); w trybie DRM wyjście nadal CPU. Brakuje
+  hotplug monitorów (`zwlr_output_manager`), `libinput` (gesty touchpada,
   akceleracja) zamiast surowych zdarzeń.
 - **Selekcja pierwotna** (`primary selection`); IME / `text-input`.
 - `wl_output` dynamiczne (zmiana trybu), fokus klawiatury po kliknięciu poza oknem.

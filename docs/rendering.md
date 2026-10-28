@@ -163,7 +163,10 @@ Dlatego kolejność to **damage → mniej komend → ewentualnie GPU**.
       `LUNA_GPU=1` (aplikacje) / `SELENE_GPU=1` (kompozytor nested), z automatycznym
       fallbackiem CPU. Na scenie pulpitu 12,63 → **1,56 ms** (z readbackiem).
       Tekst i wektory idą przez małe warstwy CPU, więc wygląd się nie zmienia.
-- [ ] **`zwp_linux_dmabuf_v1`** (etap 2) — import buforów GPU klientów.
+- [x] **`zwp_linux_dmabuf_v1`** (etap 2) — import buforów GPU klientów
+      (`EGLImage` + modyfikatory), cache per `wl_buffer`, release przy następnym commicie.
+      Round-trip testowany w `libluna-render` (eksport MESA → import → piksele).
+- [ ] Test z realnym klientem GPU (Zed) i formaty wieloplanowe (wideo).
 - [ ] Kompozycja GPU w trybie DRM (kontekst per wątek wyjścia) i zero-copy na Mesa.
 - [ ] Pełny damage tracking: `Scene`/widgety raportują prostokąty uszkodzeń, renderer
       nie rysuje całej sceny (dziś nadal budujemy ją od zera).

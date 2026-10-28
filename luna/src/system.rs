@@ -355,29 +355,61 @@ pub struct WifiNetwork {
     pub ssid: String,
     pub signal: u8,
     pub active: bool,
+    /// Zabezpieczenie (np. `WPA2`, `WPA3`, puste/`--` = sieć otwarta).
+    pub security: String,
+}
+
+/// Rozbija linię `nmcli -t` na pola, respektując escapowanie `\\:` w SSID.
+fn terse_fields(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut escaped = false;
+    for ch in line.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == ':' {
+            out.push(std::mem::take(&mut current));
+        } else {
+            current.push(ch);
+        }
+    }
+    out.push(current);
+    out
 }
 
 /// Skanuje dostępne sieci Wi-Fi.
 pub fn scan_wifi() -> Vec<WifiNetwork> {
     let Some(out) = run(
         "nmcli",
-        &["-t", "-f", "ACTIVE,SSID,SIGNAL", "dev", "wifi", "list"],
+        &[
+            "-t",
+            "-f",
+            "ACTIVE,SSID,SIGNAL,SECURITY",
+            "dev",
+            "wifi",
+            "list",
+        ],
     ) else {
         return Vec::new();
     };
     let mut networks = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for line in out.lines() {
-        let parts: Vec<&str> = line.split(':').collect();
-        if parts.len() >= 3 {
+        let parts = terse_fields(line);
+        if parts.len() >= 4 {
             let active = parts[0] == "yes";
             let ssid = parts[1].trim().to_owned();
             let signal: u8 = parts[2].trim().parse().unwrap_or(0);
+            let security = parts[3].trim().to_owned();
             if !ssid.is_empty() && seen.insert(ssid.clone()) {
                 networks.push(WifiNetwork {
                     ssid,
                     signal,
                     active,
+                    security,
                 });
             }
         }
@@ -388,6 +420,141 @@ pub fn scan_wifi() -> Vec<WifiNetwork> {
             .then_with(|| b.signal.cmp(&a.signal))
     });
     networks
+}
+
+/// Łączy z siecią Wi-Fi przez NetworkManager (D-Bus, bez hasła w `argv`).
+///
+/// Tworzymy profil `802-11-wireless` i aktywujemy go na pierwszym urządzeniu
+/// Wi-Fi. Hasło żyje wyłącznie w słowniku D-Bus przekazanym do NetworkManagera.
+pub fn connect_wifi(ssid: &str, password: Option<&str>) -> Result<(), String> {
+    use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue};
+
+    let connection =
+        zbus::blocking::Connection::system().map_err(|err| format!("D-Bus (system): {err}"))?;
+
+    // 1) Pierwsze urządzenie typu Wi-Fi (`NM_DEVICE_TYPE_WIFI = 2`).
+    let devices: Vec<OwnedObjectPath> = connection
+        .call_method(
+            Some("org.freedesktop.NetworkManager"),
+            "/org/freedesktop/NetworkManager",
+            Some("org.freedesktop.NetworkManager"),
+            "GetDevices",
+            &(),
+        )
+        .map_err(|err| format!("NetworkManager: {err}"))?
+        .body()
+        .deserialize()
+        .map_err(|err| format!("NetworkManager: {err}"))?;
+    let mut wifi_device = None;
+    for device in devices {
+        let value: OwnedValue = connection
+            .call_method(
+                Some("org.freedesktop.NetworkManager"),
+                device.as_str(),
+                Some("org.freedesktop.DBus.Properties"),
+                "Get",
+                &("org.freedesktop.NetworkManager.Device", "DeviceType"),
+            )
+            .map_err(|err| format!("NetworkManager: {err}"))?
+            .body()
+            .deserialize()
+            .map_err(|err| format!("NetworkManager: {err}"))?;
+        if u32::try_from(value).ok() == Some(2) {
+            wifi_device = Some(device);
+            break;
+        }
+    }
+    let device = wifi_device.ok_or_else(|| "No Wi-Fi device was found".to_owned())?;
+
+    // 2) Profil połączenia. `ay` dla SSID wymaga bajtów, nie tekstu.
+    let settings = wifi_connection_settings(ssid, password);
+    let root = ObjectPath::from_static_str("/").expect("root path");
+    connection
+        .call_method(
+            Some("org.freedesktop.NetworkManager"),
+            "/org/freedesktop/NetworkManager",
+            Some("org.freedesktop.NetworkManager"),
+            "AddAndActivateConnection",
+            &(settings, root, device),
+        )
+        .map_err(|err| format!("NetworkManager: {err}"))?;
+    Ok(())
+}
+
+/// Słownik `a{sa{sv}}` dla `AddAndActivateConnection`.
+fn wifi_connection_settings(
+    ssid: &str,
+    password: Option<&str>,
+) -> std::collections::HashMap<
+    String,
+    std::collections::HashMap<String, zbus::zvariant::Value<'static>>,
+> {
+    use std::collections::HashMap;
+
+    use zbus::zvariant::Value;
+
+    let mut connection = HashMap::new();
+    connection.insert("id".to_owned(), Value::from(ssid.to_owned()));
+    connection.insert("type".to_owned(), Value::from("802-11-wireless".to_owned()));
+    connection.insert("uuid".to_owned(), Value::from(new_uuid()));
+    connection.insert("autoconnect".to_owned(), Value::from(true));
+
+    let mut wireless = HashMap::new();
+    wireless.insert("ssid".to_owned(), Value::from(ssid.as_bytes().to_vec()));
+    wireless.insert("mode".to_owned(), Value::from("infrastructure".to_owned()));
+
+    let mut settings: HashMap<String, HashMap<String, Value<'static>>> = HashMap::new();
+    settings.insert("connection".to_owned(), connection);
+    settings.insert("802-11-wireless".to_owned(), wireless);
+    if let Some(password) = password.filter(|value| !value.is_empty()) {
+        let mut security = HashMap::new();
+        security.insert("key-mgmt".to_owned(), Value::from("wpa-psk".to_owned()));
+        security.insert("psk".to_owned(), Value::from(password.to_owned()));
+        settings.insert("802-11-wireless-security".to_owned(), security);
+    }
+    let mut ipv4 = HashMap::new();
+    ipv4.insert("method".to_owned(), Value::from("auto".to_owned()));
+    settings.insert("ipv4".to_owned(), ipv4);
+    let mut ipv6 = HashMap::new();
+    ipv6.insert("method".to_owned(), Value::from("auto".to_owned()));
+    settings.insert("ipv6".to_owned(), ipv6);
+    settings
+}
+
+/// UUID v4-podobny bez dodatkowej zależności (wystarczający dla profilu NM).
+fn new_uuid() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let salt = (std::process::id() as u128) << 64;
+    let value = nanos ^ salt ^ 0x9e37_79b9_7f4a_7c15_9e37_79b9_7f4a_7c15;
+    let hex = format!("{value:032x}");
+    format!(
+        "{}-{}-4{}-a{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[13..16],
+        &hex[17..20],
+        &hex[20..32]
+    )
+}
+
+/// Czy synchronizacja czasu (NTP) jest włączona w systemie.
+pub fn ntp_enabled() -> Option<bool> {
+    let output = Command::new("timedatectl")
+        .env("LC_ALL", "C")
+        .args(["show", "-p", "NTP", "--value"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    match String::from_utf8_lossy(&output.stdout).trim() {
+        "yes" | "true" | "1" => Some(true),
+        "no" | "false" | "0" => Some(false),
+        _ => None,
+    }
 }
 
 fn spawn_cmd(program: &str, args: &[&str]) {
@@ -613,6 +780,27 @@ fn parse_audio_sink(out: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wifi_profile_has_ssid_and_psk_without_plaintext_fields() {
+        let settings = wifi_connection_settings("Dom", Some("tajne-hasło"));
+        assert_eq!(settings.len(), 5);
+        let wireless = &settings["802-11-wireless"];
+        assert_eq!(
+            wireless["ssid"].value_signature().to_string(),
+            "ay",
+            "SSID musi być bajtami"
+        );
+        let security = &settings["802-11-wireless-security"];
+        assert_eq!(
+            String::try_from(security["psk"].clone()).ok().as_deref(),
+            Some("tajne-hasło")
+        );
+        let uuid =
+            String::try_from(settings["connection"]["uuid"].clone()).expect("uuid jako tekst");
+        assert_eq!(uuid.len(), 36);
+        assert_eq!(uuid.chars().filter(|c| *c == '-').count(), 4);
+    }
 
     #[test]
     fn brightness_cycles_levels() {

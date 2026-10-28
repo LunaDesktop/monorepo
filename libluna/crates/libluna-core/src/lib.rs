@@ -20,8 +20,10 @@ pub mod event;
 pub mod geometry;
 pub mod greeter;
 pub mod icons;
+pub mod input;
 pub mod lock;
 pub mod motion;
+pub mod os;
 pub mod region;
 pub mod runtime;
 pub mod scale;
@@ -37,8 +39,12 @@ pub use event::{
 pub use geometry::{Insets, Point, Rect, Size};
 pub use greeter::GreeterSettings;
 pub use icons::{IconSet, IconSettings, IconTheme, DEFAULT_ICON_SET};
+pub use input::{
+    InputSettings, MAX_REPEAT_DELAY, MAX_REPEAT_RATE, MIN_REPEAT_DELAY, MIN_REPEAT_RATE,
+};
 pub use lock::{LockSettings, LockWallpaper};
 pub use motion::{lerp, Animation, Easing};
+pub use os::name as os_name;
 pub use region::RegionSettings;
 pub use scale::Scale;
 pub use style::{

@@ -9,6 +9,8 @@ use wayland_server::{
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
 };
 
+use libluna_render::DmabufImage;
+
 use crate::state::State;
 use crate::sync::LockExt;
 
@@ -120,22 +122,59 @@ fn debug() -> bool {
     std::env::var("SELENE_STATS").is_ok()
 }
 
-/// Dane bufora (`wl_buffer`): odniesienie do puli + geometria.
+/// Dane bufora (`wl_buffer`): albo pula shm, albo bufor `dmabuf` klienta GPU.
 pub struct BufferData {
-    pub pool: Arc<ShmPoolData>,
+    /// `Some` dla `wl_shm`; `None` dla `dmabuf`.
+    pub pool: Option<Arc<ShmPoolData>>,
     pub offset: usize,
     pub width: i32,
     pub height: i32,
     pub stride: i32,
     pub format: wl_shm::Format,
+    /// Bufor GPU; import wykonuje backend rysujący (`GpuRenderer`).
+    pub dmabuf: Option<Arc<DmabufImage>>,
+}
+
+impl BufferData {
+    /// Bufor bez puli shm — tylko metadane `dmabuf`.
+    pub fn dmabuf(image: Arc<DmabufImage>, format: wl_shm::Format) -> Self {
+        Self {
+            pool: None,
+            offset: 0,
+            width: image.width as i32,
+            height: image.height as i32,
+            stride: 0,
+            format,
+            dmabuf: Some(image),
+        }
+    }
+
+    /// Bufor, którego import się nie udał — istnieje dla protokołu, nic nie rysuje.
+    pub fn failed(width: i32, height: i32) -> Self {
+        Self {
+            pool: None,
+            offset: 0,
+            width,
+            height,
+            stride: 0,
+            format: wl_shm::Format::Argb8888,
+            dmabuf: None,
+        }
+    }
 }
 
 impl BufferData {
     /// Odczytuje piksele bufora jako premultiplied RGBA8 (swizzle BGRA→RGBA).
     ///
+    /// Dla `dmabuf` zwraca `None` — piksele żyją wyłącznie na GPU.
+    ///
     /// Waliduje geometrię względem rozmiaru puli (arytmetyka bez przepełnień) i ogranicza
     /// rozmiar alokacji, żeby klient nie wywołał paniki ani OOM.
     pub fn to_rgba(&self) -> Option<Vec<u8>> {
+        if self.dmabuf.is_some() {
+            return None;
+        }
+        let pool = self.pool.as_ref()?;
         if self.width <= 0 || self.height <= 0 || self.stride <= 0 {
             return None;
         }
@@ -154,7 +193,7 @@ impl BufferData {
         }
 
         // Trzymamy blokadę mapy przez cały odczyt (mapa może rosnąć w `resize`).
-        let map = self.pool.map.lock_or_recover();
+        let map = pool.map.lock_or_recover();
         if map.ptr.is_null() || end > map.size {
             return None;
         }
@@ -302,12 +341,13 @@ impl Dispatch<wl_shm_pool::WlShmPool, Arc<ShmPoolData>> for State {
                 data_init.init(
                     id,
                     BufferData {
-                        pool: Arc::clone(data),
+                        pool: Some(Arc::clone(data)),
                         offset: offset.max(0) as usize,
                         width,
                         height,
                         stride,
                         format: format.into_result().unwrap_or(wl_shm::Format::Argb8888),
+                        dmabuf: None,
                     },
                 );
             }
@@ -351,12 +391,13 @@ mod tests {
 
     fn buffer(pool: Arc<ShmPoolData>, w: i32, h: i32, stride: i32) -> BufferData {
         BufferData {
-            pool,
+            pool: Some(pool),
             offset: 0,
             width: w,
             height: h,
             stride,
             format: wl_shm::Format::Argb8888,
+            dmabuf: None,
         }
     }
 

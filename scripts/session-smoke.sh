@@ -126,12 +126,14 @@ windows_snapshot() {
     ' "$log"
 }
 
-wait_title() { # wait_title <tytuł> [próby]
+wait_title() { # wait_title <fragment tytułu> [próby]
     title="$1"
     tries="${2:-60}"
     i=0
     while [ "$i" -lt "$tries" ]; do
-        if windows_snapshot | grep 'mapped=true' | grep -F "\"$title\"" >/dev/null 2>&1; then
+        # Fragment, nie cały tytuł: Ustawienia mają tytuł zależny od języka
+        # („Pagan Linux Settings” / „Ustawienia — Pagan Linux”).
+        if windows_snapshot | grep 'mapped=true' | grep -F "$title" >/dev/null 2>&1; then
             return 0
         fi
         sleep 0.2
@@ -232,6 +234,20 @@ say "luna-shell: panel warstwowy"
 start shell env $client_env "$shell_bin"
 wait_layer "z=1000000" || fail "panel Luna Shell się nie zmapował"
 note "panel widoczny"
+
+# ── dmabuf: ogłaszany tylko z GPU ───────────────────────────────────────────
+say "dmabuf: zgodny z backendem"
+control dmabuf >/dev/null 2>&1 || true
+sleep 0.3
+if [ -n "${SELENE_GPU:-}" ] || [ -n "${LUNA_GPU:-}" ]; then
+    grep -q 'selene/control: dmabuf enabled=true' "$log" ||
+        fail "brak globala zwp_linux_dmabuf_v1 przy włączonym GPU"
+    note "dmabuf włączony (GPU)"
+else
+    grep -q 'selene/control: dmabuf enabled=false' "$log" ||
+        fail "dmabuf ogłoszony bez backendu GPU"
+    note "dmabuf wyłączony (CPU)"
+fi
 
 # ── Launcher: PPM przypina/odpina aplikację ─────────────────────────────────
 say "launcher: PPM przypina aplikację (stan w launcher.conf)"

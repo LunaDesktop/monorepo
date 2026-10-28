@@ -56,6 +56,21 @@ fn main() {
         ] {
             println!("  {name:<42} {}", if ok { "tak" } else { "nie" });
         }
+        let formats = gpu::dmabuf_formats();
+        let pairs: usize = formats.iter().map(|(_, m)| m.len()).sum();
+        println!(
+            "  dmabuf: {} formatów, {} par format/modyfikator",
+            formats.len(),
+            pairs
+        );
+        let interesting: Vec<String> = formats
+            .iter()
+            .take(8)
+            .map(|(f, _)| format!("0x{f:08x}"))
+            .collect();
+        if !interesting.is_empty() {
+            println!("  formaty: {}", interesting.join(", "));
+        }
         println!();
     }
 

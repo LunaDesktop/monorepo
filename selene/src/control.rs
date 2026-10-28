@@ -11,6 +11,8 @@ use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use wayland_server::Resource;
+
 use crate::state::State;
 use crate::sync::LockExt;
 
@@ -70,6 +72,45 @@ fn handle(state: &mut State, line: &str) {
                 }
             }
         }
+        // `workspace-corner <0|1>` — przełączanie przestrzeni dolnymi rogami ekranu.
+        "workspace-corner" => {
+            state.set_workspace_corner_switch(matches!(rest.trim(), "1" | "true" | "on"));
+            if std::env::var("SELENE_STATS").is_ok() {
+                eprintln!(
+                    "selene/control: workspace-corner = {}",
+                    state.ws_corner_switch
+                );
+            }
+        }
+        // `input repeat <opóźnienie_ms> <klawisze/s>` oraz `input natural-scroll <0|1>`.
+        "input" => {
+            let (what, values) = rest.split_once(' ').unwrap_or((rest, ""));
+            match what.trim() {
+                "repeat" => {
+                    let mut parts = values.split_whitespace();
+                    if let (Some(delay), Some(rate)) = (parts.next(), parts.next()) {
+                        if let (Ok(delay), Ok(rate)) = (delay.parse::<u32>(), rate.parse::<u32>()) {
+                            state.repeat_delay = delay.clamp(100, 2000);
+                            state.repeat_rate = rate.clamp(5, 60);
+                            for keyboard in &state.keyboards {
+                                if keyboard.version() >= 4 {
+                                    let _ = keyboard.send_event(
+                                        wayland_server::protocol::wl_keyboard::Event::RepeatInfo {
+                                            rate: state.repeat_rate as i32,
+                                            delay: state.repeat_delay as i32,
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                "natural-scroll" => {
+                    state.natural_scroll = matches!(values.trim(), "1" | "true" | "on");
+                }
+                _ => {}
+            }
+        }
         // `workspace-name <indeks> <nazwa>` — zmiana nazwy bez restartu sesji.
         "workspace-name" => {
             let (index, name) = rest.split_once(' ').unwrap_or((rest, ""));
@@ -106,6 +147,14 @@ fn handle(state: &mut State, line: &str) {
                     w.data.height
                 );
             }
+        }
+        // `dmabuf` — czy `zwp_linux_dmabuf_v1` jest ogłoszony (tylko z GPU).
+        "dmabuf" => {
+            let (formats, modifiers) = crate::dmabuf::counts();
+            eprintln!(
+                "selene/control: dmabuf enabled={} formats={formats} modifiers={modifiers}",
+                crate::dmabuf::enabled()
+            );
         }
         // `outputs` — geometria monitorów (testy sesji liczą z niej współrzędne).
         "outputs" => {

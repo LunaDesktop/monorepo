@@ -191,7 +191,10 @@ pub fn scene_to_svg(scene: &Scene, width: f64, height: f64) -> String {
                     svg.push_str("  </g>\n");
                 }
             }
-            DrawCommand::Text(_) | DrawCommand::Image { .. } | DrawCommand::Background { .. } => {
+            DrawCommand::Text(_)
+            | DrawCommand::Image { .. }
+            | DrawCommand::ImageDmabuf { .. }
+            | DrawCommand::Background { .. } => {
                 svg.push_str("  <!-- pominięto: tekst/obraz nie jest eksportowany -->\n");
             }
         }

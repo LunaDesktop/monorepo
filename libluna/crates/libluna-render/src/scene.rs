@@ -5,6 +5,7 @@
 
 use libluna_core::style::weight;
 use libluna_core::{Color, Point, Rect};
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::Arc;
 
 /// Gotowy obraz (premultiplied RGBA8) — np. skomponowany bufor okna z `wl_shm`.
@@ -82,6 +83,72 @@ impl TextRun {
     }
 }
 
+/// Pojedynczy plan bufora `dmabuf` (klient GPU).
+///
+/// Deskryptor jest trzymany przy obrazie, żeby import EGL mógł nastąpić
+/// leniwie (przy pierwszym rysowaniu) i żeby pamięć żyła do końca bufora.
+pub struct DmabufPlane {
+    pub fd: OwnedFd,
+    pub offset: u32,
+    pub stride: u32,
+}
+
+impl std::fmt::Debug for DmabufPlane {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DmabufPlane")
+            .field("fd", &self.fd.as_raw_fd())
+            .field("offset", &self.offset)
+            .field("stride", &self.stride)
+            .finish()
+    }
+}
+
+impl PartialEq for DmabufPlane {
+    fn eq(&self, other: &Self) -> bool {
+        self.fd.as_raw_fd() == other.fd.as_raw_fd()
+            && self.offset == other.offset
+            && self.stride == other.stride
+    }
+}
+
+/// Bufor `dmabuf` klienta (GPU) — import robi backend\.
+///
+/// Scena tylko opisuje bufor; `GpuRenderer` tworzy z niego `EGLImage` przy
+/// pierwszym użyciu. `SoftwareRenderer` nie potrafi go odczytać i rysuje
+/// zastępczy prostokąt (taki bufor nie powinien się pojawić bez GPU, bo
+/// Selene ogłasza `zwp_linux_dmabuf_v1` tylko przy włączonym backendzie GPU).
+pub struct DmabufImage {
+    pub width: u32,
+    pub height: u32,
+    /// Kod `DRM_FORMAT_*` (little-endian fourcc), np. `ARGB8888`.
+    pub format: u32,
+    /// Modyfikator układu (`DRM_FORMAT_MOD_*`); `u64::MAX` = nieznany/invalid.
+    pub modifier: u64,
+    pub planes: Vec<DmabufPlane>,
+}
+
+impl std::fmt::Debug for DmabufImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DmabufImage")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("format", &format!("0x{:08x}", self.format))
+            .field("modifier", &format!("0x{:016x}", self.modifier))
+            .field("planes", &self.planes)
+            .finish()
+    }
+}
+
+impl PartialEq for DmabufImage {
+    fn eq(&self, other: &Self) -> bool {
+        self.width == other.width
+            && self.height == other.height
+            && self.format == other.format
+            && self.modifier == other.modifier
+            && self.planes == other.planes
+    }
+}
+
 /// Polecenie rysowania.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DrawCommand {
@@ -138,6 +205,8 @@ pub enum DrawCommand {
     Text(TextRun),
     /// Obraz (np. bufor okna) wpisany w prostokąt docelowy.
     Image { rect: Rect, data: Arc<ImageData> },
+    /// Bufor `dmabuf` klienta GPU; import wykonuje backend.
+    ImageDmabuf { rect: Rect, data: Arc<DmabufImage> },
     /// Tło pulpitu: pełnoekranowy, **nieprzezroczysty** obraz. Renderer kopiuje piksele
     /// wprost — mieszanie 2 mln pikseli co klatkę kosztowało ~10 ms na 1080p.
     Background { data: Arc<ImageData> },
@@ -287,6 +356,12 @@ impl Scene {
         self
     }
 
+    /// Rysuje bufor `dmabuf` klienta (import po stronie backendu GPU).
+    pub fn image_dmabuf(&mut self, rect: Rect, data: Arc<DmabufImage>) -> &mut Self {
+        self.commands.push(DrawCommand::ImageDmabuf { rect, data });
+        self
+    }
+
     /// Ustawia tło pulpitu (pełnoekranowy, nieprzezroczysty obraz).
     pub fn background(&mut self, data: Arc<ImageData>) -> &mut Self {
         self.commands.push(DrawCommand::Background { data });
@@ -314,6 +389,10 @@ fn same_command(a: &DrawCommand, b: &DrawCommand) -> bool {
         (DrawCommand::Image { rect: ra, data: da }, DrawCommand::Image { rect: rb, data: db }) => {
             ra == rb && Arc::ptr_eq(da, db)
         }
+        (
+            DrawCommand::ImageDmabuf { rect: ra, data: da },
+            DrawCommand::ImageDmabuf { rect: rb, data: db },
+        ) => ra == rb && Arc::ptr_eq(da, db),
         (DrawCommand::Background { data: da }, DrawCommand::Background { data: db }) => {
             Arc::ptr_eq(da, db)
         }

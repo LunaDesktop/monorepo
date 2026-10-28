@@ -19,6 +19,7 @@
 
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_void, CStr};
+use std::os::fd::AsRawFd;
 use std::ptr;
 use std::sync::Arc;
 
@@ -26,7 +27,7 @@ use libluna_core::{Color, Point, Rect};
 use tiny_skia::Pixmap;
 
 use crate::renderer::Renderer;
-use crate::scene::{DrawCommand, ImageData, Scene, TextRun};
+use crate::scene::{DmabufImage, DrawCommand, ImageData, Scene, TextRun};
 use crate::software::SoftwareRenderer;
 use crate::text::TextEngine;
 
@@ -47,6 +48,25 @@ const EGL_CONTEXT_CLIENT_VERSION: u32 = 0x3098;
 const EGL_EXTENSIONS: u32 = 0x3055;
 const EGL_VENDOR: u32 = 0x3053;
 const EGL_VERSION: u32 = 0x3054;
+const EGL_WIDTH: u32 = 0x3057;
+const EGL_HEIGHT: u32 = 0x3056;
+const EGL_LINUX_DMA_BUF_EXT: u32 = 0x3270;
+const EGL_LINUX_DRM_FOURCC_EXT: u32 = 0x3271;
+const EGL_DMA_BUF_PLANE0_FD_EXT: u32 = 0x3272;
+const EGL_DMA_BUF_PLANE0_OFFSET_EXT: u32 = 0x3273;
+const EGL_DMA_BUF_PLANE0_PITCH_EXT: u32 = 0x3274;
+const EGL_DMA_BUF_PLANE1_FD_EXT: u32 = 0x3275;
+const EGL_DMA_BUF_PLANE1_OFFSET_EXT: u32 = 0x3276;
+const EGL_DMA_BUF_PLANE1_PITCH_EXT: u32 = 0x3277;
+const EGL_DMA_BUF_PLANE2_FD_EXT: u32 = 0x3278;
+const EGL_DMA_BUF_PLANE2_OFFSET_EXT: u32 = 0x3279;
+const EGL_DMA_BUF_PLANE2_PITCH_EXT: u32 = 0x327A;
+const EGL_DMA_BUF_PLANE3_FD_EXT: u32 = 0x3440;
+const EGL_DMA_BUF_PLANE3_OFFSET_EXT: u32 = 0x3441;
+const EGL_DMA_BUF_PLANE3_PITCH_EXT: u32 = 0x3442;
+const EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT: u32 = 0x3443;
+const EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT: u32 = 0x3444;
+const EGL_NO_CONTEXT: *mut c_void = ptr::null_mut();
 
 // ── Stałe GLES2 ─────────────────────────────────────────────────────────────
 const GL_TEXTURE_2D: u32 = 0x0DE1;
@@ -107,6 +127,19 @@ type EglMakeCurrent =
     unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void) -> u32;
 type EglGetError = unsafe extern "C" fn() -> i32;
 type EglSwapInterval = unsafe extern "C" fn(*mut c_void, i32) -> u32;
+// `eglCreateImageKHR` ma atrybuty 32-bitowe (w odróżnieniu od 1.5 `eglCreateImage`
+// z `EGLAttrib` 64-bit); używamy wariantu KHR dla importu dmabuf i testów.
+type EglCreateImage =
+    unsafe extern "C" fn(*mut c_void, *mut c_void, u32, *mut c_void, *const i32) -> *mut c_void;
+type EglDestroyImage = unsafe extern "C" fn(*mut c_void, *mut c_void) -> u32;
+type EglQueryDmaBufFormats = unsafe extern "C" fn(*mut c_void, i32, *mut i32, *mut i32) -> u32;
+type EglQueryDmaBufModifiers =
+    unsafe extern "C" fn(*mut c_void, i32, i32, *mut u64, *mut u32, *mut i32) -> u32;
+type EglExportDmaBuf =
+    unsafe extern "C" fn(*mut c_void, *mut c_void, *mut i32, *mut i32, *mut i32) -> u32;
+type EglExportDmaBufQuery =
+    unsafe extern "C" fn(*mut c_void, *mut c_void, *mut i32, *mut i32, *mut u64) -> u32;
+type GlEglImageTargetTexture2D = unsafe extern "C" fn(u32, *mut c_void);
 
 type GlGetString = unsafe extern "C" fn(u32) -> *const u8;
 type GlGenTextures = unsafe extern "C" fn(i32, *mut Gluint);
@@ -178,9 +211,21 @@ fn has_ext(all: &str, name: &str) -> bool {
 
 struct Gl {
     /// Trzymane tylko po to, żeby kontekst żył przez cały czas życia renderera.
-    _dpy: *mut c_void,
+    dpy: *mut c_void,
     _ctx: *mut c_void,
     get_error: EglGetError,
+    /// Import `dmabuf` (EGL 1.5 / `EGL_KHR_image_base`).
+    create_image: Option<EglCreateImage>,
+    destroy_image: Option<EglDestroyImage>,
+    /// `glEGLImageTargetTexture2DOES` (`GL_OES_EGL_image`).
+    egl_image_texture: Option<GlEglImageTargetTexture2D>,
+    query_formats: Option<EglQueryDmaBufFormats>,
+    query_modifiers: Option<EglQueryDmaBufModifiers>,
+    /// Eksport tekstury do `dmabuf` — tylko do testów round-trip importu.
+    #[allow(dead_code)]
+    export_image: Option<EglExportDmaBuf>,
+    #[allow(dead_code)]
+    export_query: Option<EglExportDmaBufQuery>,
     gen_textures: GlGenTextures,
     delete_textures: GlDeleteTextures,
     bind_texture: GlBindTexture,
@@ -332,9 +377,17 @@ impl Gl {
 
             Ok((
                 Self {
-                    _dpy: dpy,
+                    dpy,
                     _ctx: ctx,
                     get_error,
+                    create_image: load_proc(get_proc, "eglCreateImageKHR"),
+                    destroy_image: load_proc(get_proc, "eglDestroyImage")
+                        .or_else(|| dlsym_fn(egl_lib, "eglDestroyImage")),
+                    egl_image_texture: load_proc(get_proc, "glEGLImageTargetTexture2DOES"),
+                    query_formats: load_proc(get_proc, "eglQueryDmaBufFormatsEXT"),
+                    query_modifiers: load_proc(get_proc, "eglQueryDmaBufModifiersEXT"),
+                    export_image: load_proc(get_proc, "eglExportDMABUFImageMESA"),
+                    export_query: load_proc(get_proc, "eglExportDMABUFImageQueryMESA"),
                     gen_textures: glfn!("glGenTextures"),
                     delete_textures: glfn!("glDeleteTextures"),
                     bind_texture: glfn!("glBindTexture"),
@@ -401,6 +454,90 @@ pub fn info() -> Option<GpuInfo> {
         .clone()
 }
 
+/// Czy import `dmabuf` jest dostępny (EGL + `GL_OES_EGL_image` + formaty).
+pub fn dmabuf_supported() -> bool {
+    !dmabuf_formats().is_empty()
+}
+
+/// Formaty DRM i ich modyfikatory obsługiwane przez EGL (cache na proces).
+///
+/// Lista jest pusta, gdy brak importu `dmabuf` — wtedy Selene nie ogłasza
+/// `zwp_linux_dmabuf_v1` i klienci zostają przy `wl_shm`.
+pub fn dmabuf_formats() -> Vec<(u32, Vec<u64>)> {
+    static CACHE: std::sync::OnceLock<Vec<(u32, Vec<u64>)>> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let Ok((gl, info)) = Gl::open() else {
+                return Vec::new();
+            };
+            if !info.has_dma_buf_import() {
+                return Vec::new();
+            }
+            let (Some(query_formats), Some(query_modifiers)) =
+                (gl.query_formats, gl.query_modifiers)
+            else {
+                return Vec::new();
+            };
+            let dpy = gl.dpy;
+            let mut count = 0i32;
+            if unsafe { query_formats(dpy, 0, ptr::null_mut(), &mut count) } == 0 || count <= 0 {
+                return Vec::new();
+            }
+            let mut formats = vec![0i32; count as usize];
+            if unsafe { query_formats(dpy, count, formats.as_mut_ptr(), &mut count) } == 0 {
+                return Vec::new();
+            }
+            formats.truncate(count.max(0) as usize);
+            let mut out = Vec::with_capacity(formats.len());
+            for format in formats {
+                let format = format as u32;
+                let mut n = 0i32;
+                let mut mods = Vec::new();
+                if unsafe {
+                    query_modifiers(
+                        dpy,
+                        format as i32,
+                        0,
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                        &mut n,
+                    )
+                } != 0
+                    && n > 0
+                {
+                    let mut values = vec![0u64; n as usize];
+                    let mut external = vec![0u32; n as usize];
+                    if unsafe {
+                        query_modifiers(
+                            dpy,
+                            format as i32,
+                            n,
+                            values.as_mut_ptr(),
+                            external.as_mut_ptr(),
+                            &mut n,
+                        )
+                    } != 0
+                    {
+                        values.truncate(n.max(0) as usize);
+                        external.truncate(n.max(0) as usize);
+                        mods = values
+                            .into_iter()
+                            .zip(external)
+                            .filter_map(|(m, ext)| (ext == 0).then_some(m))
+                            .collect();
+                    }
+                }
+                // Brak modyfikatorów = format obsługiwany tylko z niejawnym układem.
+                if mods.is_empty() {
+                    mods.push(u64::MAX);
+                }
+                out.push((format, mods));
+            }
+            out
+        })
+        .clone()
+}
+
 fn dlopen_cstr(name: &str) -> Option<*mut c_void> {
     let c = std::ffi::CString::new(name).ok()?;
     let h = unsafe { dlopen(c.as_ptr(), RTLD_NOW) };
@@ -456,6 +593,7 @@ struct TexProgram {
     rect: Glint,
     clip: Glint,
     round: Glint,
+    round_r: Glint,
     tex: Glint,
 }
 
@@ -471,6 +609,7 @@ struct ShapeProgram {
     width: Glint,
     clip: Glint,
     round: Glint,
+    round_r: Glint,
 }
 
 const VS: &str = "\
@@ -491,8 +630,11 @@ varying vec2 local;
 uniform sampler2D tex;
 uniform vec4 rect;
 uniform vec4 clip;
+// Clip zaokrąglony: xy = początek, zw = rozmiar, round_r = promień.
 uniform vec4 round;
+uniform float round_r;
 float sd_round(vec2 p, vec2 size, float r) {
+    r = min(r, min(size.x, size.y) * 0.5);
     vec2 q = abs(p - size * 0.5) - (size * 0.5 - vec2(r));
     return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
 }
@@ -501,8 +643,8 @@ void main() {
         local.x > clip.x + clip.z || local.y > clip.y + clip.w) discard;
     vec2 uv = (local - rect.xy) / rect.zw;
     float a = 1.0;
-    if (round.z > 0.0 && round.w > 0.0) {
-        float d = sd_round(local - round.xy, round.zw, round.w);
+    if (round.z > 0.0 && round.w > 0.0 && round_r > 0.0) {
+        float d = sd_round(local - round.xy, round.zw, round_r);
         a = clamp(0.5 - d, 0.0, 1.0);
         if (a <= 0.0) discard;
     }
@@ -516,10 +658,12 @@ uniform vec4 rect;
 uniform vec4 color;
 uniform vec4 clip;
 uniform vec4 round;
+uniform float round_r;
 uniform float radius;
 uniform int mode;
 uniform float border;
 float sd_round(vec2 p, vec2 size, float r) {
+    r = min(r, min(size.x, size.y) * 0.5);
     vec2 q = abs(p - size * 0.5) - (size * 0.5 - vec2(r));
     return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
 }
@@ -544,8 +688,8 @@ void main() {
         }
     }
     float a = clamp(0.5 - d, 0.0, 1.0);
-    if (round.z > 0.0 && round.w > 0.0) {
-        float rd = sd_round(local - round.xy, round.zw, round.w);
+    if (round.z > 0.0 && round.w > 0.0 && round_r > 0.0) {
+        float rd = sd_round(local - round.xy, round.zw, round_r);
         a *= clamp(0.5 - rd, 0.0, 1.0);
     }
     gl_FragColor = color * a;
@@ -557,6 +701,8 @@ struct Tex {
     h: u32,
     /// Ostatnia klatka, w której tekstura była użyta (eviction).
     used: u64,
+    /// `EGLImage` do zniszczenia razem z teksturą (`null` dla tekstur z CPU).
+    egl_image: *mut c_void,
 }
 
 /// Backend GPU: EGL surfaceless + GLES2, wyjście przez readback.
@@ -726,14 +872,20 @@ impl GpuRenderer {
                 clip.height() as f32,
             );
             match round {
-                Some((r, radius)) => (self.gl.uniform_4f)(
-                    p.round,
-                    r.x() as f32,
-                    r.y() as f32,
-                    r.width() as f32,
-                    radius as f32,
-                ),
-                None => (self.gl.uniform_4f)(p.round, 0.0, 0.0, 0.0, 0.0),
+                Some((r, radius)) => {
+                    (self.gl.uniform_4f)(
+                        p.round,
+                        r.x() as f32,
+                        r.y() as f32,
+                        r.width() as f32,
+                        r.height() as f32,
+                    );
+                    (self.gl.uniform_1f)(p.round_r, radius as f32);
+                }
+                None => {
+                    (self.gl.uniform_4f)(p.round, 0.0, 0.0, 0.0, 0.0);
+                    (self.gl.uniform_1f)(p.round_r, 0.0);
+                }
             }
             (self.gl.draw_arrays)(GL_TRIANGLE_STRIP, 0, 4);
         }
@@ -785,14 +937,20 @@ impl GpuRenderer {
                 clip.height() as f32,
             );
             match round {
-                Some((rr, radius)) => (self.gl.uniform_4f)(
-                    p.round,
-                    rr.x() as f32,
-                    rr.y() as f32,
-                    rr.width() as f32,
-                    radius as f32,
-                ),
-                None => (self.gl.uniform_4f)(p.round, 0.0, 0.0, 0.0, 0.0),
+                Some((rr, radius)) => {
+                    (self.gl.uniform_4f)(
+                        p.round,
+                        rr.x() as f32,
+                        rr.y() as f32,
+                        rr.width() as f32,
+                        rr.height() as f32,
+                    );
+                    (self.gl.uniform_1f)(p.round_r, radius as f32);
+                }
+                None => {
+                    (self.gl.uniform_4f)(p.round, 0.0, 0.0, 0.0, 0.0);
+                    (self.gl.uniform_1f)(p.round_r, 0.0);
+                }
             }
             (self.gl.draw_arrays)(GL_TRIANGLE_STRIP, 0, 4);
         }
@@ -824,22 +982,136 @@ impl GpuRenderer {
                 w: data.width,
                 h: data.height,
                 used: frame,
+                egl_image: ptr::null_mut(),
             },
         );
         id
     }
 
+    /// Importuje `dmabuf` klienta jako teksturę (leniwie, z cache per `Arc`).
+    fn dmabuf_texture(&mut self, data: &Arc<DmabufImage>) -> Gluint {
+        let key = Arc::as_ptr(data) as usize;
+        let frame = self.frame;
+        if let Some(t) = self.textures.get_mut(&key) {
+            t.used = frame;
+            return t.id;
+        }
+        let (Some(create), Some(target)) = (self.gl.create_image, self.gl.egl_image_texture) else {
+            return 0;
+        };
+        let mut attribs: Vec<i32> = vec![
+            EGL_WIDTH as i32,
+            data.width as i32,
+            EGL_HEIGHT as i32,
+            data.height as i32,
+            EGL_LINUX_DRM_FOURCC_EXT as i32,
+            data.format as i32,
+        ];
+        // Kolejne plany mają stałe offsety w enumie EGL (0x3272, 0x3275, ...).
+        const FD: [u32; 4] = [
+            EGL_DMA_BUF_PLANE0_FD_EXT,
+            EGL_DMA_BUF_PLANE1_FD_EXT,
+            EGL_DMA_BUF_PLANE2_FD_EXT,
+            EGL_DMA_BUF_PLANE3_FD_EXT,
+        ];
+        const OFF: [u32; 4] = [
+            EGL_DMA_BUF_PLANE0_OFFSET_EXT,
+            EGL_DMA_BUF_PLANE1_OFFSET_EXT,
+            EGL_DMA_BUF_PLANE2_OFFSET_EXT,
+            EGL_DMA_BUF_PLANE3_OFFSET_EXT,
+        ];
+        const PITCH: [u32; 4] = [
+            EGL_DMA_BUF_PLANE0_PITCH_EXT,
+            EGL_DMA_BUF_PLANE1_PITCH_EXT,
+            EGL_DMA_BUF_PLANE2_PITCH_EXT,
+            EGL_DMA_BUF_PLANE3_PITCH_EXT,
+        ];
+        for (i, plane) in data.planes.iter().take(4).enumerate() {
+            attribs.extend_from_slice(&[
+                FD[i] as i32,
+                plane.fd.as_raw_fd(),
+                OFF[i] as i32,
+                plane.offset as i32,
+                PITCH[i] as i32,
+                plane.stride as i32,
+            ]);
+        }
+        // Modyfikator tylko dla planu 0 (protokół wymaga wspólnego modyfikatora).
+        if data.modifier != u64::MAX {
+            attribs.extend_from_slice(&[
+                EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT as i32,
+                (data.modifier & 0xffff_ffff) as i32,
+                EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT as i32,
+                (data.modifier >> 32) as i32,
+            ]);
+        }
+        attribs.push(EGL_NONE as i32);
+        let egl_image = unsafe {
+            create(
+                self.gl.dpy,
+                EGL_NO_CONTEXT,
+                EGL_LINUX_DMA_BUF_EXT,
+                ptr::null_mut(),
+                attribs.as_ptr(),
+            )
+        };
+        if egl_image.is_null() {
+            if std::env::var("LUNA_GPU_STATS").is_ok() {
+                eprintln!(
+                    "libluna-render: import dmabuf nieudany (format 0x{:08x}, modifier 0x{:016x})",
+                    data.format, data.modifier
+                );
+            }
+            return 0;
+        }
+        let id = unsafe {
+            let mut tex = 0;
+            (self.gl.gen_textures)(1, &mut tex);
+            (self.gl.bind_texture)(GL_TEXTURE_2D, tex);
+            target(GL_TEXTURE_2D, egl_image);
+            (self.gl.tex_parameteri)(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR as i32);
+            (self.gl.tex_parameteri)(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as i32);
+            (self.gl.tex_parameteri)(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE as i32);
+            (self.gl.tex_parameteri)(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE as i32);
+            tex
+        };
+        self.textures.insert(
+            key,
+            Tex {
+                id,
+                w: data.width,
+                h: data.height,
+                used: frame,
+                egl_image,
+            },
+        );
+        if std::env::var("LUNA_GPU_STATS").is_ok() {
+            eprintln!(
+                "libluna-render: dmabuf {}x{} format=0x{:08x} → tekstura {id}",
+                data.width, data.height, data.format
+            );
+        }
+        id
+    }
+
     fn evict_textures(&mut self) {
         let frame = self.frame;
-        let mut dead = Vec::new();
+        let mut dead: Vec<(usize, Gluint, *mut c_void)> = Vec::new();
         for (key, t) in &self.textures {
             // 120 klatek bez użycia = okno zamknięte/przewinięte.
             if frame.saturating_sub(t.used) > 120 {
-                dead.push((*key, t.id));
+                dead.push((*key, t.id, t.egl_image));
             }
         }
-        for (key, id) in dead {
-            unsafe { (self.gl.delete_textures)(1, &id) };
+        for (key, id, egl_image) in dead {
+            unsafe {
+                (self.gl.delete_textures)(1, &id);
+                if !egl_image.is_null() {
+                    if let Some(destroy) = self.gl.destroy_image {
+                        destroy(self.gl.dpy, egl_image);
+                    }
+                }
+            }
             self.textures.remove(&key);
         }
     }
@@ -986,6 +1258,18 @@ impl Renderer for GpuRenderer {
                         continue;
                     }
                     let tex = self.image_texture(data);
+                    if tex != 0 {
+                        let (clip, round) = clip_for(&clip_stack, screen);
+                        let phys = phys_rect(rect, k);
+                        self.draw_texture(tex, phys, clip, round);
+                    }
+                }
+                DrawCommand::ImageDmabuf { rect, data } => {
+                    self.flush_run(&mut run, &mut run_bounds, k, &clip_stack);
+                    if rect.width() <= 0.0 || rect.height() <= 0.0 {
+                        continue;
+                    }
+                    let tex = self.dmabuf_texture(data);
                     if tex != 0 {
                         let (clip, round) = clip_for(&clip_stack, screen);
                         let phys = phys_rect(rect, k);
@@ -1255,6 +1539,10 @@ fn translate(cmd: &DrawCommand, dx: f64, dy: f64) -> DrawCommand {
             rect: rect.offset(-dx, -dy),
             data: Arc::clone(data),
         },
+        DrawCommand::ImageDmabuf { rect, data } => DrawCommand::ImageDmabuf {
+            rect: rect.offset(-dx, -dy),
+            data: Arc::clone(data),
+        },
         DrawCommand::Background { data } => DrawCommand::Background {
             data: Arc::clone(data),
         },
@@ -1335,6 +1623,7 @@ impl TexProgram {
                 rect: (gl.get_uniform_location)(id, b"rect\0".as_ptr() as *const Glchar),
                 clip: (gl.get_uniform_location)(id, b"clip\0".as_ptr() as *const Glchar),
                 round: (gl.get_uniform_location)(id, b"round\0".as_ptr() as *const Glchar),
+                round_r: (gl.get_uniform_location)(id, b"round_r\0".as_ptr() as *const Glchar),
                 tex: (gl.get_uniform_location)(id, b"tex\0".as_ptr() as *const Glchar),
             })
         }
@@ -1357,6 +1646,7 @@ impl ShapeProgram {
                 width: (gl.get_uniform_location)(id, b"width\0".as_ptr() as *const Glchar),
                 clip: (gl.get_uniform_location)(id, b"clip\0".as_ptr() as *const Glchar),
                 round: (gl.get_uniform_location)(id, b"round\0".as_ptr() as *const Glchar),
+                round_r: (gl.get_uniform_location)(id, b"round_r\0".as_ptr() as *const Glchar),
             })
         }
     }
@@ -1473,6 +1763,9 @@ impl Scene {
             DrawCommand::Image { rect, data } => {
                 self.image(rect, data);
             }
+            DrawCommand::ImageDmabuf { rect, data } => {
+                self.image_dmabuf(rect, data);
+            }
             DrawCommand::Background { data } => {
                 self.background(data);
             }
@@ -1483,6 +1776,7 @@ impl Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scene::DmabufPlane;
     use libluna_core::Color;
 
     /// Renderer GPU musi dać dokładnie `width*height*4` bajtów i rysować obraz
@@ -1514,5 +1808,163 @@ mod tests {
         assert_eq!(px(12, 12), (0xff, 0x40, 0x20));
         assert_eq!(px(0, 0), (0x10, 0x20, 0x30));
         assert!(gpu.encode_png().is_some());
+    }
+
+    /// Tekstura z `wl_shm` (`DrawCommand::Image`) musi być widoczna — to treść
+    /// okien klientów. Test pilnuje, żeby GPU nie gubił obrazów w clipie.
+    #[test]
+    fn gpu_draws_shm_image() {
+        if !available() {
+            eprintln!("pominięto: brak EGL/GPU");
+            return;
+        }
+        let mut gpu = match GpuRenderer::new(64, 64) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("pominięto: {e}");
+                return;
+            }
+        };
+        let mut rgba = vec![0u8; 16 * 16 * 4];
+        for px in rgba.chunks_exact_mut(4) {
+            px.copy_from_slice(&[0xff, 0x00, 0x00, 0xff]);
+        }
+        let mut scene = Scene::new();
+        scene.image(
+            Rect::from_xywh(8.0, 8.0, 16.0, 16.0),
+            std::sync::Arc::new(ImageData::new(16, 16, rgba.clone())),
+        );
+        gpu.draw(&scene, 1.0, Color::BLACK);
+        let no_clip = pixel(&gpu, 16, 16);
+        assert_eq!(no_clip, (0xff, 0x00, 0x00), "obraz shm bez clipu");
+
+        let mut scene = Scene::new();
+        scene.push_clip_rounded(Rect::from_xywh(8.0, 8.0, 16.0, 16.0), 4.0);
+        scene.image(
+            Rect::from_xywh(0.0, 0.0, 64.0, 64.0),
+            std::sync::Arc::new(ImageData::new(
+                64,
+                64,
+                vec![0xff, 0x00, 0x00, 0xff].repeat(64 * 64),
+            )),
+        );
+        scene.pop_clip();
+        gpu.draw(&scene, 1.0, Color::BLACK);
+        assert_eq!(
+            pixel(&gpu, 16, 16),
+            (0xff, 0x00, 0x00),
+            "obraz shm w clipie"
+        );
+        assert_eq!(pixel(&gpu, 0, 0), (0, 0, 0));
+    }
+
+    fn pixel(gpu: &GpuRenderer, x: usize, y: usize) -> (u8, u8, u8) {
+        let i = (y * 64 + x) * 4;
+        (gpu.data()[i], gpu.data()[i + 1], gpu.data()[i + 2])
+    }
+
+    /// Pełny round-trip: tekstura GL → eksport MESA do `dmabuf` → import przez
+    /// `dmabuf_texture` → rysowanie. Sprawdza atrybuty EGL (fd/offset/stride/
+    /// modifier) i to, że kolory nie są zamieniane.
+    #[test]
+    fn dmabuf_import_roundtrip_from_egl_export() {
+        use std::os::fd::{FromRawFd, OwnedFd};
+
+        if !available() {
+            eprintln!("pominięto: brak EGL/GPU");
+            return;
+        }
+        let mut gpu = match GpuRenderer::new(4, 4) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("pominięto: {e}");
+                return;
+            }
+        };
+        let (Some(export), Some(query)) = (gpu.gl.export_image, gpu.gl.export_query) else {
+            eprintln!("pominięto: brak EGL_MESA_image_dma_buf_export");
+            return;
+        };
+        // Źródło: 4×4 w wyrazistych kolorach (premultiplied, alpha=255).
+        let mut src = vec![0u8; 4 * 4 * 4];
+        for y in 0..4u32 {
+            for x in 0..4u32 {
+                let i = ((y * 4 + x) * 4) as usize;
+                src[i] = (x * 60) as u8;
+                src[i + 1] = (y * 60) as u8;
+                src[i + 2] = 200;
+                src[i + 3] = 255;
+            }
+        }
+        let tex = upload_texture(&gpu.gl, 4, 4, &src);
+        // EGLImage z tekstury GL (wymaga bieżącego kontekstu).
+        const EGL_GL_TEXTURE_2D_KHR: u32 = 0x30B1;
+        const EGL_GL_TEXTURE_LEVEL_KHR: u32 = 0x30BC;
+        let Some(create) = gpu.gl.create_image else {
+            eprintln!("pominięto: brak eglCreateImage");
+            return;
+        };
+        let attrs: [i32; 3] = [EGL_GL_TEXTURE_LEVEL_KHR as i32, 0, EGL_NONE as i32];
+        let egl_image = unsafe {
+            create(
+                gpu.gl.dpy,
+                gpu.gl._ctx,
+                EGL_GL_TEXTURE_2D_KHR,
+                tex as *mut c_void,
+                attrs.as_ptr(),
+            )
+        };
+        if egl_image.is_null() {
+            eprintln!("pominięto: eglCreateImage(EGL_GL_TEXTURE_2D_KHR) nie powiodło się");
+            return;
+        }
+        let (mut fourcc, mut planes, mut modifier) = (0i32, 1i32, 0u64);
+        let ok = unsafe {
+            query(
+                gpu.gl.dpy,
+                egl_image,
+                &mut fourcc,
+                &mut planes,
+                &mut modifier,
+            )
+        };
+        let (mut fd, mut stride, mut offset) = (0i32, 0i32, 0i32);
+        if ok == 0
+            || unsafe { export(gpu.gl.dpy, egl_image, &mut fd, &mut stride, &mut offset) } == 0
+        {
+            eprintln!("pominięto: eksport dmabuf nie powiódł się");
+            return;
+        }
+        let image = Arc::new(DmabufImage {
+            width: 4,
+            height: 4,
+            format: fourcc as u32,
+            modifier,
+            planes: vec![DmabufPlane {
+                fd: unsafe { OwnedFd::from_raw_fd(fd) },
+                offset: offset as u32,
+                stride: stride as u32,
+            }],
+        });
+        let mut scene = Scene::new();
+        scene.image_dmabuf(Rect::from_xywh(0.0, 0.0, 4.0, 4.0), Arc::clone(&image));
+        gpu.draw(&scene, 1.0, Color::from_rgba8(0, 0, 0, 255));
+        // Import nie może dać czarnego/niebieskiego — porównujemy kilka pikseli.
+        let px = |x: usize, y: usize| {
+            let i = (y * 4 + x) * 4;
+            (gpu.data()[i], gpu.data()[i + 1], gpu.data()[i + 2])
+        };
+        let want = |x: usize, y: usize| {
+            let i = (y * 4 + x) * 4;
+            (src[i], src[i + 1], src[i + 2])
+        };
+        for (x, y) in [(0, 0), (2, 1), (3, 3)] {
+            assert_eq!(px(x, y), want(x, y), "piksel ({x},{y}) po round-tripie");
+        }
+        // Sprzątanie: EGLImage jest trzymany w cache tylko do eviction, więc
+        // niszczymy go jawnie (tekstura źródłowa żyje do końca testu).
+        if let Some(destroy) = gpu.gl.destroy_image {
+            unsafe { destroy(gpu.gl.dpy, egl_image) };
+        }
     }
 }
