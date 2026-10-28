@@ -12,7 +12,7 @@ zmieniać API — ale nie dowolnie: ten dokument mówi, co jest traktowane jako
 |---|---|---|
 | Fasada toolkitu | `libluna::prelude::*`, `libluna::t!` | re-eksporty warstw, makro i18n |
 | Aplikacja i okno | `libluna_platform::{run, AppConfig, Frame, LayerConfig}` | pętla zdarzeń, akcje okna, warstwy |
-| Scena | `libluna_render::{Scene, DrawCommand, TextRun, ImageData}` | niezależna od backendu |
+| Scena | `libluna_render::{Scene, DrawCommand, TextRun, ImageData}` + `Scene::same_as` | niezależna od backendu; porównanie komend do pomijania `draw` |
 | Damage | `libluna_render::{diff_bounds, DamageRect}` | damage lite (identyczne klatki, prostokąt zmian) |
 | Backend | `libluna_render::{Renderer, SoftwareRenderer}` | `Box<dyn Renderer>` w platformie |
 | Tekst | `libluna_render::TextEngine` | metryki i rysowanie tekstu |

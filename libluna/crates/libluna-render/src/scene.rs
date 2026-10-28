@@ -292,6 +292,33 @@ impl Scene {
         self.commands.push(DrawCommand::Background { data });
         self
     }
+
+    /// Czy obie sceny zawierają identyczne polecenia?
+    ///
+    /// Obrazy (`Image`/`Background`) porównujemy po **wskaźniku `Arc`**, nie po
+    /// zawartości — inaczej porównanie tapety 1080p co klatkę kosztowałoby więcej
+    /// niż samo rysowanie. Różne `Arc` o tej samej treści = „różne” (bezpieczny
+    /// false negative: po prostu przerysujemy).
+    pub fn same_as(&self, other: &Scene) -> bool {
+        self.commands.len() == other.commands.len()
+            && self
+                .commands
+                .iter()
+                .zip(&other.commands)
+                .all(|(a, b)| same_command(a, b))
+    }
+}
+
+fn same_command(a: &DrawCommand, b: &DrawCommand) -> bool {
+    match (a, b) {
+        (DrawCommand::Image { rect: ra, data: da }, DrawCommand::Image { rect: rb, data: db }) => {
+            ra == rb && Arc::ptr_eq(da, db)
+        }
+        (DrawCommand::Background { data: da }, DrawCommand::Background { data: db }) => {
+            Arc::ptr_eq(da, db)
+        }
+        _ => a == b,
+    }
 }
 
 #[cfg(test)]
@@ -324,5 +351,32 @@ mod tests {
         assert_eq!(s.len(), 100, "bez clear() komendy sumują się");
         s.clear();
         assert!(s.is_empty(), "clear() opróżnia scenę do reużycia");
+    }
+
+    #[test]
+    fn same_as_compares_commands_and_images_by_pointer() {
+        let rect = Rect::from_xywh(0.0, 0.0, 10.0, 10.0);
+        let image = Arc::new(ImageData::empty(4, 4));
+
+        let mut a = Scene::new();
+        a.fill_rect(rect, Color::BLACK).image(rect, image.clone());
+        let mut b = a.clone();
+        assert!(a.same_as(&b));
+
+        // Ta sama treść, inny `Arc` — traktujemy jako zmianę (bezpieczny false negative).
+        b.image(rect, Arc::new(ImageData::empty(4, 4)));
+        assert!(!a.same_as(&b));
+
+        // Inna geometria/komenda.
+        let mut c = a.clone();
+        c.fill_rect(rect, Color::WHITE);
+        assert!(!a.same_as(&c));
+
+        // Tło również jest porównywane po wskaźniku.
+        let mut d = Scene::new();
+        d.background(image.clone());
+        let mut e = Scene::new();
+        e.background(image);
+        assert!(d.same_as(&e));
     }
 }

@@ -42,8 +42,11 @@ szczegóły EGL/dmabuf/synchronizacji zostają w jego implementacji.
   bufor z poprzednią klatką (`damage::diff_bounds`) i:
   - pomija `wl_surface.commit`, gdy klatka jest identyczna,
   - zawęża `wl_surface.damage_buffer` do najmniejszego zmienionego prostokąta.
-  To **damage lite** — nie zastępuje jeszcze selektywnego rysowania sceny
-  (pełny damage tracking raportowany przez widgety jest osobnym etapem).
+- Dodatkowo `Scene::same_as` porównuje **listę komend** z poprzednio narysowaną sceną
+  (obrazy po `Arc`, nie po zawartości). Jeśli komendy są identyczne i nie zmienił się
+  rozmiar/skala/tło, platforma pomija samo `renderer.draw`.
+- To **damage lite + scene fingerprint** — nadal nie zastępuje selektywnego rysowania
+  sceny (pełny damage tracking raportowany przez widgety jest osobnym etapem).
 
 ## 2. Benchmark
 
@@ -133,6 +136,8 @@ Dlatego kolejność to **damage → mniej komend → ewentualnie GPU**.
 
 - [x] **Damage lite**: `libluna_render::damage::diff_bounds` porównuje klatki,
       pomija identyczne `commit` i zawęża `damage_buffer` do zmienionego prostokąta.
+- [x] **Scene fingerprint**: `Scene::same_as` + `last_scene` w platformie — gdy komendy
+      są identyczne, `renderer.draw` jest pomijany (obrazy po `Arc`).
 - [ ] Pełny damage tracking: `Scene`/widgety raportują prostokąty uszkodzeń, renderer
       nie rysuje całej sceny (dziś nadal budujemy ją od zera).
 - [ ] Cache glifów i ścieżek między klatkami (dziś `tiny-skia` buduje ścieżki od nowa).
@@ -143,7 +148,8 @@ Dlatego kolejność to **damage → mniej komend → ewentualnie GPU**.
 ## 5. Diagnostyka w działającej sesji
 
 - `LUNA_STATS=1` — platforma wypisuje klatki/s, ile z nich pominięto (`damage lite`)
-  oraz czas rysowania i wysyłki.
+  oraz czas rysowania i wysyłki. Po scene fingerprint na bezczynnym ekranie Ustawień
+  rysowanie spada z ~3,8 ms do ~0,2–0,6 ms na próbę klatki.
 - `SELENE_STATS=1` — kompozytor: FPS wyjścia i tempo kursora.
 - `scripts/session-smoke.sh` — poprawność przepływu (nie wydajność).
 - Zrzuty: `Print` / `Super+F12` w Selene; podglądy headless renderują do PNG.

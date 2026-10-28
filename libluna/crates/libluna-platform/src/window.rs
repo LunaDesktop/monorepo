@@ -702,6 +702,8 @@ where
             Box::new(SoftwareRenderer::new(iw, ih))
         },
         last_frame: Vec::new(),
+        last_scene: Scene::new(),
+        last_scene_key: None,
         settings: config.settings,
         scene: Scene::new(),
         render: Box::new(render),
@@ -838,6 +840,11 @@ struct App {
     renderer: Box<dyn Renderer>,
     /// Poprzednia klatka (RGBA8888) — do wyznaczania prostokąta uszkodzenia.
     last_frame: Vec<u8>,
+    /// Poprzednio narysowana scena — do pomijania `renderer.draw`, gdy komendy
+    /// są identyczne (oszczędza rasteryzację na klatkach „bez zmian”).
+    last_scene: Scene,
+    /// Rozmiar/skala/tło, dla których `last_scene` jest aktualna.
+    last_scene_key: Option<(u32, u32, u64, Color)>,
     settings: ThemeSettings,
     scene: Scene,
     render: Box<RenderFn>,
@@ -1257,7 +1264,15 @@ impl App {
             return;
         }
 
-        self.renderer.draw(&self.scene, scale, bg);
+        // Scena identyczna z poprzednią (i ten sam rozmiar/skala/tło) → nie ma po co
+        // rasteryzować. `present` i tak pominie commit, ale to oszczędza `draw`.
+        let key = (phys_w, phys_h, scale.to_bits(), bg);
+        let same = self.last_scene_key == Some(key) && self.scene.same_as(&self.last_scene);
+        if !same {
+            self.renderer.draw(&self.scene, scale, bg);
+            std::mem::swap(&mut self.scene, &mut self.last_scene);
+            self.last_scene_key = Some(key);
+        }
     }
 
     fn present(&mut self, force_commit: bool) -> bool {
