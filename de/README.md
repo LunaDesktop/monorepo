@@ -105,7 +105,7 @@ Selene.
   podświetla się pod kursorem. Mechanizm jest wspólny (`libluna_widgets::Hover`):
   powłoka podaje mu zdarzenia, a rysowanie pyta `is_hovered`/`index`.
 - **Ekran blokady** (`luna-lock`): pełnoekranowy overlay `wlr-layer-shell` z klawiaturą
-  wyłączną, hasło weryfikowane w tle przez `polkit-agent-helper-1`/`sudo`, jedna powierzchnia
+  wyłączną, hasło weryfikowane w tle przez PAM, jedna powierzchnia
   rysowana na wszystkich monitorach. Wejście: menu sesji → **Zablokuj ekran**.
   Tło to **ta sama tapeta co na pulpicie** (przyciemniona pod kartę):
   `LUNA_WALLPAPER`/`SELENE_WALLPAPER`, a potem `~/.config/luna/wallpaper.conf`

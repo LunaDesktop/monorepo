@@ -4,7 +4,8 @@
 //! jej fokus od razu po zmapowaniu, a warstwa overlay jest nad panelami i oknami.
 //! Na wielu monitorach ta sama powierzchnia jest rysowana na każdym wyjściu.
 //!
-//! Hasło weryfikujemy przez `luna::polkit::verify_password` (setuid helper albo sudo).
+//! Hasło weryfikujemy przez PAM (`luna::pam`), a `sudo` jest tylko fallbackiem,
+//! gdy PAM jest niedostępny w systemie.
 //! Po powodzeniu okno się zamyka; nie da się go zamknąć skrótem kompozytora.
 
 use std::error::Error;
@@ -19,7 +20,7 @@ use libluna_core::{
     ButtonState, Event, IconSettings, IconTheme, KeyEvent, LockSettings, LockWallpaper,
     PointerButton, Rect, Size, Theme, ThemePreference, ThemeSettings,
 };
-use libluna_i18n::{set_locale, tr};
+use libluna_i18n::{set_locale, tr, tr_args};
 use libluna_platform::{run, AppConfig, Frame, LayerConfig};
 use libluna_render::wallpaper::{configured_path, cover, decode_png, load_path};
 use libluna_render::ImageData;
@@ -40,7 +41,7 @@ struct Lock {
     /// Język, w którym zbudowano placeholder i komunikat błędu.
     language: String,
     /// Wynik weryfikacji z wątku tła; `None`, gdy nic nie trwa.
-    pending: Option<mpsc::Receiver<bool>>,
+    pending: Option<mpsc::Receiver<luna::polkit::AuthOutcome>>,
 }
 
 impl Lock {
@@ -76,7 +77,7 @@ impl Lock {
     }
 
     /// Odbiera wynik z wątku weryfikującego (bez blokowania UI).
-    fn take_result(&mut self) -> Option<bool> {
+    fn take_result(&mut self) -> Option<luna::polkit::AuthOutcome> {
         let rx = self.pending.as_ref()?;
         match rx.try_recv() {
             Ok(result) => {
@@ -87,7 +88,7 @@ impl Lock {
             // Wątek padł bez odpowiedzi — traktujemy jak odrzucone hasło.
             Err(TryRecvError::Disconnected) => {
                 self.pending = None;
-                Some(false)
+                Some(luna::polkit::AuthOutcome::WrongPassword)
             }
         }
     }
@@ -108,7 +109,7 @@ impl Lock {
             let result = luna::polkit::verify_password(&user, &password);
             if std::env::var("LUNA_DEBUG").is_ok() {
                 eprintln!(
-                    "luna-lock: próba hasła len={} wynik={result}",
+                    "luna-lock: próba hasła len={} wynik={result:?}",
                     password.chars().count()
                 );
             }
@@ -196,15 +197,38 @@ fn main() -> Result<(), Box<dyn Error>> {
         lock.refresh_language();
         handle_events(&mut lock, frame, &theme);
         match lock.take_result() {
-            Some(true) => {
+            Some(luna::polkit::AuthOutcome::Ok) => {
                 lock.entry.clear();
                 lock.error = None;
                 frame.close();
             }
-            Some(false) => {
+            Some(luna::polkit::AuthOutcome::WrongPassword) => {
                 lock.entry.clear();
                 lock.entry.set_focused(true);
                 lock.error = Some(tr("Incorrect password"));
+            }
+            Some(luna::polkit::AuthOutcome::Locked(detail)) => {
+                lock.entry.clear();
+                lock.entry.set_focused(true);
+                lock.error = Some(match detail {
+                    Some(detail) => tr_args(
+                        "Account locked after failed attempts: {detail}",
+                        &[("detail", &detail)],
+                    ),
+                    None => {
+                        tr("Account temporarily locked after failed attempts — wait a few minutes")
+                    }
+                });
+            }
+            Some(luna::polkit::AuthOutcome::Unavailable) => {
+                lock.entry.clear();
+                lock.entry.set_focused(true);
+                lock.error = Some(tr("Authentication is unavailable — PAM is missing"));
+            }
+            Some(luna::polkit::AuthOutcome::Error(message)) => {
+                lock.entry.clear();
+                lock.entry.set_focused(true);
+                lock.error = Some(message);
             }
             None => {}
         }
@@ -586,8 +610,8 @@ mod tests {
         assert!(lock.is_verifying());
         assert_eq!(lock.take_result(), None);
 
-        tx.send(true).unwrap();
-        assert_eq!(lock.take_result(), Some(true));
+        tx.send(luna::polkit::AuthOutcome::Ok).unwrap();
+        assert_eq!(lock.take_result(), Some(luna::polkit::AuthOutcome::Ok));
         assert!(!lock.is_verifying());
         assert_eq!(lock.take_result(), None);
     }
@@ -595,10 +619,13 @@ mod tests {
     #[test]
     fn dropped_verifier_counts_as_failure() {
         let mut lock = Lock::new();
-        let (tx, rx) = mpsc::channel::<bool>();
+        let (tx, rx) = mpsc::channel::<luna::polkit::AuthOutcome>();
         lock.pending = Some(rx);
         drop(tx);
-        assert_eq!(lock.take_result(), Some(false));
+        assert_eq!(
+            lock.take_result(),
+            Some(luna::polkit::AuthOutcome::WrongPassword)
+        );
         assert!(!lock.is_verifying());
     }
 

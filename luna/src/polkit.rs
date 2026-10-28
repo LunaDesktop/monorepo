@@ -1,8 +1,9 @@
 //! `luna-polkit` — agent uwierzytelniania Polkit (PolicyKit1 Authentication Agent).
 //!
 //! Rejestruje się na magistrali systemowej w `org.freedesktop.PolicyKit1.Authority`
-//! i odpowiada na żądania podniesienia uprawnień (np. `pkexec`, aktualizacje, instalatory).
-//! Gdy wymagana jest autoryzacja, wyświetla okno dialogowe z pytaniem o hasło.
+//! i odpowiada na żądania podniesienia uprawnień (np. `pkexec`, NetworkManager,
+//! aktualizacje). Gdy wymagana jest autoryzacja, pokazuje okno z pytaniem o hasło,
+//! sprawdza je przez PAM i dopiero po sukcesie potwierdza cookie w `polkitd`.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -15,6 +16,8 @@ use libluna_i18n::{tr, tr_args};
 use libluna_platform::{run, AppConfig, Frame};
 use libluna_widgets::{paint_icon, IconName, PaintCtx};
 use zbus::zvariant::{OwnedValue, Value};
+
+pub use crate::pam::AuthOutcome;
 
 /// Informacje o oczekującym żądaniu uwierzytelnienia.
 #[derive(Debug, Clone)]
@@ -101,7 +104,12 @@ pub fn register_agent(
     Ok(())
 }
 
-/// Potwierdza pomyślne uwierzytelnienie do PolicyKit Authority.
+/// Potwierdza uwierzytelnienie do PolicyKit Authority **bez** helpera.
+///
+/// Normalnie robi to `polkit-agent-helper-1` po udanym PAM (i to on wysyła
+/// odpowiedź). Ta funkcja istnieje na wypadek systemów bez helpera — wtedy
+/// hasło trzeba sprawdzić samemu ([`verify_password`]) i dopiero potem potwierdzić
+/// cookie. `polkitd` ufa agentowi, więc **nigdy** nie wysyłaj jej bez sprawdzenia.
 pub fn send_response(
     conn: &zbus::blocking::Connection,
     cookie: &str,
@@ -117,41 +125,93 @@ pub fn send_response(
     Ok(())
 }
 
-/// Weryfikuje hasło użytkownika przez `polkit-agent-helper-1` lub `sudo`.
-pub fn verify_password(user: &str, password: &str) -> bool {
-    if verify_with_helper(user, password) {
-        return true;
-    }
-    verify_with_sudo(password)
-}
-
-fn verify_with_helper(user: &str, password: &str) -> bool {
-    let helper_paths = [
+/// Ścieżka `polkit-agent-helper-1` (setuid root; PAM + odpowiedź do `polkitd`).
+fn agent_helper_path() -> Option<std::path::PathBuf> {
+    [
         "/usr/lib/polkit-1/polkit-agent-helper-1",
         "/usr/libexec/polkit-agent-helper-1",
         "/usr/lib64/polkit-1/polkit-agent-helper-1",
-    ];
-    let helper = helper_paths.iter().find(|p| Path::new(p).exists());
-    let Some(path) = helper else { return false };
+    ]
+    .iter()
+    .map(std::path::PathBuf::from)
+    .find(|path| path.exists())
+}
 
-    let mut child = match Command::new(path)
+/// Sprawdza hasło **w kontekście żądania polkit** i potwierdza cookie.
+///
+/// To jedyna poprawna droga dla agenta: `polkit-agent-helper-1` jest setuid root,
+/// więc PAM widzi `pam_faillock` i `/etc/shadow`; po sukcesie helper **sam** wysyła
+/// `AuthenticationAgentResponse`. Protokół: cookie w pierwszej linii stdin,
+/// hasło w drugiej (argv widać w `/proc`, więc cookie nie idzie argumentem).
+///
+/// `Ok(())` = zalogowano i odpowiedź poszła do `polkitd` — nie wysyłaj jej ponownie.
+pub fn verify_agent_request(user: &str, cookie: &str, password: &str) -> Result<(), String> {
+    let helper = agent_helper_path()
+        .ok_or_else(|| tr("polkit-agent-helper-1 is missing — install polkit"))?;
+    let mut child = Command::new(&helper)
         .arg(user)
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
-    {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
+        .map_err(|err| format!("polkit-agent-helper-1: {err}"))?;
 
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(password.as_bytes());
-        let _ = stdin.write_all(b"\n");
-        let _ = stdin.flush();
+        let mut input = String::with_capacity(cookie.len() + password.len() + 2);
+        input.push_str(cookie);
+        input.push('\n');
+        input.push_str(password);
+        input.push('\n');
+        stdin
+            .write_all(input.as_bytes())
+            .map_err(|err| format!("polkit-agent-helper-1: {err}"))?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|err| format!("polkit-agent-helper-1: {err}"))?;
+    if output.status.success() {
+        return Ok(());
     }
 
-    child.wait().map(|s| s.success()).unwrap_or(false)
+    // Helper wypisuje na stdout komunikaty PAM (np. o blokadzie konta) i „FAILURE”.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if let Some(line) = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && *line != "FAILURE")
+        .find(|line| line.to_lowercase().contains("locked"))
+    {
+        return Err(line.to_owned());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let detail = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .next_back();
+    match detail {
+        Some(line) if !line.contains("FAILURE") => Err(line.to_owned()),
+        _ => Err(tr("Incorrect password. Try again.")),
+    }
+}
+
+/// Weryfikuje hasło użytkownika przez PAM.
+///
+/// Używane przez ekran blokady (nie ma tam cookie polkit). Źródłem prawdy jest PAM
+/// (`pam_unix` → `unix_chkpwd`), czyli ten sam mechanizm, którego używają `login`
+/// i `sudo`. `sudo` jest tylko awaryjnym fallbackiem, gdy PAM jest niedostępny
+/// (minimalna instalacja bez `libpam`).
+pub fn verify_password(user: &str, password: &str) -> AuthOutcome {
+    match crate::pam::verify(user, password) {
+        AuthOutcome::Unavailable => {
+            if verify_with_sudo(password) {
+                AuthOutcome::Ok
+            } else {
+                AuthOutcome::WrongPassword
+            }
+        }
+        other => other,
+    }
 }
 
 fn verify_with_sudo(password: &str) -> bool {
@@ -172,8 +232,6 @@ fn verify_with_sudo(password: &str) -> bool {
     child.wait().map(|s| s.success()).unwrap_or(false)
 }
 
-use std::path::Path;
-
 fn current_user() -> String {
     std::env::var("USER")
         .or_else(|_| std::env::var("LOGNAME"))
@@ -191,8 +249,17 @@ fn user_from_uid(uid: u32) -> Option<String> {
     None
 }
 
-/// Wyświetla graficzne okno autoryzacji Luny i zwraca podane hasło, gdy użytkownik kliknie "Uwierzytelnij".
-pub fn show_dialog(req: &AuthRequest) -> Option<String> {
+/// Wyświetla graficzne okno autoryzacji Luny i zwraca podane hasło, gdy użytkownik
+/// kliknie "Uwierzytelnij".
+///
+/// `verify` decyduje, czy hasło jest poprawne — dla agenta polkit to
+/// [`verify_agent_request`] (helper potwierdza cookie), a dla ekranu blokady
+/// [`verify_password`]. Dzięki temu okno zostaje otwarte do skutku i pokazuje
+/// konkretny powód (złe hasło, blokada konta), zamiast zamykać się po pierwszej próbie.
+pub fn show_dialog<F>(req: &AuthRequest, verify: F) -> Option<String>
+where
+    F: Fn(&str) -> Result<(), String> + 'static,
+{
     let cfg = AppConfig::new(tr("Authentication"))
         .app_id("eu.paganlinux.Luna.Polkit")
         .initial_size(440, 260);
@@ -241,13 +308,16 @@ pub fn show_dialog(req: &AuthRequest) -> Option<String> {
                         }
                         0xff0d | 0xff8d => {
                             // Enter — Uwierzytelnij
-                            if verify_password(&user_name, &password) {
-                                *auth_result.lock().unwrap() = Some(password.clone());
-                                frame.close();
-                                return;
-                            } else {
-                                error_msg = Some(tr("Incorrect password. Try again."));
-                                password.clear();
+                            match verify(&password) {
+                                Ok(()) => {
+                                    *auth_result.lock().unwrap() = Some(password.clone());
+                                    frame.close();
+                                    return;
+                                }
+                                Err(message) => {
+                                    error_msg = Some(message);
+                                    password.clear();
+                                }
                             }
                         }
                         _ => {
@@ -264,13 +334,16 @@ pub fn show_dialog(req: &AuthRequest) -> Option<String> {
                         frame.close();
                         return;
                     } else if auth_rect.contains(pe.position) {
-                        if verify_password(&user_name, &password) {
-                            *auth_result.lock().unwrap() = Some(password.clone());
-                            frame.close();
-                            return;
-                        } else {
-                            error_msg = Some(tr("Incorrect password. Try again."));
-                            password.clear();
+                        match verify(&password) {
+                            Ok(()) => {
+                                *auth_result.lock().unwrap() = Some(password.clone());
+                                frame.close();
+                                return;
+                            }
+                            Err(message) => {
+                                error_msg = Some(message);
+                                password.clear();
+                            }
                         }
                     }
                 }
@@ -404,5 +477,30 @@ fn char_from_keysym(keysym: u32) -> Option<char> {
         0x20..=0x7e => char::from_u32(keysym),
         0x0100..=0x10ff => char::from_u32(keysym),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_helper_is_found_on_this_host() {
+        // Kontrakt: jeśli polkit jest zainstalowany, helper też (setuid).
+        if let Some(path) = agent_helper_path() {
+            assert!(path.is_absolute());
+        }
+    }
+
+    #[test]
+    fn bogus_cookie_is_rejected_without_panic() {
+        if agent_helper_path().is_none() {
+            return;
+        }
+        // Nieistniejący użytkownik + nieprawidłowe cookie: helper musi odmówić,
+        // a my zwracamy czytelny komunikat (bez zapisu do `faillock`).
+        let err = verify_agent_request("__luna_nie_ma_takiego_usera__", "zle-cookie", "x")
+            .expect_err("nieprawidłowe cookie musi dać błąd");
+        assert!(!err.is_empty());
     }
 }

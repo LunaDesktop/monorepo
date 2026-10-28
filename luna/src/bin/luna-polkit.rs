@@ -4,7 +4,7 @@ use std::error::Error;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use luna::polkit::{register_agent, send_response, show_dialog, AuthRequest, PolkitAgent};
+use luna::polkit::{register_agent, show_dialog, verify_agent_request, AuthRequest, PolkitAgent};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let _ = libluna_core::runtime::ensure_runtime_dir();
@@ -35,8 +35,21 @@ fn main() -> Result<(), Box<dyn Error>> {
         };
 
         if let Some(req) = req {
-            if let Some(_pwd) = show_dialog(&req) {
-                let _ = send_response(&conn, &req.cookie, &req.identity);
+            let started = std::time::Instant::now();
+            // Helper polkit (setuid) sprawdza hasło przez PAM i po sukcesie sam
+            // wysyła `AuthenticationAgentResponse` — nie robimy tego drugi raz.
+            let user = req.user.clone();
+            let cookie = req.cookie.clone();
+            let result = show_dialog(&req, move |password| {
+                verify_agent_request(&user, &cookie, password)
+            });
+            match result {
+                Some(_) => eprintln!(
+                    "luna-polkit: autoryzacja OK ({}), {:.1} s",
+                    req.action_id,
+                    started.elapsed().as_secs_f64()
+                ),
+                None => eprintln!("luna-polkit: autoryzacja anulowana ({})", req.action_id),
             }
         }
 

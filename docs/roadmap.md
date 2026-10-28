@@ -231,7 +231,8 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   „nie przeszkadzać”) i **menu kontekstowe** taskbara (schowaj/pokaż, zamknij,
   przenieś na przestrzeń). Kropka przy zegarze sygnalizuje historię powiadomień.
   ✅ **Ekran blokady** `luna-lock`: overlay `wlr-layer-shell` z klawiaturą wyłączną,
-  wspólny dla wszystkich monitorów; hasło przez helper polkit. Restart/wyłączenie
+  wspólny dla wszystkich monitorów; hasło przez PAM (`unix_chkpwd`, z `pam_faillock`).
+  Restart/wyłączenie
   w menu sesji idą przez `systemctl` (poprzednie `loginctl reboot`/`poweroff`
   nie istnieją i dlatego nic nie robiły).
 - **Luna Settings** (`apps/luna-settings`) — centrum ustawień środowiska i systemu
