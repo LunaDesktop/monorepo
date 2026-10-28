@@ -66,6 +66,9 @@ LUNA_SMOKE_PROFILE=debug ./scripts/session-smoke.sh
 
 # wskazanie konkretnego gniazda nadrzędnego kompozytora
 LUNA_SMOKE_PARENT=/run/user/1000/wayland-0 ./scripts/session-smoke.sh
+
+# ten sam test z backendem GPU kompozytora (brak EGL = automatyczny fallback CPU)
+SELENE_GPU=1 ./scripts/session-smoke.sh
 ```
 
 Zmienne:

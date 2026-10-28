@@ -1,4 +1,4 @@
-# GPU w Lunie — pomiary, architektura i etapy
+ # GPU w Lunie — pomiary, architektura i etapy
 
 Ten dokument jest **planem wejścia GPU do rdzenia** (libLuna + Selene), opartym na
 realnym pomiarze, a nie na założeniach. Punkt wyjścia: renderer CPU
@@ -22,16 +22,14 @@ GLES 3.2, **EGL surfaceless** (bez X11/Waylanda), 1920×1080:
 
 | Operacja | Czas |
 |---|---:|
-| `clear` 1920×1080 | 0,03 ms |
-| upload tekstury 1920×1080 RGBA | 0,98 ms |
-| kompozycja 30 okien 640×480 (blending) | **0,80 ms** |
-| readback 1920×1080 do RGBA | **1,19 ms** |
-| **razem: kompozycja + readback** | **1,98 ms** |
-| ta sama scena na CPU (`SoftwareRenderer`) | **49,8 ms** |
+| `clear` + kompozycja 30 okien (GPU) | **1,37 ms** |
+| ta sama scena na CPU (`SoftwareRenderer`) | **49,3 ms** |
+| pulpit: tło + 6 okien + SSD + kursor, GPU | **1,56 ms** |
+| ten sam pulpit, CPU | **12,63 ms** |
 
-Wniosek: dla sceny „pulpit z 30 oknami” GPU jest ~60× szybsze od CPU, a nawet
-ścieżka z readbackiem (wymagana, gdy nie ma zero-copy) mieści się w budżecie
-**2 ms** z 16,7 ms klatki. Readback jest jedynym realnym kosztem wyjścia.
+Wniosek: przy 30 oknach GPU jest ~36× szybsze, a realistyczny pulpit z tekstem
+(paski SSD) ~8× — mimo że tekst jest rasteryzowany na CPU w małych warstwach.
+Czas GPU zawiera już `glReadPixels` (wyjście bez zero-copy).
 
 ### Dostępne rozszerzenia (ta maszyna)
 
@@ -54,41 +52,46 @@ FBO→glReadPixels→shm/dumb (fallback, dziś NVIDIA).
 ## 2. Architektura docelowa
 
 ```text
-                        ┌──────────────────────────────────────────┐
- klienci Wayland ──┐    │ Selene                                   │
-   wl_shm          ├──► │  GpuCompositor (EGL/GLES)                │
-   dmabuf (GPU) ───┘    │   ├─ import: shm → tex, dmabuf → EGLImage│
-                        │   ├─ sceny: obrazy + SSD + kursor         │
-                        │   └─ wyjście: GBM/dmabuf | readback → shm│
-                        └──────────────────────────────────────────┘
- aplikacje libLuna ──► libluna-render::Renderer
-                          ├─ SoftwareRenderer (dziś, domyślny)
-                          └─ GpuRenderer (etap 3)
+klienci Wayland (wl_shm; dmabuf — etap 2)
+        │
+        ▼
+   Selene: model okien → Scene (obrazy, SSD, kursor, overview)
+        │  Renderer::draw(scene, scale, background)
+        ▼
+   libluna-render
+        ├─ SoftwareRenderer (CPU, domyślnie)
+        └─ GpuRenderer (EGL/GLES; LUNA_GPU=1 / SELENE_GPU=1)
+              ├─ GPU: obrazy, prostokąty, zaokrąglenia, obwódki, okręgi, clip
+              ├─ CPU: tekst i wektory → małe warstwy wstawiane w kolejności z
+              └─ wyjście: glReadPixels → wl_shm (nested) / dumb buffer (DRM)
 ```
 
-Kluczowa zasada z `docs/api-stability.md`: widgety i aplikacje **nie wiedzą**
-o EGL. Backend wchodzi wyłącznie za `Renderer`, a Selene wybiera kompozytor
-GPU/CPU na podstawie dostępności EGL.
+Widgety i aplikacje **nie wiedzą** o EGL. Backend wchodzi wyłącznie za `Renderer`,
+a Selene/aplikacja wybiera GPU tylko wtedy, gdy EGL działa — inaczej zostaje CPU.
+Zero-copy (`dmabuf` → tekstura → page-flip) dochodzi w etapach 2 i 4.
 
 ## 3. Etapy (każdy kończy się pomiarem i fallbackiem)
 
 ### ETAP 1 — `GpuCompositor` w Selene (największy zysk, najmniejsze ryzyko)
 
-Zakres:
-1. `selene/src/gpu.rs`: loader EGL/GLES (ten sam co w sondzie), kontekst
-   surfaceless, shader „tekstura + alpha”, VBO z quadem, FBO na wyjście.
-2. Import `wl_shm` jako tekstur (`glTexSubImage2D`), cache per `wl_buffer`
-   (usuwać przy `release`).
-3. Kompozycja sceny Selene: tło, okna (z `image_offset`), SSD, kursor, overview.
-   Popupy i warstwy: te same obrazy w kolejności `z`.
-4. Wyjście: `SELENE_GPU=1` → FBO + readback do dotychczasowego bufora
-   (`ImageData`), więc **reszta kodu zostaje bez zmian**. Brak EGL = automatyczny
-   powrót do CPU (jedna linia w logu).
-5. Kryterium: 30 okien 1080p, p95 klatki ≤ 8 ms; brak różnic pikseli poza
-   antyaliasingiem.
+**Status: ✅ zaimplementowany jako `libluna_render::gpu::GpuRenderer`.**
 
-Dlaczego najpierw to: nie dotyka protokołu, nie wymaga dmabuf, a od razu zdejmuje
-z CPU ~50 ms/klatkę w gęstej sesji.
+Zakres (zrobione):
+1. `gpu.rs`: loader EGL/GLES (`dlopen`/`eglGetProcAddress`), kontekst surfaceless,
+   shadery (tekstura z clipem; kształty SDF: prostokąt, zaokrąglenie, obwódka, okrąg).
+2. Import `wl_shm` jako tekstur z cache per `Arc<ImageData>` (eviction po 120 klatkach).
+3. Kolejność `z` zachowana: tekst, łamane i wielokąty (ikony, kursor, tytuły SSD)
+   idą do małych **warstw CPU** rasteryzowanych przez `SoftwareRenderer` i rysowanych
+   jako quad dokładnie w tym miejscu sceny — bez zmiany wyglądu.
+4. Wyjście: `glReadPixels` do bufora `Renderer::data()` (fallback bez GBM).
+5. Włączenie: `LUNA_GPU=1` (każda aplikacja libLuny) lub `SELENE_GPU=1` (kompozytor
+   zagnieżdżony). Brak EGL = log + CPU, sesja żyje.
+6. Kryterium: renderer desktop 12,63 → **1,56 ms**; `luna-panel` z `LUNA_GPU=1`
+   daje obrazy zgodne z CPU (różnice tylko antyaliasing zaokrągleń).
+
+Pozostało w tym etapie: przenieść kompozycję DRM na GPU (dziś ścieżka DRM ma
+osobny `SoftwareRenderer` i wątki per monitor — potrzebny jeden kontekst per wątek)
+i dodać pomiar w realnej sesji na słabym sprzęcie.
 
 ### ETAP 2 — `zwp_linux_dmabuf_v1` (klienci GPU)
 
@@ -105,18 +108,18 @@ Zakres:
 5. Kryterium: Zed/Chrome/Electron startują **natywnie na Waylandzie**
    (bez `LUNA_X11_APPS`), wideo sprzętowe nie kopiuje klatek przez CPU.
 
-### ETAP 3 — `GpuRenderer` dla libLuna (ścieżki, tekst, clip)
+### ETAP 3 — pełny GPU dla `Scene` (ścieżki, tekst, clip)
 
-`Scene` ma ścieżki i glify, więc sam „quad z teksturą” nie wystarczy. Kolejność:
+**Status: ✅ podstawy działają** (obrazy, prostokąty, zaokrąglenia, obwódki,
+okręgi, clip prostokątny/zaokrąglony; tekst i wektory przez warstwy CPU).
 
-1. **Warstwa obrazów i prostokątów** (okna, tła, separatory) — shader SDF dla
-   zaokrągleń i obwódek (bez teselacji).
-2. **Cache rastrowy kształtów** (ten sam, o którym mówi `docs/rendering.md`):
-   zaokrąglona karta/ikona rasteryzowana raz do atlasu, potem rysowana jako quad.
-   To łączy zalety CPU (wierność tiny-skia) i GPU (tanie składanie).
-3. **Tekst**: atlas glifów (już mamy cache w `text.rs`) → instancjonowane quady.
-4. **Clip**: `glScissor` dla prostokątów, stencil dla zaokrągleń.
-5. Kryterium: te same scenariusze co `render_bench`, p95 ≤ 8 ms przy 2560×1440,
+Pozostało:
+1. **Atlas glifów** — dziś tekst jest rasteryzowany przez `TextEngine` do warstwy
+   CPU; docelowo atlas + instancjonowane quady (mniej kopii i uploadów).
+2. **Ścieżki natywnie** — `StrokeLine`/`FillPolygon` (ikony, kursor) przez
+   triangulację/SDF, żeby zniknęły warstwy CPU.
+3. **Clip stencil** dla wielu zaokrąglonych clipów jednocześnie (dziś ostatni).
+4. Kryterium: te same scenariusze co `render_bench`, p95 ≤ 8 ms przy 2560×1440,
    pamięć ≤ +20%, fallback CPU gdy brak EGL.
 
 ### ETAP 4 — wyjście zero-copy (DRM/Mesa)
@@ -142,7 +145,8 @@ Zakres:
 ## 5. Kolejność prac (konkret)
 
 1. [x] Sonda EGL + benchmark (`gpu_probe`), potwierdzenie dmabuf/fence.
-2. [ ] `GpuCompositor` (etap 1) za `SELENE_GPU=1`, z fallbackiem i pomiarem.
-3. [ ] `zwp_linux_dmabuf_v1` (etap 2) + test z klientem GPU w izolowanej sesji.
-4. [ ] `GpuRenderer` dla `Scene` (etap 3), najpierw obrazy/prostokąty/zaokrąglenia.
+2. [x] `GpuRenderer` (etap 1) — `LUNA_GPU=1`/`SELENE_GPU=1`, fallback CPU, warstwy
+   CPU dla tekstu/wektorów, pomiar 12,6 → 1,6 ms na scenie pulpitu.
+3. [ ] Kompozycja GPU w trybie DRM (kontekst per wątek wyjścia).
+4. [ ] `zwp_linux_dmabuf_v1` (etap 2) + test z klientem GPU w izolowanej sesji.
 5. [ ] Zero-copy DRM (etap 4) na Mesa; NVIDIA — readback.

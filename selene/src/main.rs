@@ -54,6 +54,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     libluna_i18n::set_locale(libluna_i18n::Locale::from_env());
     libluna_i18n::load_catalogs_from_dirs();
 
+    // `SELENE_GPU=1` włącza backend GPU dla warstwy wyjściowej (nested rysuje przez
+    // libluna-platform, który wybiera backend po `LUNA_GPU`). Brak EGL = fallback CPU;
+    // sesja nigdy nie może zginąć z powodu GPU. Etap 2 z `docs/gpu.md`.
+    if std::env::var("SELENE_GPU").is_ok() && std::env::var_os("LUNA_GPU").is_none() {
+        std::env::set_var("LUNA_GPU", "1");
+    }
+
     // Ctrl+C / Ctrl+\ w terminalu nie mogą kończyć kompozytora (a więc i sesji).
     // Sygnał ma trafić do dziecka PTY, nie do procesu Selene. Przy okazji logujemy
     // SIGTERM/SIGHUP razem z pidem nadawcy — po nagłym końcu sesji wiadomo, kto ją zamknął.

@@ -181,6 +181,13 @@ case "$display" in
 esac
 note "X11 podłączony jako DISPLAY=:$display"
 
+# Szerokość monitora — nie zakładamy 1280 px (nested może dostać inny rozmiar).
+control outputs >/dev/null 2>&1 || true
+sleep 0.3
+out_w="$(grep 'selene/control:   output 0 ' "$log" | tail -n 1 |
+    sed -n 's/.*output 0 [^ ]* \([0-9]*\)x[0-9]* @.*/\1/p')"
+[ -n "$out_w" ] || out_w=1280
+
 say "XWM: właściciel menedżera okien"
 control x11 >/dev/null 2>&1 || true
 sleep 0.3
@@ -220,11 +227,11 @@ w="${3:-320}"
 mx=$((x + w - 53))
 my=$((y + 19))
 send_input "click $mx $my"
-wait_geom_width "xclock" 1280 50 || {
+wait_geom_width "xclock" "$out_w" 50 || {
     set -- $(win_geom "xclock")
-    fail "maksymalizacja nie zadziałała (szerokość=${3:-?}, oczekiwano 1280)"
+    fail "maksymalizacja nie zadziałała (szerokość=${3:-?}, oczekiwano $out_w)"
 }
-note "zmaksymalizowane: szerokość=1280"
+note "zmaksymalizowane: szerokość=$out_w"
 
 # ── Zamknięcie naszym SSD ───────────────────────────────────────────────────
 say "SSD: zamknięcie okna X11"

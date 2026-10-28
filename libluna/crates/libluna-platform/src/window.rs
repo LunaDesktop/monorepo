@@ -20,7 +20,9 @@ use libluna_core::{
     Accent, ButtonState, Color, Event, IconSettings, KeyEvent, Modifiers, Point, PointerButton,
     PointerEvent, Rect, ScrollEvent, Size, Theme, ThemePreference, ThemeSettings, WindowEvent,
 };
-use libluna_render::{diff_bounds, Renderer, Scene, SoftwareRenderer, TextEngine};
+use libluna_render::{
+    diff_bounds, gpu::GpuRenderer, Renderer, Scene, SoftwareRenderer, TextEngine,
+};
 
 use smithay_client_toolkit::reexports::calloop::{EventLoop, LoopHandle};
 use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
@@ -533,6 +535,37 @@ fn ensure_wayland_display() -> Result<(), Box<dyn Error>> {
     .into())
 }
 
+/// Tworzy backend rysowania.
+///
+/// `LUNA_GPU=1` prosi o GPU; brak EGL/kontekstu **nie może** przewrócić aplikacji,
+/// więc spadamy do CPU z jednym czytelnym komunikatem. Domyślnie CPU.
+pub(crate) fn new_renderer(monospace: bool, width: u32, height: u32) -> Box<dyn Renderer> {
+    let want_gpu = std::env::var("LUNA_GPU")
+        .map(|v| !v.is_empty() && v != "0")
+        .unwrap_or(false);
+    if want_gpu {
+        let gpu = if monospace {
+            GpuRenderer::new_mono(width, height)
+        } else {
+            GpuRenderer::new(width, height)
+        };
+        match gpu {
+            Ok(r) => {
+                if std::env::var("LUNA_STATS").is_ok() {
+                    eprintln!("libluna-platform: backend={}", r.name());
+                }
+                return Box::new(r);
+            }
+            Err(e) => eprintln!("libluna-platform: GPU niedostępne ({e}) — backend CPU"),
+        }
+    }
+    if monospace {
+        Box::new(SoftwareRenderer::new_mono(width, height))
+    } else {
+        Box::new(SoftwareRenderer::new(width, height))
+    }
+}
+
 pub fn run<F>(config: AppConfig, render: F) -> Result<(), Box<dyn Error>>
 where
     F: for<'a> FnMut(&mut Frame<'a>) + 'static,
@@ -696,11 +729,7 @@ where
         paste_text: Arc::new(Mutex::new(None)),
         paste_busy: Arc::new(AtomicBool::new(false)),
         modifiers: Modifiers::NONE,
-        renderer: if config.monospace {
-            Box::new(SoftwareRenderer::new_mono(iw, ih))
-        } else {
-            Box::new(SoftwareRenderer::new(iw, ih))
-        },
+        renderer: new_renderer(config.monospace, iw, ih),
         last_frame: Vec::new(),
         last_scene: Scene::new(),
         last_scene_key: None,

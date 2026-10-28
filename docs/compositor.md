@@ -22,6 +22,8 @@ kompozytora, na którym codzienna praca nie wymaga obejść.
 | ekran blokady (`luna-lock`) | overlay + `keyboard_interactivity=exclusive`; jedna powierzchnia na wszystkie wyjścia |
 | `xwayland_shell_v1` + XWM | okna X11, `_NET_WM_STATE`, ramki, menu X11 |
 | diagnostyka X11 | `luna-control x11` — ekran, właściciel WM, liczba okien i treść każdego okna (`content=WxH border=N`) |
+| diagnostyka monitorów | `luna-control outputs` — nazwa, `WxH`, pozycja; testy sesji liczą z tego współrzędne |
+| **GPU (nested)** | `SELENE_GPU=1` → `libluna_render::gpu::GpuRenderer` (EGL surfaceless) zamiast CPU; brak EGL = automatyczny fallback, sesja żyje. Szczegóły: [`docs/gpu.md`](gpu.md) |
 | test X11 | `scripts/x11-smoke.sh` (`make smoke-x11`): Xwayland + `xclock`, SSD maksymalizacja i zamknięcie |
 | X11 CSD (Firefox itd.) | ruch: `_NET_WM_MOVERESIZE` w `_NET_SUPPORTED` **oraz** self-move przez `ConfigureRequest`; maksymalizacja: `_NET_WM_STATE` z akcją 2 i dwoma atomami — cel liczony raz na komunikat |
 | `xdg_surface.set_window_geometry` | widoczny prostokąt vs bufor z cieniami CSD |

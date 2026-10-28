@@ -107,6 +107,17 @@ fn handle(state: &mut State, line: &str) {
                 );
             }
         }
+        // `outputs` — geometria monitorów (testy sesji liczą z niej współrzędne).
+        "outputs" => {
+            let outs = state.outputs.lock_or_recover();
+            eprintln!("selene/control: outputs={}", outs.len());
+            for (i, o) in outs.iter().enumerate() {
+                eprintln!(
+                    "selene/control:   output {i} {} {}x{} @ ({},{})",
+                    o.name, o.width, o.height, o.x, o.y
+                );
+            }
+        }
         // `x11` — diagnostyka XWayland/XWM: ekran, właściciel WM, liczba okien.
         // Używane przez `scripts/x11-smoke.sh` i przy diagnozie „aplikacja X11 się nie mapuje”.
         "x11" => match crate::xwm::global() {

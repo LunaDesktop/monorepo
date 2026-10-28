@@ -236,17 +236,34 @@ note "panel widoczny"
 # ── Launcher: PPM przypina/odpina aplikację ─────────────────────────────────
 say "launcher: PPM przypina aplikację (stan w launcher.conf)"
 launcher_conf="$rt/config/luna/launcher.conf"
+# Szerokość wyjścia bierzemy z kompozytora — nie zakładamy 1280 px.
+# Szerokość powierzchni panelu bierzemy z jej bufora (`data=WxH`) — w trybie
+# zagnieżdżonym okno Selene może zostać rozciągnięte przez nadrzędny kompozytor
+# inaczej niż wynika to z modelu `wl_output`.
+screen_w="$(windows_snapshot | grep 'layer=true' | grep 'z=1000000' | tail -n 1 |
+    sed -n 's/.*data=\([0-9]*\)x[0-9]*$/\1/p')"
+if [ -z "$screen_w" ]; then
+    control outputs >/dev/null 2>&1 || true
+    sleep 0.3
+    screen_w="$(grep 'selene/control:   output 0 ' "$log" | tail -n 1 |
+        sed -n 's/.*output 0 [^ ]* \([0-9]*\)x[0-9]* @.*/\1/p')"
+fi
+[ -n "$screen_w" ] || screen_w=1280
+lw=$((screen_w - 80))
+if [ "$lw" -gt 720 ]; then lw=720; fi
+content_x=$(((screen_w - lw) / 2 + 18))
+cell=$(((lw - 36 - 36) / 4))
+tile_x=$((content_x + cell / 2))
 send_input "click 20 20" # burger w lewym górnym rogu paska
 sleep 0.6
-# Zagnieżdżony Selene ma 1280x800; launcher 720x600 jest wyśrodkowany,
-# więc pierwszy kafel siatki wypada w (379, 206).
-send_input "rclick 379 206"
+# Pierwszy kafel siatki launchera (te same stałe co `launcher_rects`).
+send_input "rclick $tile_x 206"
 sleep 0.8
 if ! grep -q '^pinned=' "$launcher_conf" 2>/dev/null; then
     fail "PPM nie przypiął aplikacji (brak wpisu w $launcher_conf)"
 fi
 note "aplikacja przypięta"
-send_input "rclick 379 206" # ta sama pozycja = ta sama (już przypięta) aplikacja
+send_input "rclick $tile_x 206" # ta sama pozycja = ta sama (już przypięta) aplikacja
 sleep 0.8
 if grep -q '^pinned=' "$launcher_conf" 2>/dev/null; then
     fail "drugi PPM nie odpiął aplikacji"

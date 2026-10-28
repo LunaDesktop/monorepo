@@ -14,7 +14,7 @@
 use std::error::Error;
 
 use libluna_core::{Color, IconTheme, Rect, Size, Theme};
-use libluna_render::{Scene, SoftwareRenderer, TextEngine};
+use libluna_render::{gpu::GpuRenderer, Renderer, Scene, SoftwareRenderer, TextEngine};
 use libluna_widgets::{Hover, IconName, PaintCtx};
 use luna::notifications::{Notification, Notifications};
 use luna::osd::Osd;
@@ -207,7 +207,19 @@ fn save(theme: &Theme, path: &str, draw: impl FnOnce(&mut PaintCtx)) -> Result<(
             .fill_rect(Rect::from_size(Size::new(W as f64, H as f64)), desktop_bg());
         draw(&mut ctx);
     }
-    let mut renderer = SoftwareRenderer::new(W, H);
+    let mut renderer: Box<dyn Renderer> = match std::env::var("LUNA_GPU") {
+        Ok(v) if !v.is_empty() && v != "0" => match GpuRenderer::new(W, H) {
+            Ok(r) => {
+                eprintln!("luna-panel: backend GPU");
+                Box::new(r)
+            }
+            Err(e) => {
+                eprintln!("luna-panel: GPU niedostępne ({e}) — backend CPU");
+                Box::new(SoftwareRenderer::new(W, H))
+            }
+        },
+        _ => Box::new(SoftwareRenderer::new(W, H)),
+    };
     renderer.draw(&scene, 1.0, theme.colors.window_bg);
     let png = renderer.encode_png().ok_or("failed to encode PNG")?;
     std::fs::write(path, png)?;

@@ -31,8 +31,11 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
 - Graf sceny: prostokąty, zaokrąglone prostokąty, obcinanie (clip), cień, obrazy/ikony SVG.
 - `libluna-text`: shaping/układanie (Pango albo cosmic-text), fallback fontów, ellipsis.
 - `damage`/częściowe odświeżanie.
-- ✅ **Sonda GPU** (`examples/gpu_probe`): EGL surfaceless + GLES2, ~60× szybsza
+- ✅ **Sonda GPU** (`examples/gpu_probe`): EGL surfaceless + GLES2, ~36× szybsza
   kompozycja 30 okien 1080p od CPU; plan i pomiary w [`docs/gpu.md`](gpu.md).
+- ✅ **`GpuRenderer`** za `Renderer` (`LUNA_GPU=1`, `SELENE_GPU=1`, fallback CPU):
+  GPU składa obrazy/prostokąty/zaokrąglenia/clip, tekst i wektory idą przez małe
+  warstwy CPU w tej samej kolejności `z`. Scena pulpitu 12,6 → **1,6 ms** (z readbackiem).
 
 ## M2.5 — Widgety (start) — ⏳ W TOKU
 - `libluna-widgets`: widgety wielokrotnego użytku w modelu immediate — `ViewSwitcher`, `NavList`,
