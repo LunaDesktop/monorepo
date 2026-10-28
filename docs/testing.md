@@ -85,14 +85,18 @@ więc test nie zależy od języka ani motywu z `~/.config`.
 
 1. **Start kompozytora** — Selene tworzy `wayland-0` i gniazdo `luna-control`.
 2. **Panel** — `luna-shell` mapuje powierzchnię warstwową (`layer=true`).
-3. **Okna** — `luna-settings` i terminale mapują się jako zwykłe okna.
-4. **Klawiatura** — znak wysłany skryptem trafia do procesu w PTY (`dd` zapisuje bajt).
-5. **Schowek między klientami** — terminal A kopiuje linię (`Ctrl+Shift+C`),
+3. **Launcher + przypinanie** — klik w burger otwiera launcher, a PPM na pierwszym
+   kaflu zapisuje `pinned=` do `$XDG_CONFIG_HOME/luna/launcher.conf`; drugi PPM
+   (ta sama pozycja, bo przypięta aplikacja przeskakuje na początek) usuwa wpis.
+   To sprawdza całą drogę: hit-test kafla → `Launcher::toggle_pin` → zapis atomowy.
+4. **Okna** — `luna-settings` i terminale mapują się jako zwykłe okna.
+5. **Klawiatura** — znak wysłany skryptem trafia do procesu w PTY (`dd` zapisuje bajt).
+6. **Schowek między klientami** — terminal A kopiuje linię (`Ctrl+Shift+C`),
    terminal B wkleja ją (`Ctrl+Shift+V`), a wynik trafia do pliku.
    To testuje pełną drogę: `wl_data_source` → Selene → `wl_data_offer` → drugi klient.
-6. **Ekran blokady** — `luna-lock` mapuje overlay i **przejmuje klawiaturę**:
+7. **Ekran blokady** — `luna-lock` mapuje overlay i **przejmuje klawiaturę**:
    znak wysłany po zablokowaniu nie dociera do terminala pod spodem.
-7. **Zakończenie** — wszystkie procesy kończą się po `SIGTERM` (brak zawieszonych klientów).
+8. **Zakończenie** — wszystkie procesy kończą się po `SIGTERM` (brak zawieszonych klientów).
 
 ### Czego harness nie robi
 

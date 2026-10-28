@@ -63,9 +63,9 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   contain/cover/fill/fit-width/fit-height) i `MediaControls` (play/pauza + pasek postępu +
   czasy); podgląd: `cargo run --manifest-path apps/luna-demo/Cargo.toml --bin new-widgets` → `docs/images/new-widgets.png`.
 - **Pakiet ikon symbolicznych** (`libluna-widgets::icon`): `IconName` + `paint_icon`,
-  47 ikon rysowanych wektorowo w naszym stylu — domyślnie **pastelowych**
+  48 ikon rysowanych wektorowo w naszym stylu — domyślnie **pastelowych**
   (Menu/Search/Files/Settings/Terminal/Music/Star/Clock/Store/Edit/Wifi/Volume/Battery/
-  Power/Grid/List/Carousel/…). Zestaw jest **wyliczalny** (`IconName::ALL` +
+  Power/Grid/List/Carousel/…/Moon/Pin). Zestaw jest **wyliczalny** (`IconName::ALL` +
   `IconName::name()`), a cały pakiet ma galerię-podgląd:
   `cargo run --manifest-path apps/luna-demo/Cargo.toml --bin icons` → `docs/images/icons.png` (motyw jasny i ciemny).
   Styl opisuje [`docs/icons.md`](icons.md): kształty i paleta per rodzina, tryb
@@ -200,6 +200,13 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   strzałki (lista ±1, siatka kolumny/wiersze, karuzela karty), `Enter` uruchamia zaznaczoną
   pozycję, `Esc` zamyka; zaznaczenie automatycznie przewija się do widoku
   (`Launcher::navigate` + `ensure_selection_visible`).
+  ✅ **Przypięte i ostatnio używane**: PPM na aplikacji przypina ją (pinezka, pozycja
+  przesuwa się na górę), kolejne przypięte idą w kolejności dodania, a po nich lista
+  „ostatnio używanych” (8 pozycji, bez duplikatów). Stan przetrwa przelogowanie w
+  `~/.config/luna/launcher.conf` (`luna::launcher_conf`, klucze = nazwy plików
+  `.desktop`); usunięcie aplikacji z systemu nie psuje konfiguracji — wpis po prostu
+  znika z listy. Kolejność jest częścia kontraktu: indeksy w rysowaniu, hit-testach
+  i nawigacji klawiatury liczy jedno `Launcher::filter_apps`.
   ✅ **`luna-shell`** (bin) uruchamia panel jako prawdziwą **powierzchnię
   warstwową** (`wlr-layer-shell` po stronie klienta w `libluna-platform`); bez kompozytora
   kończy się czytelnym `NoCompositor`. ✅ **OSD** (`osd.rs`) i **powiadomienia** (`notifications.rs`)

@@ -9,6 +9,7 @@
 pub mod apps;
 pub mod dbus_notifications;
 pub mod keyring;
+pub mod launcher_conf;
 pub mod media;
 pub mod notifications;
 pub mod osd;

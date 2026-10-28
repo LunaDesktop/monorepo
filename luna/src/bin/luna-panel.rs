@@ -56,12 +56,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut launcher = Launcher::new();
         launcher.view = view;
         launcher.carousel = 2;
-        launcher.selected = Some(if view == LauncherView::List { 4 } else { 2 });
-        launcher.scroll = if view == LauncherView::List {
-            96.0
-        } else {
-            0.0
-        };
+        // Podgląd nowego stanu: przypięte na górze (z pinezką) i ostatnio używane.
+        launcher.pinned = vec![apps[6].key(), apps[2].key()];
+        launcher.recent = vec![apps[3].key()];
+        launcher.selected = Some(if view == LauncherView::List { 1 } else { 0 });
+        launcher.scroll = 0.0;
         let larea = area(panel::LAUNCHER_W);
         save(
             &theme,

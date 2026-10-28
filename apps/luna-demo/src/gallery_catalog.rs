@@ -208,7 +208,7 @@ tip.paint(ctx, area);"#,
     DemoSpec {
         name: "IconName / paint_icon",
         category: Category::Basics,
-        description: "Spójny zestaw 47 pastelowych ikon wektorowych (pliki, terminal, multimedia, urządzenia).",
+        description: "Spójny zestaw 48 pastelowych ikon wektorowych (pliki, terminal, multimedia, urządzenia).",
         source: "icon.rs",
         code: r#"paint_icon(ctx, IconName::Files, rect, color);
 paint_icon(ctx, IconName::Search, rect, color);

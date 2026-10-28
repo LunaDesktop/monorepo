@@ -60,6 +60,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         App::from_desktop(&desktop)
     };
     let mut launcher = Launcher::new();
+    // Przypięte i ostatnio używane aplikacje przetrwają przelogowanie.
+    luna::launcher_conf::load_into(&mut launcher);
     // Jedno miejsce śledzenia kursora dla paska, launchera i wszystkich popupów.
     let mut hover = Hover::new();
 
@@ -458,7 +460,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             let filtered = launcher.filter_apps(&apps);
                             if let Some(i) = launcher.selected_index(filtered.len()) {
                                 if let Some(app) = filtered.get(i) {
-                                    launch_app(app);
+                                    launch_from_launcher(&mut launcher, app);
                                 }
                                 target_progress = 0.0;
                             }
@@ -635,6 +637,38 @@ fn main() -> Result<(), Box<dyn Error>> {
                         Some(panel::NotificationHit::Row(row)) => Some(row),
                         _ => None,
                     };
+                }
+
+                // PPM na aplikacji w launcherze — przypnij/odepnij ją do góry listy.
+                // Launcher zostaje otwarty, żeby użytkownik widział nową kolejność.
+                // **Musi być przed** ogólnym PPM taskbara (ten zamyka każdy popup).
+                Event::PointerButton(pe)
+                    if pe.state == ButtonState::Pressed
+                        && pe.button == PointerButton::Right
+                        && animating_popup == ActivePopup::Launcher
+                        && target_progress > 0.0 =>
+                {
+                    if let Some(i) = panel::launcher_app_at(
+                        &apps,
+                        &launcher,
+                        larea,
+                        &frame.theme,
+                        text,
+                        pe.position,
+                    ) {
+                        let pinned = launcher.toggle_pin(&apps[i]);
+                        luna::launcher_conf::save_from(&launcher);
+                        if stats {
+                            eprintln!(
+                                "luna-shell: {} {:?}",
+                                if pinned { "przypięto" } else { "odpięto" },
+                                apps[i].name
+                            );
+                        }
+                    } else {
+                        // PPM poza aplikacją zamyka launcher (jak dotychczas).
+                        target_progress = 0.0;
+                    }
                 }
 
                 // PPM na przycisku okna — menu kontekstowe (pokaż/zamknij/przenieś).
@@ -1007,7 +1041,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     text,
                                     pos,
                                 ) {
-                                    launch(&apps, i);
+                                    launch_from_launcher(&mut launcher, &apps[i]);
                                     target_progress = 0.0;
                                     handled = true;
                                 } else if larea.contains(pos) {
@@ -2042,11 +2076,11 @@ fn build_toggles(s: &luna::system::SystemStatus) -> Vec<Toggle> {
     v
 }
 
-/// Uruchamia aplikację o indeksie `i` (jeśli ma polecenie).
-fn launch(apps: &[App], i: usize) {
-    if let Some(app) = apps.get(i) {
-        launch_app(app);
-    }
+/// Uruchamia aplikację z launchera i zapisuje ją na liście „ostatnio używane”.
+fn launch_from_launcher(launcher: &mut Launcher, app: &App) {
+    launch_app(app);
+    launcher.remember_used(app);
+    luna::launcher_conf::save_from(launcher);
 }
 
 /// Uruchamia aplikację, obsługując aplikacje konsolowe w emulatorze terminala oraz odpinając we/wy.

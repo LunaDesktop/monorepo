@@ -62,6 +62,11 @@ każda rodzina ma własny, stały odcień, a kształt mówi, do czego ikona słu
 | `Wifi`, `Volume`, `Battery`, `Power`, `Bluetooth` | stan urządzeń | panel, OSD |
 | `Monitor`, `Screenshot`, `Sliders`, `Brightness` | ustawienia systemowe | Ustawienia, Quick Panel |
 | `Play`, `Pause`, `Moon` | sterowanie i tryb ciemny | odtwarzacz, przełącznik motywu |
+| `Pin` | pinezka | launcher, przypięte aplikacje |
+
+Kontrolki interfejsu (`Menu`, `Search`, strzałki, `Close`, `Pin`) są zawsze rysowane
+symbolicznie w kolorze przekazanym przez wywołującego — także w motywie pastelowym —
+żeby nie znikały na tle kart i przycisków.
 
 Ikony typów plików w `luna-files` (`folder`, `file`, `Image`, `Music`,
 `Video`, `Archive`, `Document`, `Code`, `Text`) korzystają z tej samej palety,

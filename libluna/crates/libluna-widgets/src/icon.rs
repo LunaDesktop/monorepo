@@ -512,11 +512,13 @@ pub enum IconName {
     Play,
     Pause,
     Moon,
+    /// Pinezka — „przypnij do launchera”.
+    Pin,
 }
 
 impl IconName {
     /// Wszystkie ikony z pakietu (kolejność = kolejność w galerii).
-    pub const ALL: [IconName; 47] = [
+    pub const ALL: [IconName; 48] = [
         IconName::Menu,
         IconName::Search,
         IconName::Files,
@@ -564,6 +566,7 @@ impl IconName {
         IconName::Play,
         IconName::Pause,
         IconName::Moon,
+        IconName::Pin,
     ];
 
     /// Nazwa ikony (do galerii/diagnostyki).
@@ -616,6 +619,7 @@ impl IconName {
             IconName::Play => "Play",
             IconName::Pause => "Pause",
             IconName::Moon => "Moon",
+            IconName::Pin => "Pin",
         }
     }
 }
@@ -1716,6 +1720,11 @@ pub fn paint_icon_themed(
                 .collect();
             scene.stroke_polyline(&pts, g.d(1.6), color);
         }
+        IconName::Pin => {
+            // Pinezka „mapowa”: zaokrąglona główka i zwężenie do ostrza.
+            scene.fill_circle(g.p(12.0, 9.0), g.d(5.6), color);
+            scene.fill_polygon(&[g.p(7.6, 11.2), g.p(16.4, 11.2), g.p(12.0, 21.0)], color);
+        }
     }
 }
 
@@ -1795,6 +1804,7 @@ fn has_pastel_art(name: IconName) -> bool {
             | IconName::Maximize
             | IconName::Check
             | IconName::Plus
+            | IconName::Pin
     )
 }
 

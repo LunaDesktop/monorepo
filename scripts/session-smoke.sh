@@ -233,6 +233,28 @@ start shell env $client_env "$shell_bin"
 wait_layer "z=1000000" || fail "panel Luna Shell się nie zmapował"
 note "panel widoczny"
 
+# ── Launcher: PPM przypina/odpina aplikację ─────────────────────────────────
+say "launcher: PPM przypina aplikację (stan w launcher.conf)"
+launcher_conf="$rt/config/luna/launcher.conf"
+send_input "click 20 20" # burger w lewym górnym rogu paska
+sleep 0.6
+# Zagnieżdżony Selene ma 1280x800; launcher 720x600 jest wyśrodkowany,
+# więc pierwszy kafel siatki wypada w (379, 206).
+send_input "rclick 379 206"
+sleep 0.8
+if ! grep -q '^pinned=' "$launcher_conf" 2>/dev/null; then
+    fail "PPM nie przypiął aplikacji (brak wpisu w $launcher_conf)"
+fi
+note "aplikacja przypięta"
+send_input "rclick 379 206" # ta sama pozycja = ta sama (już przypięta) aplikacja
+sleep 0.8
+if grep -q '^pinned=' "$launcher_conf" 2>/dev/null; then
+    fail "drugi PPM nie odpiął aplikacji"
+fi
+note "aplikacja odpięta"
+press_key 1 # Esc zamyka launcher
+sleep 0.4
+
 # ── Ustawienia ──────────────────────────────────────────────────────────────
 say "luna-settings: okno ustawień"
 start settings env $client_env "$settings_bin"

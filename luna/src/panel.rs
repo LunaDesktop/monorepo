@@ -195,6 +195,10 @@ pub struct Launcher {
     pub search: String,
     /// Pozycja pod kursorem — podświetlenie niezależne od zaznaczenia klawiatury.
     pub hover: Option<usize>,
+    /// Klucze aplikacji przypiętych do góry listy (w kolejności przypinania).
+    pub pinned: Vec<String>,
+    /// Klucze ostatnio uruchomionych aplikacji (najnowsza pierwsza).
+    pub recent: Vec<String>,
 }
 
 impl Launcher {
@@ -202,19 +206,72 @@ impl Launcher {
         Self::default()
     }
 
-    /// Filtruje aplikacje wg bieżącej frazy wyszukiwania.
+    /// Ile ostatnio używanych aplikacji pamiętamy.
+    pub const RECENT_LIMIT: usize = 8;
+
+    /// Filtruje i porządkuje aplikacje: przypięte, potem ostatnio używane,
+    /// a na końcu reszta w kolejności alfabetycznej z `apps`.
+    ///
+    /// Kolejność jest częścią kontraktu — indeksy z [`launcher_app_at`],
+    /// nawigacji klawiatury i rysowania muszą się zgadzać.
     pub fn filter_apps<'a>(&self, apps: &'a [App]) -> Vec<&'a App> {
         let q = self.search.trim().to_lowercase();
-        if q.is_empty() {
-            return apps.iter().collect();
+        let hit = |a: &App| {
+            q.is_empty()
+                || a.name.to_lowercase().contains(&q)
+                || a.category.to_lowercase().contains(&q)
+                || a.exec.as_deref().unwrap_or("").to_lowercase().contains(&q)
+        };
+        // Klucze liczymy raz na aplikację — launcher woła tę funkcję co klatkę.
+        let keys: Vec<String> = apps.iter().map(App::key).collect();
+        let mut used = vec![false; apps.len()];
+        let mut out: Vec<&App> = Vec::with_capacity(apps.len());
+
+        let mut take = |key: &str, out: &mut Vec<&'a App>| {
+            if let Some(i) = keys.iter().position(|k| k == key) {
+                if !used[i] && hit(&apps[i]) {
+                    used[i] = true;
+                    out.push(&apps[i]);
+                }
+            }
+        };
+        for key in &self.pinned {
+            take(key, &mut out);
         }
-        apps.iter()
-            .filter(|a| {
-                a.name.to_lowercase().contains(&q)
-                    || a.category.to_lowercase().contains(&q)
-                    || a.exec.as_deref().unwrap_or("").to_lowercase().contains(&q)
-            })
-            .collect()
+        for key in &self.recent {
+            take(key, &mut out);
+        }
+        for (i, app) in apps.iter().enumerate() {
+            if !used[i] && hit(app) {
+                out.push(app);
+            }
+        }
+        out
+    }
+
+    /// Czy aplikacja jest przypięta do góry listy.
+    pub fn is_pinned(&self, app: &App) -> bool {
+        self.pinned.contains(&app.key())
+    }
+
+    /// Przypina lub odpina aplikację. Zwraca `true`, gdy po zmianie jest przypięta.
+    pub fn toggle_pin(&mut self, app: &App) -> bool {
+        let key = app.key();
+        if let Some(i) = self.pinned.iter().position(|k| k == &key) {
+            self.pinned.remove(i);
+            false
+        } else {
+            self.pinned.push(key);
+            true
+        }
+    }
+
+    /// Zapisuje uruchomienie aplikacji na początku listy „ostatnio używane”.
+    pub fn remember_used(&mut self, app: &App) {
+        let key = app.key();
+        self.recent.retain(|k| k != &key);
+        self.recent.insert(0, key);
+        self.recent.truncate(Self::RECENT_LIMIT);
     }
 
     /// Przełącza na kolejny widok.
@@ -300,6 +357,22 @@ pub struct App {
 }
 
 impl App {
+    /// Stabilny klucz aplikacji do zapisu w konfiguracji launchera.
+    ///
+    /// Preferujemy nazwę pliku `.desktop` (nie zależy od języka ani od nazwy
+    /// wyświetlanej); dla wpisów przykładowych zostaje nazwa z prefiksem.
+    pub fn key(&self) -> String {
+        if let Some(path) = &self.desktop_path {
+            if let Some(stem) = path.file_stem() {
+                let stem = stem.to_string_lossy();
+                if !stem.is_empty() {
+                    return stem.into_owned();
+                }
+            }
+        }
+        format!("name:{}", self.name)
+    }
+
     /// Przykładowy zestaw ikon (podglądy, gdy brak `.desktop`).
     pub fn sample() -> Vec<App> {
         const APPS: [(IconName, &str, &str); 12] = [
@@ -3809,14 +3882,37 @@ pub fn paint_launcher(
     ctx.scene
         .stroke_rounded_rect(area, t.radius.large, 1.0, t.colors.border);
 
+    let title = tr("Applications");
     ctx.label_left(
         r.header.x(),
         r.header.center().y,
-        &tr("Applications"),
+        &title,
         t.typography.heading.size,
         weight::BOLD,
         t.colors.text,
     );
+
+    // Podpowiedź obok tytułu: jak przypinać aplikacje (PPM). Nie wchodzi pod przełącznik.
+    let hint_x =
+        r.header.x() + ctx.measure(&title, t.typography.heading.size, weight::BOLD) + t.spacing.lg;
+    let hint_max = r.switcher.x() - t.spacing.sm - hint_x;
+    if hint_max > 40.0 {
+        let hint = ellipsize(
+            &tr("Right-click to pin"),
+            hint_max,
+            t.typography.caption.size,
+            weight::NORMAL,
+            ctx.text,
+        );
+        ctx.label_left(
+            hint_x,
+            r.header.center().y,
+            &hint,
+            t.typography.caption.size,
+            weight::NORMAL,
+            t.colors.dim_text,
+        );
+    }
 
     // Przełącznik widoku.
     for (i, view) in LauncherView::ALL.iter().enumerate() {
@@ -3927,6 +4023,7 @@ pub fn paint_launcher(
                         app,
                         launcher.selected_index(filtered.len()) == Some(i),
                         launcher.hover == Some(i),
+                        launcher.is_pinned(app),
                         icon_theme,
                         ctx,
                         rect,
@@ -3941,6 +4038,7 @@ pub fn paint_launcher(
                         app,
                         launcher.selected_index(filtered.len()) == Some(i),
                         launcher.hover == Some(i),
+                        launcher.is_pinned(app),
                         icon_theme,
                         ctx,
                         rect,
@@ -3953,6 +4051,7 @@ pub fn paint_launcher(
                         app,
                         i == launcher.carousel,
                         launcher.hover == Some(i),
+                        launcher.is_pinned(app),
                         icon_theme,
                         ctx,
                         carousel_card(r.content, i, launcher.carousel),
@@ -3965,10 +4064,12 @@ pub fn paint_launcher(
 }
 
 /// Kafelek siatki: ikona + nazwa; zaznaczony wyróżniony akcentem.
+#[allow(clippy::too_many_arguments)]
 fn paint_grid_tile(
     app: &App,
     selected: bool,
     hovered: bool,
+    pinned: bool,
     icon_theme: IconTheme,
     ctx: &mut PaintCtx,
     rect: Rect,
@@ -4018,13 +4119,31 @@ fn paint_grid_tile(
         weight::NORMAL,
         t.colors.text,
     );
+    if pinned {
+        let badge = Rect::from_xywh(rect.right() - 26.0, rect.y() + 6.0, 20.0, 20.0);
+        ctx.scene
+            .fill_circle(badge.center(), badge.width() / 2.0, t.colors.shade);
+        paint_icon(
+            ctx,
+            IconName::Pin,
+            Rect::from_xywh(
+                badge.x() + 3.0,
+                badge.y() + 3.0,
+                badge.width() - 6.0,
+                badge.height() - 6.0,
+            ),
+            t.colors.accent,
+        );
+    }
 }
 
 /// Wiersz listy: ikona + nazwa + kategoria; zaznaczony wyróżniony akcentem.
+#[allow(clippy::too_many_arguments)]
 fn paint_list_row(
     app: &App,
     selected: bool,
     hovered: bool,
+    pinned: bool,
     icon_theme: IconTheme,
     ctx: &mut PaintCtx,
     rect: Rect,
@@ -4082,13 +4201,38 @@ fn paint_list_row(
         weight::NORMAL,
         t.colors.dim_text,
     );
+    if pinned {
+        // Pinezka tuż przed kategorią, żeby nie nachodziły na siebie.
+        let cat_w = ctx.measure(&app.category, t.typography.caption.size, weight::NORMAL);
+        let badge = Rect::from_xywh(
+            rect.right() - t.spacing.md - cat_w - t.spacing.sm - 20.0,
+            rect.center().y - 10.0,
+            20.0,
+            20.0,
+        );
+        ctx.scene
+            .fill_circle(badge.center(), badge.width() / 2.0, t.colors.shade);
+        paint_icon(
+            ctx,
+            IconName::Pin,
+            Rect::from_xywh(
+                badge.x() + 3.0,
+                badge.y() + 3.0,
+                badge.width() - 6.0,
+                badge.height() - 6.0,
+            ),
+            t.colors.accent,
+        );
+    }
 }
 
 /// Karta karuzeli: duża ikona + nazwa; wybrana wyróżniona akcentem.
+#[allow(clippy::too_many_arguments)]
 fn paint_carousel_card(
     app: &App,
     selected: bool,
     hovered: bool,
+    pinned: bool,
     icon_theme: IconTheme,
     ctx: &mut PaintCtx,
     rect: Rect,
@@ -4150,6 +4294,22 @@ fn paint_carousel_card(
         weight::NORMAL,
         t.colors.dim_text,
     );
+    if pinned {
+        let badge = Rect::from_xywh(rect.right() - 30.0, rect.y() + 10.0, 22.0, 22.0);
+        ctx.scene
+            .fill_circle(badge.center(), badge.width() / 2.0, t.colors.shade);
+        paint_icon(
+            ctx,
+            IconName::Pin,
+            Rect::from_xywh(
+                badge.x() + 4.0,
+                badge.y() + 4.0,
+                badge.width() - 8.0,
+                badge.height() - 8.0,
+            ),
+            t.colors.accent,
+        );
+    }
 }
 
 /// Kolory tła i ikony dla wybranego stylu ikon.
@@ -4437,6 +4597,7 @@ mod tests {
             scroll: 0.0,
             search: String::new(),
             hover: None,
+            ..Launcher::default()
         };
         paint_launcher(
             &App::sample(),
@@ -4486,6 +4647,7 @@ mod tests {
             scroll: 0.0,
             search: String::new(),
             hover: None,
+            ..Launcher::default()
         };
         let max = launcher_scroll_max(&apps, &launcher, area(), &theme, &text);
         assert!(max > 0.0, "lista 12 pozycji powinna się przewijać");
@@ -4554,6 +4716,7 @@ mod tests {
                 scroll: 0.0,
                 search: String::new(),
                 hover: None,
+                ..Launcher::default()
             };
             let r = launcher_rects(area(), &theme, &text);
             // Punkt wnętrza znanej pozycji (pierwszy kafel/wiersz, albo środek wybranej karty).
@@ -5010,6 +5173,71 @@ mod tests {
         assert_eq!(l.scroll, 0.0);
         l.scroll_by_notches(100.0, 64.0, 500.0);
         assert_eq!(l.scroll, 500.0);
+    }
+
+    /// Przypięcie przenosi aplikację na początek listy, odpina przywraca porządek,
+    /// a wyszukiwanie nadal znajduje przypięte pozycje.
+    #[test]
+    fn pinned_apps_move_to_top() {
+        let apps = App::sample();
+        let pinned = &apps[6]; // Terminal
+        let mut l = Launcher::new();
+        assert!(!l.is_pinned(pinned));
+        assert!(l.toggle_pin(pinned));
+        assert!(l.is_pinned(pinned));
+
+        let filtered = l.filter_apps(&apps);
+        assert_eq!(filtered.len(), apps.len(), "przypięcie nie gubi pozycji");
+        assert!(std::ptr::eq(filtered[0], pinned));
+
+        l.search = "term".to_owned();
+        let hits = l.filter_apps(&apps);
+        assert!(!hits.is_empty());
+        assert!(std::ptr::eq(hits[0], pinned));
+        l.search.clear();
+
+        assert!(!l.toggle_pin(pinned));
+        let filtered = l.filter_apps(&apps);
+        assert!(std::ptr::eq(filtered[0], &apps[0]));
+    }
+
+    /// Ostatnio używane: bez duplikatów, najnowsza pierwsza, po przypiętych.
+    #[test]
+    fn recent_apps_follow_pinned() {
+        let apps = App::sample();
+        let mut l = Launcher::new();
+        l.remember_used(&apps[2]);
+        l.remember_used(&apps[3]);
+        l.remember_used(&apps[2]);
+        assert_eq!(
+            l.recent,
+            vec![apps[2].key(), apps[3].key()],
+            "powtórne uruchomienie nie tworzy duplikatu"
+        );
+
+        let filtered = l.filter_apps(&apps);
+        assert!(std::ptr::eq(filtered[0], &apps[2]));
+        assert!(std::ptr::eq(filtered[1], &apps[3]));
+
+        // Przypięta wygrywa kolejnością z „ostatnio używanymi”.
+        l.toggle_pin(&apps[3]);
+        let filtered = l.filter_apps(&apps);
+        assert!(std::ptr::eq(filtered[0], &apps[3]));
+        assert!(std::ptr::eq(filtered[1], &apps[2]));
+    }
+
+    /// Lista „ostatnio używane” jest krótka i wypycha najstarsze wpisy.
+    #[test]
+    fn recent_list_is_limited() {
+        let apps = App::sample();
+        assert!(apps.len() > Launcher::RECENT_LIMIT);
+        let mut l = Launcher::new();
+        for app in &apps {
+            l.remember_used(app);
+        }
+        assert_eq!(l.recent.len(), Launcher::RECENT_LIMIT);
+        assert_eq!(l.recent[0], apps[apps.len() - 1].key());
+        assert!(!l.recent.contains(&apps[0].key()));
     }
 
     fn tray_item(i: usize) -> TrayItem {
