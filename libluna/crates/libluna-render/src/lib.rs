@@ -15,6 +15,7 @@
 //! Rozdzielenie sceny od backendu pozwala później dodać backend GPU bez zmian
 //! w widgetach.
 
+pub mod damage;
 pub mod renderer;
 pub mod scene;
 pub mod software;
@@ -22,6 +23,7 @@ pub mod svg;
 pub mod text;
 pub mod wallpaper;
 
+pub use damage::{diff_bounds, DamageRect};
 pub use renderer::Renderer;
 pub use scene::{DrawCommand, ImageData, Scene, TextRun};
 pub use software::SoftwareRenderer;

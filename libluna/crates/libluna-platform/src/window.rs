@@ -20,7 +20,7 @@ use libluna_core::{
     Accent, ButtonState, Color, Event, IconSettings, KeyEvent, Modifiers, Point, PointerButton,
     PointerEvent, Rect, ScrollEvent, Size, Theme, ThemePreference, ThemeSettings, WindowEvent,
 };
-use libluna_render::{Renderer, Scene, SoftwareRenderer, TextEngine};
+use libluna_render::{diff_bounds, Renderer, Scene, SoftwareRenderer, TextEngine};
 
 use smithay_client_toolkit::reexports::calloop::{EventLoop, LoopHandle};
 use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
@@ -701,6 +701,7 @@ where
         } else {
             Box::new(SoftwareRenderer::new(iw, ih))
         },
+        last_frame: Vec::new(),
         settings: config.settings,
         scene: Scene::new(),
         render: Box::new(render),
@@ -716,6 +717,7 @@ where
         applied_input_region: Some(InputRegion::Auto),
         stats: std::env::var("LUNA_STATS").is_ok(),
         stat_frames: 0,
+        stat_skipped: 0,
         stat_ms_draw: 0.0,
         stat_ms_present: 0.0,
         stat_report: Instant::now(),
@@ -834,6 +836,8 @@ struct App {
     paste_busy: Arc<AtomicBool>,
     modifiers: Modifiers,
     renderer: Box<dyn Renderer>,
+    /// Poprzednia klatka (RGBA8888) — do wyznaczania prostokąta uszkodzenia.
+    last_frame: Vec<u8>,
     settings: ThemeSettings,
     scene: Scene,
     render: Box<RenderFn>,
@@ -853,6 +857,8 @@ struct App {
     /// Diagnostyka (`LUNA_STATS=1`): koszt rysowania i wysyłki bufora.
     stats: bool,
     stat_frames: u64,
+    /// Klatki pominięte przez damage lite (identyczne z poprzednią).
+    stat_skipped: u64,
     stat_ms_draw: f64,
     stat_ms_present: f64,
     stat_report: Instant,
@@ -1016,7 +1022,7 @@ impl App {
         }
 
         let t_present = Instant::now();
-        self.present();
+        let presented = self.present(input_changed);
         let ms_present = t_present.elapsed().as_secs_f64() * 1000.0;
         self.apply_actions();
 
@@ -1027,16 +1033,21 @@ impl App {
             self.stat_ms_draw += t_draw.elapsed().as_secs_f64() * 1000.0 - ms_present;
             self.stat_ms_present += ms_present;
             self.stat_frames += 1;
+            if !presented {
+                self.stat_skipped += 1;
+            }
             let secs = self.stat_report.elapsed().as_secs_f64();
             if secs >= 2.0 {
                 let n = self.stat_frames.max(1) as f64;
                 eprintln!(
-                    "luna-platform: {:.1} prezentacji/s | rysowanie {:.2} ms, wysyłka {:.2} ms",
+                    "luna-platform: {:.1} klatek/s (pominięte {:.1}/s) | rysowanie {:.2} ms, wysyłka {:.2} ms",
                     self.stat_frames as f64 / secs,
+                    self.stat_skipped as f64 / secs,
                     self.stat_ms_draw / n,
                     self.stat_ms_present / n
                 );
                 self.stat_frames = 0;
+                self.stat_skipped = 0;
                 self.stat_ms_draw = 0.0;
                 self.stat_ms_present = 0.0;
                 self.stat_report = Instant::now();
@@ -1249,11 +1260,26 @@ impl App {
         self.renderer.draw(&self.scene, scale, bg);
     }
 
-    fn present(&mut self) {
+    fn present(&mut self, force_commit: bool) -> bool {
         let (width, height, scale) = (self.width, self.height, self.scale);
         let phys_w = (width as f64 * scale).round().max(1.0) as u32;
         let phys_h = (height as f64 * scale).round().max(1.0) as u32;
         let stride = phys_w as i32 * 4;
+
+        // Damage lite: porównanie z poprzednią klatką pozwala pominąć commit,
+        // gdy nic się nie zmieniło, i zawęzić `damage_buffer` do realnego obszaru.
+        let pixels = self.renderer.data();
+        let Some(damage) = diff_bounds(&self.last_frame, pixels, phys_w, phys_h) else {
+            // Klatka identyczna — bez kopiowania i bez nowego bufora. Commit jest
+            // potrzebny tylko wtedy, gdy zmienił się inny stan powierzchni (np. region
+            // wejścia), bo inaczej zmiana czekałaby do najbliższej zmiany pikseli.
+            if force_commit {
+                self.target.commit();
+            }
+            // Aktualizujemy czas, żeby pętla nie próbowała odświeżać w kółko (~60 Hz).
+            self.last_present = Instant::now();
+            return false;
+        };
 
         // Preferujemy format natywny dla renderera (`RGBA` w pamięci): `Abgr8888`
         // (z alfą, panele) albo `Xbgr8888` (okna nieprzezroczyste). Dzięki temu
@@ -1300,7 +1326,6 @@ impl App {
             }
         };
 
-        let pixels = self.renderer.data();
         let count = (phys_w as usize * phys_h as usize)
             .min(canvas.len() / 4)
             .min(pixels.len() / 4);
@@ -1338,10 +1363,18 @@ impl App {
         }
 
         let surface = self.target.surface();
-        surface.damage_buffer(0, 0, phys_w as i32, phys_h as i32);
+        surface.damage_buffer(
+            damage.x as i32,
+            damage.y as i32,
+            damage.width as i32,
+            damage.height as i32,
+        );
         buffer.attach_to(surface).expect("buffer attach");
         self.target.commit();
+        self.last_frame.clear();
+        self.last_frame.extend_from_slice(pixels);
         self.last_present = Instant::now();
+        true
     }
 
     /// Ustawia region wejścia, gdy zmienił się od poprzedniej klatki.

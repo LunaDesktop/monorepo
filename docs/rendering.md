@@ -38,9 +38,12 @@ szczegóły EGL/dmabuf/synchronizacji zostają w jego implementacji.
 - `Scene` jest **niezależna od backendu**: prostokąty, zaokrąglenia, obwódki,
   clip (także zaokrąglony), linie, okręgi, wielokąty, tekst, obrazy, tło.
 - `Scene` nie zna pikseli fizycznych — `scale` przelicza współrzędne logiczne.
-- Każda klatka jest budowana od zera (`Scene::clear()`), więc „damage tracking”
-  wymaga osobnego mechanizmu — dziś platforma wysyła pełny prostokąt powierzchni
-  (`wl_surface.damage_buffer(0, 0, w, h)`).
+- Każda klatka jest budowana od zera (`Scene::clear()`). Platforma porównuje gotowy
+  bufor z poprzednią klatką (`damage::diff_bounds`) i:
+  - pomija `wl_surface.commit`, gdy klatka jest identyczna,
+  - zawęża `wl_surface.damage_buffer` do najmniejszego zmienionego prostokąta.
+  To **damage lite** — nie zastępuje jeszcze selektywnego rysowania sceny
+  (pełny damage tracking raportowany przez widgety jest osobnym etapem).
 
 ## 2. Benchmark
 
@@ -103,6 +106,9 @@ Wnioski:
 - Samo wypełnienie 2560×1440 jest tanie; koszt rośnie z liczbą ścieżek i glifów.
 - Bufor klatki to 4,1 MiB (1280×800), 8,3 MiB (1920×1080), 14,7 MiB (2560×1440).
   `wl_shm` z double bufferingiem może trzymać dwa takie bufory.
+- **Damage lite** dokłada jedną kopię poprzedniej klatki na proces (tyle samo co
+  bufor), żeby porównywać piksele. To świadomy koszt pamięci za mniejszy ruch do
+  kompozytora i brak pustych commitów.
 
 ## 3. Kiedy GPU ma sens
 
@@ -125,8 +131,10 @@ Dlatego kolejność to **damage → mniej komend → ewentualnie GPU**.
 
 ## 4. Następne kroki (renderer)
 
-- [ ] Damage tracking: `Scene`/platforma raportują prostokąty uszkodzeń zamiast
-      pełnego bufora; `wl_surface.damage_buffer` przyjmuje listę.
+- [x] **Damage lite**: `libluna_render::damage::diff_bounds` porównuje klatki,
+      pomija identyczne `commit` i zawęża `damage_buffer` do zmienionego prostokąta.
+- [ ] Pełny damage tracking: `Scene`/widgety raportują prostokąty uszkodzeń, renderer
+      nie rysuje całej sceny (dziś nadal budujemy ją od zera).
 - [ ] Cache glifów i ścieżek między klatkami (dziś `tiny-skia` buduje ścieżki od nowa).
 - [ ] Benchmark w CI z progiem (`--json` + porównanie do baseline).
 - [ ] Backend GPU za `Renderer` (EGL/wgpu) dopiero po powyższych.
@@ -134,7 +142,8 @@ Dlatego kolejność to **damage → mniej komend → ewentualnie GPU**.
 
 ## 5. Diagnostyka w działającej sesji
 
-- `LUNA_STATS=1` — platforma wypisuje prezentacje/s, czas rysowania i wysyłki.
+- `LUNA_STATS=1` — platforma wypisuje klatki/s, ile z nich pominięto (`damage lite`)
+  oraz czas rysowania i wysyłki.
 - `SELENE_STATS=1` — kompozytor: FPS wyjścia i tempo kursora.
 - `scripts/session-smoke.sh` — poprawność przepływu (nie wydajność).
 - Zrzuty: `Print` / `Super+F12` w Selene; podglądy headless renderują do PNG.
