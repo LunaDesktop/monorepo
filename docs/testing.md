@@ -98,6 +98,21 @@ więc test nie zależy od języka ani motywu z `~/.config`.
    znak wysłany po zablokowaniu nie dociera do terminala pod spodem.
 8. **Zakończenie** — wszystkie procesy kończą się po `SIGTERM` (brak zawieszonych klientów).
 
+### Test X11 (`scripts/x11-smoke.sh`)
+
+Osobny test dla ścieżki `Xwayland + XWM` (wymaga `xclock` z pakietu `x11-apps`):
+
+```sh
+./scripts/x11-smoke.sh
+# lub
+make smoke-x11
+```
+
+Sprawdza: start Xwaylanda i marker `luna-display`, `wm=true` z
+`luna-control x11`, okno `xclock` jako zwykłe okno (nie warstwa),
+**maksymalizację** i **zamknięcie** przyciskami naszego SSD oraz to, że szerokość
+po maksymalizacji to dokładnie szerokość monitora (regresja obramowania X11).
+
 ### Czego harness nie robi
 
 - **Nie loguje się przez greeter** (`greetd`/PAM) i **nie odblokowuje** ekranu hasłem —

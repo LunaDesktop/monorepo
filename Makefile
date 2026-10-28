@@ -19,7 +19,7 @@ ROOT := $(CURDIR)
 CARGO_TARGET_DIR ?= $(ROOT)/target
 export CARGO_TARGET_DIR
 
-.PHONY: all build check test test-doc smoke bench-render lock install install-terminal icons icons-png clean fmt \
+.PHONY: all build check test test-doc smoke smoke-x11 bench-render bench-gpu lock install install-terminal icons icons-png clean fmt \
 	web-assets web-api web-docs
 
 all: build
@@ -38,6 +38,12 @@ test-doc:
 
 smoke:
 	./scripts/workspaces.sh smoke
+
+smoke-x11:
+	./scripts/x11-smoke.sh
+
+bench-gpu:
+	cargo run --release --manifest-path libluna/Cargo.toml -p libluna-render --example gpu_probe
 
 bench-render:
 	cargo run --release --manifest-path libluna/Cargo.toml -p libluna-render --example render_bench

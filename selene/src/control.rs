@@ -107,6 +107,29 @@ fn handle(state: &mut State, line: &str) {
                 );
             }
         }
+        // `x11` — diagnostyka XWayland/XWM: ekran, właściciel WM, liczba okien.
+        // Używane przez `scripts/x11-smoke.sh` i przy diagnozie „aplikacja X11 się nie mapuje”.
+        "x11" => match crate::xwm::global() {
+            Some(xwm) => {
+                let s = xwm.status();
+                eprintln!(
+                    "selene/control: x11 display=:{} wm={} managed={} windows={}",
+                    s.display, s.is_wm, s.managed, s.windows
+                );
+                for (win, info) in xwm.managed_info() {
+                    eprintln!(
+                        "selene/control:   x11 0x{win:x} \"{}\" content={}x{} border={} csd={} over={}",
+                        info.title,
+                        info.width,
+                        info.height,
+                        info.border,
+                        info.client_decorations,
+                        info.override_redirect
+                    );
+                }
+            }
+            None => eprintln!("selene/control: x11 display=- wm=false managed=0 windows=0"),
+        },
         // `screenshot` — zapis klatek wszystkich monitorów (Super+F12).
         "screenshot" => {
             if std::env::var("SELENE_STATS").is_ok() {

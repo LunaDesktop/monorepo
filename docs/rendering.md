@@ -151,11 +151,17 @@ Dlatego kolejność to **damage → mniej komend → ewentualnie GPU**.
       dla zwykłych prostokątów.
 - [ ] **Cache rastrowy kształtów** (np. 9-slice dla kart/przycisków) — to dopiero
       zaatakuje dominujący koszt rasteryzacji zaokrągleń.
+- [x] **Sonda GPU** (`examples/gpu_probe`): EGL surfaceless + GLES2, pomiar
+      kompozycji vs CPU i wykrywanie `EGL_EXT_image_dma_buf_import`. Wyniki i plan:
+      [`docs/gpu.md`](gpu.md). Na dev-karcie 30 okien 1080p: 0,80 ms GPU vs 49,8 ms CPU
+      (+1,19 ms readback).
+- [ ] **`GpuCompositor` w Selene** (etap 1 z `gpu.md`) za `SELENE_GPU=1`, z fallbackiem CPU.
+- [ ] **`zwp_linux_dmabuf_v1`** (etap 2) — import buforów GPU klientów.
+- [ ] Backend GPU za `Renderer` dla scen libLuny (etap 3) — najpierw obrazy/zaokrąglenia.
 - [ ] Pełny damage tracking: `Scene`/widgety raportują prostokąty uszkodzeń, renderer
       nie rysuje całej sceny (dziś nadal budujemy ją od zera).
 - [ ] Cache glifów i ścieżek między klatkami (dziś `tiny-skia` buduje ścieżki od nowa).
 - [ ] Benchmark w CI z progiem (`--json` + porównanie do baseline).
-- [ ] Backend GPU za `Renderer` (EGL/wgpu) dopiero po powyższych.
 - [ ] Porównanie z GTK4 na tych samych scenach (Definition of Done z roadmapy).
 
 ## 5. Diagnostyka w działającej sesji

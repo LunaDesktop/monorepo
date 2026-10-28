@@ -59,6 +59,9 @@ pub struct X11Info {
     pub y: i32,
     pub width: i32,
     pub height: i32,
+    /// Szerokość obramowania X11 (`border_width` z `GetGeometry`).
+    /// Bufor Waylanda z Xwaylanda zawiera obramowanie, a my pokazujemy treść.
+    pub border: u32,
 }
 
 impl X11Info {
@@ -139,6 +142,39 @@ pub struct XwmState {
     ewmh: HashMap<Window, (bool, bool)>,
     /// Czy udało się zostać menedżerem okien X11.
     pub is_wm: bool,
+    /// Numer ekranu X11 (`DISPLAY=:N`); 0 przed połączeniem.
+    pub display: u32,
+}
+
+/// Stan X11 do diagnostyki (`luna-control x11`, testy sesji).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct X11Status {
+    pub display: u32,
+    pub is_wm: bool,
+    /// Okna zarządzane (na `_NET_CLIENT_LIST`).
+    pub managed: usize,
+    /// Wszystkie znane okna X11 (z nadrzędnymi i override-redirect).
+    pub windows: usize,
+}
+
+impl XwmState {
+    /// Stan X11 do diagnostyki.
+    pub fn status(&self) -> X11Status {
+        X11Status {
+            display: self.display,
+            is_wm: self.is_wm,
+            managed: self.managed.len(),
+            windows: self.windows.len(),
+        }
+    }
+
+    /// Okna zarządzane z informacjami z X11 (tytuł, treść, obramowanie).
+    pub fn managed_info(&self) -> Vec<(Window, X11Info)> {
+        self.managed
+            .iter()
+            .filter_map(|w| self.windows.get(w).map(|i| (*w, i.clone())))
+            .collect()
+    }
 }
 
 impl XwmState {
@@ -207,6 +243,16 @@ impl Xwm {
         self.state.lock_or_recover().is_wm
     }
 
+    /// Stan X11 do diagnostyki (numer ekranu, WM, liczba okien).
+    pub fn status(&self) -> X11Status {
+        self.state.lock_or_recover().status()
+    }
+
+    /// Okna zarządzane z informacjami z X11.
+    pub fn managed_info(&self) -> Vec<(Window, X11Info)> {
+        self.state.lock_or_recover().managed_info()
+    }
+
     fn send(&self, cmd: XwmCommand) {
         // Kanał jest jedynym sposobem rozmowy z wątkiem X11; jego zamknięcie (X11 padł)
         // nie może przewrócić kompozytora.
@@ -256,6 +302,11 @@ pub fn spawn(display: u32) {
     let (tx, rx) = std::sync::mpsc::channel();
     let state: Arc<Mutex<XwmState>> = Arc::new(Mutex::new(XwmState::default()));
     let st = Arc::clone(&state);
+    {
+        // Numer ekranu znamy od razu — `x11` w `luna-control` ma go pokazać
+        // nawet przed udanym połączeniem.
+        st.lock_or_recover().display = display;
+    }
 
     std::thread::spawn(move || {
         // 1) Połączenie z X11 — z ponowieniami (Xwayland wstaje asynchronicznie).
@@ -462,6 +513,9 @@ fn handle_event(
                     info.y = i32::from(e.y);
                     info.width = i32::from(e.width);
                     info.height = i32::from(e.height);
+                    // Obramowanie trzeba znać **przed** pierwszym commitem, bo Xwayland
+                    // tworzy bufor razem z nim (inaczej okno startuje o 2 px za szerokie).
+                    info.border = window_border(conn, e.window);
                 }
             }
         }
@@ -913,8 +967,21 @@ fn read_info(conn: &RustConnection, atoms: &Atoms, window: Window) -> X11Info {
         override_redirect: is_override_redirect(conn, window),
         kind,
         client_decorations: has_client_decorations(conn, atoms, window),
+        border: window_border(conn, window),
         ..X11Info::default()
     }
+}
+
+/// Szerokość obramowania X11 (`border_width` z `GetGeometry`).
+///
+/// `ConfigureNotify` go nie zawiera, a Xwayland wlicza obramowanie do bufora
+/// Waylanda — bez tej wartości model okna byłby o `2 × border` za duży.
+fn window_border(conn: &RustConnection, window: Window) -> u32 {
+    conn.get_geometry(window)
+        .ok()
+        .and_then(|c| c.reply().ok())
+        .map(|g| u32::from(g.border_width))
+        .unwrap_or(0)
 }
 
 /// Czy klient chce sam rysować dekoracje (`_MOTIF_WM_HINTS` z wyłączonymi dekoracjami).
@@ -1156,7 +1223,19 @@ fn sync_window_info(state: &mut State) {
                 let w = windows.get(slot)?;
                 let moved =
                     is_popup && info.width > 0 && (w.x != info.x as f64 || w.y != info.y as f64);
-                w.title != info.title || w.ssd != info.decorated() || w.popup != is_popup || moved
+                // X11: model trzyma **treść** (bez obramowania), a bufor jest o nie większy.
+                // XWM działa w osobnym wątku, więc pierwszy `commit` mógł wyprzedzić
+                // `WL_SURFACE_SERIAL` — tutaj domykamy różnicę i wymuszamy przeliczenie.
+                let b = info.border.min(8) as i32;
+                let resized = !is_popup
+                    && b > 0
+                    && (w.width != (w.data.width as i32 - 2 * b).max(1)
+                        || w.height != (w.data.height as i32 - 2 * b).max(1));
+                w.title != info.title
+                    || w.ssd != info.decorated()
+                    || w.popup != is_popup
+                    || moved
+                    || resized
             };
             changed.then_some((slot, info))
         })
@@ -1177,6 +1256,21 @@ fn sync_window_info(state: &mut State) {
                 w.title = info.title.clone();
                 w.ssd = info.decorated();
                 w.popup = is_popup;
+                // X11: model = treść klienta; bufor rysujemy przesunięty o obramowanie.
+                if !is_popup {
+                    let b = info.border.min(8) as i32;
+                    let (cw, ch) = if b > 0 {
+                        (
+                            (w.data.width as i32 - 2 * b).max(1),
+                            (w.data.height as i32 - 2 * b).max(1),
+                        )
+                    } else {
+                        (w.data.width as i32, w.data.height as i32)
+                    };
+                    w.width = cw;
+                    w.height = ch;
+                    w.image_offset = (f64::from(b), f64::from(b));
+                }
                 // Menu X11 ma współrzędne absolutne — ustawiamy je dokładnie tam,
                 // gdzie klient je otworzył (klik w menu wtedy trafia w menu).
                 if is_popup && info.width > 0 && info.height > 0 {

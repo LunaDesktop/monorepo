@@ -31,6 +31,8 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
 - Graf sceny: prostokąty, zaokrąglone prostokąty, obcinanie (clip), cień, obrazy/ikony SVG.
 - `libluna-text`: shaping/układanie (Pango albo cosmic-text), fallback fontów, ellipsis.
 - `damage`/częściowe odświeżanie.
+- ✅ **Sonda GPU** (`examples/gpu_probe`): EGL surfaceless + GLES2, ~60× szybsza
+  kompozycja 30 okien 1080p od CPU; plan i pomiary w [`docs/gpu.md`](gpu.md).
 
 ## M2.5 — Widgety (start) — ⏳ W TOKU
 - `libluna-widgets`: widgety wielokrotnego użytku w modelu immediate — `ViewSwitcher`, `NavList`,
@@ -182,6 +184,10 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   ✅ M-K8: **wejście evdev** (`SELENE_INPUT=evdev`): własne czytanie `/dev/input/event*`
   (wskaźnik względny z wirtualnym kursorem, przyciski, kółko, klawiatura) — rodzime wejście
   dla trybu DRM. Wymaga grupy `input`/root.
+  ✅ **X11 (XWayland + XWM)**: `xwayland_shell_v1`, EWMH, SSD, CSD, menu X11, a także
+  **diagnostyka** `luna-control x11` i test end-to-end `scripts/x11-smoke.sh`
+  (`make smoke-x11`). Model okna X11 używa **treści** (bez `border_width`), więc
+  maksymalizacja daje dokładnie szerokość monitora.
   ✅ Optymalizacje: cache `mmap` puli `wl_shm` i zero-copy w rendererze (`PixmapRef::from_bytes`).
   Uruchomienie: `cargo run --manifest-path selene/Cargo.toml` (szczegóły: `de/README.md`).
 - Dalej: GLES/akceleracja, hotplug monitorów (`zwlr_output_manager`), `libinput` (gesty),

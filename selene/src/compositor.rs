@@ -361,6 +361,10 @@ fn composite(
     let mut x11_popup = false;
     let mut x11_ssd = true;
     let mut x11_pos: Option<(f64, f64)> = None;
+    // Szerokość obramowania X11: bufor Waylanda je zawiera, a model ma opisywać treść.
+    let mut x11_border = 0u32;
+    // Szerokość treści z `ConfigureNotify` — tylko podpowiedź dla wyliczenia obramowania.
+    let mut x11_content_w = 0i32;
     if is_x11 {
         let serial = *data.x11_serial.lock_or_recover();
         if let Some(info) = crate::xwm::global().and_then(|x| x.info_for_serial(serial)) {
@@ -370,6 +374,8 @@ fn composite(
             x11_popup = info.override_redirect || info.kind == crate::xwm::X11Kind::Transient;
             x11_ssd = info.decorated();
             x11_title = info.title;
+            x11_border = info.border;
+            x11_content_w = info.width;
             // Menu X11 ma współrzędne absolutne — stawiamy je tam, gdzie klient chce,
             // a nie w kaskadzie (inaczej klik w widoczne menu trafia obok).
             if x11_popup && info.width > 0 && info.height > 0 {
@@ -471,6 +477,29 @@ fn composite(
                 ),
             ),
             _ => ((0.0, 0.0), (bw, bh)),
+        }
+    } else if !x11_popup {
+        // Okno X11: model = treść klienta, bufor może być większy o obramowanie X11.
+        // Rysujemy go przesuniętego o `border`, dzięki czemu obramowanie zostaje
+        // na ekranie, a okno nie przekracza obszaru roboczego po maksymalizacji.
+        //
+        // XWM działa w osobnym wątku, więc przy pierwszej klatce `info.border` może
+        // być jeszcze 0. Wtedy wyprowadzamy je z różnicy: Xwayland wlicza obramowanie
+        // do bufora, więc `(bw - treść) / 2` to `border_width`. Guard na różnicę chroni
+        // przed nieświeżym `ConfigureNotify` po zmianie rozmiaru (skok o setki px).
+        let derived = if x11_content_w > 0 && bw > x11_content_w && bw - x11_content_w <= 16 {
+            ((bw - x11_content_w) / 2) as u32
+        } else {
+            0
+        };
+        let b = x11_border.max(derived).min(8) as i32;
+        if b > 0 {
+            (
+                (f64::from(b), f64::from(b)),
+                ((bw - 2 * b).max(1), (bh - 2 * b).max(1)),
+            )
+        } else {
+            ((0.0, 0.0), (bw, bh))
         }
     } else {
         ((0.0, 0.0), (bw, bh))
