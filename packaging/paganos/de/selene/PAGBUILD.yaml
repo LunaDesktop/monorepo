@@ -7,13 +7,13 @@
 # również w tym katalogu (pagbuild kopiuje pliki z katalogu receptury do katalogu budowy).
 
 pkgname: selene
-pkgver: '0.0.1'
+pkgver: '0.0.5'
 pkgrel: 1
 pkgdesc: 'Selene — kompozytor Wayland środowiska Luna (czysty Rust, bez smithay): xdg-shell, layer-shell, SSD, DRM/KMS, schowek, DnD'
 url: 'https://git.paganlinux.eu/luna.git'
 arch: x86_64
 license:
-- MPL-2.0
+- GPL-3.0-or-later
 depends:
 - libxkbcommon
 - dejavu-ttf

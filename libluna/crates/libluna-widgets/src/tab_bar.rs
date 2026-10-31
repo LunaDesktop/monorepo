@@ -361,7 +361,19 @@ impl TabBar {
             let close_shown = tab.closable && (selected || hovered);
             let offset = if tab.closable { m.close / 2.0 } else { 0.0 };
             let cx = seg.center().x - offset;
-            ctx.label_center(cx, seg.center().y, &tab.title, size, weight, fg);
+            let reserve = if tab.closable {
+                m.close + m.pad_x / 2.0
+            } else {
+                0.0
+            };
+            let label = elide_label(
+                text,
+                &tab.title,
+                (seg.width() - 2.0 * m.pad_x - reserve).max(0.0),
+                size,
+                weight,
+            );
+            ctx.label_center(cx, seg.center().y, &label, size, weight, fg);
 
             if close_shown {
                 let c = close_center(*seg, m.close, m.pad_x);
@@ -404,6 +416,35 @@ impl TabBar {
 /// Środek przycisku zamknięcia w zakładce (wspólny dla rysowania i trafień).
 fn close_center(seg: Rect, close: f64, pad_x: f64) -> Point {
     Point::new(seg.right() - pad_x / 2.0 - close / 2.0, seg.center().y)
+}
+
+/// Skraca etykietę do `max_width`, dodając wielokropek.
+fn elide_label(text: &TextEngine, value: &str, max_width: f64, size: f64, weight: u16) -> String {
+    if max_width <= 0.0 {
+        return String::new();
+    }
+    if text.measure(value, size, weight).width <= max_width {
+        return value.to_owned();
+    }
+    let ellipsis = "…";
+    let ellipsis_width = text.measure(ellipsis, size, weight).width;
+    if ellipsis_width >= max_width {
+        return ellipsis.to_owned();
+    }
+    let mut out = String::new();
+    let mut width = 0.0;
+    for ch in value.chars() {
+        let mut buffer = [0u8; 4];
+        let piece = ch.encode_utf8(&mut buffer);
+        let width_ch = text.measure(piece, size, weight).width;
+        if width + width_ch + ellipsis_width > max_width {
+            break;
+        }
+        out.push(ch);
+        width += width_ch;
+    }
+    out.push('…');
+    out
 }
 
 #[cfg(test)]
@@ -469,6 +510,21 @@ mod tests {
         let seg0 = closable.segments(r, &text, &theme)[0];
         let c = close_center(seg0, theme.metrics.tabs.close, theme.metrics.tabs.pad_x);
         assert_eq!(closable.close_at(r, &text, &theme, c), Some(0));
+    }
+
+    #[test]
+    fn long_titles_are_elided_to_the_tab() {
+        let text = TextEngine::system();
+        let theme = theme();
+        let m = theme.metrics.tabs;
+        let title = "bardzo-dluga-nazwa-pliku-ktora-na-pewno-nie-miesci-sie-w-zakladce.rs";
+        let bar = TabBar::with_tabs(vec![Tab::new(title).closable(true)]).expand(false);
+        let seg = bar.segments(Rect::from_xywh(0.0, 0.0, 140.0, 34.0), &text, &theme)[0];
+        let size = theme.typography.body.size;
+        let available = (seg.width() - 2.0 * m.pad_x - m.close - m.pad_x / 2.0).max(0.0);
+        let label = elide_label(&text, title, available, size, weight::NORMAL);
+        assert!(label.ends_with('…'));
+        assert!(text.measure(&label, size, weight::NORMAL).width <= available + 0.5);
     }
 
     #[test]

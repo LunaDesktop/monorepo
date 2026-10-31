@@ -1,0 +1,22 @@
+[package]
+name = "luna-eq"
+version = "0.0.1"
+edition = "2021"
+license = "GPL-3.0-or-later"
+rust-version = "1.80"
+authors = ["Patryk Szkudlarek / libLuna contributors"]
+description = "10-pasmowy korektor graficzny dla Luny — wtyczka LADSPA dla PipeWire"
+
+[workspace]
+resolver = "2"
+
+[lib]
+name = "luna_eq"
+path = "src/lib.rs"
+# `cdylib` = wtyczka ładowana przez PipeWire (filter-chain), `rlib` = testy jednostkowe.
+crate-type = ["cdylib", "rlib"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

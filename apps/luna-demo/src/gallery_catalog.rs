@@ -836,7 +836,12 @@ if let Some(i) = view.index_at(rect, pos, theme) {
     Column::new("Size"),
 ]);
 table.set_rows(5);
-table.paint(ctx, rect);"#,
+table.set_selected(Some(1));
+table.paint(ctx, rect);
+
+if let Some(row) = table.row_at(rect, theme, pos) {
+    table.set_selected(Some(row));
+}"#,
         preview: pv::column_view,
     },
     DemoSpec {
@@ -898,7 +903,11 @@ pic.paint(ctx, rect);"#,
         code: r#"let bar = InfoBar::new("Storage almost full")
     .kind(InfoBarKind::Warning)
     .action("Manage");
-bar.paint(ctx, rect);"#,
+bar.paint(ctx, rect);
+
+if bar.action_at(rect, theme, text, pos).is_some() {
+    open_storage();
+}"#,
         preview: pv::info_bar,
     },
     DemoSpec {
@@ -910,7 +919,11 @@ bar.paint(ctx, rect);"#,
     .kind(BannerKind::Info)
     .description("libLuna 0.0.2 is ready.")
     .action("Install");
-banner.paint(ctx, rect);"#,
+banner.paint(ctx, rect);
+
+if banner.action_at(rect, theme, text, pos).is_some() {
+    install_update();
+}"#,
         preview: pv::banner,
     },
     DemoSpec {
@@ -933,7 +946,11 @@ toast.paint(ctx, window_size);"#,
     .icon(StatusIcon::Search)
     .description("Try another phrase")
     .action("Clear");
-page.paint(ctx, rect);"#,
+page.paint(ctx, rect);
+
+if page.action_at(rect, theme, pos) {
+    clear_search();
+}"#,
         preview: pv::status_page,
     },
     DemoSpec {
@@ -966,7 +983,18 @@ popover.paint(ctx, panel);"#,
         code: r#"let bar = HeaderBar::new()
     .title("Files")
     .controls(ControlsSide::Right);
-bar.paint(ctx, rect, hovered_control);"#,
+bar.paint(ctx, rect, hovered_control);
+
+let layout = bar.controls_layout(rect, theme);
+if let Some(control) = bar.control_at(rect, theme, pos) {
+    handle(control);
+}
+
+// Inne warianty:
+let start = HeaderBar::new()
+    .title("Docs")
+    .title_align(TitleAlign::Start);
+let left = HeaderBar::new().controls(ControlsSide::Left);"#,
         preview: pv::header_bar,
     },
     DemoSpec {
@@ -1067,8 +1095,11 @@ if sheet.close_at(window_size, theme, pos) {
 ]);
 wizard.paint(ctx, rect, "Cancel", "Next");
 
-if wizard.is_last() {
-    finish();
+let [cancel, next] = wizard.buttons(rect, text, theme, "Cancel", "Next");
+if next.contains(pos) {
+    if wizard.is_last() { finish(); } else { wizard.next(); }
+} else if cancel.contains(pos) {
+    close();
 }"#,
         preview: pv::assistant,
     },
@@ -1077,4 +1108,236 @@ if wizard.is_last() {
 /// Liczba widgetów w katalogu (do nagłówka galerii).
 pub fn widget_count() -> usize {
     DEMOS.len()
+}
+
+/// Krótka nota „jak użyć” wyświetlana pod przykładem kodu.
+///
+/// Opisuje podział odpowiedzialności: co robi widget, a co zostaje po stronie
+/// aplikacji (stan, animacja, nawigacja). Dla kontenerów układu zwraca wspólny
+/// kontrakt `paint`, a dla pozostałych — najważniejszą metodę interakcji.
+pub fn notes(name: &str) -> &'static str {
+    match name {
+        "Button" => {
+            "Stan wizualny (`set_hovered`, `set_pressed`) ustawia aplikacja. `click_at` tylko \
+             sprawdza trafienie — akcję wykonuje aplikacja."
+        }
+        "ToggleButton / LinkButton / ColorButton" => {
+            "`ToggleButton` trzyma stan `active`, `LinkButton` jest akcją tekstową, a \
+             `ColorButton` tylko prezentuje próbkę koloru. Zapis wyboru należy do aplikacji."
+        }
+        "SplitButton" => {
+            "`rects` dzieli przycisk na część główną i strzałkę; `main_at` / `arrow_at` \
+             rozstrzygają, którą akcję kliknięto."
+        }
+        "MenuButton" => {
+            "`set_open` steruje wyglądem przycisku. Samo menu rysujesz osobno przez \
+             `Menu::place` i obsługujesz jego trafienia."
+        }
+        "Label" => "Etykieta jest bezstanowa — `bold`, `dim` i `align` ustawiasz przy tworzeniu.",
+        "Separator" => {
+            "Bezstanowa linia; orientację wybierasz przez `horizontal()` / `vertical()`."
+        }
+        "Image" => "Rysuje ikonę z zestawu `ImageIcon`; rozmiar podajesz metodą `size`.",
+        "Avatar" => "Inicjały i kolor wylicza z tekstu; rozmiar skaluje się tokenem motywu.",
+        "Spinner" => {
+            "Animację napędza aplikacja: w każdej klatce zwiększaj `progress` i wołaj `paint`."
+        }
+        "ProgressBar / LevelBar" => {
+            "`fraction` / `value` są tylko wejściem rysowania. Aplikacja aktualizuje je po \
+             swojej stronie (np. po zakończeniu zadania)."
+        }
+        "ShortcutLabel" => "Przyjmuje listę klawiszy i rysuje je jako osobne klawisze.",
+        "Tooltip" => {
+            "Pozycję liczy `rect(anchor, theme, text)`; `paint` rysuje dymek we wskazanym \
+             prostokącie."
+        }
+        "IconName / paint_icon" => {
+            "`paint_icon` rysuje ikonę w dowolnym prostokącie; `IconName` to zamknięty zestaw \
+             kształtów z jednej palety."
+        }
+        "Entry" => {
+            "Stan tekstu i kursora jest w `Entry`. Trait `TextInput` obsługuje edycję, a \
+             `set_focused(true)` włącza kursor."
+        }
+        "EditableLabel" => {
+            "Dwa tryby: etykieta i edycja. Przełączasz je przez `start_editing` / \
+             `stop_editing`, a wynik czytasz po zatwierdzeniu."
+        }
+        "PasswordEntry" => {
+            "Maskuje tekst; `peek_at` / `toggle_peek` obsługują podgląd hasła. Wartość \
+             czytasz przez `text()`."
+        }
+        "SearchEntry" => {
+            "Jak `Entry`, plus lupka i `clear_at`. Wpisany tekst filtruje listę po stronie \
+             aplikacji — widget nie zna wyników."
+        }
+        "SearchBar" => {
+            "`toggle` / `is_search_mode` przełączają tryb. Pole wyszukiwania rysujesz w \
+             prostokącie z `entry_rect`."
+        }
+        "TextView" => {
+            "Wielolinijkowy edytor: `insert_*`, `backspace` i `move_*` obsługują klawiaturę. \
+             Zawijanie długich linii należy do aplikacji."
+        }
+        "SpinButton" => {
+            "`click_at` obsługuje strzałki, a `TextInput` pozwala wpisać wartość. Zakres \
+             podajesz w `new`."
+        }
+        "Stepper" => {
+            "`side_at` mówi, czy kliknięto `−` czy `+`; wartość zmieniasz przez `inc` / `dec` \
+             i czytasz przez `value`."
+        }
+        "Slider" => {
+            "`hit` sprawdza tor, a `value_at` przelicza pozycję na 0..1. Przeciąganie \
+             (pointer motion) obsługuje aplikacja."
+        }
+        "Switch" => "`click_at` przełącza stan w strukturze; aplikacja czyta go przez `is_on`.",
+        "CheckButton" => {
+            "`click_at` przełącza zaznaczenie; etykieta jest częścią obszaru trafienia."
+        }
+        "RadioGroup" => "`click_at` wybiera opcję, a `selected` zwraca jej indeks.",
+        "DropDown" => {
+            "`click_at` otwiera listę. `menu()` zwraca gotowe `Menu`, które rysujesz i \
+             obsługujesz osobno."
+        }
+        "ToggleGroup" => {
+            "Segmenty są niezależne: `click_at` zwraca indeks klikniętego, a stan trzyma \
+             aplikacja."
+        }
+        "Calendar" => {
+            "`day_at` zwraca kliknięty dzień, `prev_month` / `next_month` zmieniają miesiąc. \
+             Tytuł i nazwy dni tygodnia podaje aplikacja."
+        }
+        "ColorChooser" => "`click_at` ustawia zaznaczenie; `selected_color` zwraca wybrany kolor.",
+        "EmojiChooser" => "Siatka symboli: `click_at` wybiera, a `selected_emoji` zwraca tekst.",
+        "ViewSwitcher" => {
+            "`index_at` zwraca kliknięty segment; zaznaczenie ustawiasz przez `set_selected`."
+        }
+        "NavList" => "`click_at` wybiera pozycję; nagłówki sekcji nie są klikalne.",
+        "NavigationRail" => "Pionowy odpowiednik `NavList`; `click_at` zmienia zaznaczenie.",
+        "TabBar" => {
+            "`click_at` wybiera zakładkę i obsługuje przyciski zamykania; `selected` zwraca \
+             indeks aktywnej."
+        }
+        "TabView" => {
+            "Model stron: `tab_bar()` daje pasek do rysowania, a `select` / `close` zmieniają \
+             strony."
+        }
+        "PathBar" => {
+            "`index_at` zwraca kliknięty okruszek; `truncate` skraca ścieżkę, czyli realizuje \
+             nawigację „w górę”."
+        }
+        "Pager" => {
+            "`page_rect` rozmieszcza strony, a `click_indicator` / `on_scroll` zmieniają \
+             aktywną stronę."
+        }
+        "NavigationView" => {
+            "`push` / `pop` zmieniają głębokość stosu; `back_at` sprawdza klik w przycisk \
+             „wstecz”."
+        }
+        "NavigationSplitView" => {
+            "`sidebar_rect` / `content_rect` dzielą obszar; `toggle` chowa i pokazuje panel."
+        }
+        "OverlaySplitView" => {
+            "Panel nakładany na treść; `scrim_at` pozwala zamknąć go klikiem w tło."
+        }
+        "Sidebar" => "Rysuje tło i krawędź panelu; treść umieszczasz w `content_rect`.",
+        "PopoverMenuBar" => {
+            "`click_at` zwraca indeks przycisku; popover z zawartością otwiera aplikacja."
+        }
+        "Menu" => {
+            "`index_at` / `click_at` zwracają pozycję, a `place` liczy panel względem kotwicy \
+             i brzegu okna."
+        }
+        "Card" => "`paint` zwraca prostokąt treści — kontrolki rysuj wewnątrz niego.",
+        "PreferencesGroup" => {
+            "`paint` zwraca obszar wierszy; `row_rect` dzieli go na równe wiersze."
+        }
+        "PreferencesPage" => "Składa grupy pionowo; `paint` zwraca prostokąty kolejnych wierszy.",
+        "ActionRow" => {
+            "`paint` zwraca prostokąt na kontrolkę po prawej; trafienie w kontrolkę obsługuje \
+             aplikacja."
+        }
+        "Row" => {
+            "Rodzina wierszy listy — konstruktor wybiera typ (`Row::switch`, `Row::combo`, …), \
+             a `suffix_at` sprawdza klik w kontrolkę."
+        }
+        "Expander" => {
+            "`click_at` rozwija lub zwija sekcję; `content_rect` wskazuje miejsce na treść."
+        }
+        "FlowBox" => {
+            "`index_at` zwraca klikniętą komórkę, a `cells` daje prostokąty do wypełnienia \
+             zawartością."
+        }
+        "Paned" => {
+            "`separator_hit` + `begin_drag` / `drag_to` / `end_drag` obsługują przeciąganie \
+             separatora."
+        }
+        "Stack" => {
+            "`set_visible_index` zmienia stronę, a `advance` napędza animację przejścia. \
+             Strony rysuje aplikacja."
+        }
+        "Grid / Fixed / CenterBox / Bin" => {
+            "Czyste funkcje układu — nie rysują, tylko liczą prostokąty dla dzieci."
+        }
+        "Clamp / AspectFrame / Frame / Overlay / Revealer" => {
+            "Pomocniki układu i prezentacji; większość zwraca prostokąty dla treści (np. \
+             `Frame::paint`)."
+        }
+        "WrapBox / BreakpointBin / ButtonContent" => {
+            "`WrapBox::layout` zwraca prostokąty elementów, a `BreakpointBin::active` wybiera \
+             aktywny próg responsywności."
+        }
+        "ToolbarView / Viewport / WindowHandle / ActionBar" => {
+            "`rects` / `parts` dzielą okno, a `WindowHandle::is_drag_region` wyklucza obszary \
+             kontrolek z przeciągania."
+        }
+        "ItemView" => {
+            "`index_at` zwraca element, `toggle_selected` obsługuje wielokrotny wybór, a \
+             `set_mode` przełącza listę i siatkę."
+        }
+        "ColumnView" => "`row_at` zwraca kliknięty wiersz; `cell_rect` pomaga rysować zawartość.",
+        "ScrollView" => {
+            "Stan przewijania trzyma aplikacja: `set_content_height`, `on_scroll`, `drag_to`. \
+             `paint_scrollbar` tylko rysuje pasek."
+        }
+        "Scrollbar / Adjustment" => {
+            "`Adjustment` przechowuje zakres i pozycję, a `Scrollbar` tylko go rysuje."
+        }
+        "MediaControls" => {
+            "`play_at` i `seek_at` zwracają intencję użytkownika; stan odtwarzania i czas \
+             trzyma aplikacja."
+        }
+        "Picture" => "`set_fit` wybiera dopasowanie; obraz przekazujesz jako `Arc<ImageData>`.",
+        "InfoBar" => {
+            "`action_at` / `close_at` zwracają kliknięte akcje. Pasek jest bezstanowy — \
+             ukryciem steruje aplikacja."
+        }
+        "Banner" => "Jak `InfoBar`, z dodatkowym opisem; `action_at` zwraca klikniętą akcję.",
+        "Toast" => {
+            "Animację napędza `advance`; `action_at` sprawdza klik w akcję, a `dismiss_at` \
+             zamyka powiadomienie."
+        }
+        "StatusPage" => "`action_at` sprawdza klik w przycisk; reszta jest czystą prezentacją.",
+        "Statusbar" => "Bezstanowy pasek; komunikat i licznik ustawiasz setterami.",
+        "Popover" => "`place` liczy panel, a `dismiss_at` zamyka go klikiem poza panelem.",
+        "HeaderBar" => {
+            "`paint` przyjmuje podświetloną kontrolkę, `control_at` zwraca klikniętą. \
+             Warianty: `title_align`, `controls(Left/Right/None)` oraz własna treść \
+             w `controls_layout().content`."
+        }
+        "WindowTitle" => "Układa tytuł i podtytuł wokół kontrolek okna.",
+        "Dialog" => "`paint` zwraca prostokąty, a `close_at` / `scrim_at` obsługują zamknięcie.",
+        "AlertDialog" => "`action_at` zwraca indeks przycisku; tytuł i treść są bezstanowe.",
+        "AboutDialog" => "Prezentacja metadanych aplikacji; `paint` wypełnia całe okno.",
+        "ShortcutsDialog" => "Lista skrótów; kolejne pozycje dokładasz przez `entry`.",
+        "PreferencesDialog" => "`paint` zwraca `content` — tam rysujesz `PreferencesPage`.",
+        "BottomSheet" => {
+            "`set_open_animated` + `advance` animują panel; `close_at` / `scrim_at` zamykają go."
+        }
+        "Assistant" => {
+            "`next` / `prev` zmieniają krok, a `buttons` zwraca prostokąty akcji stopki."
+        }
+        _ => "Rysowanie: `paint(ctx, rect)`. Stan, animacje i decyzje pozostają w aplikacji.",
+    }
 }

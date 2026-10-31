@@ -1,145 +1,228 @@
-//! Pełne, interaktywne demo Ustawień Luny — to samo, które widać na obrazach
-//! `docs/images/demo-step-*.png` (sidebar, motywy, akcenty, język, zakładki,
-//! pliki, popovery, powiadomienia i dolny panel).
+//! Aplikacja demo Luny w wersji dokumentacyjnej.
 //!
-//! Wspólne dla binarek `luna-demo` i `luna-showcase` („Luna — widgety”), żeby
-//! instalowana aplikacja pokazywała **cały** zestaw widgetów, a nie uproszczony mockup.
+//! Okno pokazuje **wyłącznie** stronę „Widgety”: listę komponentów, działający
+//! przykład, gotowy kod i notę „jak użyć”. Nie ma tu już makiety Ustawień —
+//! pasek tytułu (CSD), wyszukiwarka, przełącznik motywu i wszystkie przykłady
+//! obsługują prawdziwe zdarzenia okna.
 
 use std::error::Error;
 
-use crate::ui::{self, Demo};
-use libluna_core::ThemeSettings;
-use libluna_i18n::set_locale;
+use libluna_core::{ButtonState, Event, KeyEvent, PointerButton, Rect, WindowEvent};
 use libluna_platform::{run as run_app, AppConfig, Frame};
+use libluna_widgets::{clipboard_command, TextClipboardCommand, WindowControl};
 
-/// Otwiera okno pełnego demo i uruchamia pętlę zdarzeń (start: „Wygląd”).
+use crate::gallery_interactive::Focus;
+use crate::gallery_page::{self, GalleryState};
+
+/// Cel wklejenia ze schowka (zapamiętany przy Ctrl+V).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PasteTarget {
+    Search,
+    Entry,
+    Password,
+    ExampleSearch,
+    SearchBar,
+    Note,
+}
+
+/// Stan okna dokumentacji.
+struct Docs {
+    gallery: GalleryState,
+    paste_target: Option<PasteTarget>,
+}
+
+/// Otwiera dokumentację widgetów.
 pub fn run() -> Result<(), Box<dyn Error>> {
-    run_with_start(None)
+    run_docs()
 }
 
-/// Otwiera demo od razu na stronie „Widgety” (galeria komponentów).
+/// Zgodność ze starą nazwą binarki `showcase` („Luna — widgety”).
 pub fn run_widgets() -> Result<(), Box<dyn Error>> {
-    run_with_start(Some(ui::WIDGETS_NAV))
+    run_docs()
 }
 
-fn run_with_start(start_nav: Option<usize>) -> Result<(), Box<dyn Error>> {
-    set_locale(libluna_i18n::preferred_locale());
-    // Doładuj języki ze standardowych katalogów (nadpisują wbudowane).
-    libluna_i18n::load_catalogs_from_dirs();
-
-    // Ustawienia wyglądu wczytane z dysku (jeśli są).
-    let settings = ThemeSettings::load();
-    // Tryb systemowy: prosty przełącznik przez zmienną środowiskową (docelowo portal).
+fn run_docs() -> Result<(), Box<dyn Error>> {
+    let settings = libluna_core::ThemeSettings::load();
+    let preference = settings.preference();
     let system_dark = std::env::var("LUNA_SYSTEM_DARK")
         .map(|v| !v.is_empty() && v != "0")
         .unwrap_or(false);
 
-    let config = AppConfig::new("Aplikacja")
-        .app_id("eu.paganlinux.Luna.Settings")
-        .initial_size(1200, 1028)
+    let config = AppConfig::new("Dokumentacja widgetów")
+        .app_id("eu.paganlinux.Luna.Widgets")
+        .initial_size(1200, 900)
         .settings(settings)
-        .system_dark(system_dark);
+        .system_dark(system_dark)
+        // Esc czyści fokus/pole w galerii, a nie zamyka demo.
+        .escape_to_exit(false);
 
-    let mut demo = Demo::default();
-    if let Some(i) = start_nav {
-        demo.nav_selected = Some(i);
-    }
+    let mut docs = Docs {
+        gallery: GalleryState::default(),
+        paste_target: None,
+    };
+    docs.gallery.theme_pref = preference;
 
     run_app(config, move |frame: &mut Frame| {
         let mut settings = frame.settings();
+        let mut theme = settings.resolve_themed(frame.system_dark());
+        let full = Rect::from_xywh(0.0, 0.0, frame.size.width, frame.size.height);
+        let header = gallery_page::header_rect(full, &theme);
+        let bar = gallery_page::header_bar();
 
-        // Motyw (z ewentualnym stylem z pliku) do obsługi zdarzeń.
-        let theme = settings.resolve_themed(frame.system_dark());
-        ui::handle_events(
-            &mut settings,
-            frame.events,
-            frame.size,
-            &theme,
-            frame.text,
-            &mut demo,
-        );
+        for event in frame.events {
+            match event {
+                Event::PointerButton(pe) if pe.button == PointerButton::Left => {
+                    let p = pe.position;
+                    match pe.state {
+                        ButtonState::Pressed => {
+                            if let Some(control) = bar.control_at(header, &theme, p) {
+                                match control {
+                                    WindowControl::Minimize => frame.minimize(),
+                                    WindowControl::Maximize => frame.toggle_maximize(),
+                                    WindowControl::Close => frame.close(),
+                                }
+                            } else if header.contains(p) {
+                                // Przeciąganie okna za pasek tytułu (CSD).
+                                frame.begin_move();
+                            } else {
+                                gallery_page::pointer_pressed(
+                                    &mut docs.gallery,
+                                    full,
+                                    &theme,
+                                    frame.text,
+                                    p,
+                                );
+                            }
+                        }
+                        ButtonState::Released => {
+                            gallery_page::pointer_released(&mut docs.gallery);
+                        }
+                    }
+                }
+                Event::PointerMotion { position, .. } => {
+                    docs.gallery.header_hover = bar.control_at(header, &theme, *position);
+                    gallery_page::pointer_motion(
+                        &mut docs.gallery,
+                        full,
+                        &theme,
+                        frame.text,
+                        *position,
+                    );
+                }
+                Event::PointerLeave => {
+                    docs.gallery.header_hover = None;
+                    gallery_page::pointer_left(&mut docs.gallery);
+                }
+                Event::Scroll(se) => {
+                    gallery_page::scroll(
+                        &mut docs.gallery,
+                        full,
+                        &theme,
+                        frame.text,
+                        se.position,
+                        se.dy * 60.0,
+                    );
+                }
+                Event::Key(ke) => {
+                    if handle_clipboard(&mut docs, ke, frame) {
+                        continue;
+                    }
+                    gallery_page::key(&mut docs.gallery, full, &theme, frame.text, ke);
+                }
+                Event::Text(text) => {
+                    if docs.gallery.search.is_focused() {
+                        docs.gallery.search.insert_str(text);
+                        gallery_page::search_changed(&mut docs.gallery);
+                    } else {
+                        match docs.gallery.example.focus {
+                            Focus::Entry => docs.gallery.example.entry.insert_str(text),
+                            Focus::Password => docs.gallery.example.password.insert_str(text),
+                            Focus::Search => docs.gallery.example.search.insert_str(text),
+                            Focus::SearchBar => docs.gallery.example.bar_entry.insert_str(text),
+                            Focus::Note => docs.gallery.example.note.insert_str(text),
+                            Focus::None => {}
+                        }
+                    }
+                }
+                Event::Paste(text) => {
+                    let Some(target) = docs.paste_target.take() else {
+                        continue;
+                    };
+                    match target {
+                        PasteTarget::Search => {
+                            docs.gallery.search.paste(text);
+                            gallery_page::search_changed(&mut docs.gallery);
+                        }
+                        PasteTarget::Entry => docs.gallery.example.entry.paste(&text),
+                        PasteTarget::Password => docs.gallery.example.password.paste(&text),
+                        PasteTarget::ExampleSearch => docs.gallery.example.search.paste(&text),
+                        PasteTarget::SearchBar => docs.gallery.example.bar_entry.paste(&text),
+                        PasteTarget::Note => docs.gallery.example.note.paste(&text),
+                    }
+                }
+                Event::Window(WindowEvent::CloseRequested) => frame.close(),
+                _ => {}
+            }
+        }
 
-        // „Kopiuj” w galerii widgetów → systemowy schowek (wl_data_device).
-        if let Some(text) = demo.gallery.copy_request.take() {
+        // Zmiana motywu z przełącznika w stopce listy widgetów.
+        if let Some(preference) = docs.gallery.theme_change.take() {
+            settings.set_preference(preference);
+            frame.set_preference(preference);
+            theme = settings.resolve_themed(frame.system_dark());
+        }
+
+        // „Kopiuj kod” w dokumentacji → systemowy schowek.
+        if let Some(text) = docs.gallery.copy_request.take() {
             frame.copy_to_clipboard(text);
         }
-        // Ctrl+C/X w polach tekstowych → systemowy schowek.
-        if let Some(text) = demo.clipboard_text.take() {
-            frame.copy_to_clipboard(text);
+
+        let mut ctx = libluna_widgets::PaintCtx::new(frame.scene, &theme, frame.text);
+        gallery_page::paint(&mut ctx, full, &docs.gallery);
+    })
+}
+
+/// Które pole tekstowe ma teraz fokus (dla schowka).
+fn paste_target(gallery: &GalleryState) -> Option<PasteTarget> {
+    if gallery.search.is_focused() {
+        return Some(PasteTarget::Search);
+    }
+    match gallery.example.focus {
+        Focus::Entry => Some(PasteTarget::Entry),
+        Focus::Password => Some(PasteTarget::Password),
+        Focus::Search => Some(PasteTarget::ExampleSearch),
+        Focus::SearchBar => Some(PasteTarget::SearchBar),
+        Focus::Note => Some(PasteTarget::Note),
+        Focus::None => None,
+    }
+}
+
+/// Obsługa Ctrl+C / Ctrl+X / Ctrl+V dla aktywnego pola. Zwraca `true`, gdy zużyto.
+fn handle_clipboard(docs: &mut Docs, ke: &KeyEvent, frame: &mut Frame) -> bool {
+    let Some(target) = paste_target(&docs.gallery) else {
+        return false;
+    };
+    let command = match target {
+        PasteTarget::Search => clipboard_command(&mut docs.gallery.search, ke),
+        PasteTarget::Entry => clipboard_command(&mut docs.gallery.example.entry, ke),
+        PasteTarget::Password => clipboard_command(&mut docs.gallery.example.password, ke),
+        PasteTarget::ExampleSearch => clipboard_command(&mut docs.gallery.example.search, ke),
+        PasteTarget::SearchBar => clipboard_command(&mut docs.gallery.example.bar_entry, ke),
+        PasteTarget::Note => clipboard_command(&mut docs.gallery.example.note, ke),
+    };
+    let Some(command) = command else {
+        return false;
+    };
+    match command {
+        TextClipboardCommand::Copy(text) | TextClipboardCommand::Cut(text) => {
+            if let Some(text) = text {
+                frame.copy_to_clipboard(text);
+            }
         }
-        // Ctrl+V → odczyt schowka; wynik wróci do UI jako `Event::Paste`.
-        if demo.paste_requested {
-            demo.paste_requested = false;
+        TextClipboardCommand::Paste => {
+            docs.paste_target = Some(target);
             frame.paste_from_clipboard();
         }
-
-        // Akcje okna zgłoszone przez HeaderBar (kontrolki).
-        if demo.pending_close {
-            if std::env::var("LUNA_DEBUG_INPUT").is_ok() {
-                eprintln!("demo: frame.close()");
-            }
-            frame.close();
-            demo.pending_close = false;
-        }
-        if demo.pending_minimize {
-            frame.minimize();
-            demo.pending_minimize = false;
-        }
-        if demo.pending_maximize {
-            frame.toggle_maximize();
-            demo.pending_maximize = false;
-        }
-        // Przeciąganie okna za pasek tytułu (CSD) — ruch wykonuje kompozytor.
-        if demo.pending_move {
-            if std::env::var("LUNA_DEBUG_INPUT").is_ok() {
-                eprintln!("demo: frame.begin_move()");
-            }
-            frame.begin_move();
-            demo.pending_move = false;
-        }
-
-        if settings.preference() != frame.preference() {
-            frame.set_preference(settings.preference());
-        }
-        if settings.accent() != frame.accent() {
-            frame.set_accent(settings.accent());
-        }
-        if settings.style() != frame.style() {
-            frame.set_style(settings.style().map(str::to_owned));
-        }
-
-        // Animacja powiadomienia: krok i prośba o kolejną klatkę, dopóki trwa.
-        if demo.toast.is_animating() {
-            demo.toast.advance(frame.delta_time(), 0.3);
-            frame.request_frame();
-        }
-
-        // Animacja przejścia zakładek (`Stack` slide).
-        if demo.tab_stack.is_animating() {
-            demo.tab_stack.advance(frame.delta_time(), 0.25);
-            frame.request_frame();
-        }
-
-        // Animacja dolnego panelu (wysuwanie) i przyciągania karuzeli.
-        if demo.sheet.is_animating() {
-            demo.sheet.advance(frame.delta_time(), 0.3);
-            frame.request_frame();
-        }
-        if demo.pager.is_animating() {
-            demo.pager.advance(frame.delta_time(), 0.3);
-            frame.request_frame();
-        }
-
-        // Motyw po zmianach (np. wybór stylu) — klatka od razu poprawna.
-        let theme = settings.resolve_themed(frame.system_dark());
-        ui::build_scene(
-            frame.scene,
-            &theme,
-            frame.text,
-            frame.size,
-            &demo,
-            settings.preference(),
-            settings.accent(),
-        );
-    })
+    }
+    true
 }

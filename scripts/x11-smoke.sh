@@ -6,10 +6,12 @@
 #   2. XWM zostaje menedżerem okien (`wm=true` z `luna-control x11`),
 #   3. okno X11 (`xclock`) pojawia się w modelu jako zwykłe okno (nie warstwa),
 #   4. klik w nasz przycisk **maksymalizuj** działa na oknie X11,
-#   5. klik w **zamknij** zamyka okno (SSD + routing wskaźnika).
+#   5. kursor ustawiony przez klienta X11 dociera przez `wl_pointer.set_cursor`,
+#   6. klik w **zamknij** zamyka okno (SSD + routing wskaźnika).
 #
-# Wymagania: działający nadrzędny kompozytor Wayland, `python3`, `xclock`
-# i zbudowane binarki (`./scripts/workspaces.sh build --release`).
+# Wymagania: działający nadrzędny kompozytor Wayland, `python3`, `xclock`,
+# opcjonalnie `python3-gi` + GTK4 (test kursora X11), i zbudowane binarki
+# (`./scripts/workspaces.sh build --release`).
 #
 # Uruchomienie:
 #   ./scripts/x11-smoke.sh
@@ -232,6 +234,52 @@ wait_geom_width "xclock" "$out_w" 50 || {
     fail "maksymalizacja nie zadziałała (szerokość=${3:-?}, oczekiwano $out_w)"
 }
 note "zmaksymalizowane: szerokość=$out_w"
+
+# ── Kursor od klienta X11 ───────────────────────────────────────────────────
+# `xclock` używa domyślnego kursora X11, więc Xwayland nie ma czego ustawiać.
+# Uruchamiamy GTK4 z backendem X11: pole tekstowe wymusza kursor I-beam, który
+# Xwayland przekazuje przez `wl_pointer.set_cursor` (albo `wp_cursor_shape_v1`).
+say "kursor: ustawiony przez klienta X11"
+if python3 -c 'import gi; gi.require_version("Gtk", "4.0")' >/dev/null 2>&1; then
+    env -u WAYLAND_DISPLAY -u GDK_BACKEND DISPLAY=":$display" GDK_BACKEND=x11 \
+        LANGUAGE=en LANG=C.UTF-8 python3 - >"$rt/gtk.log" 2>&1 <<'PY' &
+import gi
+
+gi.require_version("Gtk", "4.0")
+from gi.repository import GLib, Gtk
+
+win = Gtk.Window()
+win.set_title("luna-cursor")
+entry = Gtk.Entry()
+entry.set_placeholder_text("pole tekstowe")
+win.set_child(entry)
+win.set_default_size(420, 200)
+win.present()
+GLib.MainLoop().run()
+PY
+    gtk_pid=$!
+    pids="$pids $gtk_pid"
+    if wait_window "luna-cursor" 100; then
+        # Ruch w **treść** okna (nie w pasek SSD) — dopiero wtedy Xwayland wysyła kursor.
+        set -- $(win_geom "luna-cursor")
+        send_input "move $(( ${1:-60} + ${3:-420} / 2 )) $(( ${2:-20} + ${4:-200} / 2 ))"
+        sleep 0.5
+        control cursor >/dev/null 2>&1 || true
+        sleep 0.3
+        if grep -q "selene/control: cursor image=custom:" "$log"; then
+            note "obraz od klienta (wl_pointer.set_cursor)"
+        elif grep -q "selene/control: cursor image=shape:" "$log"; then
+            note "kształt przez wp_cursor_shape_v1"
+        else
+            fail "kursor nad oknem X11 nie został ustawiony przez klienta"
+        fi
+    else
+        fail "okno GTK4 przez Xwayland się nie zmapowało (zobacz $rt/gtk.log)"
+    fi
+    kill "$gtk_pid" 2>/dev/null || true
+else
+    note "pominięto: brak python3-gi/GTK4 (wymagane do testu kursora X11)"
+fi
 
 # ── Zamknięcie naszym SSD ───────────────────────────────────────────────────
 say "SSD: zamknięcie okna X11"

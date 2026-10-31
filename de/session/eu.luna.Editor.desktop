@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=Editor
+Name[pl]=Edytor
+Name[de]=Editor
+Comment=Edit text and source code with syntax highlighting
+Comment[pl]=Edytuj tekst i kod źródłowy z podświetlaniem składni
+Comment[de]=Text und Quellcode mit Syntaxhervorhebung bearbeiten
+Exec=luna-editor %f
+Icon=accessories-text-editor
+Terminal=false
+Categories=Utility;TextEditor;Development;
+MimeType=text/plain;text/x-rust;text/x-c;text/x-c++;text/x-python;text/x-shellscript;application/json;application/toml;text/markdown;text/x-makefile;application/x-shellscript;
+Keywords=editor;code;text;syntax;highlight;rust;python;json;toml;markdown;
+Keywords[pl]=edytor;kod;tekst;składnia;podświetlanie;rust;python;json;toml;markdown;
+Keywords[de]=Editor;Code;Text;Syntax;Hervorhebung;Rust;Python;JSON;TOML;Markdown;

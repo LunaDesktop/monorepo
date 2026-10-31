@@ -498,6 +498,15 @@ impl GreeterApp {
     }
 
     fn on_greeter_event(&mut self, event: GreeterEvent, frame: &mut Frame) {
+        if self.apply_greeter_event(event) {
+            frame.close();
+        }
+    }
+
+    /// Aplikuje zdarzenie greetd do stanu UI.
+    ///
+    /// Zwraca `true`, gdy sesja wystartowała i okno powinno się zamknąć.
+    fn apply_greeter_event(&mut self, event: GreeterEvent) -> bool {
         match event {
             GreeterEvent::Connected => {
                 self.phase = Phase::Idle;
@@ -507,7 +516,11 @@ impl GreeterApp {
                 AuthKind::Secret => {
                     self.phase = Phase::AwaitingSecret;
                     self.set_focus(Focus::Password);
-                    self.set_message(message, MessageKind::Info);
+                    // Pusty tekst promptu (typowy po błędnym haśle) nie może
+                    // wymazać komunikatu o błędzie z poprzedniej próby.
+                    if !message.trim().is_empty() {
+                        self.set_message(message, MessageKind::Info);
+                    }
                     // Jeśli hasło było wpisane przed pierwszym Enterem, wyślij je
                     // od razu — użytkownik nie musi wciskać Enter drugi raz.
                     self.respond_pending_secret();
@@ -519,7 +532,24 @@ impl GreeterApp {
                     self.set_message(message, MessageKind::Info);
                 }
                 AuthKind::Info => self.set_message(message, MessageKind::Info),
-                AuthKind::Error => self.set_message(message, MessageKind::Error),
+                AuthKind::Error => {
+                    // PAM raportuje błędy po angielsku (np. „Authentication
+                    // failure”) — typowe odrzucenie hasła tłumaczymy, a nietypowe
+                    // komunikaty (np. blokada konta) pokazujemy z oryginałem.
+                    eprintln!("luna-greeter: PAM: {}", message.trim());
+                    self.password.clear();
+                    self.pending_secret = None;
+                    self.set_focus(Focus::Password);
+                    if self.phase == Phase::Busy {
+                        self.phase = Phase::AwaitingSecret;
+                    }
+                    let text = if is_generic_auth_failure(&message) {
+                        tr("Incorrect username or password")
+                    } else {
+                        format!("{}: {}", tr("Login failed"), message.trim())
+                    };
+                    self.set_message(text, MessageKind::Error);
+                }
             },
             GreeterEvent::AuthOk => {
                 self.pending_secret = None;
@@ -537,25 +567,24 @@ impl GreeterApp {
                 self.save_prefs();
                 self.phase = Phase::Started;
                 self.set_message(tr("Starting Luna…"), MessageKind::Success);
-                frame.close();
+                return true;
             }
             GreeterEvent::ServerError {
                 error_type,
                 description,
             } => {
+                eprintln!("luna-greeter: greetd {error_type}: {description}");
                 self.worker = None;
                 self.pending_secret = None;
                 self.phase = Phase::Idle;
                 self.password.clear();
                 self.set_focus(Focus::Password);
-                let text = if description.trim().is_empty() {
-                    if error_type == "auth_error" {
-                        tr("Incorrect username or password")
-                    } else {
-                        tr("Login failed")
-                    }
+                let text = if error_type == "auth_error" && is_generic_auth_failure(&description) {
+                    tr("Incorrect username or password")
+                } else if description.trim().is_empty() {
+                    tr("Login failed")
                 } else {
-                    description
+                    format!("{}: {}", tr("Login failed"), description.trim())
                 };
                 self.set_message(text, MessageKind::Error);
             }
@@ -569,6 +598,7 @@ impl GreeterApp {
                 );
             }
         }
+        false
     }
 
     fn on_login_event(&mut self, event: &Event, lay: &Layout, frame: &mut Frame) {
@@ -921,7 +951,12 @@ impl GreeterApp {
                     return;
                 };
                 let response = self.password.text().to_owned();
-                worker.send(Command::Respond { response });
+                if !worker.send(Command::Respond { response }) {
+                    self.worker = None;
+                    self.phase = Phase::Offline;
+                    self.set_message(tr("Connection to greetd failed"), MessageKind::Error);
+                    return;
+                }
                 self.pending_secret = None;
                 self.password.clear();
                 self.phase = Phase::Busy;
@@ -932,9 +967,14 @@ impl GreeterApp {
                     self.phase = Phase::Offline;
                     return;
                 };
-                worker.send(Command::Respond {
+                if !worker.send(Command::Respond {
                     response: self.username.text().trim().to_owned(),
-                });
+                }) {
+                    self.worker = None;
+                    self.phase = Phase::Offline;
+                    self.set_message(tr("Connection to greetd failed"), MessageKind::Error);
+                    return;
+                }
                 self.phase = Phase::Busy;
                 self.set_message(tr("Signing in…"), MessageKind::Info);
             }
@@ -1934,6 +1974,19 @@ fn paint_session_menu(
     menu.paint(ctx, panel);
 }
 
+/// Czy komunikat PAM/greetd to typowe odrzucenie danych logowania (a nie np.
+/// blokada konta), które warto zastąpić jednym zrozumiałym zdaniem.
+fn is_generic_auth_failure(description: &str) -> bool {
+    let text = description.trim().to_ascii_lowercase();
+    text.is_empty()
+        || text.contains("authentication failure")
+        || text.contains("authentication failed")
+        || text.contains("auth failure")
+        || text.contains("invalid username or password")
+        || text.contains("incorrect password")
+        || text.contains("try again")
+}
+
 fn datetime() -> String {
     let now = unsafe { libc::time(std::ptr::null_mut()) };
     let mut tm = std::mem::MaybeUninit::<libc::tm>::uninit();
@@ -2155,6 +2208,70 @@ mod tests {
     }
 
     #[test]
+    fn wrong_password_shows_error_and_keeps_it_visible() {
+        let mut app = sample_app();
+        app.phase = Phase::Busy;
+        app.password.set_text("zle-haslo");
+
+        // PAM po nieudanym hasle wysyła błąd, a zaraz potem nowy prompt sekretu
+        // z pustym tekstem — ten prompt nie może wymazać komunikatu.
+        app.apply_greeter_event(GreeterEvent::Prompt {
+            kind: AuthKind::Error,
+            message: "Authentication failure".to_owned(),
+        });
+        app.apply_greeter_event(GreeterEvent::Prompt {
+            kind: AuthKind::Secret,
+            message: String::new(),
+        });
+
+        let message = app.message.as_ref().expect("komunikat o błędzie");
+        assert_eq!(message.text, tr("Incorrect username or password"));
+        assert_eq!(message.kind, MessageKind::Error);
+        assert!(
+            app.password.text().is_empty(),
+            "pole hasła ma się wyczyścić"
+        );
+        assert_eq!(app.phase, Phase::AwaitingSecret);
+    }
+
+    #[test]
+    fn server_error_is_localized_and_reports_details() {
+        let mut app = sample_app();
+        app.apply_greeter_event(GreeterEvent::ServerError {
+            error_type: "auth_error".to_owned(),
+            description: "Authentication failure".to_owned(),
+        });
+        let message = app.message.as_ref().expect("komunikat o błędzie");
+        assert_eq!(message.text, tr("Incorrect username or password"));
+        assert_eq!(message.kind, MessageKind::Error);
+
+        // Nietypowy błąd (np. brak uprawnień PAM) musi być widoczny.
+        app.apply_greeter_event(GreeterEvent::ServerError {
+            error_type: "auth_error".to_owned(),
+            description: "Permission denied".to_owned(),
+        });
+        let message = app.message.as_ref().expect("komunikat o błędzie");
+        assert!(
+            message.text.starts_with(&tr("Login failed")),
+            "{}",
+            message.text
+        );
+        assert!(message.text.contains("Permission denied"));
+
+        app.apply_greeter_event(GreeterEvent::ServerError {
+            error_type: "error".to_owned(),
+            description: "start_session failed".to_owned(),
+        });
+        let message = app.message.as_ref().expect("komunikat o błędzie");
+        assert!(
+            message.text.starts_with(&tr("Login failed")),
+            "{}",
+            message.text
+        );
+        assert!(message.text.contains("start_session failed"));
+    }
+
+    #[test]
     fn layout_keeps_fields_inside_card() {
         let theme = Theme::dark();
         let lay = layout(Size::new(1200.0, 800.0), &theme, true, 2, true);
@@ -2352,6 +2469,20 @@ mod tests {
         let light = Theme::light();
         render(&app, &dark, size, "/tmp/luna-greeter.png");
         render(&app, &light, size, "/tmp/luna-greeter-light.png");
+
+        // Błędne hasło — sprawdzenie, że komunikat mieści się w karcie.
+        let mut wrong = make();
+        wrong.password.set_text("zle-haslo");
+        wrong.phase = Phase::Busy;
+        wrong.apply_greeter_event(GreeterEvent::Prompt {
+            kind: AuthKind::Error,
+            message: "Authentication failure".to_owned(),
+        });
+        wrong.apply_greeter_event(GreeterEvent::Prompt {
+            kind: AuthKind::Secret,
+            message: String::new(),
+        });
+        render(&wrong, &light, size, "/tmp/luna-greeter-error.png");
         render(
             &app,
             &dark,

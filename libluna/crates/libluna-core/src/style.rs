@@ -117,6 +117,21 @@ impl Typography {
             caption: FontStyle::new(12.0, weight::NORMAL, 16.0, false),
         }
     }
+
+    /// Skaluje rozmiary tekstu i wysokości linii (dostępność: większy tekst).
+    pub fn scaled(self, factor: f64) -> Self {
+        let scale = |font: FontStyle| FontStyle {
+            size: font.size * factor,
+            line_height: font.line_height * factor,
+            ..font
+        };
+        Self {
+            title: scale(self.title),
+            heading: scale(self.heading),
+            body: scale(self.body),
+            caption: scale(self.caption),
+        }
+    }
 }
 
 impl Default for Typography {
@@ -156,6 +171,47 @@ pub struct ColorScheme {
 }
 
 impl ColorScheme {
+    /// Wariant wysokiego kontrastu: czarno-biały tekst, mocne obramowania.
+    ///
+    /// Akcent zostaje z motywu użytkownika, żeby zaznaczenia nadal były czytelne.
+    pub const fn high_contrast(dark: bool, accent: Color, accent_fg: Color) -> Self {
+        if dark {
+            Self {
+                window_bg: Color::from_rgba8(0x00, 0x00, 0x00, 0xff),
+                view_bg: Color::from_rgba8(0x00, 0x00, 0x00, 0xff),
+                card_bg: Color::from_rgba8(0x0a, 0x0a, 0x0a, 0xff),
+                headerbar_bg: Color::from_rgba8(0x0a, 0x0a, 0x0a, 0xff),
+                sidebar_bg: Color::from_rgba8(0x0a, 0x0a, 0x0a, 0xff),
+                text: Color::from_rgba8(0xff, 0xff, 0xff, 0xff),
+                dim_text: Color::rgba(1.0, 1.0, 1.0, 0.80),
+                accent,
+                accent_fg,
+                border: Color::rgba(1.0, 1.0, 1.0, 0.60),
+                shade: Color::rgba(1.0, 1.0, 1.0, 0.18),
+                error: Color::from_rgba8(0xff, 0x8a, 0x8a, 0xff),
+                warning: Color::from_rgba8(0xff, 0xe0, 0x66, 0xff),
+                success: Color::from_rgba8(0x8a, 0xff, 0xb0, 0xff),
+            }
+        } else {
+            Self {
+                window_bg: Color::from_rgba8(0xff, 0xff, 0xff, 0xff),
+                view_bg: Color::from_rgba8(0xff, 0xff, 0xff, 0xff),
+                card_bg: Color::from_rgba8(0xf2, 0xf2, 0xf2, 0xff),
+                headerbar_bg: Color::from_rgba8(0xe6, 0xe6, 0xe6, 0xff),
+                sidebar_bg: Color::from_rgba8(0xe6, 0xe6, 0xe6, 0xff),
+                text: Color::from_rgba8(0x00, 0x00, 0x00, 0xff),
+                dim_text: Color::rgba(0.0, 0.0, 0.0, 0.85),
+                accent,
+                accent_fg,
+                border: Color::rgba(0.0, 0.0, 0.0, 0.60),
+                shade: Color::rgba(0.0, 0.0, 0.0, 0.16),
+                error: Color::from_rgba8(0xa4, 0x00, 0x00, 0xff),
+                warning: Color::from_rgba8(0x6b, 0x47, 0x00, 0xff),
+                success: Color::from_rgba8(0x00, 0x60, 0x28, 0xff),
+            }
+        }
+    }
+
     /// Wariant jasny (przybliżenie libadwaita light).
     pub const fn light() -> Self {
         Self {
@@ -654,8 +710,8 @@ impl Metrics {
                 anchor_gap: 4.0,
             },
             nav: NavMetrics {
-                item_h: 34.0,
-                section_h: 30.0,
+                item_h: 32.0,
+                section_h: 28.0,
                 pad_v: 6.0,
                 pad_x: 12.0,
             },
@@ -791,6 +847,59 @@ impl Default for Metrics {
     }
 }
 
+/// Kolory podświetlania składni (edytor kodu, podgląd diffów, logi).
+///
+/// Warianty jasny/ciemny są dobrane pod paletę motywu, ale można je nadpisać
+/// w pliku `.theme` kluczami `syntax.<nazwa>`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SyntaxColors {
+    pub keyword: Color,
+    pub type_name: Color,
+    pub function: Color,
+    pub string: Color,
+    pub number: Color,
+    pub comment: Color,
+    pub operator: Color,
+    pub constant: Color,
+    pub variable: Color,
+}
+
+impl SyntaxColors {
+    pub const fn light() -> Self {
+        Self {
+            keyword: Color::from_rgba8(0xa6, 0x26, 0xa4, 0xff),
+            type_name: Color::from_rgba8(0xc1, 0x84, 0x01, 0xff),
+            function: Color::from_rgba8(0x40, 0x78, 0xf2, 0xff),
+            string: Color::from_rgba8(0x50, 0xa1, 0x4f, 0xff),
+            number: Color::from_rgba8(0x98, 0x68, 0x01, 0xff),
+            comment: Color::from_rgba8(0x9a, 0x9d, 0xa3, 0xff),
+            operator: Color::from_rgba8(0x01, 0x84, 0xbc, 0xff),
+            constant: Color::from_rgba8(0xe4, 0x56, 0x49, 0xff),
+            variable: Color::from_rgba8(0x38, 0x3a, 0x42, 0xff),
+        }
+    }
+
+    pub const fn dark() -> Self {
+        Self {
+            keyword: Color::from_rgba8(0xc6, 0x78, 0xdd, 0xff),
+            type_name: Color::from_rgba8(0xe5, 0xc0, 0x7b, 0xff),
+            function: Color::from_rgba8(0x61, 0xaf, 0xef, 0xff),
+            string: Color::from_rgba8(0x98, 0xc3, 0x79, 0xff),
+            number: Color::from_rgba8(0xd1, 0x9a, 0x66, 0xff),
+            comment: Color::from_rgba8(0x7f, 0x84, 0x8e, 0xff),
+            operator: Color::from_rgba8(0x56, 0xb6, 0xc2, 0xff),
+            constant: Color::from_rgba8(0xe0, 0x6c, 0x75, 0xff),
+            variable: Color::from_rgba8(0xab, 0xb2, 0xbf, 0xff),
+        }
+    }
+}
+
+impl Default for SyntaxColors {
+    fn default() -> Self {
+        Self::light()
+    }
+}
+
 /// Kompletny motyw: odstępy, promienie, typografia, geometria kontrolek i paleta.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Theme {
@@ -799,6 +908,7 @@ pub struct Theme {
     pub metrics: Metrics,
     pub typography: Typography,
     pub colors: ColorScheme,
+    pub syntax: SyntaxColors,
     pub appearance: Appearance,
 }
 
@@ -810,6 +920,7 @@ impl Theme {
             metrics: Metrics::standard(),
             typography: Typography::standard(),
             colors: ColorScheme::light(),
+            syntax: SyntaxColors::light(),
             appearance: Appearance::Light,
         }
     }
@@ -821,6 +932,7 @@ impl Theme {
             metrics: Metrics::standard(),
             typography: Typography::standard(),
             colors: ColorScheme::dark(),
+            syntax: SyntaxColors::dark(),
             appearance: Appearance::Dark,
         }
     }
@@ -829,6 +941,36 @@ impl Theme {
     pub fn accented(mut self, accent: Color, foreground: Color) -> Self {
         self.colors.accent = accent;
         self.colors.accent_fg = foreground;
+        self
+    }
+
+    /// Nakłada ustawienia dostępności (skala tekstu, wysoki kontrast).
+    ///
+    /// Wywoływane przez [`ThemeSettings::resolve_themed`](crate::ThemeSettings::resolve_themed),
+    /// więc ta sama konfiguracja działa we wszystkich aplikacjach libLuny.
+    pub fn with_accessibility(
+        mut self,
+        settings: &crate::accessibility::AccessibilitySettings,
+    ) -> Self {
+        let factor = settings.scale_factor();
+        if (factor - 1.0).abs() > 0.001 {
+            self.typography = self.typography.scaled(factor);
+            // Tekst musi się mieścić w kontrolkach o stałej wysokości.
+            self.metrics.headerbar.height *= factor;
+            self.metrics.button.height *= factor;
+            self.metrics.entry.height *= factor;
+            self.metrics.check.size *= factor;
+            self.metrics.switch.width *= factor;
+            self.metrics.switch.height *= factor;
+            self.metrics.group.header *= factor;
+        }
+        if settings.high_contrast {
+            self.colors = ColorScheme::high_contrast(
+                self.appearance == Appearance::Dark,
+                self.colors.accent,
+                self.colors.accent_fg,
+            );
+        }
         self
     }
 }
@@ -859,5 +1001,35 @@ mod tests {
         assert!(s.xs < s.sm && s.sm < s.md && s.md < s.lg && s.lg < s.xl);
         let t = Typography::standard();
         assert!(t.title.size > t.heading.size && t.heading.size > t.body.size);
+    }
+
+    #[test]
+    fn accessibility_scales_text_and_controls() {
+        let settings = crate::accessibility::AccessibilitySettings {
+            text_scale: 150,
+            high_contrast: false,
+            reduce_motion: false,
+        };
+        let scaled = Theme::dark().with_accessibility(&settings);
+        let base = Theme::dark();
+        assert!((scaled.typography.body.size - base.typography.body.size * 1.5).abs() < 0.01);
+        assert!((scaled.metrics.button.height - base.metrics.button.height * 1.5).abs() < 0.01);
+        // Akcent i wygląd zostają bez zmian.
+        assert_eq!(scaled.colors.accent, base.colors.accent);
+        assert_eq!(scaled.appearance, Appearance::Dark);
+    }
+
+    #[test]
+    fn high_contrast_keeps_the_users_accent() {
+        let base = Theme::dark();
+        let settings = crate::accessibility::AccessibilitySettings {
+            text_scale: 100,
+            high_contrast: true,
+            reduce_motion: false,
+        };
+        let contrast = base.with_accessibility(&settings);
+        assert_eq!(contrast.colors.accent, base.colors.accent);
+        assert_ne!(contrast.colors.window_bg, base.colors.window_bg);
+        assert_eq!(contrast.colors.window_bg, Color::from_rgba8(0, 0, 0, 0xff));
     }
 }

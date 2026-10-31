@@ -12,7 +12,10 @@ zbudować, przetestować i wydać niezależnie od reszty środowiska.
 | `luna-greeter/` | `luna-greeter` | libluna | ekran logowania dla greetd |
 | `apps/luna-demo/` | `luna-demo` | libluna | demo / galeria widgetów |
 | `apps/luna-files/` | `luna-files` | libluna | menedżer plików |
+| `apps/luna-eq/` | `luna-eq` | — (wtyczka LADSPA) | korektor graficzny dla PipeWire |
 | `apps/luna-settings/` | `luna-settings` | libluna, luna | centrum ustawień |
+| `apps/luna-clock/` | `luna-clock` | libluna | zegar, minutnik, stoper i kalendarz |
+| `apps/luna-store/` | `luna-store` | libluna | sklep i aktualizacje (pacman/pag/apt/dnf/emerge/Flatpak) |
 | `apps/luna-terminal/` | `luna-terminal` | libluna | terminal |
 
 `de/` nie jest pakietem Cargo — to wspólna **integracja sesji** (launcher,
@@ -132,7 +135,7 @@ jeśli nie zmieniasz API toolkitu.
   powtarzalne buildy są ważniejsze niż „biblioteczna” konwencja).
 - Po podniesieniu `version` w dowolnym pakiecie uruchom `./scripts/workspaces.sh lock`.
   Cargo wymaga też, aby zależności `path` miały **zgodny wymóg wersji** (np. po
-  `libluna` 0.0.4 wszystkie `libluna-*` powinny mieć `version = "0.0.4"`).
+  `libluna` 0.0.5 wszystkie `libluna-*` powinny mieć `version = "0.0.5"`).
 - Jeśli wersje pakietów zaczną się rozjeżdżać, zaktualizuj `version` w
   zależnościach `path` (np. `libluna-core = { path = "...", version = "0.1.0" }`).
 

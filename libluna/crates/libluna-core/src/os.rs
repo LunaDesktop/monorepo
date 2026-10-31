@@ -9,6 +9,13 @@
 /// Kolejność: `NAME`, potem `PRETTY_NAME`, na końcu `ID`. Wartości w cudzysłowach
 /// są odcyfrowywane; brak pliku nie jest błędem (zwracamy `Linux`).
 pub fn name() -> String {
+    // Pozwala nadpisać nazwę w sesji/paczce (spójnie z instalatorem).
+    if let Ok(value) = std::env::var("LUNA_SYSTEM_NAME") {
+        let value = value.trim();
+        if !value.is_empty() {
+            return value.to_owned();
+        }
+    }
     std::fs::read_to_string("/etc/os-release")
         .ok()
         .and_then(|text| parse_name(&text))

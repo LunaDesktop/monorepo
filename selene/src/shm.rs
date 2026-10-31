@@ -171,6 +171,13 @@ impl BufferData {
     /// Waliduje geometrię względem rozmiaru puli (arytmetyka bez przepełnień) i ogranicza
     /// rozmiar alokacji, żeby klient nie wywołał paniki ani OOM.
     pub fn to_rgba(&self) -> Option<Vec<u8>> {
+        self.to_rgba_with_opacity().map(|(rgba, _)| rgba)
+    }
+
+    /// Jak [`BufferData::to_rgba`], ale dodatkowo mówi, czy **każdy** piksel ma
+    /// `alpha == 255`. Dzięki temu renderer może skopiować obraz zamiast go
+    /// blendować (okna `Xrgb8888` i bufory ARGB bez przezroczystości).
+    pub fn to_rgba_with_opacity(&self) -> Option<(Vec<u8>, bool)> {
         if self.dmabuf.is_some() {
             return None;
         }
@@ -215,6 +222,7 @@ impl BufferData {
             self.format,
             wl_shm::Format::Xrgb8888 | wl_shm::Format::Xbgr8888
         );
+        let mut opaque = true;
         let mut out = vec![0u8; out_len];
         #[cfg(target_endian = "little")]
         {
@@ -232,6 +240,8 @@ impl BufferData {
                         for px in row_dst.chunks_exact_mut(4) {
                             px[3] = 255;
                         }
+                    } else {
+                        opaque &= row_dst.chunks_exact(4).all(|px| px[3] == 255);
                     }
                     continue;
                 }
@@ -244,6 +254,8 @@ impl BufferData {
                         (s & 0xFF00_FF00) | ((s & 0x00FF_0000) >> 16) | ((s & 0x0000_00FF) << 16);
                     if force_alpha {
                         v |= 0xFF00_0000;
+                    } else if s & 0xFF00_0000 != 0xFF00_0000 {
+                        opaque = false;
                     }
                     *d = v;
                 }
@@ -261,6 +273,8 @@ impl BufferData {
                         for px in row_dst.chunks_exact_mut(4) {
                             px[3] = 255;
                         }
+                    } else {
+                        opaque &= row_dst.chunks_exact(4).all(|px| px[3] == 255);
                     }
                     continue;
                 }
@@ -269,10 +283,13 @@ impl BufferData {
                     d[1] = s[1];
                     d[2] = s[0];
                     d[3] = if force_alpha { 255 } else { s[3] };
+                    if !force_alpha && s[3] != 255 {
+                        opaque = false;
+                    }
                 }
             }
         }
-        Some(out)
+        Some((out, opaque))
     }
 }
 
@@ -413,6 +430,22 @@ mod tests {
         let mut b = buffer(pool(&[1, 2, 3, 0]), 1, 1, 4);
         b.format = wl_shm::Format::Xrgb8888;
         assert_eq!(b.to_rgba().unwrap(), vec![3, 2, 1, 255]);
+        assert!(b.to_rgba_with_opacity().unwrap().1);
+    }
+
+    #[test]
+    fn argb_opacity_follows_alpha_bytes() {
+        // Wszystkie piksele kryjące → obraz można skopiować zamiast blendować.
+        let b = buffer(pool(&[10, 20, 30, 255, 40, 50, 60, 255]), 2, 1, 8);
+        let got = b.to_rgba_with_opacity().unwrap();
+        assert!(
+            got.1,
+            "rgba={:?} opaque={} format={:?}",
+            got.0, got.1, b.format
+        );
+        // Jeden piksel półprzezroczysty → trzeba blendować.
+        let b = buffer(pool(&[10, 20, 30, 255, 40, 50, 60, 128]), 2, 1, 8);
+        assert!(!b.to_rgba_with_opacity().unwrap().1);
     }
 
     #[test]

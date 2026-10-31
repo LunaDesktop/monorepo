@@ -1,9 +1,7 @@
-//! Demo aplikacji środowiska Luna — pełne, interaktywne okno Ustawień z
-//! HeaderBar-em (CSD), sidebarem, motywami, akcentami, i18n, zakładkami,
-//! widokiem plików, popoverami, powiadomieniem i dolnym panelem.
+//! Dokumentacja widgetów libLuny — jedyne okno aplikacji demo.
 //!
 //! Uruchom: `cargo run -p luna-demo --bin luna-demo`
-//! To samo demo instaluje się jako `luna-showcase` („Luna — widgety”).
+//! To samo okno instaluje się jako `luna-showcase` („Luna — widgety”).
 
 use std::error::Error;
 

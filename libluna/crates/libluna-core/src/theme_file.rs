@@ -100,6 +100,12 @@ fn apply_entry(theme: &mut Theme, key: &str, value: &str) {
         }
         return;
     }
+    if let Some(field) = key.strip_prefix("syntax.") {
+        if let Some(color) = Color::from_hex(value) {
+            set_syntax_color(&mut theme.syntax, field, color);
+        }
+        return;
+    }
     macro_rules! set_f64 {
         ($target:expr) => {
             if let Ok(n) = value.parse::<f64>() {
@@ -157,6 +163,21 @@ fn set_color(colors: &mut ColorScheme, field: &str, color: Color) {
         "error" => colors.error = color,
         "warning" => colors.warning = color,
         "success" => colors.success = color,
+        _ => {}
+    }
+}
+
+fn set_syntax_color(syntax: &mut crate::style::SyntaxColors, field: &str, color: Color) {
+    match field {
+        "keyword" => syntax.keyword = color,
+        "type_name" => syntax.type_name = color,
+        "function" => syntax.function = color,
+        "string" => syntax.string = color,
+        "number" => syntax.number = color,
+        "comment" => syntax.comment = color,
+        "operator" => syntax.operator = color,
+        "constant" => syntax.constant = color,
+        "variable" => syntax.variable = color,
         _ => {}
     }
 }
@@ -290,6 +311,14 @@ nieznany.klucz = cokolwiek
         assert_eq!(theme.metrics.button.height, 38.0);
         assert_eq!(theme.colors.accent, Accent::Teal.color());
         assert_eq!(theme.colors.card_bg, Color::from_hex("#3b4252").unwrap());
+    }
+
+    #[test]
+    fn syntax_colors_can_be_overridden_in_style_files() {
+        let patch = ThemePatch::parse("syntax.keyword = #112233\nsyntax.comment = #445566\n");
+        let theme = patch.build(Theme::light());
+        assert_eq!(theme.syntax.keyword, Color::from_hex("#112233").unwrap());
+        assert_eq!(theme.syntax.comment, Color::from_hex("#445566").unwrap());
     }
 
     #[test]

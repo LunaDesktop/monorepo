@@ -1,5 +1,8 @@
-//! Kode źródłowe demo aplikacji Luna: scena Ustawień (współdzielona przez binarkę okienną
-//! i narzędzie renderujące do PNG).
+//! Dokumentacja widgetów libLuny (dawniej demo Ustawień).
+//!
+//! Główna aplikacja (`luna-demo` / `luna-showcase`) pokazuje wyłącznie stronę
+//! „Widgety”: żywe przykłady, kod użycia i warianty `HeaderBar`. Moduł `ui`
+//! pozostał jako zestaw narzędzi deweloperskich (`render`, `simulate`, `layout`).
 
 pub mod app;
 pub mod gallery_catalog;

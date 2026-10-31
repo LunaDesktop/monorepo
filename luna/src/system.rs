@@ -28,8 +28,6 @@ pub struct SystemStatus {
     pub audio_sink: Option<String>,
     /// `(włączone, SSID gdy połączone)`.
     pub wifi: Option<(bool, Option<String>)>,
-    /// Dostępne sieci Wi-Fi (skanowane w tle).
-    pub wifi_networks: Vec<WifiNetwork>,
     /// `(włączony, liczba podłączonych urządzeń)`; `None` = brak adaptera.
     pub bluetooth: Option<(bool, usize)>,
     /// Aktywny profil zasilania z `power-profiles-daemon` (gdy działa).
@@ -48,7 +46,6 @@ impl SystemStatus {
             volume: read_volume(),
             audio_sink: audio_sink(),
             wifi: wifi(),
-            wifi_networks: Vec::new(),
             bluetooth: bluetooth(),
             power_profile: power_profile(),
             battery: battery(),
@@ -212,8 +209,9 @@ fn sync_system_dark() {
 }
 
 /// Włącza/wyłącza Wi-Fi (przełącznik „Wi-Fi” w pasku).
+/// Włącza/wyłącza radio Wi-Fi (NetworkManager przez D-Bus).
 pub fn set_wifi(on: bool) {
-    spawn_cmd("nmcli", &["radio", "wifi", if on { "on" } else { "off" }]);
+    let _ = crate::network::set_wifi_enabled(on);
 }
 
 /// Czy w systemie jest adapter Bluetooth (`/sys/class/bluetooth`).
@@ -349,197 +347,6 @@ pub fn adjust_volume(current: u8, delta: i8) -> u8 {
     next
 }
 
-/// Pojedyncza sieć Wi-Fi wykryta przez `nmcli`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WifiNetwork {
-    pub ssid: String,
-    pub signal: u8,
-    pub active: bool,
-    /// Zabezpieczenie (np. `WPA2`, `WPA3`, puste/`--` = sieć otwarta).
-    pub security: String,
-}
-
-/// Rozbija linię `nmcli -t` na pola, respektując escapowanie `\\:` w SSID.
-fn terse_fields(line: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut current = String::new();
-    let mut escaped = false;
-    for ch in line.chars() {
-        if escaped {
-            current.push(ch);
-            escaped = false;
-        } else if ch == '\\' {
-            escaped = true;
-        } else if ch == ':' {
-            out.push(std::mem::take(&mut current));
-        } else {
-            current.push(ch);
-        }
-    }
-    out.push(current);
-    out
-}
-
-/// Skanuje dostępne sieci Wi-Fi.
-pub fn scan_wifi() -> Vec<WifiNetwork> {
-    let Some(out) = run(
-        "nmcli",
-        &[
-            "-t",
-            "-f",
-            "ACTIVE,SSID,SIGNAL,SECURITY",
-            "dev",
-            "wifi",
-            "list",
-        ],
-    ) else {
-        return Vec::new();
-    };
-    let mut networks = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for line in out.lines() {
-        let parts = terse_fields(line);
-        if parts.len() >= 4 {
-            let active = parts[0] == "yes";
-            let ssid = parts[1].trim().to_owned();
-            let signal: u8 = parts[2].trim().parse().unwrap_or(0);
-            let security = parts[3].trim().to_owned();
-            if !ssid.is_empty() && seen.insert(ssid.clone()) {
-                networks.push(WifiNetwork {
-                    ssid,
-                    signal,
-                    active,
-                    security,
-                });
-            }
-        }
-    }
-    networks.sort_by(|a, b| {
-        b.active
-            .cmp(&a.active)
-            .then_with(|| b.signal.cmp(&a.signal))
-    });
-    networks
-}
-
-/// Łączy z siecią Wi-Fi przez NetworkManager (D-Bus, bez hasła w `argv`).
-///
-/// Tworzymy profil `802-11-wireless` i aktywujemy go na pierwszym urządzeniu
-/// Wi-Fi. Hasło żyje wyłącznie w słowniku D-Bus przekazanym do NetworkManagera.
-pub fn connect_wifi(ssid: &str, password: Option<&str>) -> Result<(), String> {
-    use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue};
-
-    let connection =
-        zbus::blocking::Connection::system().map_err(|err| format!("D-Bus (system): {err}"))?;
-
-    // 1) Pierwsze urządzenie typu Wi-Fi (`NM_DEVICE_TYPE_WIFI = 2`).
-    let devices: Vec<OwnedObjectPath> = connection
-        .call_method(
-            Some("org.freedesktop.NetworkManager"),
-            "/org/freedesktop/NetworkManager",
-            Some("org.freedesktop.NetworkManager"),
-            "GetDevices",
-            &(),
-        )
-        .map_err(|err| format!("NetworkManager: {err}"))?
-        .body()
-        .deserialize()
-        .map_err(|err| format!("NetworkManager: {err}"))?;
-    let mut wifi_device = None;
-    for device in devices {
-        let value: OwnedValue = connection
-            .call_method(
-                Some("org.freedesktop.NetworkManager"),
-                device.as_str(),
-                Some("org.freedesktop.DBus.Properties"),
-                "Get",
-                &("org.freedesktop.NetworkManager.Device", "DeviceType"),
-            )
-            .map_err(|err| format!("NetworkManager: {err}"))?
-            .body()
-            .deserialize()
-            .map_err(|err| format!("NetworkManager: {err}"))?;
-        if u32::try_from(value).ok() == Some(2) {
-            wifi_device = Some(device);
-            break;
-        }
-    }
-    let device = wifi_device.ok_or_else(|| "No Wi-Fi device was found".to_owned())?;
-
-    // 2) Profil połączenia. `ay` dla SSID wymaga bajtów, nie tekstu.
-    let settings = wifi_connection_settings(ssid, password);
-    let root = ObjectPath::from_static_str("/").expect("root path");
-    connection
-        .call_method(
-            Some("org.freedesktop.NetworkManager"),
-            "/org/freedesktop/NetworkManager",
-            Some("org.freedesktop.NetworkManager"),
-            "AddAndActivateConnection",
-            &(settings, root, device),
-        )
-        .map_err(|err| format!("NetworkManager: {err}"))?;
-    Ok(())
-}
-
-/// Słownik `a{sa{sv}}` dla `AddAndActivateConnection`.
-fn wifi_connection_settings(
-    ssid: &str,
-    password: Option<&str>,
-) -> std::collections::HashMap<
-    String,
-    std::collections::HashMap<String, zbus::zvariant::Value<'static>>,
-> {
-    use std::collections::HashMap;
-
-    use zbus::zvariant::Value;
-
-    let mut connection = HashMap::new();
-    connection.insert("id".to_owned(), Value::from(ssid.to_owned()));
-    connection.insert("type".to_owned(), Value::from("802-11-wireless".to_owned()));
-    connection.insert("uuid".to_owned(), Value::from(new_uuid()));
-    connection.insert("autoconnect".to_owned(), Value::from(true));
-
-    let mut wireless = HashMap::new();
-    wireless.insert("ssid".to_owned(), Value::from(ssid.as_bytes().to_vec()));
-    wireless.insert("mode".to_owned(), Value::from("infrastructure".to_owned()));
-
-    let mut settings: HashMap<String, HashMap<String, Value<'static>>> = HashMap::new();
-    settings.insert("connection".to_owned(), connection);
-    settings.insert("802-11-wireless".to_owned(), wireless);
-    if let Some(password) = password.filter(|value| !value.is_empty()) {
-        let mut security = HashMap::new();
-        security.insert("key-mgmt".to_owned(), Value::from("wpa-psk".to_owned()));
-        security.insert("psk".to_owned(), Value::from(password.to_owned()));
-        settings.insert("802-11-wireless-security".to_owned(), security);
-    }
-    let mut ipv4 = HashMap::new();
-    ipv4.insert("method".to_owned(), Value::from("auto".to_owned()));
-    settings.insert("ipv4".to_owned(), ipv4);
-    let mut ipv6 = HashMap::new();
-    ipv6.insert("method".to_owned(), Value::from("auto".to_owned()));
-    settings.insert("ipv6".to_owned(), ipv6);
-    settings
-}
-
-/// UUID v4-podobny bez dodatkowej zależności (wystarczający dla profilu NM).
-fn new_uuid() -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    let salt = (std::process::id() as u128) << 64;
-    let value = nanos ^ salt ^ 0x9e37_79b9_7f4a_7c15_9e37_79b9_7f4a_7c15;
-    let hex = format!("{value:032x}");
-    format!(
-        "{}-{}-4{}-a{}-{}",
-        &hex[0..8],
-        &hex[8..12],
-        &hex[13..16],
-        &hex[17..20],
-        &hex[20..32]
-    )
-}
-
 /// Czy synchronizacja czasu (NTP) jest włączona w systemie.
 pub fn ntp_enabled() -> Option<bool> {
     let output = Command::new("timedatectl")
@@ -590,50 +397,6 @@ fn run_timeout(program: &str, args: &[&str], timeout: Duration) -> Option<String
     }
 }
 
-/// Skan sieci Wi-Fi w tle.
-///
-/// `nmcli dev wifi list` potrafi trwać sekundy (realny skan radiowy), więc nie wolno
-/// wołać go z wątku UI. Powłoka prosi o skan przy otwarciu popupu sieci
-/// ([`WifiScan::refresh`]) i co klatkę czyta ostatni wynik ([`WifiScan::current`]).
-pub struct WifiScan {
-    nets: Arc<Mutex<Vec<WifiNetwork>>>,
-    requested: Arc<std::sync::atomic::AtomicBool>,
-}
-
-impl WifiScan {
-    /// Startuje wątek skanujący (leniwie — tylko na żądanie).
-    pub fn spawn() -> Self {
-        let nets: Arc<Mutex<Vec<WifiNetwork>>> = Arc::new(Mutex::new(Vec::new()));
-        let requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (w_nets, w_req) = (Arc::clone(&nets), Arc::clone(&requested));
-        std::thread::spawn(move || {
-            use std::sync::atomic::Ordering;
-            loop {
-                std::thread::sleep(Duration::from_millis(400));
-                if !w_req.swap(false, Ordering::Relaxed) {
-                    continue;
-                }
-                let fresh = scan_wifi();
-                if let Ok(mut g) = w_nets.lock() {
-                    *g = fresh;
-                }
-            }
-        });
-        Self { nets, requested }
-    }
-
-    /// Prosi o świeży skan (np. po otwarciu popupu sieci).
-    pub fn refresh(&self) {
-        self.requested
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// Ostatnia znana lista sieci (kopia).
-    pub fn current(&self) -> Vec<WifiNetwork> {
-        self.nets.lock().map(|g| g.clone()).unwrap_or_default()
-    }
-}
-
 fn user_name() -> String {
     std::env::var("USER")
         .or_else(|_| std::env::var("LOGNAME"))
@@ -667,31 +430,8 @@ fn parse_volume(out: &str) -> Option<(u8, bool)> {
 }
 
 fn wifi() -> Option<(bool, Option<String>)> {
-    // „enabled:connected” / „disabled:…”.
-    let general = run("nmcli", &["-t", "-f", "WIFI,STATE", "general"])?;
-    let (enabled, connected) = parse_wifi_general(&general)?;
-    let ssid = if connected {
-        run("nmcli", &["-t", "-f", "ACTIVE,SSID", "dev", "wifi"]).and_then(|o| parse_ssid(&o))
-    } else {
-        None
-    };
-    Some((enabled, ssid))
-}
-
-/// Parsuje `general` z `nmcli -t -f WIFI,STATE general` → `(włączone, połączone)`.
-///
-/// Stan bywa dłuższy („connected (local only)”), a „disconnected” zawiera
-/// podciąg „connected”, więc porównujemy początek pola.
-fn parse_wifi_general(out: &str) -> Option<(bool, bool)> {
-    let (wifi, state) = out.trim().split_once(':')?;
-    Some((wifi == "enabled", state.starts_with("connected")))
-}
-
-/// Parsuje `nmcli -t -f ACTIVE,SSID dev wifi` → SSID aktywnej sieci.
-#[allow(dead_code)]
-fn parse_ssid(out: &str) -> Option<String> {
-    out.lines()
-        .find_map(|l| l.strip_prefix("yes:").map(str::to_owned))
+    // Jedno źródło prawdy: ta sama warstwa D‑Bus, z której korzystają Ustawienia.
+    crate::network::wifi_state()
 }
 
 fn battery() -> Option<BatteryStatus> {
@@ -782,27 +522,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wifi_profile_has_ssid_and_psk_without_plaintext_fields() {
-        let settings = wifi_connection_settings("Dom", Some("tajne-hasło"));
-        assert_eq!(settings.len(), 5);
-        let wireless = &settings["802-11-wireless"];
-        assert_eq!(
-            wireless["ssid"].value_signature().to_string(),
-            "ay",
-            "SSID musi być bajtami"
-        );
-        let security = &settings["802-11-wireless-security"];
-        assert_eq!(
-            String::try_from(security["psk"].clone()).ok().as_deref(),
-            Some("tajne-hasło")
-        );
-        let uuid =
-            String::try_from(settings["connection"]["uuid"].clone()).expect("uuid jako tekst");
-        assert_eq!(uuid.len(), 36);
-        assert_eq!(uuid.chars().filter(|c| *c == '-').count(), 4);
-    }
-
-    #[test]
     fn brightness_cycles_levels() {
         assert_eq!(next_brightness_level(0), 25);
         assert_eq!(next_brightness_level(25), 50);
@@ -817,32 +536,6 @@ mod tests {
         assert_eq!(parse_volume("Volume: 0.40 [MUTED]\n"), Some((40, true)));
         assert_eq!(parse_volume("Volume: 1.00\n"), Some((100, false)));
         assert_eq!(parse_volume("Nieoczekiwane\n"), None);
-    }
-
-    #[test]
-    fn parses_wifi_general_and_ssid() {
-        assert_eq!(parse_wifi_general("enabled:connected"), Some((true, true)));
-        assert_eq!(
-            parse_wifi_general("enabled:connected (local only)\n"),
-            Some((true, true))
-        );
-        assert_eq!(
-            parse_wifi_general("enabled:disconnected\n"),
-            Some((true, false))
-        );
-        assert_eq!(
-            parse_wifi_general("enabled:connecting\n"),
-            Some((true, false))
-        );
-        assert_eq!(
-            parse_wifi_general("disabled:unavailable"),
-            Some((false, false))
-        );
-        assert_eq!(parse_wifi_general("śmieci"), None);
-
-        let scan = "no:Dom\nyes:PaganNet\nno:Sasiad\n";
-        assert_eq!(parse_ssid(scan).as_deref(), Some("PaganNet"));
-        assert_eq!(parse_ssid("no:Dom\nno:Sasiad\n"), None);
     }
 
     #[test]

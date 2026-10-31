@@ -353,7 +353,11 @@ impl Entry {
             match icon_kind {
                 EntryIcon::Search => icon::search(
                     ctx,
-                    colors.dim_text,
+                    if self.focused {
+                        colors.accent
+                    } else {
+                        colors.dim_text
+                    },
                     Point::new(rect.x() + m.pad_x + m.icon / 2.0, cy),
                     m.icon,
                 ),

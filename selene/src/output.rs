@@ -18,8 +18,8 @@ use crate::drm::{DrmBackend, DrmError};
 use crate::input::{self, Events};
 use crate::monitors::{layout_horizontal, OutputInfo, Outputs};
 use crate::state::{
-    CursorModel, Overview, OverviewModel, ScreenshotModel, Window, WindowModel,
-    WorkspaceCountModel, WorkspaceModel,
+    CornerHint, CornerKind, CursorModel, Overview, OverviewModel, ScreenshotModel, Window,
+    WindowModel, WorkspaceCountModel, WorkspaceModel,
 };
 use crate::sync::LockExt;
 
@@ -43,7 +43,9 @@ pub fn spawn(
         let config = AppConfig::new("Selene")
             .app_id("eu.paganlinux.Luna.Selene")
             .initial_size(width, height)
-            .settings(ThemeSettings::load());
+            .settings(ThemeSettings::load())
+            // Esc należy do sesji gościa — nie może zamykać okna testowego Selene.
+            .escape_to_exit(false);
         let theme = user_theme();
         let text = TextEngine::system();
         // Zrzut nested: trzymamy jeden renderer przez całą sesję — tworzenie
@@ -129,13 +131,13 @@ pub fn spawn(
 /// (20 ms) — wcześniej każde opóźnienie było płacone w krokach po 100 ms, co dawało
 /// odczucie „panel wyskakuje po ~5 sekundach”. Po pół sekundy przechodzimy na 100 ms,
 /// żeby nie palić procesora bez potrzeby.
-fn open_drm_waiting() -> Result<DrmBackend, DrmError> {
+fn open_drm_waiting(preferences: &libluna_core::DisplaySettings) -> Result<DrmBackend, DrmError> {
     let stats = std::env::var("SELENE_STATS").is_ok();
     let started = std::time::Instant::now();
     let deadline = started + Duration::from_secs(15);
     let mut attempt = 0u32;
     loop {
-        let err = match DrmBackend::open() {
+        let err = match DrmBackend::open(preferences) {
             Ok(backend) => {
                 if stats && attempt > 0 {
                     eprintln!(
@@ -177,6 +179,34 @@ fn throttle_delay(power_saver: bool, elapsed: Duration) -> Option<Duration> {
     (elapsed < MIN).then(|| MIN - elapsed)
 }
 
+/// Zapisuje migawkę monitorów dla Ustawień: `nazwa|szer|wys|hz|x|y|skala|tryby`.
+///
+/// Dzięki temu strona „Ekrany” zna tryby z modesetu (z odświeżaniem), a nie tylko
+/// pierwszą linię z `/sys/class/drm/*/modes`. Plik nazywa się `luna-monitors`,
+/// bo `luna-outputs` jest markerem sesji (liczba monitorów → ile paneli uruchomić).
+fn write_outputs_snapshot(
+    outputs: &[OutputInfo],
+    detailed: &[(String, u32, u32, u32, Vec<libluna_core::OutputMode>)],
+) {
+    let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") else {
+        return;
+    };
+    let mut text = String::from("# luna-monitors: nazwa|szer|wys|hz|x|y|skala|tryby\n");
+    for (info, (_, _, _, _, modes)) in outputs.iter().zip(detailed) {
+        let modes = modes
+            .iter()
+            .map(|mode| mode.config_value())
+            .collect::<Vec<_>>()
+            .join(",");
+        text.push_str(&format!(
+            "{}|{}|{}|{}|{}|{}|{}|{}\n",
+            info.name, info.width, info.height, info.refresh_hz, info.x, info.y, info.scale, modes
+        ));
+    }
+    let path = std::path::PathBuf::from(runtime).join("luna-monitors");
+    let _ = std::fs::write(path, text);
+}
+
 /// Uruchamia wątek wyjścia DRM/KMS — renderuje scenę do buforów i skanuje na monitorach.
 ///
 /// Wymaga bycia DRM masterem; jeśli inną sesję trzyma master, kończy bez efektu
@@ -184,6 +214,7 @@ fn throttle_delay(power_saver: bool, elapsed: Duration) -> Option<Duration> {
 pub fn spawn_drm(
     model: WindowModel,
     cursor: CursorModel,
+    cursor_image: crate::state::CursorImageModel,
     ws: WorkspaceModel,
     overview: OverviewModel,
     screenshot: crate::state::ScreenshotModel,
@@ -191,9 +222,12 @@ pub fn spawn_drm(
     power_saver: crate::state::PowerSaverModel,
     outputs: Outputs,
     ws_count: WorkspaceCountModel,
+    display_request: crate::state::DisplayRequestModel,
+    position_request: crate::state::PositionRequestModel,
 ) {
     std::thread::spawn(move || {
-        let mut backend = match open_drm_waiting() {
+        let display = libluna_core::DisplaySettings::load();
+        let mut backend = match open_drm_waiting(&display) {
             Ok(backend) => backend,
             Err(reason) => {
                 // Rozróżniamy powód — inaczej „brak mastera” maskuje błędy inicjalizacji.
@@ -212,11 +246,13 @@ pub fn spawn_drm(
                 return;
             }
         };
-        let infos = backend.outputs();
+        let mut infos = backend.outputs();
         // Night light: sprawdzamy **realne** wsparcie CRTC dla tablicy gamma i od razu
-        // wgrywamy neutralną rampę (to zarazem test ioctla). Flaga w katalogu runtime
+        // wgrywamy zapisaną rampę (to zarazem test ioctla). Flaga w katalogu runtime
         // mówi powłoce, czy kafelek „Tryb nocny” jest w ogóle dostępny.
-        let gamma_ok = backend.supports_night_light() && backend.set_night_light(0);
+        let initial_night = display.night_light;
+        night_light.store(initial_night, std::sync::atomic::Ordering::Relaxed);
+        let gamma_ok = backend.supports_night_light() && backend.set_night_light(initial_night);
         write_gamma_flag(gamma_ok);
         if std::env::var("SELENE_STATS").is_ok() {
             eprintln!(
@@ -232,7 +268,9 @@ pub fn spawn_drm(
         // Wcześniej model zostawał przy wyniku wczesnego `discover()`; gdy kernel
         // zgłosił inny tryb (albo inne złącze), panel i okna miały złą geometrię,
         // a drugi monitor potrafił dostać nie-natywną rozdzielczość.
+        let mut origins: Vec<(f64, f64)>;
         {
+            let detailed = backend.outputs_with_modes();
             let mut list: Vec<OutputInfo> = infos
                 .iter()
                 .map(|(name, w, h, hz)| OutputInfo {
@@ -245,22 +283,37 @@ pub fn spawn_drm(
                     y: 0,
                 })
                 .collect();
-            layout_horizontal(&mut list);
+            // Układ zapisany przez użytkownika (`output <złącze> position = x,y`).
+            // Brakujące pozycje dokładamy po prawej stronie zapisanych.
+            let mut positioned = false;
+            let mut right = 0;
+            for info in &mut list {
+                if let Some((x, y)) = display.position_for(&info.name) {
+                    info.x = x;
+                    info.y = y;
+                    positioned = true;
+                    right = right.max(x + info.width);
+                }
+            }
+            if positioned {
+                for info in &mut list {
+                    if display.position_for(&info.name).is_none() {
+                        info.x = right;
+                        info.y = 0;
+                        right += info.width;
+                    }
+                }
+            } else {
+                layout_horizontal(&mut list);
+            }
+            write_outputs_snapshot(&list, &detailed);
+            origins = list
+                .iter()
+                .map(|info| (info.x as f64, info.y as f64))
+                .collect();
             *outputs.lock_or_recover() = list;
         }
-        let sizes: Vec<(u32, u32)> = infos.iter().map(|(_, w, h, _)| (*w, *h)).collect();
-        let origins: Vec<(f64, f64)> = {
-            // Wyjścia ułożone poziomo (spójne z modelem monitorów).
-            let mut x = 0.0;
-            sizes
-                .iter()
-                .map(|(w, _)| {
-                    let o = (x, 0.0);
-                    x += *w as f64;
-                    o
-                })
-                .collect()
-        };
+        let mut sizes: Vec<(u32, u32)> = infos.iter().map(|(_, w, h, _)| (*w, *h)).collect();
         for (name, w, h, hz) in &infos {
             println!(
                 "{}: {} {}x{}@{}Hz",
@@ -280,7 +333,7 @@ pub fn spawn_drm(
         // GPU komponuje okna `dmabuf` sprzętowo (CPU rysuje dla nich tylko zaślepkę),
         // a każdy monitor dostaje własny kontekst — render jest sekwencyjny, bo
         // kontekstu EGL nie można przenosić między wątkami.
-        let use_gpu = if gpu_requested() {
+        let mut use_gpu = if gpu_requested() {
             let mut gpu = Vec::with_capacity(sizes.len());
             let mut error = None;
             for (w, h) in &sizes {
@@ -319,14 +372,26 @@ pub fn spawn_drm(
         let mut theme_checked = std::time::Instant::now();
         let text_engine = TextEngine::system();
 
-        // Sprzętowy kursor: renderujemy raz obraz strzałki (ARGB) i odtąd poruszamy
-        // tylko płaszczyzną kursora — ruch myszy nie przemalowuje sceny.
-        let (cursor_rgba, cw, ch) = cursor_image();
-        let mut hw_cursor = true;
+        // Kursor: obraz bierzemy z modelu (kształt z `wp_cursor_shape_v1` albo bufor
+        // klienta). Płaszczyzna sprzętowa dostaje własny BO; za duży obraz → scena.
+        let mut cursor_source = crate::state::CursorImage::Default;
+        crate::cursor::set_model(&cursor_source);
+        let (mut cursor_gfx, mut cursor_hotspot) = crate::cursor::current();
+        let mut hw_cursor = crate::cursor::fits_hardware(&cursor_gfx);
         for i in 0..sizes.len() {
             // Bezpieczna próba na (0, 0) i natychmiastowe ukrycie — uodparnia na
             // sterowniki DRM odrzucające ujemne współrzędne w `MODE_CURSOR`.
-            if !backend.set_cursor_image(i, &cursor_rgba, cw, ch, 0, 0) || !backend.hide_cursor(i) {
+            if !hw_cursor
+                || !backend.set_cursor_image(
+                    i,
+                    &cursor_gfx.rgba,
+                    cursor_gfx.width,
+                    cursor_gfx.height,
+                    0,
+                    0,
+                )
+                || !backend.hide_cursor(i)
+            {
                 hw_cursor = false;
             }
         }
@@ -359,6 +424,129 @@ pub fn spawn_drm(
                     // Wymuś pełny render (sygnatury nie zawierają kolorów motywu).
                     for sig in last_sigs.iter_mut() {
                         *sig = None;
+                    }
+                }
+            }
+            // Zmiana trybu monitora z Ustawień (`luna-control output-mode`):
+            // realny modeset DRM + odbudowa buforów i rendererów tego monitora.
+            if let Some((name, mode)) = display_request.lock_or_recover().take() {
+                match backend.set_mode(&name, mode) {
+                    Some(_index) => {
+                        let previous = outputs.lock_or_recover().clone();
+                        infos = backend.outputs();
+                        sizes = infos.iter().map(|(_, w, h, _)| (*w, *h)).collect();
+                        if use_gpu {
+                            let mut gpu = Vec::with_capacity(sizes.len());
+                            let mut failure = None;
+                            for (w, h) in &sizes {
+                                match GpuRenderer::new(*w, *h) {
+                                    Ok(renderer) => gpu.push(renderer),
+                                    Err(err) => {
+                                        failure = Some(err);
+                                        break;
+                                    }
+                                }
+                            }
+                            if failure.is_none() && gpu.len() == sizes.len() {
+                                gpu_renderers = gpu;
+                            } else {
+                                eprintln!(
+                                    "selene/drm: GPU po zmianie trybu niedostępne ({}) — przechodzę na CPU",
+                                    failure.as_deref().unwrap_or("nieznany błąd")
+                                );
+                                use_gpu = false;
+                                gpu_renderers.clear();
+                                renderers = sizes
+                                    .iter()
+                                    .map(|(w, h)| SoftwareRenderer::new(*w, *h))
+                                    .collect();
+                            }
+                        } else {
+                            renderers = sizes
+                                .iter()
+                                .map(|(w, h)| SoftwareRenderer::new(*w, *h))
+                                .collect();
+                        }
+                        // Płaszczyzna kursora mogła zostać zresetowana przez modeset.
+                        hw_cursor = crate::cursor::fits_hardware(&cursor_gfx);
+                        for i in 0..sizes.len() {
+                            if !hw_cursor
+                                || !backend.set_cursor_image(
+                                    i,
+                                    &cursor_gfx.rgba,
+                                    cursor_gfx.width,
+                                    cursor_gfx.height,
+                                    0,
+                                    0,
+                                )
+                                || !backend.hide_cursor(i)
+                            {
+                                hw_cursor = false;
+                            }
+                        }
+                        cursor_shown = vec![false; sizes.len()];
+                        last_sigs = vec![None; sizes.len()];
+                        last_present = std::time::Instant::now();
+                        // Modeset zeruje LUT gamma — night light trzeba wgrać ponownie.
+                        applied_night = None;
+
+                        // Panel i Ustawienia dostają nową geometrię od razu.
+                        // Pozycje z układu użytkownika zostają — zmienił się tylko rozmiar.
+                        let detailed = backend.outputs_with_modes();
+                        let mut list: Vec<OutputInfo> = infos
+                            .iter()
+                            .map(|(name, w, h, hz)| OutputInfo {
+                                name: name.clone(),
+                                width: *w as i32,
+                                height: *h as i32,
+                                refresh_hz: *hz as i32,
+                                scale: 1,
+                                x: 0,
+                                y: 0,
+                            })
+                            .collect();
+                        if previous.len() == list.len() {
+                            for (info, old) in list.iter_mut().zip(previous.iter()) {
+                                info.x = old.x;
+                                info.y = old.y;
+                            }
+                        } else {
+                            layout_horizontal(&mut list);
+                        }
+                        origins = list
+                            .iter()
+                            .map(|info| (info.x as f64, info.y as f64))
+                            .collect();
+                        write_outputs_snapshot(&list, &detailed);
+                        *outputs.lock_or_recover() = list;
+                        if stats {
+                            eprintln!("selene/drm: tryb {name} zmieniony");
+                        }
+                    }
+                    None => eprintln!("selene/drm: nie udało się ustawić trybu dla {name}"),
+                }
+            }
+            // Przesunięcie monitora w układzie (`luna-control output-position`).
+            // Bez modesetu: zmienia się tylko model wyjść i geometria dla klientów.
+            if let Some((name, x, y)) = position_request.lock_or_recover().take() {
+                let mut list = outputs.lock_or_recover().clone();
+                if let Some(slot) = list.iter_mut().find(|output| output.name == name) {
+                    slot.x = x;
+                    slot.y = y;
+                    origins = list
+                        .iter()
+                        .map(|info| (info.x as f64, info.y as f64))
+                        .collect();
+                    let detailed = backend.outputs_with_modes();
+                    write_outputs_snapshot(&list, &detailed);
+                    *outputs.lock_or_recover() = list;
+                    // Inne kadrowanie monitorów — wymuś pełny render.
+                    for sig in last_sigs.iter_mut() {
+                        *sig = None;
+                    }
+                    last_cur = None;
+                    if stats {
+                        eprintln!("selene/drm: {name} -> {x},{y}");
                     }
                 }
             }
@@ -397,10 +585,61 @@ pub fn spawn_drm(
                     save_screenshots(&refs, &infos);
                 }
             }
-            let cur = *cursor.lock_or_recover();
-            let cur_ws = *ws.lock_or_recover();
             let ov = *overview.lock_or_recover();
+            // Wygaszony ekran = brak kursora (także sprzętowego) do pierwszej aktywności.
+            let cur = if ov.blanked {
+                None
+            } else {
+                *cursor.lock_or_recover()
+            };
+            let cur_ws = *ws.lock_or_recover();
             let ws_count = ws_count.load(std::sync::atomic::Ordering::Relaxed);
+
+            // Zmiana obrazu kursora (kształt z `wp_cursor_shape_v1` albo bufor klienta).
+            // Nie zależy od ruchu myszy, więc wykrywamy ją osobno.
+            let image_changed = {
+                let next = cursor_image.lock_or_recover().clone();
+                if next == cursor_source {
+                    false
+                } else {
+                    cursor_source = next;
+                    crate::cursor::set_model(&cursor_source);
+                    let (gfx, hotspot) = crate::cursor::current();
+                    cursor_gfx = gfx;
+                    cursor_hotspot = hotspot;
+                    true
+                }
+            };
+            if image_changed {
+                if hw_cursor && !crate::cursor::fits_hardware(&cursor_gfx) {
+                    // Płaszczyzna bywa mniejsza niż kursor klienta — rysujemy w scenie.
+                    hw_cursor = false;
+                    for i in 0..sizes.len() {
+                        backend.hide_cursor(i);
+                        cursor_shown[i] = false;
+                    }
+                    eprintln!(
+                        "selene/drm: kursor {}×{} za duży dla płaszczyzny — rysuję w scenie",
+                        cursor_gfx.width, cursor_gfx.height
+                    );
+                }
+                if hw_cursor {
+                    apply_hw_cursor(
+                        &mut backend,
+                        &sizes,
+                        &origins,
+                        cur,
+                        &cursor_gfx,
+                        cursor_hotspot,
+                        &mut cursor_shown,
+                        true,
+                    );
+                }
+                // Software: kursor jest częścią sceny — wymuś pełny render.
+                for sig in last_sigs.iter_mut() {
+                    *sig = None;
+                }
+            }
 
             let cur_changed = last_cur != cur;
             let mut any_changed = false;
@@ -434,30 +673,17 @@ pub fn spawn_drm(
             last_cur = cur;
 
             // Kursor sprzętowy: ustaw/przesuń płaszczyznę kursora (bez dotykania sceny).
-            if hw_cursor && cur_changed {
-                for i in 0..sizes.len() {
-                    let (w, h) = sizes[i];
-                    let (ox, oy) = origins[i];
-                    let local = cur.map(|c| ((c.x - ox) as i32, (c.y - oy) as i32));
-                    let inside = cur
-                        .map(|c| {
-                            let (lx, ly) = (c.x - ox, c.y - oy);
-                            lx >= 0.0 && ly >= 0.0 && lx < w as f64 && ly < h as f64
-                        })
-                        .unwrap_or(false);
-                    if inside {
-                        let (x, y) = local.unwrap();
-                        if cursor_shown[i] {
-                            backend.move_cursor(i, x, y);
-                        } else {
-                            backend.set_cursor_image(i, &cursor_rgba, cw, ch, x, y);
-                            cursor_shown[i] = true;
-                        }
-                    } else if cursor_shown[i] {
-                        backend.hide_cursor(i);
-                        cursor_shown[i] = false;
-                    }
-                }
+            if hw_cursor && (cur_changed || image_changed) {
+                apply_hw_cursor(
+                    &mut backend,
+                    &sizes,
+                    &origins,
+                    cur,
+                    &cursor_gfx,
+                    cursor_hotspot,
+                    &mut cursor_shown,
+                    image_changed,
+                );
             }
 
             if any_changed {
@@ -670,15 +896,45 @@ fn screenshot_dir() -> std::path::PathBuf {
     std::path::PathBuf::from("/tmp")
 }
 
-/// Obraz kursora (strzałka) w RGBA8 — do płaszczyzny kursora DRM.
-fn cursor_image() -> (Vec<u8>, u32, u32) {
-    let (w, h) = (64u32, 64u32);
-    let mut renderer = SoftwareRenderer::new(w, h);
-    let mut scene = Scene::new();
-    scene.clear();
-    draw_cursor(&mut scene, Point::new(2.0, 2.0));
-    renderer.draw(&scene, 1.0, Color::rgba(0.0, 0.0, 0.0, 0.0));
-    (renderer.data().to_vec(), w, h)
+/// Ustawia obraz i pozycję kursora sprzętowego na wyjściach (DRM).
+///
+/// `force_image` wymusza nowy BO (po zmianie kształtu/obrazu), a nie tylko ruch —
+/// `MODE_CURSOR` z flagą `MOVE` nie zmienia zawartości pamięci kursora.
+#[allow(clippy::too_many_arguments)]
+fn apply_hw_cursor(
+    backend: &mut DrmBackend,
+    sizes: &[(u32, u32)],
+    origins: &[(f64, f64)],
+    cur: Option<Point>,
+    gfx: &libluna_render::ImageData,
+    hotspot: (i32, i32),
+    shown: &mut [bool],
+    force_image: bool,
+) {
+    for i in 0..sizes.len() {
+        let (ow, oh) = sizes[i];
+        let (ox, oy) = origins[i];
+        let inside = cur
+            .map(|c| {
+                let (lx, ly) = (c.x - ox, c.y - oy);
+                lx >= 0.0 && ly >= 0.0 && lx < ow as f64 && ly < oh as f64
+            })
+            .unwrap_or(false);
+        if inside {
+            let c = cur.unwrap_or(Point::new(0.0, 0.0));
+            let x = (c.x - ox) as i32 - hotspot.0;
+            let y = (c.y - oy) as i32 - hotspot.1;
+            if force_image || !shown[i] {
+                backend.set_cursor_image(i, &gfx.rgba, gfx.width, gfx.height, x, y);
+                shown[i] = true;
+            } else {
+                backend.move_cursor(i, x, y);
+            }
+        } else if shown[i] {
+            backend.hide_cursor(i);
+            shown[i] = false;
+        }
+    }
 }
 
 /// Sygnatura sceny dla konkretnego monitora — pozwala pominąć render monitora, na którym nic się nie zmieniło.
@@ -701,11 +957,25 @@ fn output_signature(
     mix(current_ws as u64);
     // Liczba przestrzeni zmienia pasek/podgląd, nawet gdy bieżąca przestrzeń się nie zmienia.
     mix(ws_count as u64);
+    // Tapeta z Ustawień działa bez restartu sesji.
+    mix(wallpaper_stamp());
     mix(u64::from(overview.on));
+    mix(u64::from(overview.blanked));
     if let Some((slot, (px, py))) = overview.drag {
         mix(slot as u64);
         mix(px.to_bits());
         mix(py.to_bits());
+    }
+    // Poświata rogu: kwantyzacja postępu (256 kroków) wystarcza, a nie tworzy
+    // nowej sygnatury dla każdej klatki po zatrzymaniu się na 100%.
+    match overview.corner {
+        Some(hint) => {
+            mix(1);
+            mix(hint.kind as u64);
+            mix((hint.progress.clamp(0.0, 1.0) * 255.0).round() as u64);
+            mix(hint.top_inset.to_bits());
+        }
+        None => mix(0),
     }
     let mon_rect = Rect::from_xywh(ox, oy, ow, oh);
     {
@@ -756,6 +1026,8 @@ fn scene_signature(
     };
     mix(current_ws as u64);
     mix(u64::from(overview.on));
+    mix(u64::from(overview.blanked));
+    mix(wallpaper_stamp());
     if let Some((slot, (px, py))) = overview.drag {
         mix(slot as u64);
         mix(px.to_bits());
@@ -816,6 +1088,16 @@ fn build_scene(
 ) {
     let sh = |r: Rect| r.offset(-ox, -oy);
     scene.clear();
+    // Ekran wygaszony po bezczynności: czarna klatka zamiast pulpitu i kursora.
+    // Wątek wyjścia i tak nie renderuje wtedy nic więcej (sygnatura się nie zmienia),
+    // więc CPU/GPU odpoczywają do pierwszego zdarzenia wejścia.
+    if overview.blanked {
+        scene.fill_rect(
+            Rect::from_size(size),
+            Color::from_rgba8(0x00, 0x00, 0x00, 0xff),
+        );
+        return;
+    }
     // Tło pulpitu: tapeta z `assets/branding` (gradient zostaje jako zapas).
     match wallpaper_for(size.width.max(1.0) as u32, size.height.max(1.0) as u32) {
         Some(img) => {
@@ -844,8 +1126,16 @@ fn build_scene(
                 && w.in_workspace(current_ws)
         });
         let inactive_dim = Color::from_rgba8(0x00, 0x00, 0x00, 0x40);
+        // Widoczny obszar tego monitora (globalnie) — do odsiania okien z innych wyjść.
+        let out_rect = Rect::from_xywh(ox, oy, size.width, size.height);
         for w in order {
             if !w.mapped || w.minimized || !w.in_workspace(current_ws) {
+                continue;
+            }
+            // Okno z innego monitora nie wnosi pikseli, a jego zaokrąglony clip
+            // kosztowałby pełną maskę bufora (kilka ms na klatkę).
+            let bounds = w.outer().union(&w.buffer_rect());
+            if !bounds.intersects(&out_rect) {
                 continue;
             }
             // Tło treści: **nie malujemy czerni** pod buforem klienta. Bufory bywają
@@ -855,13 +1145,18 @@ fn build_scene(
             // jest większy od widocznego okna i musi być rysowany z przesunięciem.
             // Zaokrąglone narożniki: wymuszamy dla wszystkich zwykłych okien (także CSD),
             // promieniem z motywu. Maksymalizowane/fullscreen zostają ostre.
-            let radius = if !w.popup && !w.layer && !w.maximized && !w.fullscreen {
+            let outer = sh(w.outer());
+            // Okno na całą szerokość monitora („przyklejone” do obu krawędzi) nie
+            // potrzebuje zaokrągleń — narożniki i tak leżą na krawędzi ekranu, a clip
+            // wymusza budowę maski o rozmiarze całego bufora i blokuje szybki blit.
+            let spans_width = outer.x() <= 0.5 && outer.right() >= size.width - 0.5;
+            let radius = if !w.popup && !w.layer && !w.maximized && !w.fullscreen && !spans_width {
                 theme.radius.large
             } else {
                 0.0
             };
             if radius > 0.0 {
-                scene.push_clip_rounded(sh(w.outer()), radius);
+                scene.push_clip_rounded(outer, radius);
             }
             match &w.dmabuf {
                 Some(db) => {
@@ -907,7 +1202,7 @@ fn build_scene(
             // Rysujemy **przed** zdjęciem clipu, żeby przygaszenie miało zaokrąglone
             // narożniki razem z oknem.
             if focused_normal && !w.focused && !w.popup && !w.layer {
-                scene.fill_rect(sh(w.outer()), inactive_dim);
+                scene.fill_rect(outer, inactive_dim);
             }
             if radius > 0.0 {
                 scene.pop_clip();
@@ -929,11 +1224,21 @@ fn build_scene(
         );
     }
 
+    // Poświata „gorącego rogu”: rośnie przy przytrzymaniu kursora w rogu ekranu.
+    // Rysujemy ją po oknach, ale przed kursorem i tylko gdy podgląd jest zamknięty
+    // (podgląd zajmuje cały ekran własnymi kafelkami).
+    if !overview.on {
+        if let Some(hint) = overview.corner {
+            draw_corner_hint(scene, size, ox, oy, hint, theme);
+        }
+    }
+
     // Kursor rysuje ten monitor, na którym leży (tryb DRM — nikt go za nas nie narysuje).
+    // Obraz (strzałka, kształt z motywu albo bufor klienta) pochodzi z `crate::cursor`.
     if let Some(c) = cursor.filter(|_| show_cursor) {
         let (cx, cy) = (c.x - ox, c.y - oy);
         if cx >= 0.0 && cy >= 0.0 && cx < size.width && cy < size.height {
-            draw_cursor(scene, Point::new(cx, cy));
+            crate::cursor::paint(scene, Point::new(cx, cy));
         }
     }
 }
@@ -944,39 +1249,79 @@ fn build_scene(
 /// Skalowanie robimy **raz** na rozmiar i trzymamy w cache — w pętli renderowania
 /// idzie wtedy tani blit 1:1, a nie skalowanie pełnego ekranu co klatkę.
 fn wallpaper_for(w: u32, h: u32) -> Option<std::sync::Arc<ImageData>> {
+    type SizedCache = Vec<(u64, (u32, u32), std::sync::Arc<ImageData>)>;
     let (w, h) = (w.max(1), h.max(1));
-    static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<Vec<((u32, u32), std::sync::Arc<ImageData>)>>,
-    > = std::sync::OnceLock::new();
+    let stamp = wallpaper_stamp();
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<SizedCache>> = std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(|| std::sync::Mutex::new(Vec::new()));
     let mut guard = cache.lock_or_recover();
-    if let Some((_, img)) = guard.iter().find(|((cw, ch), _)| *cw == w && *ch == h) {
+    // Nowa tapeta (mtime / ścieżka) unieważnia przeskalowane kopie starych rozmiarów.
+    guard.retain(|(cached_stamp, _, _)| *cached_stamp == stamp);
+    if let Some((_, _, img)) = guard
+        .iter()
+        .find(|(cached_stamp, (cw, ch), _)| *cached_stamp == stamp && *cw == w && *ch == h)
+    {
         return Some(std::sync::Arc::clone(img));
     }
-    let src = wallpaper_source()?;
-    let img = std::sync::Arc::new(libluna_render::wallpaper::cover(src, w, h));
-    guard.push(((w, h), std::sync::Arc::clone(&img)));
+    let src = wallpaper_source(stamp)?;
+    let img = std::sync::Arc::new(libluna_render::wallpaper::cover(&src, w, h));
+    guard.push((stamp, (w, h), std::sync::Arc::clone(&img)));
     Some(img)
 }
 
-/// Dekoduje tapetę raz na proces. Źródło: `LUNA_WALLPAPER` / `SELENE_WALLPAPER` /
+/// Sygnatura tapety: zmienia się przy podmianie pliku w Ustawieniach.
+///
+/// Kompozytor działa dalej bez restartu — wystarczy zapis `wallpaper.conf`.
+fn wallpaper_stamp() -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for var in ["LUNA_WALLPAPER", "SELENE_WALLPAPER", "SELENE_NO_WALLPAPER"] {
+        std::env::var_os(var).hash(&mut hasher);
+    }
+    if let Some(config) = libluna_render::wallpaper::config_path() {
+        if let Ok(meta) = std::fs::metadata(&config) {
+            meta.modified().ok().hash(&mut hasher);
+            meta.len().hash(&mut hasher);
+        }
+    }
+    if let Some(path) = libluna_render::wallpaper::configured_path() {
+        path.hash(&mut hasher);
+        if let Ok(meta) = std::fs::metadata(&path) {
+            meta.modified().ok().hash(&mut hasher);
+            meta.len().hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+/// Dekoduje tapetę raz na wersję pliku. Źródło: `LUNA_WALLPAPER` / `SELENE_WALLPAPER` /
 /// `~/.config/luna/wallpaper.conf`, a w ostateczności wbudowana grafika.
 /// Wyłączenie (powrót do gradientu): `SELENE_NO_WALLPAPER=1`.
-fn wallpaper_source() -> Option<&'static ImageData> {
-    static SRC: std::sync::OnceLock<Option<ImageData>> = std::sync::OnceLock::new();
-    SRC.get_or_init(|| {
-        if std::env::var_os("SELENE_NO_WALLPAPER").is_some() {
-            return None;
+fn wallpaper_source(stamp: u64) -> Option<std::sync::Arc<ImageData>> {
+    type SourceCache = Option<(u64, Option<std::sync::Arc<ImageData>>)>;
+    static SRC: std::sync::OnceLock<std::sync::Mutex<SourceCache>> = std::sync::OnceLock::new();
+    let cache = SRC.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = cache.lock_or_recover();
+    if let Some((cached_stamp, src)) = guard.as_ref() {
+        if *cached_stamp == stamp {
+            return src.clone();
         }
+    }
+    let src = if std::env::var_os("SELENE_NO_WALLPAPER").is_some() {
+        None
+    } else {
         libluna_render::wallpaper::configured_path()
             .and_then(|path| libluna_render::wallpaper::load_path(&path))
+            .map(std::sync::Arc::new)
             .or_else(|| {
                 libluna_render::wallpaper::decode_png(include_bytes!(
                     "../../assets/branding/paganlinux.png"
                 ))
+                .map(std::sync::Arc::new)
             })
-    })
-    .as_ref()
+    };
+    *guard = Some((stamp, src.clone()));
+    src
 }
 
 fn fill_vgradient(scene: &mut Scene, rect: Rect, top: Color, bottom: Color) {
@@ -994,6 +1339,38 @@ fn fill_vgradient(scene: &mut Scene, rect: Rect, top: Color, bottom: Color) {
 
 /// Rysuje podgląd okien i przestrzeni — kafelki z podglądem treści + pasek przestrzeni.
 #[allow(clippy::too_many_arguments)]
+/// Rysuje poświatę „gorącego rogu”.
+///
+/// Kilka półprzezroczystych kół zakotwiczonych w narożniku ekranu (widoczna jest
+/// tylko ćwiartka) daje miękką poświatę bez gradientów. Rozmiar i krycie rosną
+/// z postępem przytrzymania, więc użytkownik widzi, że akcja zaraz zadziała.
+fn draw_corner_hint(
+    scene: &mut Scene,
+    size: Size,
+    ox: f64,
+    oy: f64,
+    hint: CornerHint,
+    theme: &Theme,
+) {
+    let progress = hint.progress.clamp(0.0, 1.0) as f32;
+    let (x, y) = match hint.kind {
+        CornerKind::TopLeft => (ox, oy + hint.top_inset),
+        CornerKind::BottomLeft => (ox, oy + size.height),
+        CornerKind::BottomRight => (ox + size.width, oy + size.height),
+    };
+    let center = Point::new(x - ox, y - oy);
+    let accent = theme.colors.accent;
+    // Warstwy: (skala promienia, krycie). Środek jaśniejszy, brzeg delikatny.
+    let radius = 56.0 + 84.0 * f64::from(progress);
+    for (scale, alpha) in [
+        (1.0f64, 0.08 + 0.10 * progress),
+        (0.74, 0.09 + 0.11 * progress),
+        (0.48, 0.10 + 0.12 * progress),
+    ] {
+        scene.fill_circle(center, radius * scale, accent.scale_alpha(alpha));
+    }
+}
+
 fn draw_overview(
     scene: &mut Scene,
     size: Size,
@@ -1072,34 +1449,83 @@ fn draw_overview(
     }
 }
 
-/// Klasyczna strzałka kursora (biała z ciemnym obrysem).
-fn draw_cursor(scene: &mut Scene, p: Point) {
-    let arrow = [
-        Point::new(p.x, p.y),
-        Point::new(p.x, p.y + 17.0),
-        Point::new(p.x + 4.2, p.y + 12.6),
-        Point::new(p.x + 7.0, p.y + 18.5),
-        Point::new(p.x + 9.7, p.y + 17.2),
-        Point::new(p.x + 6.9, p.y + 11.4),
-        Point::new(p.x + 11.5, p.y + 11.4),
-    ];
-    let white = Color::from_rgba8(0xf5, 0xf5, 0xf5, 0xff);
-    let outline = Color::from_rgba8(0x10, 0x10, 0x10, 0xff);
-    scene.fill_polygon(&arrow, white);
-    let mut closed = arrow.to_vec();
-    closed.push(arrow[0]);
-    scene.stroke_polyline(&closed, 1.5, outline);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use libluna_render::SoftwareRenderer;
 
     #[test]
-    fn draw_cursor_paints_pixels() {
+    fn corner_glow_paints_the_corner() {
+        let theme = Theme::dark();
+        let size = Size::new(200.0, 200.0);
         let mut scene = Scene::new();
-        draw_cursor(&mut scene, Point::new(8.0, 8.0));
+        scene.fill_rect(Rect::from_size(size), Color::from_rgba8(0, 0, 0, 255));
+        draw_corner_hint(
+            &mut scene,
+            size,
+            0.0,
+            0.0,
+            CornerHint {
+                kind: CornerKind::BottomRight,
+                progress: 0.9,
+                top_inset: 0.0,
+            },
+            &theme,
+        );
+        let mut renderer = SoftwareRenderer::new(200, 200);
+        renderer.draw(&scene, 1.0, Color::from_rgba8(0, 0, 0, 255));
+        let data = renderer.data();
+        let at = |x: usize, y: usize| {
+            let i = (y * 200 + x) * 4;
+            [data[i], data[i + 1], data[i + 2]]
+        };
+        assert_ne!(at(199, 199), [0, 0, 0], "róg ma być podświetlony");
+        assert_ne!(at(170, 170), [0, 0, 0], "poświata ma mieć miękki zasięg");
+        assert_eq!(at(60, 60), [0, 0, 0], "środek ekranu zostaje czysty");
+    }
+
+    #[test]
+    fn blanked_scene_is_black() {
+        use std::sync::{Arc, Mutex};
+        let model: WindowModel = Arc::new(Mutex::new(Vec::new()));
+        let theme = Theme::dark();
+        let text = TextEngine::none();
+        let mut scene = Scene::new();
+        let overview = Overview {
+            blanked: true,
+            ..Overview::default()
+        };
+        build_scene(
+            &mut scene,
+            Size::new(64.0, 64.0),
+            0.0,
+            0.0,
+            &model,
+            0,
+            4,
+            overview,
+            true,
+            None,
+            false,
+            &theme,
+            &text,
+        );
+        let mut renderer = SoftwareRenderer::new(64, 64);
+        renderer.draw(&scene, 1.0, Color::from_rgba8(0, 0, 0, 255));
+        assert!(
+            renderer
+                .data()
+                .chunks_exact(4)
+                .all(|px| px[0] == 0 && px[1] == 0 && px[2] == 0),
+            "wygaszony ekran ma być cały czarny (bez tapety, okien i kursora)"
+        );
+    }
+
+    #[test]
+    fn software_cursor_paints_pixels() {
+        // Kursor w scenie rysuje `crate::cursor` (domyślnie wbudowana strzałka).
+        let mut scene = Scene::new();
+        crate::cursor::paint(&mut scene, Point::new(8.0, 8.0));
         let mut renderer = SoftwareRenderer::new(48, 48);
         renderer.draw(&scene, 1.0, Color::from_rgba8(0, 0, 0, 255));
         let painted = renderer

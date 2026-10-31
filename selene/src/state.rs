@@ -3,6 +3,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use libluna_core::idle::IdleSettings;
 use libluna_core::{Modifiers, Point, Rect};
 use libluna_render::ImageData;
 use wayland_protocols::ext::workspace::v1::server::{
@@ -246,8 +247,51 @@ pub type NightLightModel = Arc<std::sync::atomic::AtomicU8>;
 /// Tryb oszczędzania energii (kompozytor ogranicza wtedy tempo prezentacji).
 pub type PowerSaverModel = Arc<std::sync::atomic::AtomicBool>;
 
+/// Żądanie zmiany trybu monitora: `(nazwa złącza, tryb)`; `None` = automatyczny.
+///
+/// Ustawia je gniazdo sterowania (`output-mode …`), a wątek wyjścia wykonuje
+/// realny modeset i odbudowuje bufory oraz renderery.
+pub type DisplayRequestModel = Arc<Mutex<Option<(String, Option<libluna_core::OutputMode>)>>>;
+
+/// Żądanie przesunięcia monitora w układzie: `(nazwa, x, y)`.
+///
+/// Pozycja nie wymaga modesetu — zmienia model wyjść i geometrię wysyłaną klientom.
+pub type PositionRequestModel = Arc<Mutex<Option<(String, i32, i32)>>>;
+
 /// Współdzielona pozycja kursora (tryb DRM/evdev); `None` = nie rysujemy kursora.
 pub type CursorModel = Arc<Mutex<Option<Point>>>;
+
+/// Obraz kursora: domyślna strzałka, nazwany kształt (`wp_cursor_shape_v1`)
+/// albo bufor dostarczony przez klienta (`wl_pointer.set_cursor`).
+#[derive(Clone, PartialEq)]
+pub enum CursorImage {
+    /// Klient ukrył kursor (`wl_pointer.set_cursor` z NULL) — np. gry i odtwarzacze.
+    Hidden,
+    Default,
+    Shape(String),
+    Custom {
+        data: Arc<libluna_render::ImageData>,
+        hotspot: (i32, i32),
+    },
+}
+
+impl std::fmt::Debug for CursorImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Hidden => f.write_str("hidden"),
+            Self::Default => f.write_str("default"),
+            Self::Shape(name) => write!(f, "shape:{name}"),
+            Self::Custom { data, hotspot } => write!(
+                f,
+                "custom:{}x{}@{},{} ",
+                data.width, data.height, hotspot.0, hotspot.1
+            ),
+        }
+    }
+}
+
+/// Współdzielony obraz kursora (kompozytor ↔ wątek wyjścia).
+pub type CursorImageModel = Arc<Mutex<CursorImage>>;
 
 /// Współdzielony numer bieżącej przestrzeni roboczej (kompozytor ↔ wątek wyjścia).
 pub type WorkspaceModel = Arc<Mutex<usize>>;
@@ -261,6 +305,37 @@ pub struct Overview {
     pub on: bool,
     /// Przeciągane okno: `(slot, pozycja kursora)`.
     pub drag: Option<(usize, (f64, f64))>,
+    /// Podpowiedź „gorącego rogu” (poświata przy przytrzymaniu kursora).
+    /// Współdzielona z wątkiem wyjścia, który rysuje ją na scenie.
+    pub corner: Option<CornerHint>,
+    /// Czy ekran jest wygaszony (czarna klatka, kursor schowany).
+    /// Trzymamy to razem z modelem rysowania, żeby wątek wyjścia widział zmianę
+    /// bez dodatkowej synchronizacji.
+    pub blanked: bool,
+}
+
+/// Który róg ekranu jest aktualnie „przytrzymywany” kursorem.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CornerKind {
+    /// Lewy górny róg obszaru roboczego (poniżej panelu) — podgląd jak `Super+Tab`.
+    TopLeft,
+    /// Dolny lewy róg — poprzednia przestrzeń.
+    BottomLeft,
+    /// Dolny prawy róg — następna przestrzeń.
+    BottomRight,
+}
+
+/// Stan poświaty w rogu: rodzaj, postęp przytrzymania (0–1) i górny margines panelu.
+///
+/// `progress = 0` to pierwsza klatka po wjechaniu w róg; `1` oznacza pełne
+/// przytrzymanie (akcja już wykonana). Rysuje to wątek wyjścia — dlatego dane
+/// muszą być `Copy` i tanie w kopiowaniu.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CornerHint {
+    pub kind: CornerKind,
+    pub progress: f64,
+    /// Wysokość panelu na tym monitorze (dla lewego górnego rogu).
+    pub top_inset: f64,
 }
 
 /// Współdzielony tryb podglądu okien/przestrzeni (kompozytor ↔ wątek wyjścia).
@@ -396,6 +471,12 @@ pub struct State {
     pub windows: WindowModel,
     /// Pozycja kursora do narysowania (tryb DRM/evdev), współdzielona z wątkiem wyjścia.
     pub cursor: CursorModel,
+    /// Obraz kursora (kształt z `wp_cursor_shape_v1` albo bufor klienta).
+    pub cursor_image: CursorImageModel,
+    /// Powierzchnia kursora z `wl_pointer.set_cursor` — jej commity aktualizują obraz.
+    pub cursor_surface: Option<WlSurface>,
+    /// Hotspot obrazu klienta (piksele powierzchni kursora).
+    pub cursor_hotspot: (i32, i32),
     /// Ostatnie wciśnięcie lewego przycisku na pasku tytułu: `(slot, czas)`.
     /// Pozwala rozpoznać podwójny klik (maksymalizacja/przywrcenie domyślnego rozmiaru).
     pub last_title_click: Option<(usize, Instant)>,
@@ -417,8 +498,16 @@ pub struct State {
     pub ws_names: Vec<String>,
     /// Czy dolne rogi ekranu przełączają przestrzenie (opcja użytkownika).
     pub ws_corner_switch: bool,
-    /// Zapadka: róg już przełączył przestrzeń, dopóki kursor z niego nie wyjdzie.
+    /// Czy lewy górny róg otwiera podgląd okien/przestrzeni (Super+Tab).
+    pub ws_overview_corner: bool,
+    /// Zapadka: róg już zadziałał, dopóki kursor z niego nie wyjdzie.
     pub ws_corner_latch: bool,
+    /// Róg, w którym kursor stoi teraz (None = poza strefami).
+    pub ws_corner_hover: Option<CornerKind>,
+    /// Kiedy kursor wszedł w bieżący róg (początek odliczania przytrzymania).
+    pub ws_corner_since: Option<Instant>,
+    /// Górny margines panelu zapamiętany przy wejściu w róg (rysowanie poświaty).
+    pub ws_corner_top: f64,
     /// Bieżąca przestrzeń robocza (współdzielona z wątkiem wyjścia).
     pub ws_current: WorkspaceModel,
     /// Tryb podglądu okien/przestrzeni (`Super+Tab`), współdzielony z wątkiem wyjścia.
@@ -451,6 +540,14 @@ pub struct State {
     pub repeat_rate: u32,
     /// Odwrócony kierunek przewijania (naturalne przewijanie).
     pub natural_scroll: bool,
+    /// Ustawienia bezczynności (`~/.config/luna/idle.conf`).
+    pub idle: IdleSettings,
+    /// Ostatnie zdarzenie wejścia (zegar wygaszania/blokady/usypiania).
+    pub idle_last_input: Instant,
+    /// Blokada z powodu bezczynności już wystartowała (zapadka, do czasu aktywności).
+    pub idle_lock_fired: bool,
+    /// Usypianie z powodu bezczynności już wystartowało (zapadka).
+    pub idle_suspend_fired: bool,
     /// Sesja zablokowana przez `luna-lock` (overlay + klawiatura wyłączna).
     /// Blokujemy wtedy globalne skróty kompozytora i podgląd okien.
     pub locked: bool,
@@ -487,6 +584,10 @@ pub struct State {
     pub night_light: NightLightModel,
     /// Tryb oszczędzania (limit tempa prezentacji w wątku wyjścia).
     pub power_saver: PowerSaverModel,
+    /// Żądanie zmiany trybu monitora z Ustawień (`luna-control output-mode`).
+    pub display_request: DisplayRequestModel,
+    /// Żądanie przesunięcia monitora (`luna-control output-position`).
+    pub position_request: PositionRequestModel,
 }
 
 impl Default for State {
@@ -499,6 +600,9 @@ impl Default for State {
             toplevels: 0,
             windows: Arc::new(Mutex::new(Vec::new())),
             cursor: Arc::new(Mutex::new(None)),
+            cursor_image: Arc::new(Mutex::new(CursorImage::Default)),
+            cursor_surface: None,
+            cursor_hotspot: (0, 0),
             slots: Vec::new(),
             z_counter: 1,
             outputs: Arc::new(Mutex::new(vec![OutputInfo::default()])),
@@ -507,7 +611,11 @@ impl Default for State {
             ws_count_model: Arc::new(std::sync::atomic::AtomicUsize::new(4)),
             ws_names: Vec::new(),
             ws_corner_switch: false,
+            ws_overview_corner: true,
             ws_corner_latch: false,
+            ws_corner_hover: None,
+            ws_corner_since: None,
+            ws_corner_top: 0.0,
             ws_current: Arc::new(Mutex::new(0)),
             overview: Arc::new(Mutex::new(Overview::default())),
             ws_managers: Vec::new(),
@@ -539,7 +647,13 @@ impl Default for State {
             resize: None,
             screenshot: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             night_light: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            display_request: Arc::new(Mutex::new(None)),
+            position_request: Arc::new(Mutex::new(None)),
             power_saver: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            idle: IdleSettings::default(),
+            idle_last_input: Instant::now(),
+            idle_lock_fired: false,
+            idle_suspend_fired: false,
         }
     }
 }
@@ -582,6 +696,7 @@ impl State {
             .store(self.ws_count, std::sync::atomic::Ordering::Relaxed);
         self.ws_names = layout.names();
         self.ws_corner_switch = layout.corner_switch();
+        self.ws_overview_corner = layout.overview_corner();
     }
 
     /// Wczytuje ustawienia klawiatury i myszy (`~/.config/luna/input.conf`).
@@ -596,7 +711,15 @@ impl State {
     pub fn set_workspace_corner_switch(&mut self, enabled: bool) {
         self.ws_corner_switch = enabled;
         if !enabled {
-            self.ws_corner_latch = false;
+            self.reset_corner();
+        }
+    }
+
+    /// Włącza/wyłącza podgląd (Super+Tab) w lewym górnym rogu.
+    pub fn set_workspace_overview_corner(&mut self, enabled: bool) {
+        self.ws_overview_corner = enabled;
+        if !enabled {
+            self.reset_corner();
         }
     }
 
@@ -644,6 +767,56 @@ impl State {
                 );
             }
         }
+    }
+
+    /// Przeładowuje ustawienia bezczynności (po `luna-control idle-reload`).
+    pub fn reload_idle(&mut self) {
+        self.idle = IdleSettings::load();
+        // Skrócenie progu poniżej bieżącej bezczynności ma zadziałać od razu.
+        self.idle_lock_fired = false;
+        self.idle_suspend_fired = false;
+    }
+
+    /// Zapisuje aktywność użytkownika: zeruje zegar, wygasza poświatę i budzi ekran.
+    ///
+    /// Wywoływane przy **każdym** zdarzeniu wejścia — także wtedy, gdy aplikacja
+    /// ma fokus wyłączny (np. gra), bo i tam użytkownik jest obecny.
+    pub fn note_activity(&mut self) {
+        self.idle_last_input = Instant::now();
+        self.idle_suspend_fired = false;
+        if !self.locked {
+            self.idle_lock_fired = false;
+        }
+        self.set_blanked(false);
+    }
+
+    /// Włącza/wyłącza wygaszenie ekranu (widoczne od razu w wątku wyjścia).
+    pub fn set_blanked(&mut self, on: bool) {
+        let mut overview = self.overview.lock_or_recover();
+        if overview.blanked == on {
+            return;
+        }
+        overview.blanked = on;
+        drop(overview);
+        if std::env::var("SELENE_STATS").is_ok() {
+            eprintln!(
+                "selene/idle: ekran {}",
+                if on { "wygaszony" } else { "włączony" }
+            );
+        }
+    }
+
+    /// Czy ekran jest aktualnie wygaszony.
+    pub fn is_blanked(&self) -> bool {
+        self.overview.lock_or_recover().blanked
+    }
+
+    /// Czyści stan rogu: brak poświaty i brak aktywnego odliczania.
+    pub fn reset_corner(&mut self) {
+        self.ws_corner_hover = None;
+        self.ws_corner_since = None;
+        self.ws_corner_latch = false;
+        self.overview.lock_or_recover().corner = None;
     }
 
     /// Czy trwa podgląd okien/przestrzeni.

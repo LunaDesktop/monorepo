@@ -15,6 +15,8 @@ use std::path::PathBuf;
 use rustix::fs::{Mode, OFlags};
 use rustix::mm::{mmap, munmap, MapFlags, ProtFlags};
 
+use libluna_core::{DisplaySettings, OutputMode};
+
 use crate::monitors::{layout_horizontal, OutputInfo};
 
 // — Kody ioctl KMS (`_IOWR`) —
@@ -27,7 +29,10 @@ const DRM_IOCTL_MODE_SETCRTC: u32 = 0xC068_64A2;
 const DRM_IOCTL_MODE_SETGAMMA: u32 = 0xC020_64A4;
 const DRM_IOCTL_MODE_CREATE_DUMB: u32 = 0xC020_64B2;
 const DRM_IOCTL_MODE_MAP_DUMB: u32 = 0xC010_64B3;
+const DRM_IOCTL_MODE_DESTROY_DUMB: u32 = 0xC004_64B4;
 const DRM_IOCTL_MODE_ADDFB2: u32 = 0xC068_64B8;
+/// `drm_mode_rmfb` — usuwa framebuffer (przy zmianie trybu na żywo).
+const DRM_IOCTL_MODE_RMFB: u32 = 0xC004_64AF;
 const DRM_IOCTL_MODE_PAGE_FLIP: u32 = 0xC018_64B0;
 /// `drm_mode_cursor` (`sizeof` = 28 = 0x1C).
 const DRM_IOCTL_MODE_CURSOR: u32 = 0xC01C_64A3;
@@ -173,6 +178,13 @@ struct ModeMapDumb {
     handle: u32,
     pad: u32,
     offset: u64,
+}
+
+/// `struct drm_mode_destroy_dumb`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ModeDestroyDumb {
+    handle: u32,
 }
 
 /// `struct drm_mode_fb_cmd2`.
@@ -527,26 +539,56 @@ fn pick_best_mode(modes: &[ModeInfo]) -> Option<&ModeInfo> {
     })
 }
 
+/// Tryb zapisany przez użytkownika, a gdy go nie ma (albo monitor go nie zgłasza)
+/// — automatyczny wybór [`pick_best_mode`].
+fn pick_mode(modes: &[ModeInfo], wanted: Option<OutputMode>) -> Option<&ModeInfo> {
+    if let Some(wanted) = wanted {
+        let mut candidates = modes.iter().filter(|mode| {
+            OutputMode::new(
+                mode.hdisplay,
+                mode.vdisplay,
+                mode.vrefresh.min(u16::MAX as u32) as u16,
+            )
+            .matches(wanted)
+        });
+        let hit = if wanted.refresh == 0 {
+            // Sama rozdzielczość — bierzemy najwyższe dostępne odświeżanie.
+            candidates.max_by_key(|mode| mode.vrefresh)
+        } else {
+            candidates.next()
+        };
+        if hit.is_some() {
+            return hit;
+        }
+    }
+    pick_best_mode(modes)
+}
+
 /// Nazwa konektora w stylu Wayland (np. `HDMI-A-1`, `eDP-1`).
 fn connector_name(kind: u32, index: u32) -> String {
+    // Wartości `enum drm_mode_connector_type` z `drm_mode.h` — **nie przesuwać**.
+    // Wcześniej mapa była przesunięta od 6 w górę: prawdziwy DP (10) nazywał się
+    // „HDMI-A”, a HDMI-A (11) — „HDMI-B”, przez co nazwy nie zgadzały się z `/sys`
+    // i Ustawienia widziały „trzeci” monitor (duplikat z innej listy).
     let base = match kind {
         1 => "VGA",
         2 => "DVI-I",
         3 => "DVI-D",
         4 => "DVI-A",
         5 => "Composite",
-        6 => "LVDS",
-        7 => "Component",
-        8 => "DIN",
-        9 => "DP",
-        10 => "HDMI-A",
-        11 => "HDMI-B",
-        12 => "TV",
-        13 => "eDP",
-        14 => "Virtual",
-        15 => "DSI",
-        16 => "DPI",
-        17 => "Writeback",
+        6 => "SVIDEO",
+        7 => "LVDS",
+        8 => "Component",
+        9 => "DIN",
+        10 => "DP",
+        11 => "HDMI-A",
+        12 => "HDMI-B",
+        13 => "TV",
+        14 => "eDP",
+        15 => "Virtual",
+        16 => "DSI",
+        17 => "DPI",
+        18 => "Writeback",
         _ => "Connector",
     };
     format!("{base}-{index}")
@@ -598,6 +640,10 @@ struct DumbBuffer {
     handle: u32,
     pitch: usize,
     size: usize,
+    /// Rozmiar alokacji — kursor może zmienić rozmiar (motyw 24 px, klient 64 px),
+    /// więc bufor odtwarzamy, zamiast pisać poza starszy, mniejszy zakres.
+    width: u32,
+    height: u32,
     ptr: *mut u8,
 }
 
@@ -617,12 +663,18 @@ impl Drop for DumbBuffer {
 /// Jedno wyjście DRM: konektor + CRTC + podwójny bufor.
 struct DrmOutput {
     name: String,
+    /// Konektor, do którego przypięty jest CRTC (potrzebny przy zmianie trybu).
+    connector_id: u32,
     crtc_id: u32,
     /// Rozmiar sprzętowej tablicy gamma (0 = brak wsparcia dla night lightu).
     gamma_size: u32,
     width: u32,
     height: u32,
     hz: u32,
+    /// Wszystkie tryby zgłoszone przez monitor (bez duplikatów, malejąco).
+    modes: Vec<OutputMode>,
+    /// Surowa lista trybów z modesetu — `MODE_SETCRTC` wymaga pełnego `ModeInfo`.
+    raw_modes: Vec<ModeInfo>,
     buffers: [DumbBuffer; 2],
     front: usize,
     /// Czy `present` musi przepisywać kanały (bufor `XRGB8888` zamiast `XBGR8888`).
@@ -658,7 +710,10 @@ impl Drop for DrmBackend {
 impl DrmBackend {
     /// Otwiera kartę, przejmuje mastera i ustawia tryb na wszystkich podłączonych monitorach.
     /// Zwraca `None`, gdy DRM jest niedostępne lub ktoś inny trzyma mastera (np. sesja użytkownika).
-    pub fn open() -> Result<Self, DrmError> {
+    ///
+    /// `preferences` pochodzi z `~/.config/luna/displays.conf` — zapisany tryb
+    /// (rozdzielczość + Hz) wygrywa z automatycznym wyborem „natywny/NAJWiększy”.
+    pub fn open(preferences: &DisplaySettings) -> Result<Self, DrmError> {
         let mut last = DrmError::NoOutputs;
         for card in card_paths() {
             let Ok(fd) = rustix::fs::open(&card, OFlags::RDWR | OFlags::CLOEXEC, Mode::empty())
@@ -678,7 +733,9 @@ impl DrmBackend {
             let mut used_crtcs = Vec::new();
             let mut skipped = 0usize;
             for &conn in &res.connectors {
-                if let Some(out) = setup_output(fd.as_fd(), conn, &res, &mut used_crtcs) {
+                if let Some(out) =
+                    setup_output(fd.as_fd(), conn, &res, &mut used_crtcs, preferences)
+                {
                     outputs.push(out);
                 } else {
                     skipped += 1;
@@ -710,9 +767,77 @@ impl DrmBackend {
             .collect()
     }
 
+    /// Wyjścia wraz z pełną listą trybów (dla Ustawień i pliku `luna-monitors`).
+    pub fn outputs_with_modes(&self) -> Vec<(String, u32, u32, u32, Vec<OutputMode>)> {
+        self.outputs
+            .iter()
+            .map(|o| (o.name.clone(), o.width, o.height, o.hz, o.modes.clone()))
+            .collect()
+    }
+
     /// Czy którykolwiek CRTC ma sprzętową tablicę gamma (night light).
     pub fn supports_night_light(&self) -> bool {
         self.outputs.iter().any(|o| o.gamma_size > 0)
+    }
+
+    /// Zmienia tryb wyjścia **na żywo** (bez restartu sesji).
+    ///
+    /// Tworzy nowe bufory i framebuffery, przepina CRTC i dopiero po sukcesie
+    /// zwalnia stare framebuffery; stare bufory znikają przy przypisaniu nowych.
+    /// Zwraca indeks wyjścia przy sukcesie, `None` gdy monitor nie istnieje,
+    /// nie zgłasza takiego trybu albo jądro odrzuciło modeset.
+    pub fn set_mode(&mut self, name: &str, wanted: Option<OutputMode>) -> Option<usize> {
+        let index = self.outputs.iter().position(|out| out.name == name)?;
+        let fd = self.fd.as_fd();
+        let (connector_id, crtc_id, current, mode) = {
+            let out = &self.outputs[index];
+            let mode = *pick_mode(&out.raw_modes, wanted)?;
+            (
+                out.connector_id,
+                out.crtc_id,
+                (out.width, out.height, out.hz),
+                mode,
+            )
+        };
+        if current == (mode.hdisplay as u32, mode.vdisplay as u32, mode.vrefresh) {
+            return Some(index);
+        }
+
+        let width = mode.hdisplay as u32;
+        let height = mode.vdisplay as u32;
+        let mut swizzle = false;
+        let make_pair = |format: u32| -> Option<(DumbBuffer, DumbBuffer)> {
+            Some((
+                create_dumb(fd, width, height, format)?,
+                create_dumb(fd, width, height, format)?,
+            ))
+        };
+        let (b0, b1) = match make_pair(DRM_FORMAT_XBGR8888) {
+            Some(pair) => pair,
+            None => {
+                swizzle = true;
+                make_pair(DRM_FORMAT_XRGB8888)?
+            }
+        };
+        if !set_crtc(fd, crtc_id, b0.fb_id, connector_id, &mode) {
+            destroy_fb(fd, b0.fb_id);
+            destroy_fb(fd, b1.fb_id);
+            return None;
+        }
+
+        let out = &mut self.outputs[index];
+        for old in &out.buffers {
+            destroy_fb(fd, old.fb_id);
+        }
+        out.width = width;
+        out.height = height;
+        out.hz = mode.vrefresh;
+        out.swizzle = swizzle;
+        out.front = 0;
+        out.buffers = [b0, b1];
+        // Bufor kursora zostanie utworzony na nowo przy następnym ruchu.
+        out.cursor = None;
+        Some(index)
     }
 
     /// Ustawia ciepłą korektę gamma na wszystkich wyjściach.
@@ -805,6 +930,15 @@ impl DrmBackend {
         let Some(out) = self.outputs.get_mut(idx) else {
             return false;
         };
+        // Rozmiar kursora może się zmienić (motyw 24 px → obraz klienta 64 px).
+        // Stary bufor ma inny `pitch`/rozmiar, więc bez odtworzenia pisalibyśmy
+        // poza jego zakres.
+        if let Some(old) = out.cursor.as_ref() {
+            if old.width != w || old.height != h {
+                destroy_dumb(fd, old.handle);
+                out.cursor = None;
+            }
+        }
         if out.cursor.is_none() {
             match create_dumb_fmt(fd, w, h, DRM_FORMAT_ARGB8888, false) {
                 Some(b) => out.cursor = Some(b),
@@ -862,6 +996,7 @@ fn setup_output(
     conn_id: u32,
     res: &Resources,
     used_crtcs: &mut Vec<u32>,
+    preferences: &DisplaySettings,
 ) -> Option<DrmOutput> {
     let c = ioctl_rw::<ModeGetConnector, DRM_IOCTL_MODE_GETCONNECTOR, _>(
         fd,
@@ -889,7 +1024,27 @@ fn setup_output(
         },
     )
     .ok()?;
-    let mode = *pick_best_mode(&modes)?;
+    let name = connector_name(c.connector_type, c.connector_type_id);
+    let wanted = preferences.mode_for(&name);
+    let mode = *pick_mode(&modes, wanted)?;
+    let mut offered: Vec<OutputMode> = modes
+        .iter()
+        .filter(|mode| mode.hdisplay > 0 && mode.vdisplay > 0)
+        .map(|mode| {
+            OutputMode::new(
+                mode.hdisplay,
+                mode.vdisplay,
+                mode.vrefresh.min(u16::MAX as u32) as u16,
+            )
+        })
+        .collect();
+    offered.sort_by(|a, b| {
+        b.width
+            .cmp(&a.width)
+            .then_with(|| b.height.cmp(&a.height))
+            .then_with(|| b.refresh.cmp(&a.refresh))
+    });
+    offered.dedup();
 
     // Enkoder → CRTC. Po przejęciu ekranu CRTC po poprzedniej sesji bywa jeszcze
     // zajęty (`set_crtc` kończy się `-EBUSY`) — dlatego próbujemy **kolejnych**
@@ -953,17 +1108,25 @@ fn setup_output(
     // CRTC oznaczamy jako użyty **dopiero po udanym** `set_crtc`.
     used_crtcs.push(crtc_id);
     Some(DrmOutput {
-        name: connector_name(c.connector_type, c.connector_type_id),
+        name,
+        connector_id: conn_id,
         crtc_id,
         gamma_size: gamma_size(fd, crtc_id),
         width,
         height,
         hz: mode.vrefresh,
+        modes: offered,
+        raw_modes: modes,
         buffers: [b0, b1],
         front: 0,
         swizzle,
         cursor: None,
     })
+}
+
+/// Usuwa framebuffer (po udanym modesecie na nowy obraz).
+fn destroy_fb(fd: BorrowedFd, fb_id: u32) {
+    let _ = ioctl_rw::<u32, DRM_IOCTL_MODE_RMFB, _>(fd, fb_id);
 }
 
 /// Tworzy bufor dumb, mapuje go i rejestruje jako framebuffer (scanout).
@@ -1031,8 +1194,17 @@ fn create_dumb_fmt(
         handle: dumb.handle,
         pitch: dumb.pitch as usize,
         size: dumb.size as usize,
+        width,
+        height,
         ptr,
     })
+}
+
+/// Zwalnia uchwyt GEM (`destroy_dumb`) — inaczej każdy nowy rozmiar kursora
+/// zostawiałby w jądrze martwy bufor.
+fn destroy_dumb(fd: BorrowedFd, handle: u32) {
+    let _ =
+        ioctl_rw::<ModeDestroyDumb, DRM_IOCTL_MODE_DESTROY_DUMB, _>(fd, ModeDestroyDumb { handle });
 }
 
 /// Odczytuje rozmiar sprzętowej tablicy gamma CRTC (0 = brak wsparcia).
@@ -1167,9 +1339,10 @@ mod tests {
 
     #[test]
     fn connector_names_follow_wayland_convention() {
-        assert_eq!(connector_name(13, 1), "eDP-1");
-        assert_eq!(connector_name(10, 2), "HDMI-A-2");
-        assert_eq!(connector_name(9, 1), "DP-1");
+        assert_eq!(connector_name(14, 1), "eDP-1");
+        assert_eq!(connector_name(11, 2), "HDMI-A-2");
+        assert_eq!(connector_name(12, 1), "HDMI-B-1");
+        assert_eq!(connector_name(10, 1), "DP-1");
         assert_eq!(connector_name(999, 0), "Connector-0");
     }
 
@@ -1280,6 +1453,37 @@ mod tests {
             (best.hdisplay, best.vdisplay, best.vrefresh),
             (1920, 1080, 144)
         );
+    }
+
+    #[test]
+    fn configured_mode_wins_over_the_best_one() {
+        let modes = [
+            mode(1280, 720, 60, false),
+            mode(1920, 1080, 60, false),
+            mode(1920, 1080, 144, false),
+        ];
+        let wanted = OutputMode::new(1280, 720, 60);
+        let picked = pick_mode(&modes, Some(wanted)).unwrap();
+        assert_eq!(
+            (picked.hdisplay, picked.vdisplay, picked.vrefresh),
+            (1280, 720, 60)
+        );
+    }
+
+    #[test]
+    fn missing_or_refresh_less_mode_falls_back_to_auto() {
+        let modes = [
+            mode(1280, 720, 60, false),
+            mode(1920, 1080, 60, false),
+            mode(1920, 1080, 144, false),
+        ];
+        // Zapisana rozdzielczość bez Hz — wygrywa najwyższe odświeżanie.
+        let picked = pick_mode(&modes, Some(OutputMode::new(1920, 1080, 0))).unwrap();
+        assert_eq!(picked.vrefresh, 144);
+
+        // Monitor nie zgłasza zapisanego trybu — wracamy do automatycznego wyboru.
+        let picked = pick_mode(&modes, Some(OutputMode::new(3840, 2160, 60))).unwrap();
+        assert_eq!((picked.hdisplay, picked.vdisplay), (1920, 1080));
     }
 
     #[test]

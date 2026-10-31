@@ -18,6 +18,10 @@ pliki instalowane do `${PKGDIR}`.
 | `de/selene/PAGBUILD.yaml` | pakiet `selene` — binarka kompozytora, skrypt sesji i wpis sesji Wayland |
 | `de/selene/luna-session` | launcher sesji (ustawia `XDG_*` i `SELENE_BACKEND`) |
 | `de/selene/selene.desktop` | wpis do `/usr/share/wayland-sessions` |
+| `de/luna-settings/PAGBUILD.yaml` | pakiet `luna-settings` — centrum ustawień (wygląd, ekran logowania, sieć, dźwięk, wejście), ikony i tłumaczenia |
+| `de/luna-shell/PAGBUILD.yaml` | pakiet `luna-shell` — powłoka, ekran blokady, keyring, agent polkit, korektor dźwięku, pomocnik kont |
+| `de/luna-greeter/PAGBUILD.yaml` | pakiet `luna-greeter` — ekran logowania (frontend greetd), skrypt sesji greetera i domyślna tapeta |
+| `de/luna-desktop/PAGBUILD.yaml` | **metapakiet** `luna-desktop` — kompozytor, powłoka, Ustawienia i usługi systemowe w jednej instalacji |
 | `make-tarball.sh` | generuje tarball i składa gotowy katalog `out/` z uzupełnionymi sha256 |
 
 Oba pakiety budują się z **tego samego** tarballa, ale każdy z **własnego workspace'u**
@@ -62,3 +66,38 @@ sum — te wpisuje dopiero skrypt, bo zależą od konkretnego commita/taga.
 - Wejście w trybie DRM (evdev) to kolejny krok — póki go nie ma, sesja jest „podglądowa”.
 - `selene` nie deklaruje zależności od pakietu `libluna`, bo linkuje toolkit statycznie
   (Rust) — zależność nie jest potrzebna w runtime.
+
+## Metapakiet `luna-desktop`
+
+`de/luna-desktop/PAGBUILD.yaml` nie buduje źródeł — spina to, co musi być w systemie,
+żeby **beta** dała się zainstalować jedną komendą (`pag install luna-desktop`).
+Zależności są podzielone na dwie grupy:
+
+1. **Pakiety Luny:** `libluna`, `selene`, `luna-shell`, `luna-settings`, `luna-files`,
+   `luna-terminal`, `luna-greeter`.
+2. **Usługi systemowe** (interfejs tylko z nich korzysta — nie piszemy własnych demonów):
+   `networkmanager` + `wpa_supplicant` (sieć i VPN), `bluez` (Bluetooth),
+   `polkit` (autoryzacja zmian profili, drukowania i kolorów; agent `luna-polkit`),
+   `pipewire` + `wireplumber` (dźwięk), `upower` (bateria),
+   `power-profiles-daemon` (profile zasilania), `cups` (drukarki),
+   `colord` (profile kolorów ICC), `xdg-utils` (domyślne aplikacje: `xdg-mime`),
+   `xdg-desktop-portal`
+   (przyszłe portale powiadomień/plików), `libxkbcommon` i `dejavu-ttf`.
+
+Warstwa sieci w Ustawieniach (`luna::network`) nie linkuje żadnej biblioteki
+NetworkManagera — rozmawia z nim po D-Busie. Dlatego pakiet `luna-settings`
+wystarczy zainstalować obok `networkmanager`, a metapakiet nie musi nic kompilować.
+
+Receptury `luna-shell`, `luna-settings`, `luna-greeter` i `selene` już są w repo; gdy dołączą
+`luna-files` i `luna-terminal`, metapakiet rozwiąże się w całości.
+Do tego czasu można go traktować jako **listę kontrolną zależności** dla bety.
+
+Receptura `luna-shell` (`de/luna-shell/PAGBUILD.yaml`) instaluje także pomocniki
+z workspace'u `luna/`: **`bin/luna-accounts`** (konta i hasła z Ustawień) oraz
+**`bin/luna-eq`** + **`lib/luna/libluna-eq.so`** (korektor dźwięku). Bez nich
+Ustawienia pokazują komunikat o brakującym pomocniku — dlatego `luna-accounts`
+musi być w tym samym pakiecie co `luna-shell` (metapakiet zależy od obu).
+Wzorzec plików jest w `scripts/install.sh` (komponent `luna`).
+
+> Uwaga: `pkgver` receptur (`0.0.5`) odpowiada wersji `libluna/Cargo.toml`,
+> bo z niej `make-tarball.sh` bierze nazwę tarballa (`luna-${pkgver}.tar.gz`).

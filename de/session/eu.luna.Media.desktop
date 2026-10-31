@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=Media
+Name[pl]=Multimedia
+Name[de]=Medien
+Comment=View images, camera RAW, videos and PDFs
+Comment[pl]=Przeglądaj obrazy, RAW-y, filmy i PDF-y
+Comment[de]=Bilder, Kamera-RAW, Videos und PDFs ansehen
+Exec=luna-media %f
+Icon=video-x-generic
+Terminal=false
+Categories=AudioVideo;Viewer;
+MimeType=image/png;image/jpeg;image/gif;image/webp;image/bmp;image/tiff;image/svg+xml;image/avif;image/x-canon-cr2;image/x-canon-cr3;image/x-nikon-nef;image/x-sony-arw;image/x-adobe-dng;image/x-olympus-orf;image/x-panasonic-rw2;image/x-fuji-raf;image/x-pentax-pef;application/pdf;video/mp4;video/x-matroska;video/webm;video/quicktime;video/x-msvideo;video/mpeg;
+Keywords=media;image;photo;picture;raw;video;pdf;viewer;gallery;
+Keywords[pl]=multimedia;obraz;zdjęcie;raw;film;wideo;pdf;przeglądarka;galeria;
+Keywords[de]=Medien;Bild;Foto;RAW;Video;PDF;Betrachter;Galerie;

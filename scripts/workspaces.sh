@@ -47,7 +47,7 @@ case "$CARGO_TARGET_DIR" in
 esac
 export CARGO_TARGET_DIR
 
-workspaces="libluna luna selene luna-greeter apps/luna-demo apps/luna-files apps/luna-settings apps/luna-terminal"
+workspaces="libluna luna selene luna-greeter apps/luna-demo apps/luna-files apps/luna-media apps/luna-clock apps/luna-settings apps/luna-store apps/luna-editor apps/luna-terminal apps/luna-eq"
 
 for w in $workspaces; do
     if [ "$cmd" = "test-doc" ] && ! cargo metadata --no-deps --format-version 1 \

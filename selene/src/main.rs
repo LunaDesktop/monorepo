@@ -7,6 +7,7 @@
 
 mod compositor;
 mod control;
+mod cursor;
 mod data;
 mod decoration;
 mod dmabuf;
@@ -37,6 +38,7 @@ use std::sync::Arc;
 
 use libluna_core::Event;
 use wayland_protocols::ext::workspace::v1::server::ext_workspace_manager_v1::ExtWorkspaceManagerV1;
+use wayland_protocols::wp::cursor_shape::v1::server::wp_cursor_shape_manager_v1::WpCursorShapeManagerV1;
 use wayland_protocols::wp::linux_dmabuf::zv1::server::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1;
 use wayland_protocols::xdg::decoration::zv1::server::zxdg_decoration_manager_v1;
 use wayland_protocols::xdg::shell::server::xdg_wm_base;
@@ -93,6 +95,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut state = State::default();
     state.apply_workspace_layout();
     state.apply_input_settings();
+    // Progi wygaszania/blokady/usypiania z `~/.config/luna/idle.conf`
+    // (Ustawienia mogą je później zmienić przez `luna-control idle-reload`).
+    state.reload_idle();
     // Diagnostyka: skryptowane wejście (`SELENE_INPUT_SCRIPT`) — używane w testach
     // izolowanej sesji, aby odtworzyć kliknięcia bez fizycznej myszy.
     let mut script_input = test_input::ScriptInput::open();
@@ -144,6 +149,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Wersja 4 to minimum dla `wl_keyboard.repeat_info`; wersja 1 kończyła klienta
     // twardym przerwaniem, gdy wysyłaliśmy zdarzenie ponad zadeklarowaną wersję obiektu.
     handle.create_global::<State, wl_seat::WlSeat, ()>(5, ());
+    // Kształty kursora (`text`, `pointer`, `ew-resize`…): bez tego każda aplikacja
+    // GTK/Qt pokazuje naszą strzałkę nawet nad polem tekstowym.
+    handle.create_global::<State, WpCursorShapeManagerV1, ()>(2, ());
     handle.create_global::<State, ZwlrForeignToplevelManagerV1, ()>(3, ());
     handle.create_global::<State, ExtWorkspaceManagerV1, ()>(1, ());
     // X11 (XWayland): bez tego globalu Xwayland nie przypisze okien X11 do powierzchni.
@@ -207,6 +215,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         output::spawn_drm(
             Arc::clone(&state.windows),
             Arc::clone(&state.cursor),
+            Arc::clone(&state.cursor_image),
             Arc::clone(&state.ws_current),
             Arc::clone(&state.overview),
             Arc::clone(&state.screenshot),
@@ -214,6 +223,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             Arc::clone(&state.power_saver),
             Arc::clone(&state.outputs),
             ws_count,
+            Arc::clone(&state.display_request),
+            Arc::clone(&state.position_request),
         );
     } else {
         output::spawn(
@@ -294,9 +305,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         if let Some(fd) = &control_fd {
             fds.push(rustix::event::PollFd::new(fd, rustix::event::PollFlags::IN));
         }
-        // Przy skrypcie wejścia budzimy się co ~16 ms, żeby zauważyć dopisane polecenia.
-        let poll_timeout = if script_input.is_some() { 16 } else { -1 };
+        // Budzimy się co ~16 ms przy skrypcie wejścia (dopisane polecenia) oraz gdy
+        // kursor stoi w „gorącym rogu” — poświata musi rosnąć, a aktywacja nie może
+        // zależeć od dalszego ruchu myszy. Bez tego budzimy się najpóźniej co sekundę,
+        // gdy czeka jakikolwiek próg bezczynności (wygaszenie/blokada/usypianie).
+        let corner_wait = state.ws_corner_hover.is_some() && !state.ws_corner_latch;
+        let idle_wait = crate::seat::idle_wait_ms(&state);
+        let poll_timeout = if script_input.is_some() || corner_wait {
+            16
+        } else {
+            idle_wait.map(|ms| ms.clamp(16, 1000) as i32).unwrap_or(-1)
+        };
         rustix::event::poll(&mut fds, poll_timeout)?;
+
+        // Odliczanie przytrzymania w rogu (rysowanie poświaty i ewentualna akcja).
+        crate::seat::tick_corner(&mut state);
+        // Automatyczne wygaszenie/blokada/usypianie po bezczynności.
+        crate::seat::tick_idle(&mut state);
 
         // Sterowanie z powłoki (np. przeniesienie okna na inną przestrzeń).
         if let (Some(c), Some(_)) = (&control, &control_fd) {

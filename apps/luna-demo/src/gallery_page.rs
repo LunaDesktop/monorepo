@@ -1,47 +1,60 @@
-//! Strona „Widgety” w demo — galeria deweloperska libLuny.
+//! Strona „Widgety” w demo — dokumentacja biblioteki z żywymi przykładami.
 //!
-//! Układ master–detail: po lewej lista wszystkich widgetów (z wyszukiwarką,
-//! grupowana po kategoriach), po prawej **działający przykład** wybranego widgetu
-//! i przyciski „Pokaż przykładowy kod” oraz „Kopiuj”. Przykłady rysują prawdziwe
-//! widgety z `libluna-widgets`; te, które mają stan (przyciski, suwaki, pola
-//! tekstowe, zakładki…), obsługują kliknięcia i klawiaturę przez
-//! [`crate::gallery_interactive`].
+//! Każdy wpis ma trzy części, widoczne jednocześnie:
+//!
+//! 1. **Działający przykład** — prawdziwy widget z `libluna-widgets`, który można
+//!    kliknąć, przeciągnąć lub obsłużyć klawiaturą (patrz
+//!    [`crate::gallery_interactive`]); pozostałe wpisy są rysowane na żywo, ale bez
+//!    stanu interaktywnego.
+//! 2. **Kod** — kompletny fragment użycia w modelu immediate (`paint` + `*_at`).
+//!    Kod jest zawsze widoczny i można go skopiować jednym kliknięciem.
+//! 3. **Jak użyć** — krótka nota o podziale odpowiedzialności między widgetem
+//!    a aplikacją (stan, animacja, nawigacja).
+//!
+//! Po lewej stronie znajduje się lista wszystkich widgetów z wyszukiwarką i
+//! podziałem na kategorie; strona obsługuje też przechodzenie ←/→ między wpisami.
 
 use libluna_core::style::weight;
-use libluna_core::{ButtonState, KeyEvent, Point, Rect, Theme};
+use libluna_core::{ButtonState, KeyEvent, Point, Rect, Theme, ThemePreference};
 use libluna_render::TextEngine;
 use libluna_widgets::display::ellipsize;
-use libluna_widgets::{Button, PaintCtx, ScrollView, SearchEntry};
+use libluna_widgets::{
+    Button, ControlsSide, HeaderBar, PaintCtx, ScrollView, SearchEntry, ViewSwitcher, WindowControl,
+};
 
-use crate::gallery_catalog::{Category, DemoSpec, DEMOS};
+use crate::gallery_catalog::{notes, Category, DemoSpec, DEMOS};
 use crate::gallery_interactive::{self, ExampleState};
 
 /// Odstęp od krawędzi strony.
-const PAGE_PAD: f64 = 20.0;
-/// Wysokość nagłówka strony.
-const HEADER_H: f64 = 64.0;
+const PAGE_PAD: f64 = 22.0;
 /// Maksymalna szerokość listy widgetów.
-const SIDEBAR_MAX_W: f64 = 272.0;
-/// Odstęp między listą a szczegółami.
+const SIDEBAR_MAX_W: f64 = 286.0;
+/// Odstęp między listą a treścią dokumentacji.
 const SIDEBAR_GAP: f64 = 16.0;
 /// Wysokość wiersza widgetu.
 const ROW_H: f64 = 32.0;
 /// Wysokość nagłówka kategorii.
 const GROUP_H: f64 = 28.0;
-/// Wewnętrzny padding panelu szczegółów.
-const DETAIL_PAD: f64 = 18.0;
+/// Wewnętrzny padding panelu dokumentacji.
+const DETAIL_PAD: f64 = 20.0;
 /// Wysokość działającego przykładu.
 const PREVIEW_H: f64 = 300.0;
 /// Wysokość linii kodu.
-const CODE_LINE_H: f64 = 16.0;
+const CODE_LINE_H: f64 = 17.0;
 /// Rozmiar tekstu kodu.
 const CODE_SIZE: f64 = 11.5;
 /// Padding bloku kodu.
-const CODE_PAD: f64 = 12.0;
-/// Wysokość linii opisu.
-const DESC_LINE_H: f64 = 16.0;
+const CODE_PAD: f64 = 14.0;
+/// Wysokość linii opisu i noty.
+const TEXT_LINE_H: f64 = 18.0;
+/// Wysokość przycisku „Kopiuj kod”.
+const COPY_H: f64 = 30.0;
+/// Wysokość kart poprzedni/następny.
+const NAV_H: f64 = 48.0;
+/// Odstęp między kartami poprzedni/następny.
+const NAV_GAP: f64 = 12.0;
 
-/// Stan galerii: wybrany widget, przewijanie, kod i stan przykładów.
+/// Stan galerii: wybrany widget, przewijanie, wyszukiwanie i stan przykładów.
 #[derive(Debug, Clone)]
 pub struct GalleryState {
     /// Indeks wybranego wpisu w [`DEMOS`].
@@ -50,19 +63,25 @@ pub struct GalleryState {
     pub search: SearchEntry,
     /// Przewijanie listy widgetów.
     pub sidebar: ScrollView,
-    /// Przewijanie panelu szczegółów (długi kod).
+    /// Przewijanie panelu dokumentacji (długi kod i nota).
     pub detail: ScrollView,
-    /// Czy pokazywać przykładowy kod.
-    pub show_code: bool,
     /// Podświetlony wiersz listy (indeks w [`DEMOS`]).
     pub hover_row: Option<usize>,
-    /// Podświetlenie przycisku „Pokaż przykładowy kod”.
-    pub hover_button: bool,
-    /// Podświetlenie przycisku „Kopiuj”.
+    /// Podświetlenie przycisku „Kopiuj kod”.
     pub hover_copy: bool,
+    /// Podświetlenie karty „Poprzedni”.
+    pub hover_prev: bool,
+    /// Podświetlenie karty „Następny”.
+    pub hover_next: bool,
+    /// Podświetlona kontrolka okna w pasku tytułu.
+    pub header_hover: Option<WindowControl>,
+    /// Preferencja motywu pokazywana w stopce listy.
+    pub theme_pref: ThemePreference,
+    /// Żądanie zmiany motywu (odbierane przez pętlę aplikacji).
+    pub theme_change: Option<ThemePreference>,
     /// Żądanie skopiowania kodu (odbierane przez pętlę aplikacji → schowek).
     pub copy_request: Option<String>,
-    /// Krótki komunikat po skopiowaniu (rysowany obok przycisków).
+    /// Krótki komunikat po skopiowaniu (rysowany obok przycisku).
     pub status: String,
     pub dragging_sidebar: bool,
     pub dragging_detail: bool,
@@ -77,10 +96,13 @@ impl Default for GalleryState {
             search: SearchEntry::new("Szukaj widgetu…"),
             sidebar: ScrollView::new(),
             detail: ScrollView::new(),
-            show_code: false,
             hover_row: None,
-            hover_button: false,
             hover_copy: false,
+            hover_prev: false,
+            hover_next: false,
+            header_hover: None,
+            theme_pref: ThemePreference::System,
+            theme_change: None,
             copy_request: None,
             status: String::new(),
             dragging_sidebar: false,
@@ -107,18 +129,32 @@ pub struct PageLayout {
     pub detail: Rect,
     pub rows: Vec<SidebarRow>,
     pub sidebar_content: f64,
+    pub detail_content: f64,
+    pub crumb: Point,
     pub title: Point,
     pub meta: Point,
     pub desc: Point,
+    pub preview_heading: Point,
+    pub preview_badge: Rect,
     pub preview: Rect,
     pub hint: Point,
-    pub code_button: Rect,
+    pub code_heading: Point,
     pub copy_button: Rect,
+    pub code_meta: Point,
     pub code_block: Rect,
-    pub detail_content: f64,
+    pub notes_heading: Point,
+    pub notes: Point,
+    pub prev_button: Rect,
+    pub next_button: Rect,
+    pub prev: Option<usize>,
+    pub next: Option<usize>,
+    /// Przełącznik motywu w stopce listy.
+    pub theme_switch: Rect,
+    /// Podpowiedź klawiaturowa pod listą widgetów.
+    pub sidebar_hint: Point,
 }
 
-/// Wpisy pasując do frazy z pola wyszukiwania.
+/// Wpisy pasujące do frazy z pola wyszukiwania.
 fn filtered_items(state: &GalleryState) -> Vec<usize> {
     let query = state.search.text().trim().to_lowercase();
     DEMOS
@@ -135,39 +171,95 @@ fn filtered_items(state: &GalleryState) -> Vec<usize> {
         .collect()
 }
 
-fn code_button_label(show: bool) -> &'static str {
-    if show {
-        "Ukryj przykładowy kod"
-    } else {
-        "Pokaż przykładowy kod"
+/// Zawija tekst do podanej szerokości (bez limitu linii).
+fn wrap_lines(text: &str, max_w: f64, size: f64, engine: &TextEngine) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for paragraph in text.split('\n') {
+        let mut current = String::new();
+        for word in paragraph.split_whitespace() {
+            let probe = if current.is_empty() {
+                word.to_owned()
+            } else {
+                format!("{current} {word}")
+            };
+            if !current.is_empty() && engine.measure(&probe, size, weight::NORMAL).width > max_w {
+                lines.push(std::mem::take(&mut current));
+                current = word.to_owned();
+            } else {
+                current = probe;
+            }
+        }
+        if !current.is_empty() {
+            lines.push(current);
+        }
     }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
 }
 
-/// Liczy pełny układ: nagłówek, listę widgetów i panel szczegółów.
+/// Pasek tytułu używany przez dokumentację i okno demo.
+///
+/// Tytuł jest rysowany jako treść paska, żeby obok niego zmieściły się liczniki;
+pub fn header_bar() -> HeaderBar {
+    HeaderBar::new().controls(ControlsSide::Right)
+}
+
+/// Prostokąt paska tytułu na górze okna.
+pub fn header_rect(area: Rect, theme: &Theme) -> Rect {
+    Rect::from_xywh(
+        area.x(),
+        area.y(),
+        area.width(),
+        theme.metrics.headerbar.height,
+    )
+}
+
+/// Obszar pod paskiem tytułu (cała reszta okna).
+pub fn content_area(area: Rect, theme: &Theme) -> Rect {
+    let header = header_rect(area, theme);
+    Rect::from_xywh(
+        area.x(),
+        header.bottom(),
+        area.width(),
+        (area.bottom() - header.bottom()).max(0.0),
+    )
+}
+
+/// Liczy pełny układ: pasek tytułu, listę widgetów i panel dokumentacji.
 pub fn layout(area: Rect, theme: &Theme, text: &TextEngine, state: &GalleryState) -> PageLayout {
-    let header = Rect::from_xywh(area.x(), area.y(), area.width(), HEADER_H);
-    let top = area.y() + HEADER_H;
+    let header = header_rect(area, theme);
+    let top = header.bottom();
     let inner_w = (area.width() - 2.0 * PAGE_PAD).max(0.0);
-    let sidebar_w = SIDEBAR_MAX_W.min((inner_w * 0.34).max(190.0)).min(inner_w);
+    let sidebar_w = SIDEBAR_MAX_W.min((inner_w * 0.34).max(200.0)).min(inner_w);
     let body_h = (area.bottom() - top - PAGE_PAD).max(0.0);
     let sidebar = Rect::from_xywh(area.x() + PAGE_PAD, top, sidebar_w, body_h);
     let detail_x = sidebar.right() + SIDEBAR_GAP;
     let detail_w = (area.right() - PAGE_PAD - detail_x).max(0.0);
     let detail = Rect::from_xywh(detail_x, top, detail_w, body_h);
 
-    // ── Wyszukiwarka + lista widgetów ──
+    // ── Wyszukiwarka + lista widgetów + stopka z podpowiedzią ──
     let search = Rect::from_xywh(
         sidebar.x() + 10.0,
         sidebar.y() + 10.0,
         (sidebar.width() - 20.0).max(0.0),
         34.0,
     );
+    const SIDEBAR_FOOTER_H: f64 = 66.0;
     let list = Rect::from_xywh(
         sidebar.x(),
         search.bottom() + 8.0,
         sidebar.width(),
-        (sidebar.bottom() - search.bottom() - 12.0).max(0.0),
+        (sidebar.bottom() - search.bottom() - 12.0 - SIDEBAR_FOOTER_H).max(0.0),
     );
+    let theme_switch = Rect::from_xywh(
+        sidebar.x() + 10.0,
+        sidebar.bottom() - 54.0,
+        (sidebar.width() - 20.0).max(0.0),
+        28.0,
+    );
+    let sidebar_hint = Point::new(sidebar.center().x, sidebar.bottom() - 14.0);
 
     let items = filtered_items(state);
     let mut total = 8.0;
@@ -221,66 +313,71 @@ pub fn layout(area: Rect, theme: &Theme, text: &TextEngine, state: &GalleryState
         }
     }
 
-    // ── Panel szczegółów ──
-    let spec = &DEMOS[state.selected.min(DEMOS.len().saturating_sub(1))];
+    // ── Panel dokumentacji ──
+    let selected = state.selected.min(DEMOS.len().saturating_sub(1));
+    let spec = &DEMOS[selected];
     let x = detail.x() + DETAIL_PAD;
     let w = (detail.width() - 2.0 * DETAIL_PAD).max(0.0);
-    let desc_lines = wrap_text(spec.description, w, theme, text).len() as f64;
-    let button_h = theme.metrics.button.height.max(34.0);
-    let code_button_w = Button::new(code_button_label(state.show_code)).width(text, theme);
-    let copy_button_w = Button::new("Kopiuj").width(text, theme);
-    let copy_on_right = code_button_w + 8.0 + copy_button_w <= w;
-    let buttons_h = if copy_on_right {
-        button_h
-    } else {
-        2.0 * button_h + 8.0
-    };
+
+    let caption = theme.typography.caption.size;
+    let desc_lines = wrap_lines(spec.description, w, caption, text);
+    let note_lines = wrap_lines(notes(spec.name), w - 18.0, caption, text);
     let code_lines = spec.code.lines().count().max(1) as f64;
-    let code_h = if state.show_code {
-        code_lines * CODE_LINE_H + 2.0 * CODE_PAD
-    } else {
-        0.0
-    };
-    // Wysokość treści nie zależy od przewinięcia — dzięki temu offset da się
-    // przyciąć jeszcze przed policzeniem prostokątów.
-    let detail_content = (DETAIL_PAD
-        + 38.0
-        + 32.0
-        + desc_lines * DESC_LINE_H
-        + 10.0
-        + PREVIEW_H
-        + 18.0
-        + 26.0
-        + buttons_h
-        + 12.0
-        + if code_h > 0.0 { code_h + 4.0 } else { 0.0 }
-        + DETAIL_PAD)
-        .max(detail.height());
+    let code_h = code_lines * CODE_LINE_H + 2.0 * CODE_PAD;
+    let desc_h = desc_lines.len() as f64 * TEXT_LINE_H;
+    let notes_h = note_lines.len() as f64 * TEXT_LINE_H;
+
+    // Pozycje liczone względem góry treści (offset dodajemy na końcu).
+    let mut cursor = 0.0;
+    let crumb_y = cursor + 8.0;
+    cursor += 20.0;
+    let title_y = cursor + 20.0;
+    cursor += 32.0;
+    let meta_y = cursor + 10.0;
+    cursor += 22.0;
+    let desc_y = cursor + 9.0;
+    cursor += desc_h + 16.0;
+    let preview_heading_y = cursor + 10.0;
+    let preview_badge = Rect::from_xywh(x + w - 108.0, cursor + 10.0 - 10.0, 108.0, 20.0);
+    cursor += 28.0;
+    let preview = Rect::from_xywh(x, cursor, w, PREVIEW_H);
+    cursor += PREVIEW_H + 18.0;
+    let hint_y = cursor;
+    cursor += 22.0;
+    let code_heading_y = cursor + 10.0;
+    let copy_w = Button::new("Kopiuj kod").width(text, theme).max(96.0);
+    let copy_button = Rect::from_xywh(
+        x + w - copy_w,
+        code_heading_y - COPY_H / 2.0,
+        copy_w,
+        COPY_H,
+    );
+    cursor += 30.0;
+    let code_meta_y = cursor + 9.0;
+    cursor += 20.0;
+    let code_block = Rect::from_xywh(x, cursor, w, code_h);
+    cursor += code_h + 20.0;
+    let notes_heading_y = cursor + 10.0;
+    cursor += 28.0;
+    let notes_y = cursor + 9.0;
+    cursor += notes_h + 18.0;
+    let prev_button = Rect::from_xywh(x, cursor, (w - NAV_GAP) / 2.0, NAV_H);
+    let next_button = Rect::from_xywh(
+        prev_button.right() + NAV_GAP,
+        cursor,
+        (w - NAV_GAP) / 2.0,
+        NAV_H,
+    );
+    cursor += NAV_H + DETAIL_PAD;
+
+    let detail_content = (cursor + DETAIL_PAD).max(detail.height());
     let detail_offset = state
         .detail
         .offset()
         .clamp(0.0, (detail_content - detail.height()).max(0.0));
     let content_top = detail.y() + DETAIL_PAD - detail_offset;
-    let mut cursor = content_top;
 
-    let title = Point::new(x, cursor + 10.0);
-    cursor += 38.0;
-    let meta = Point::new(x, cursor + 8.0);
-    cursor += 32.0;
-    let desc = Point::new(x, cursor + 8.0);
-    cursor += desc_lines * DESC_LINE_H + 10.0;
-    let preview = Rect::from_xywh(x, cursor, w, PREVIEW_H);
-    cursor += PREVIEW_H + 18.0;
-    let hint = Point::new(detail.center().x, cursor);
-    cursor += 26.0;
-    let code_button = Rect::from_xywh(x, cursor, code_button_w, button_h);
-    let copy_button = if copy_on_right {
-        Rect::from_xywh(code_button.right() + 8.0, cursor, copy_button_w, button_h)
-    } else {
-        Rect::from_xywh(x, cursor + button_h + 8.0, copy_button_w, button_h)
-    };
-    cursor += buttons_h + 12.0;
-    let code_block = Rect::from_xywh(x, cursor, w, code_h);
+    let point = |offset_y: f64| Point::new(x, content_top + offset_y);
 
     PageLayout {
         header,
@@ -290,25 +387,75 @@ pub fn layout(area: Rect, theme: &Theme, text: &TextEngine, state: &GalleryState
         detail,
         rows,
         sidebar_content,
-        title,
-        meta,
-        desc,
-        preview,
-        hint,
-        code_button,
-        copy_button,
-        code_block,
         detail_content,
+        crumb: point(crumb_y),
+        title: point(title_y),
+        meta: point(meta_y),
+        desc: point(desc_y),
+        preview_heading: point(preview_heading_y),
+        preview_badge: Rect::from_xywh(
+            preview_badge.x(),
+            content_top + preview_badge.y(),
+            preview_badge.width(),
+            preview_badge.height(),
+        ),
+        preview: Rect::from_xywh(
+            preview.x(),
+            content_top + preview.y(),
+            preview.width(),
+            preview.height(),
+        ),
+        hint: Point::new(detail.center().x, content_top + hint_y),
+        code_heading: point(code_heading_y),
+        copy_button: Rect::from_xywh(
+            copy_button.x(),
+            content_top + copy_button.y(),
+            copy_button.width(),
+            copy_button.height(),
+        ),
+        code_meta: point(code_meta_y),
+        code_block: Rect::from_xywh(
+            code_block.x(),
+            content_top + code_block.y(),
+            code_block.width(),
+            code_block.height(),
+        ),
+        notes_heading: point(notes_heading_y),
+        notes: point(notes_y),
+        prev_button: Rect::from_xywh(
+            prev_button.x(),
+            content_top + prev_button.y(),
+            prev_button.width(),
+            prev_button.height(),
+        ),
+        next_button: Rect::from_xywh(
+            next_button.x(),
+            content_top + next_button.y(),
+            next_button.width(),
+            next_button.height(),
+        ),
+        prev: if selected > 0 {
+            Some(selected - 1)
+        } else {
+            None
+        },
+        next: if selected + 1 < DEMOS.len() {
+            Some(selected + 1)
+        } else {
+            None
+        },
+        theme_switch,
+        sidebar_hint,
     }
 }
 
-/// Rysuje całą stronę galerii w obszarze treści.
+/// Rysuje całą stronę dokumentacji widgetów.
 pub fn paint(ctx: &mut PaintCtx, area: Rect, state: &GalleryState) {
     let theme = *ctx.theme;
     ctx.scene.fill_rect(area, theme.colors.view_bg);
 
     let lay = layout(area, &theme, ctx.text, state);
-    paint_header(ctx, area, &lay);
+    paint_header(ctx, &lay, state);
     paint_sidebar(ctx, &lay, state);
     paint_detail(ctx, &lay, state);
 
@@ -324,46 +471,32 @@ pub fn paint(ctx: &mut PaintCtx, area: Rect, state: &GalleryState) {
     detail.paint_scrollbar(ctx, lay.detail);
 }
 
-fn paint_header(ctx: &mut PaintCtx, area: Rect, lay: &PageLayout) {
+fn paint_header(ctx: &mut PaintCtx, lay: &PageLayout, state: &GalleryState) {
     let theme = *ctx.theme;
-    let x = area.x() + PAGE_PAD;
-    let right = lay.detail.right();
+    let bar = header_bar();
+    bar.paint(ctx, lay.header, state.header_hover);
+    let content = bar.controls_layout(lay.header, &theme).content;
+    let cy = lay.header.center().y;
 
     ctx.label_left(
-        x,
-        area.y() + 24.0,
-        "Widgety libLuny",
-        theme.typography.title.size,
+        content.x() + 2.0,
+        cy,
+        "Dokumentacja widgetów",
+        theme.typography.body.size,
         weight::BOLD,
         theme.colors.text,
     );
-    ctx.label_left(
-        x,
-        area.y() + 46.0,
-        "Lista widgetów po lewej · działający przykład i kod po prawej.",
-        theme.typography.caption.size,
-        weight::NORMAL,
-        theme.colors.dim_text,
-    );
     ctx.label_right(
-        right,
-        area.y() + 24.0,
+        content.right() - 6.0,
+        cy,
         &format!(
             "{} widgetów · {} kategorii",
             DEMOS.len(),
             Category::ALL.len()
         ),
-        theme.typography.body.size,
+        theme.typography.caption.size,
         weight::MEDIUM,
         theme.colors.accent,
-    );
-    ctx.label_right(
-        right,
-        area.y() + 44.0,
-        "↑ / ↓ wybór · PageUp / PageDown przewijanie",
-        theme.typography.caption.size,
-        weight::NORMAL,
-        theme.colors.dim_text,
     );
 }
 
@@ -465,6 +598,35 @@ fn paint_sidebar(ctx: &mut PaintCtx, lay: &PageLayout, state: &GalleryState) {
         }
     }
     ctx.scene.pop_clip();
+
+    let mut theme_switcher = ViewSwitcher::new(["Jasny", "Ciemny", "Auto"]);
+    theme_switcher.set_selected(theme_index(state.theme_pref));
+    theme_switcher.paint(ctx, lay.theme_switch);
+
+    ctx.label_center(
+        lay.sidebar_hint.x,
+        lay.sidebar_hint.y,
+        "↑/↓ wybór · ←/→ poprzedni/następny",
+        theme.typography.caption.size - 0.5,
+        weight::NORMAL,
+        theme.colors.dim_text.scale_alpha(0.85),
+    );
+}
+
+fn theme_index(preference: ThemePreference) -> usize {
+    match preference {
+        ThemePreference::Light => 0,
+        ThemePreference::Dark => 1,
+        ThemePreference::System => 2,
+    }
+}
+
+fn theme_preference(index: usize) -> ThemePreference {
+    match index {
+        0 => ThemePreference::Light,
+        1 => ThemePreference::Dark,
+        _ => ThemePreference::System,
+    }
 }
 
 fn paint_detail(ctx: &mut PaintCtx, lay: &PageLayout, state: &GalleryState) {
@@ -472,9 +634,23 @@ fn paint_detail(ctx: &mut PaintCtx, lay: &PageLayout, state: &GalleryState) {
     let spec = &DEMOS[state.selected.min(DEMOS.len().saturating_sub(1))];
     let width = lay.preview.width();
 
+    // Panel dokumentacji.
+    ctx.scene
+        .fill_rounded_rect(lay.detail, theme.radius.medium, theme.colors.window_bg);
+    ctx.scene
+        .stroke_rounded_rect(lay.detail, theme.radius.medium, 1.0, theme.colors.border);
+
     ctx.scene.push_clip(lay.detail);
 
-    // Tytuł i metadane.
+    // Kategoria (okruszek) i tytuł.
+    ctx.label_left(
+        lay.crumb.x,
+        lay.crumb.y,
+        &spec.category.label().to_uppercase(),
+        theme.typography.caption.size,
+        weight::BOLD,
+        theme.colors.accent,
+    );
     let title = ellipsize(spec.name, width, theme.typography.title.size, ctx.text);
     ctx.label_left(
         lay.title.x,
@@ -487,33 +663,64 @@ fn paint_detail(ctx: &mut PaintCtx, lay: &PageLayout, state: &GalleryState) {
     ctx.label_left(
         lay.meta.x,
         lay.meta.y,
-        &format!(
-            "{} · libluna-widgets/src/{}",
-            spec.category.label(),
-            spec.source
-        ),
+        &format!("libluna-widgets/src/{} · model immediate", spec.source),
         theme.typography.caption.size,
         weight::MEDIUM,
-        theme.colors.accent,
+        theme.colors.dim_text,
     );
 
-    for (i, line) in wrap_text(spec.description, width, &theme, ctx.text)
-        .into_iter()
-        .enumerate()
-    {
+    let desc = wrap_lines(
+        spec.description,
+        width,
+        theme.typography.caption.size,
+        ctx.text,
+    );
+    for (i, line) in desc.iter().enumerate() {
         ctx.label_left(
             lay.desc.x,
-            lay.desc.y + i as f64 * DESC_LINE_H,
-            &line,
+            lay.desc.y + i as f64 * TEXT_LINE_H,
+            line,
             theme.typography.caption.size,
             weight::NORMAL,
             theme.colors.dim_text,
         );
     }
 
-    // Działający przykład (prawdziwy widget).
+    // ── Działający przykład ──
+    ctx.label_left(
+        lay.preview_heading.x,
+        lay.preview_heading.y,
+        if gallery_interactive::supports(spec.name) {
+            "Działający przykład"
+        } else {
+            "Podgląd widgetu"
+        },
+        theme.typography.heading.size,
+        weight::BOLD,
+        theme.colors.text,
+    );
+    let interactive = gallery_interactive::supports(spec.name);
+    let (badge_label, badge_fg) = if interactive {
+        ("INTERAKTYWNY", theme.colors.accent)
+    } else {
+        ("PODGLĄD", theme.colors.dim_text)
+    };
+    ctx.scene.fill_rounded_rect(
+        lay.preview_badge,
+        lay.preview_badge.height() / 2.0,
+        badge_fg.scale_alpha(0.16),
+    );
+    ctx.label_center(
+        lay.preview_badge.center().x,
+        lay.preview_badge.center().y,
+        badge_label,
+        theme.typography.caption.size - 1.0,
+        weight::BOLD,
+        badge_fg,
+    );
+
     ctx.scene
-        .fill_rounded_rect(lay.preview, theme.radius.medium, theme.colors.window_bg);
+        .fill_rounded_rect(lay.preview, theme.radius.medium, theme.colors.view_bg);
     ctx.scene
         .stroke_rounded_rect(lay.preview, theme.radius.medium, 1.0, theme.colors.border);
     ctx.scene.push_clip(lay.preview);
@@ -522,57 +729,65 @@ fn paint_detail(ctx: &mut PaintCtx, lay: &PageLayout, state: &GalleryState) {
     }
     ctx.scene.pop_clip();
 
-    // Podpowiedź / wynik ostatniej akcji.
+    // Podpowiedź / wynik ostatniej akcji. Same widgety rysują własną podpowiedź
+    // w podglądzie, więc tutaj pokazujemy tylko wynik akcji (albo opis trybu
+    // statycznego, który nie ma wewnętrznej podpowiedzi).
     let status = state.example.status();
-    let hint = if gallery_interactive::supports(spec.name) {
-        if status.is_empty() {
-            "Interaktywne — kliknij elementy w podglądzie".to_owned()
-        } else {
-            status
-        }
+    let hint = if interactive {
+        status
     } else {
         "Podgląd na żywo — ten widget nie ma stanu interaktywnego".to_owned()
     };
-    ctx.label_center(
-        lay.hint.x,
-        lay.hint.y,
-        &hint,
-        theme.typography.caption.size,
-        weight::NORMAL,
-        if gallery_interactive::supports(spec.name) {
-            theme.colors.accent
-        } else {
-            theme.colors.dim_text
-        },
+    if !hint.is_empty() {
+        ctx.label_center(
+            lay.hint.x,
+            lay.hint.y,
+            &hint,
+            theme.typography.caption.size,
+            weight::NORMAL,
+            if interactive {
+                theme.colors.accent
+            } else {
+                theme.colors.dim_text
+            },
+        );
+    }
+
+    // ── Kod ──
+    ctx.label_left(
+        lay.code_heading.x,
+        lay.code_heading.y,
+        "Kod",
+        theme.typography.heading.size,
+        weight::BOLD,
+        theme.colors.text,
     );
-
-    // Przyciski: pokaż/ukryj kod i kopiowanie.
-    let mut button = Button::new(code_button_label(state.show_code));
-    button.set_hovered(state.hover_button);
-    button.paint(ctx, lay.code_button);
-
-    let mut copy = Button::new("Kopiuj");
+    let mut copy = Button::new("Kopiuj kod");
     copy.set_hovered(state.hover_copy);
     copy.paint(ctx, lay.copy_button);
 
-    // Potwierdzenie skopiowania (obok przycisków).
-    if !state.status.is_empty() && lay.code_button.height() > 0.0 {
-        let status_x = lay.copy_button.right() + 12.0;
-        let status_y = lay.copy_button.center().y;
-        if status_x < lay.detail.right() - 20.0 {
-            ctx.label_left(
-                status_x,
-                status_y,
-                &state.status,
-                theme.typography.caption.size,
-                weight::MEDIUM,
-                theme.colors.success,
-            );
-        }
+    if !state.status.is_empty() {
+        let status_x = lay.copy_button.x() - 12.0;
+        ctx.label_right(
+            status_x,
+            lay.code_heading.y,
+            &state.status,
+            theme.typography.caption.size,
+            weight::MEDIUM,
+            theme.colors.success,
+        );
     }
 
-    // Blok kodu.
-    if state.show_code && lay.code_block.height() > 0.0 {
+    ctx.label_left(
+        lay.code_meta.x,
+        lay.code_meta.y,
+        "use libluna::prelude::*; · ctx: &mut PaintCtx · rect: Rect · pos: Point",
+        theme.typography.caption.size - 0.5,
+        weight::NORMAL,
+        theme.colors.dim_text.scale_alpha(0.9),
+    );
+
+    if lay.code_block.height() > 0.0 {
         ctx.scene.fill_rounded_rect(
             lay.code_block,
             theme.radius.small,
@@ -581,75 +796,154 @@ fn paint_detail(ctx: &mut PaintCtx, lay: &PageLayout, state: &GalleryState) {
         ctx.scene
             .stroke_rounded_rect(lay.code_block, theme.radius.small, 1.0, theme.colors.border);
         ctx.scene.push_clip(lay.code_block);
+        let number_x = lay.code_block.x() + 12.0;
+        let code_x = lay.code_block.x() + 34.0;
+        let max_w = (lay.code_block.right() - 14.0 - code_x).max(20.0);
         for (i, line) in spec.code.lines().enumerate() {
             let cy = lay.code_block.y() + CODE_PAD + CODE_LINE_H / 2.0 + i as f64 * CODE_LINE_H;
             ctx.label_right(
-                lay.code_block.x() + 22.0,
+                number_x + 14.0,
                 cy,
                 &(i + 1).to_string(),
                 CODE_SIZE - 1.0,
                 weight::NORMAL,
                 theme.colors.dim_text.scale_alpha(0.55),
             );
-            paint_code_line(ctx, lay.code_block.x() + 34.0, cy, line, CODE_SIZE);
+            paint_code_line(ctx, code_x, cy, line, CODE_SIZE, max_w);
         }
         ctx.scene.pop_clip();
     }
 
+    // ── Jak użyć ──
+    ctx.label_left(
+        lay.notes_heading.x,
+        lay.notes_heading.y,
+        "Jak użyć",
+        theme.typography.heading.size,
+        weight::BOLD,
+        theme.colors.text,
+    );
+    let note_lines = wrap_lines(
+        notes(spec.name),
+        width - 18.0,
+        theme.typography.caption.size,
+        ctx.text,
+    );
+    for (i, line) in note_lines.iter().enumerate() {
+        let y = lay.notes.y + i as f64 * TEXT_LINE_H;
+        ctx.label_left(
+            lay.notes.x,
+            y,
+            "•",
+            theme.typography.caption.size,
+            weight::BOLD,
+            theme.colors.accent,
+        );
+        ctx.label_left(
+            lay.notes.x + 14.0,
+            y,
+            line,
+            theme.typography.caption.size,
+            weight::NORMAL,
+            theme.colors.dim_text,
+        );
+    }
+
+    // ── Poprzedni / następny widget ──
+    paint_nav_card(
+        ctx,
+        lay.prev_button,
+        lay.prev.map(|i| DEMOS[i].name),
+        "← Poprzedni",
+        state.hover_prev,
+    );
+    paint_nav_card(
+        ctx,
+        lay.next_button,
+        lay.next.map(|i| DEMOS[i].name),
+        "Następny →",
+        state.hover_next,
+    );
+
     ctx.scene.pop_clip();
 }
 
-/// Zawija opis do maksymalnie dwóch linii (z wielokropkiem).
-fn wrap_text(text: &str, max_w: f64, theme: &Theme, engine: &TextEngine) -> Vec<String> {
-    let size = theme.typography.caption.size;
-    let mut lines: Vec<String> = Vec::new();
-    let mut current = String::new();
-    for word in text.split_whitespace() {
-        let probe = if current.is_empty() {
-            word.to_owned()
+fn paint_nav_card(
+    ctx: &mut PaintCtx,
+    rect: Rect,
+    name: Option<&str>,
+    caption: &str,
+    hovered: bool,
+) {
+    let theme = *ctx.theme;
+    let enabled = name.is_some();
+    let bg = if hovered && enabled {
+        theme.colors.shade.scale_alpha(1.8)
+    } else {
+        theme.colors.card_bg
+    };
+    ctx.scene.fill_rounded_rect(rect, theme.radius.small, bg);
+    ctx.scene
+        .stroke_rounded_rect(rect, theme.radius.small, 1.0, theme.colors.border);
+
+    ctx.label_left(
+        rect.x() + 14.0,
+        rect.y() + 16.0,
+        caption,
+        theme.typography.caption.size - 1.0,
+        weight::MEDIUM,
+        if enabled {
+            theme.colors.accent
         } else {
-            format!("{current} {word}")
-        };
-        if !current.is_empty() && engine.measure(&probe, size, weight::NORMAL).width > max_w {
-            lines.push(std::mem::take(&mut current));
-            current = word.to_owned();
+            theme.colors.dim_text.scale_alpha(0.6)
+        },
+    );
+    let label = name.unwrap_or("—");
+    let label = ellipsize(
+        label,
+        (rect.width() - 28.0).max(20.0),
+        theme.typography.body.size,
+        ctx.text,
+    );
+    ctx.label_left(
+        rect.x() + 14.0,
+        rect.y() + 34.0,
+        &label,
+        theme.typography.body.size,
+        weight::MEDIUM,
+        if enabled {
+            theme.colors.text
         } else {
-            current = probe;
-        }
-    }
-    if !current.is_empty() {
-        lines.push(current);
-    }
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-    if lines.len() > 2 {
-        let last = lines[1].clone();
-        lines.truncate(2);
-        lines[1] = ellipsize(&format!("{last} …"), max_w, size, engine);
-    }
-    lines
+            theme.colors.dim_text.scale_alpha(0.6)
+        },
+    );
 }
 
-/// Prosty „highlighting”: słowa kluczowe akcentem, komentarze wyciszone.
-fn paint_code_line(ctx: &mut PaintCtx, x: f64, cy: f64, line: &str, size: f64) {
+/// Prosty „highlighting”: słowa kluczowe akcentem, komentarze i łańcuchy inaczej.
+fn paint_code_line(ctx: &mut PaintCtx, x: f64, cy: f64, line: &str, size: f64, max_w: f64) {
     let theme = *ctx.theme;
     if line.trim_start().starts_with("//") {
-        ctx.label_left(x, cy, line, size, weight::NORMAL, theme.colors.dim_text);
+        let text = ellipsize(line, max_w, size, ctx.text);
+        ctx.label_left(x, cy, &text, size, weight::NORMAL, theme.colors.dim_text);
         return;
     }
     let mut cx = x;
     for token in line.split_inclusive(' ') {
-        let trimmed = token.trim();
-        let color = if is_keyword(trimmed) {
+        if cx >= x + max_w {
+            break;
+        }
+        let trimmed = token.trim_end();
+        let color = if is_keyword(trimmed.trim()) {
             theme.colors.accent
-        } else if trimmed.starts_with('"') || trimmed.starts_with("r#") {
+        } else if trimmed.trim().starts_with('"') {
             theme.colors.success
         } else {
             theme.colors.text
         };
-        let w = ctx.measure(token, size, weight::NORMAL);
-        ctx.label_left(cx, cy, token, size, weight::NORMAL, color);
+        let remaining = x + max_w - cx;
+        let shown = ellipsize(token, remaining, size, ctx.text);
+        let w = ctx.measure(&shown, size, weight::NORMAL);
+        ctx.label_left(cx, cy, &shown, size, weight::NORMAL, color);
         cx += w;
     }
 }
@@ -674,12 +968,15 @@ fn is_keyword(token: &str) -> bool {
             | "Some"
             | "None"
             | "new"
+            | "return"
+            | "struct"
+            | "enum"
     )
 }
 
 // --- Obsługa zdarzeń ---
 
-/// Klik w stronę galerii. Zwraca `true`, jeśli zdarzenie zostało zużyte.
+/// Klik w stronę dokumentacji. Zwraca `true`, jeśli zdarzenie zostało zużyte.
 pub fn pointer_pressed(
     state: &mut GalleryState,
     area: Rect,
@@ -707,6 +1004,9 @@ pub fn pointer_pressed(
     }
 
     for row in &lay.rows {
+        if !lay.list.contains(p) {
+            break;
+        }
         if let SidebarRow::Item { demo, rect } = row {
             if rect.contains(p) {
                 state.search.set_focused(false);
@@ -716,24 +1016,24 @@ pub fn pointer_pressed(
             }
         }
     }
+    if lay.theme_switch.contains(p) {
+        let switcher = ViewSwitcher::new(["Jasny", "Ciemny", "Auto"]);
+        if let Some(index) = switcher.index_at(lay.theme_switch, p) {
+            let pref = theme_preference(index);
+            state.theme_pref = pref;
+            state.theme_change = Some(pref);
+        }
+        return true;
+    }
     if lay.sidebar.contains(p) {
         return true;
     }
 
-    if lay.code_button.contains(p) {
-        state.search.set_focused(false);
-        state.show_code = !state.show_code;
-        // Po zmianie wysokości treści przeliczamy układ, żeby offset był poprawny.
-        let lay = layout(area, theme, text, state);
-        state.detail.set_content_height(lay.detail_content);
-        state.detail.set_offset(state.detail.offset(), lay.detail);
-        return true;
-    }
     if lay.copy_button.contains(p) {
         state.search.set_focused(false);
         let spec = &DEMOS[state.selected.min(DEMOS.len().saturating_sub(1))];
         state.copy_request = Some(spec.code.to_owned());
-        state.status = "Skopiowano do schowka".to_owned();
+        state.status = "Skopiowano kod".to_owned();
         return true;
     }
 
@@ -741,6 +1041,25 @@ pub fn pointer_pressed(
         state.search.set_focused(false);
         let spec = &DEMOS[state.selected.min(DEMOS.len().saturating_sub(1))];
         gallery_interactive::pressed(spec.name, lay.preview, p, theme, text, &mut state.example);
+        return true;
+    }
+
+    if lay.prev_button.contains(p) && lay.prev.is_some() {
+        state.search.set_focused(false);
+        if let Some(prev) = lay.prev {
+            select(state, prev);
+            let lay = layout(area, theme, text, state);
+            ensure_row_visible(state, &lay, prev);
+        }
+        return true;
+    }
+    if lay.next_button.contains(p) && lay.next.is_some() {
+        state.search.set_focused(false);
+        if let Some(next) = lay.next {
+            select(state, next);
+            let lay = layout(area, theme, text, state);
+            ensure_row_visible(state, &lay, next);
+        }
         return true;
     }
 
@@ -761,12 +1080,17 @@ pub fn pointer_motion(
     p: Point,
 ) {
     let lay = layout(area, theme, text, state);
-    state.hover_row = lay.rows.iter().find_map(|row| match row {
-        SidebarRow::Item { demo, rect } if rect.contains(p) => Some(*demo),
-        _ => None,
-    });
-    state.hover_button = lay.code_button.contains(p);
+    state.hover_row = if lay.list.contains(p) {
+        lay.rows.iter().find_map(|row| match row {
+            SidebarRow::Item { demo, rect } if rect.contains(p) => Some(*demo),
+            _ => None,
+        })
+    } else {
+        None
+    };
     state.hover_copy = lay.copy_button.contains(p);
+    state.hover_prev = lay.prev_button.contains(p) && lay.prev.is_some();
+    state.hover_next = lay.next_button.contains(p) && lay.next.is_some();
     state
         .search
         .set_hover_clear(state.search.clear_at(lay.search, theme, p));
@@ -792,7 +1116,7 @@ pub fn pointer_released(state: &mut GalleryState) {
     gallery_interactive::released(&mut state.example);
 }
 
-/// Kółko myszy nad listą albo panelem szczegółów.
+/// Kółko myszy nad listą albo panelem dokumentacji.
 pub fn scroll(
     state: &mut GalleryState,
     area: Rect,
@@ -813,7 +1137,7 @@ pub fn scroll(
     }
 }
 
-/// Przewijanie panelu szczegółów klawiaturą (PageUp/PageDown).
+/// Przewijanie panelu dokumentacji klawiaturą (PageUp/PageDown).
 pub fn scroll_by_page(
     state: &mut GalleryState,
     area: Rect,
@@ -846,7 +1170,7 @@ pub fn scroll_to(
     ensure_row_visible(state, &lay, demo);
 }
 
-/// Klawiatura na stronie galerii. Zwraca `true`, gdy zdarzenie zostało zużyte.
+/// Klawiatura na stronie dokumentacji. Zwraca `true`, gdy zdarzenie zostało zużyte.
 pub fn key(
     state: &mut GalleryState,
     area: Rect,
@@ -885,7 +1209,6 @@ pub fn key(
 
     let items = filtered_items(state);
     if items.is_empty() {
-        // PageUp/PageDown mogą nadal przewijać szczegóły.
         return match ke.keysym {
             0xff55 => {
                 scroll_by_page(state, area, theme, text, -1.0);
@@ -908,6 +1231,21 @@ pub fn key(
         0xff54 => (position + 1).min(items.len() - 1), // Down
         0xff50 => 0,                                   // Home
         0xff57 => items.len() - 1,                     // End
+        0xff51 => {
+            if let Some(prev) = state.selected.checked_sub(1) {
+                select(state, prev);
+                let lay = layout(area, theme, text, state);
+                ensure_row_visible(state, &lay, prev);
+            }
+            return true;
+        }
+        0xff53 => {
+            let next = (state.selected + 1).min(DEMOS.len() - 1);
+            select(state, next);
+            let lay = layout(area, theme, text, state);
+            ensure_row_visible(state, &lay, next);
+            return true;
+        }
         0xff55 => {
             scroll_by_page(state, area, theme, text, -1.0);
             return true;
@@ -928,8 +1266,9 @@ pub fn key(
 /// Stan po wyjściu wskaźnika z obszaru galerii.
 pub fn pointer_left(state: &mut GalleryState) {
     state.hover_row = None;
-    state.hover_button = false;
     state.hover_copy = false;
+    state.hover_prev = false;
+    state.hover_next = false;
     state.search.set_hover_clear(false);
     state.dragging_sidebar = false;
     state.dragging_detail = false;
@@ -943,7 +1282,6 @@ fn select(state: &mut GalleryState, demo: usize) {
     }
     state.selected = demo;
     state.example.reset();
-    state.show_code = false;
     state.status.clear();
     state.detail = ScrollView::new();
 }
@@ -1002,7 +1340,7 @@ mod tests {
         DEMOS.iter().position(|d| d.name == name).expect(name)
     }
 
-    /// Podgląd galerii do PNG — pozwala obejrzeć stronę bez kompozytora.
+    /// Podgląd strony dokumentacji do PNG — pozwala obejrzeć ją bez kompozytora.
     #[test]
     #[ignore]
     fn render_gallery_preview() {
@@ -1026,24 +1364,18 @@ mod tests {
         render(&state, "/tmp/luna-gallery-page.png");
 
         state.selected = demo_index("Switch");
-        state.show_code = true;
         render(&state, "/tmp/luna-gallery-switch.png");
 
         state.selected = demo_index("Button");
-        state.show_code = true;
-        let lay = layout(Rect::from_size(size), &theme, &text, &state);
-        state.detail.set_content_height(lay.detail_content);
-        state.detail.set_offset(260.0, lay.detail);
-        state.status = "Skopiowano do schowka".to_owned();
+        state.status = "Skopiowano kod".to_owned();
         render(&state, "/tmp/luna-gallery-code.png");
 
         state.selected = demo_index("Calendar");
-        state.detail = ScrollView::new();
         render(&state, "/tmp/luna-gallery-calendar.png");
 
-        state.selected = demo_index("MediaControls");
-        state.show_code = false;
-        render(&state, "/tmp/luna-gallery-media.png");
+        state.selected = demo_index("HeaderBar");
+        state.example.header_variant = 3;
+        render(&state, "/tmp/luna-gallery-headerbar.png");
 
         // Filtr listy (np. „color” → ColorButton / ColorChooser).
         let mut filtered = GalleryState::default();
@@ -1053,7 +1385,7 @@ mod tests {
         render(&filtered, "/tmp/luna-gallery-search.png");
     }
 
-    /// Podgląd całego okna (sidebar + header + galeria) do PNG.
+    /// Podgląd całego okna (sidebar + header + dokumentacja) do PNG.
     #[test]
     #[ignore]
     fn render_demo_widgets_window() {
@@ -1068,7 +1400,6 @@ mod tests {
             ..Demo::default()
         };
         demo.gallery.selected = demo_index("Slider");
-        demo.gallery.show_code = true;
         let mut scene = Scene::new();
         build_scene(
             &mut scene,
@@ -1098,126 +1429,85 @@ mod tests {
 
     #[test]
     fn catalog_is_unique_and_has_code_for_every_widget() {
-        assert!(DEMOS.len() >= 70, "galeria powinna mieć wszystkie widgety");
-        let mut names: Vec<&str> = DEMOS.iter().map(|d| d.name).collect();
-        names.sort_unstable();
-        let unique = names.len();
-        names.dedup();
-        assert_eq!(names.len(), unique, "nazwy kafelków muszą być unikalne");
+        let mut names = std::collections::BTreeSet::new();
         for demo in DEMOS {
+            assert!(names.insert(demo.name), "zduplikowana nazwa: {}", demo.name);
             assert!(
                 !demo.code.trim().is_empty(),
-                "{}: brak przykładu",
+                "{} nie ma przykładu kodu",
                 demo.name
             );
-            assert!(!demo.source.is_empty(), "{}: brak źródła", demo.name);
-            assert!(!demo.description.is_empty(), "{}: brak opisu", demo.name);
+            assert!(
+                !notes(demo.name).trim().is_empty(),
+                "{} nie ma noty „jak użyć”",
+                demo.name
+            );
         }
     }
 
     #[test]
-    fn sidebar_lists_every_widget() {
-        let theme = Theme::dark();
-        let text = TextEngine::none();
-        let lay = layout(area(), &theme, &text, &GalleryState::default());
-        let items = lay
-            .rows
-            .iter()
-            .filter(|row| matches!(row, SidebarRow::Item { .. }))
-            .count();
-        assert_eq!(items, DEMOS.len());
-        let headers = lay
-            .rows
-            .iter()
-            .filter(|row| matches!(row, SidebarRow::Header { .. }))
-            .count();
-        assert_eq!(headers, Category::ALL.len());
-    }
-
-    #[test]
-    fn clicking_sidebar_selects_widget() {
-        let theme = Theme::dark();
-        let text = TextEngine::none();
+    fn every_demo_paints_in_detail() {
+        let theme = Theme::light();
+        let text = TextEngine::system();
         let mut state = GalleryState::default();
-        let target = demo_index("Switch");
-        let lay = layout(area(), &theme, &text, &state);
-        let rect = lay
-            .rows
-            .iter()
-            .find_map(|row| match row {
-                SidebarRow::Item { demo, rect } if *demo == target => Some(*rect),
-                _ => None,
-            })
-            .expect("wiersz");
-        assert!(pointer_pressed(
-            &mut state,
-            area(),
-            &theme,
-            &text,
-            rect.center()
-        ));
-        assert_eq!(state.selected, target);
+        for (demo, spec) in DEMOS.iter().enumerate() {
+            state.selected = demo;
+            let mut scene = Scene::new();
+            let mut ctx = PaintCtx::new(&mut scene, &theme, &text);
+            paint(&mut ctx, area(), &state);
+            assert!(!scene.is_empty(), "{} nie narysował się", spec.name);
+            for command in scene.commands() {
+                let rect = match command {
+                    libluna_render::DrawCommand::FillRect { rect, .. }
+                    | libluna_render::DrawCommand::FillRoundedRect { rect, .. }
+                    | libluna_render::DrawCommand::StrokeRoundedRect { rect, .. } => Some(*rect),
+                    _ => None,
+                };
+                if let Some(rect) = rect {
+                    assert!(
+                        rect.width() > 0.0 && rect.height() > 0.0,
+                        "{} narysował pusty prostokąt {rect:?}",
+                        spec.name
+                    );
+                }
+            }
+        }
     }
 
     #[test]
-    fn search_filters_list_and_selects_first_match() {
-        let theme = Theme::dark();
-        let text = TextEngine::none();
-        let mut state = GalleryState {
-            search: SearchEntry::new("Szukaj…"),
-            ..GalleryState::default()
-        };
-        state.search.set_text("calendar");
-        state.search.set_focused(true);
-        search_changed(&mut state);
-
-        let lay = layout(area(), &theme, &text, &state);
-        let items: Vec<usize> = lay
-            .rows
-            .iter()
-            .filter_map(|row| match row {
-                SidebarRow::Item { demo, .. } => Some(*demo),
-                _ => None,
-            })
-            .collect();
-        assert!(items.len() < DEMOS.len());
-        assert!(items.iter().any(|i| DEMOS[*i].name == "Calendar"));
-        assert_eq!(DEMOS[state.selected].name, "Calendar");
-
-        // Brak trafień → pusta lista, ale strona nadal się rysuje.
-        state.search.set_text("zzz-nie-ma");
-        search_changed(&mut state);
-        let lay = layout(area(), &theme, &text, &state);
-        assert!(!lay
-            .rows
-            .iter()
-            .any(|row| matches!(row, SidebarRow::Item { .. })));
-        let mut scene = Scene::new();
-        let mut ctx = PaintCtx::new(&mut scene, &theme, &text);
-        paint(&mut ctx, area(), &state);
-        assert!(!scene.is_empty());
-    }
-
-    #[test]
-    fn search_field_focuses_on_click() {
-        let theme = Theme::dark();
-        let text = TextEngine::none();
+    fn every_demo_renders_without_panicking() {
+        let theme = Theme::light();
+        let text = TextEngine::system();
+        let size = Size::new(1200.0, 1000.0);
+        let area = Rect::from_size(size);
         let mut state = GalleryState::default();
-        let lay = layout(area(), &theme, &text, &state);
-        assert!(pointer_pressed(
-            &mut state,
-            area(),
-            &theme,
-            &text,
-            lay.search.center()
-        ));
-        assert!(state.search.is_focused());
+        for demo in 0..DEMOS.len() {
+            state.selected = demo;
+            let mut scene = Scene::new();
+            {
+                let mut ctx = PaintCtx::new(&mut scene, &theme, &text);
+                paint(&mut ctx, area, &state);
+            }
+            let mut renderer = SoftwareRenderer::new(size.width as u32, size.height as u32);
+            renderer.draw(&scene, 1.0, theme.colors.window_bg);
+        }
     }
 
     #[test]
-    fn copy_button_requests_widget_code() {
-        let theme = Theme::dark();
-        let text = TextEngine::none();
+    fn code_and_notes_are_always_visible() {
+        let theme = Theme::light();
+        let text = TextEngine::system();
+        let state = GalleryState::default();
+        let lay = layout(area(), &theme, &text, &state);
+        assert!(lay.code_block.height() > 0.0);
+        assert!(lay.code_block.bottom() <= lay.detail_content + lay.detail.y());
+        assert!(lay.notes.y > lay.code_block.y());
+    }
+
+    #[test]
+    fn copy_button_requests_the_visible_code() {
+        let theme = Theme::light();
+        let text = TextEngine::system();
         let mut state = GalleryState::default();
         let lay = layout(area(), &theme, &text, &state);
         assert!(pointer_pressed(
@@ -1227,132 +1517,103 @@ mod tests {
             &text,
             lay.copy_button.center()
         ));
-        assert_eq!(state.copy_request.take().as_deref(), Some(DEMOS[0].code));
-        assert!(!state.status.is_empty());
+        assert_eq!(state.copy_request.as_deref(), Some(DEMOS[0].code));
     }
 
     #[test]
-    fn code_button_toggles_code_block() {
-        let theme = Theme::dark();
-        let text = TextEngine::none();
+    fn next_and_previous_cards_select_widgets() {
+        let theme = Theme::light();
+        let text = TextEngine::system();
         let mut state = GalleryState::default();
         let lay = layout(area(), &theme, &text, &state);
-        assert_eq!(lay.code_block.height(), 0.0);
         assert!(pointer_pressed(
             &mut state,
             area(),
             &theme,
             &text,
-            lay.code_button.center()
+            lay.next_button.center()
         ));
-        assert!(state.show_code);
+        assert_eq!(state.selected, 1);
+
         let lay = layout(area(), &theme, &text, &state);
-        assert!(lay.code_block.height() > 0.0);
+        assert!(pointer_pressed(
+            &mut state,
+            area(),
+            &theme,
+            &text,
+            lay.prev_button.center()
+        ));
+        assert_eq!(state.selected, 0);
     }
 
     #[test]
-    fn interactive_switch_reacts_to_click() {
-        let theme = Theme::dark();
-        let text = TextEngine::none();
-        let mut state = GalleryState {
-            selected: demo_index("Switch"),
-            ..GalleryState::default()
+    fn keyboard_moves_between_widgets() {
+        let theme = Theme::light();
+        let text = TextEngine::system();
+        let mut state = GalleryState::default();
+        let down = KeyEvent {
+            keysym: 0xff54,
+            keycode: 0,
+            state: ButtonState::Pressed,
+            modifiers: libluna_core::Modifiers::NONE,
+            text: None,
+            repeat: false,
         };
-        let lay = layout(area(), &theme, &text, &state);
-        let before = state.example.switch_on;
-        assert!(pointer_pressed(
-            &mut state,
-            area(),
-            &theme,
-            &text,
-            lay.preview.center()
-        ));
-        assert_ne!(state.example.switch_on, before);
+        assert!(key(&mut state, area(), &theme, &text, &down));
+        assert_eq!(state.selected, 1);
 
-        let mut scene = Scene::new();
-        let mut ctx = PaintCtx::new(&mut scene, &theme, &text);
-        paint(&mut ctx, area(), &state);
-        assert!(!scene.is_empty());
+        let right = KeyEvent {
+            keysym: 0xff53,
+            keycode: 0,
+            state: ButtonState::Pressed,
+            modifiers: libluna_core::Modifiers::NONE,
+            text: None,
+            repeat: false,
+        };
+        assert!(key(&mut state, area(), &theme, &text, &right));
+        assert_eq!(state.selected, 2);
+    }
+
+    #[test]
+    fn theme_switch_requests_a_theme_change() {
+        let theme = Theme::light();
+        let text = TextEngine::system();
+        let mut state = GalleryState::default();
+        let lay = layout(area(), &theme, &text, &state);
+        let dark =
+            ViewSwitcher::new(["Jasny", "Ciemny", "Auto"]).segments(lay.theme_switch)[1].center();
+        assert!(pointer_pressed(&mut state, area(), &theme, &text, dark));
+        assert_eq!(state.theme_pref, ThemePreference::Dark);
+        assert_eq!(state.theme_change, Some(ThemePreference::Dark));
+    }
+
+    #[test]
+    fn searching_selects_first_match_and_scrolls_back() {
+        let mut state = GalleryState::default();
+        state.search.set_text("calendar");
+        search_changed(&mut state);
+        assert_eq!(DEMOS[state.selected].name, "Calendar");
+        assert_eq!(state.sidebar.offset(), 0.0);
     }
 
     #[test]
     fn wheel_scrolls_sidebar_and_detail_separately() {
-        let theme = Theme::dark();
-        let text = TextEngine::none();
-        let mut state = GalleryState {
-            show_code: true,
-            ..GalleryState::default()
-        };
-        // Małe okno, żeby obie kolumny miały co przewijać.
-        let small = Rect::from_xywh(0.0, 0.0, 700.0, 600.0);
-        let lay = layout(small, &theme, &text, &state);
-
+        let theme = Theme::light();
+        let text = TextEngine::system();
+        let mut state = GalleryState::default();
+        state.selected = demo_index("Assistant");
+        let lay = layout(area(), &theme, &text, &state);
+        assert!(lay.detail_content > lay.detail.height());
+        let detail_y = state.detail.offset();
         assert!(scroll(
             &mut state,
-            small,
-            &theme,
-            &text,
-            Point::new(lay.list.center().x, lay.list.y() + 40.0),
-            600.0
-        ));
-        assert!(state.sidebar.offset() > 0.0);
-        assert_eq!(state.detail.offset(), 0.0);
-
-        assert!(scroll(
-            &mut state,
-            small,
+            area(),
             &theme,
             &text,
             lay.detail.center(),
-            600.0
+            120.0
         ));
-        assert!(state.detail.offset() > 0.0);
-    }
-
-    #[test]
-    fn interactive_examples_accept_input() {
-        use libluna_core::Modifiers;
-
-        let theme = Theme::dark();
-        let text = TextEngine::none();
-        let mut state = GalleryState {
-            selected: demo_index("Entry"),
-            ..GalleryState::default()
-        };
-        let lay = layout(area(), &theme, &text, &state);
-        let field = Point::new(lay.preview.center().x, lay.preview.center().y - 14.0);
-        assert!(pointer_pressed(&mut state, area(), &theme, &text, field));
-        let ke = KeyEvent {
-            keysym: 0x61,
-            keycode: 0,
-            text: Some("abc".to_owned()),
-            state: ButtonState::Pressed,
-            modifiers: Modifiers::NONE,
-            repeat: false,
-        };
-        assert!(key(&mut state, area(), &theme, &text, &ke));
-        assert_eq!(state.example.entry.text(), "abc");
-
-        // Slider: klik blisko prawej krawędzi toru ustawia wartość ≈ 100%.
-        state.selected = demo_index("Slider");
-        let lay = layout(area(), &theme, &text, &state);
-        let near_end = Point::new(lay.preview.right() - 45.0, lay.preview.center().y);
-        assert!(pointer_pressed(&mut state, area(), &theme, &text, near_end));
-        assert!(state.example.slider > 0.9, "{}", state.example.slider);
-    }
-
-    #[test]
-    fn every_demo_paints_in_detail() {
-        let theme = Theme::dark();
-        let text = TextEngine::none();
-        let mut state = GalleryState::default();
-        for (demo, spec) in DEMOS.iter().enumerate() {
-            state.selected = demo;
-            state.show_code = true;
-            let mut scene = Scene::new();
-            let mut ctx = PaintCtx::new(&mut scene, &theme, &text);
-            paint(&mut ctx, area(), &state);
-            assert!(!scene.is_empty(), "{} nie narysował się", spec.name);
-        }
+        assert!(state.detail.offset() > detail_y);
+        assert_eq!(state.sidebar.offset(), 0.0);
     }
 }

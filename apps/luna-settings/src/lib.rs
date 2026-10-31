@@ -7,6 +7,7 @@
 //! czyta dane systemowe, [`ui`] rysuje i obsługuje wejście. Ten sam model można
 //! renderować headless w testach.
 
+pub mod accounts_admin;
 pub mod app;
 pub mod greeter_admin;
 pub mod notify;

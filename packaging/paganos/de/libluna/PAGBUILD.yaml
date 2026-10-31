@@ -5,7 +5,7 @@
 # generowany skryptem packaging/paganos/make-tarball.sh. Katalog w tarballu: luna-${pkgver}/
 
 pkgname: libluna
-pkgver: '0.0.1'
+pkgver: '0.0.5'
 pkgrel: 1
 pkgdesc: 'libLuna — lekki toolkit GUI w Rust (alternatywa dla GTK4/libadwaita): widgety, render software, i18n; demo + galeria'
 url: 'https://git.paganlinux.eu/luna.git'

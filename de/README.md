@@ -99,6 +99,14 @@ Selene.
   kropka przy zegarze pokazuje, że w historii są powiadomienia.
 - **Wyszukiwanie w launcherze**: pole ma przycisk **„×”** czyszczący frazę, a zamknięcie
   launchera resetuje wyszukiwanie i przewinięcie — kolejne otwarcie pokazuje pełną listę.
+- **Menu PPM w launcherze**: prawy klik na aplikacji otwiera menu z akcjami
+  *Otwórz*, *Dodaj do ulubionych / Usuń z ulubionych*, *Otwórz jako administrator*
+  (polkit/pkexec — okno hasła), *Kopiuj polecenie uruchamiające* i *Odinstaluj*
+  (otwiera Sklep na pakiecie). Menu obsługuje też strzałki i `Enter`; `Esc` zamyka
+  samo menu, nie launcher.
+- **Świeża lista aplikacji**: po instalacji pakietu (nowy plik `.desktop`) launcher
+  sam wykrywa zmianę (tani znacznik katalogów `applications/`, sprawdzany co sekundę)
+  i doda nową aplikację bez restartu powłoki.
 - **Panel i launcher**: każdy klikalny element (burger, przyciski okien, kropki przestrzeni,
   przełączniki, zegar, użytkownik, zasilanie, kafelki/wiersze launchera, przełącznik widoku,
   „×” wyszukiwania, kafelki i przyciski Quick Panelu, menu sesji, listy Wi-Fi i głośności)
@@ -137,6 +145,37 @@ Selene.
   Wejście z wpisu `eu.luna.Terminal.desktop`; podgląd headless:
   `cargo run --manifest-path apps/luna-terminal/Cargo.toml --bin preview` → `docs/images/luna-terminal.png`.
   Szczegóły: [`docs/terminal.md`](../docs/terminal.md).
+- **Luna Editor** (`luna-editor`, `apps/luna-editor`) — edytor tekstu i kodu:
+  podświetlanie składni (Rust, TOML, JSON, Markdown, Shell, C/C++, Python) przez
+  nowy `CodeView` w libLunie, numery linii, bieżąca linia, przewijanie w obu osiach,
+  zaznaczanie, schowek, undo/redo, wyszukiwanie (`Ctrl+F`), „Idź do linii”
+  (`Ctrl+G`), zachowanie LF/CRLF i BOM oraz atomowy zapis pliku.
+  Wejście z `eu.luna.Editor.desktop` (MIME tekst/kod — także z Plików przez
+  „Otwórz za pomocą”); podgląd headless:
+  `cargo run --manifest-path apps/luna-editor/Cargo.toml --bin editor-render --`
+  → `docs/images/luna-editor.png` i `luna-editor-dark.png`.
+  Szczegóły: [`docs/editor.md`](../docs/editor.md).
+- **Luna Media** (`luna-media`, `apps/luna-media`) — przeglądarka obrazów, RAW-ów,
+  filmów i PDF-ów: galeria z miniaturami, podgląd z zoomem i panoramowaniem,
+  pokaz slajdów, odtwarzacz wideo (pauza, przewijanie, wyciszenie) oraz czytnik
+  PDF ze zmianą stron i zaznaczaniem tekstu. Obrazy PNG/JPEG/SVG dekodujemy
+  natywnie, RAW-y przez osadzony podgląd JPEG lub pełną demozajkę `dcraw_emu`,
+  resztę i filmy przez `ffmpeg`, strony PDF przez poppler; dźwięk przez
+  `pw-play`/`paplay`.
+  Wejście z wpisu `eu.luna.Media.desktop`; podgląd headless:
+  `cargo run --manifest-path apps/luna-media/Cargo.toml --bin preview` →
+  `docs/images/luna-media.png`, `luna-media-viewer.png`, `luna-media-video.png`,
+  `luna-media-pdf.png`.
+  Szczegóły: [`docs/media.md`](../docs/media.md).
+- **Luna Clock** (`luna-clock`, `apps/luna-clock`) — zegar lokalny i światowy,
+  minutnik, stoper oraz kalendarz z własnymi wydarzeniami, świętami liczącymi się
+  offline i automatycznym motywem o wybranych godzinach. Panel czyta ten sam plik
+  wydarzeń (kropki i plan dnia) i otwiera aplikację na wybranym dniu; po zamknięciu
+  aplikacji działający minutnik/stoper pokazuje się jako widget pod paskiem.
+  Wejście z `eu.luna.Clock.desktop`; podglądy:
+  `cargo run --manifest-path apps/luna-clock/Cargo.toml --bin preview` →
+  `docs/images/clock-*.png`.
+  Szczegóły i prywatność: [`docs/clock.md`](../docs/clock.md).
 - **Wielojęzyczność na żywo**: `libluna-platform` obserwuje `~/.config/luna/locale.conf`,
   przeładowuje katalogi `libluna-i18n`, ustawia `LANGUAGE`/`LANG` i odrysowuje okno;
   aplikacje z cache'owanymi napisami (sidebar, nawigacja, tytuł okna) odświeżają je po

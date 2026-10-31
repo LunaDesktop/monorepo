@@ -104,8 +104,13 @@ impl SoftwareRenderer {
                     // Ścieżka dla zwykłego prostokąta to zbędny narzut: tiny-skia
                     // ma szybkie `fill_rect` (skan linii, bez budowania `Path`).
                     if color.a > 0.0 {
-                        if let Some(r) = ts_rect(*rect) {
-                            pixmap.fill_rect(r, &paint(*color), transform, mask.as_ref());
+                        // Jednolity, osiowo wyrównany prostokąt (tak rysujemy tło,
+                        // przygaszenie okien i paski) blendujemy bezpośrednio —
+                        // pomijamy generyczny pipeline tiny-skia z f32 na piksel.
+                        if !fast_solid_rect(pixmap, *rect, *color, scale.factor(), mask.as_ref()) {
+                            if let Some(r) = ts_rect(*rect) {
+                                pixmap.fill_rect(r, &paint_rect(*color), transform, mask.as_ref());
+                            }
                         }
                     }
                 }
@@ -117,7 +122,7 @@ impl SoftwareRenderer {
                     if *radius <= 0.0 {
                         if color.a > 0.0 {
                             if let Some(r) = ts_rect(*rect) {
-                                pixmap.fill_rect(r, &paint(*color), transform, mask.as_ref());
+                                pixmap.fill_rect(r, &paint_rect(*color), transform, mask.as_ref());
                             }
                         }
                     } else if let Some(path) = paths.rect(*rect, *radius) {
@@ -262,6 +267,21 @@ impl SoftwareRenderer {
                         && (rect.width().round() as u32) == data.width
                         && (rect.height().round() as u32) == data.height;
 
+                    if is_1to1 && data.opaque {
+                        let (px, py) = (
+                            (rect.x() * k as f64).round() as i32,
+                            (rect.y() * k as f64).round() as i32,
+                        );
+                        match mask.as_ref() {
+                            // Nieprzezroczysty obraz pod clipem: nadal można pominąć
+                            // generyczny pipeline tiny-skia i blendować tylko piksele
+                            // objęte maską (większość bufora to pełne krycie → kopiowanie).
+                            Some(m) => blit_opaque_masked(pixmap, data, px, py, m),
+                            None => blit_opaque(pixmap, data, px, py),
+                        }
+                        continue;
+                    }
+
                     if is_1to1 && mask.is_none() && data.sparse {
                         // Rzadki obraz (panel, popup): większość pikseli ma `alpha == 0`.
                         // Blit z pomijaniem zer jest znacznie tańszy niż blendowanie
@@ -292,7 +312,11 @@ impl SoftwareRenderer {
                         let t = Transform::from_scale(sx, sy)
                             .post_translate(rect.x() as f32 * k, rect.y() as f32 * k);
                         let paint = PixmapPaint {
-                            quality: FilterQuality::Bilinear,
+                            quality: if data.nearest {
+                                FilterQuality::Nearest
+                            } else {
+                                FilterQuality::Bilinear
+                            },
                             ..PixmapPaint::default()
                         };
                         pixmap.draw_pixmap(0, 0, src, &paint, t, mask.as_ref());
@@ -391,6 +415,18 @@ fn paint(color: Color) -> Paint<'static> {
     }
 }
 
+/// Jak [`paint`], ale bez antyaliasingu — dla osiowo wyrównanych prostokątów.
+///
+/// tiny-skia ma bug w ścieżce AA dla prostokątów o ułamkowym położeniu i grubości
+/// bliskiej 1 px (np. separatorów `1.0` na `x.5`); bez AA wynik jest poprawny.
+fn paint_rect(color: Color) -> Paint<'static> {
+    Paint {
+        shader: Shader::SolidColor(ts_color(color)),
+        anti_alias: false,
+        ..Default::default()
+    }
+}
+
 fn fill(pixmap: &mut Pixmap, path: &Path, color: Color, transform: Transform, mask: Option<&Mask>) {
     if color.a <= 0.0 {
         return;
@@ -428,6 +464,171 @@ fn build_mask(pixmap: &Pixmap, path: &Path, transform: Transform) -> Option<Mask
 fn div255(x: u32) -> u32 {
     let x = x + 128;
     (x + (x >> 8)) >> 8
+}
+
+/// Szybki blend jednolitego, osiowo wyrównanego prostokąta.
+///
+/// Zwraca `false`, gdy geometria nie nadaje się do ścieżki szybkiej (skala ≠ 1,
+/// niecałkowite współrzędne) — wtedy rysuje tiny-skia. `mask` jest maską clipu
+/// (pełny rozmiar bufora), więc jej wartość mnożymy per piksel.
+fn fast_solid_rect(
+    pixmap: &mut Pixmap,
+    rect: Rect,
+    color: Color,
+    scale: f64,
+    mask: Option<&Mask>,
+) -> bool {
+    if (scale - 1.0).abs() > 1e-3 {
+        return false;
+    }
+    let near_int = |v: f64| (v - v.round()).abs() < 0.01;
+    if !near_int(rect.x())
+        || !near_int(rect.y())
+        || !near_int(rect.width())
+        || !near_int(rect.height())
+    {
+        return false;
+    }
+    let (dw, dh) = (pixmap.width() as i64, pixmap.height() as i64);
+    let x0 = (rect.x() as i64).max(0);
+    let y0 = (rect.y() as i64).max(0);
+    let x1 = ((rect.x() + rect.width()) as i64).min(dw);
+    let y1 = ((rect.y() + rect.height()) as i64).min(dh);
+    if x0 >= x1 || y0 >= y1 {
+        return true;
+    }
+
+    let [r, g, b, a] = color.to_rgba8();
+    let sa = a as u32;
+    // Kolor jest niemnożony; źródło do source-over musi być premultiplied.
+    let sr = (r as u32 * sa + 127) / 255;
+    let sg = (g as u32 * sa + 127) / 255;
+    let sb = (b as u32 * sa + 127) / 255;
+
+    let dw_usize = pixmap.width() as usize;
+    let mask_stride = mask.map(|m| m.width() as usize);
+    let mask_data = mask.map(|m| m.data());
+    let dst = pixmap.data_mut();
+
+    if sa == 255 && mask_data.is_none() {
+        // Pełne krycie: wiersz wypełniamy wzorcem 4-bajtowym.
+        let pattern = [r, g, b, 255];
+        for y in y0..y1 {
+            let start = (y as usize * dw_usize + x0 as usize) * 4;
+            let end = (y as usize * dw_usize + x1 as usize) * 4;
+            for px in dst[start..end].chunks_exact_mut(4) {
+                px.copy_from_slice(&pattern);
+            }
+        }
+        return true;
+    }
+
+    let inv_a = 255 - sa;
+    let row_bytes = (x1 - x0) as usize * 4;
+    for y in y0..y1 {
+        let mask_row = mask_data.map(|data| {
+            let stride = mask_stride.unwrap_or(dw_usize);
+            &data[y as usize * stride + x0 as usize..y as usize * stride + x1 as usize]
+        });
+        let start = (y as usize * dw_usize + x0 as usize) * 4;
+        let row = &mut dst[start..start + row_bytes];
+        match mask_row {
+            None => {
+                for px in row.chunks_exact_mut(4) {
+                    px[0] = (sr + div255(px[0] as u32 * inv_a)) as u8;
+                    px[1] = (sg + div255(px[1] as u32 * inv_a)) as u8;
+                    px[2] = (sb + div255(px[2] as u32 * inv_a)) as u8;
+                    px[3] = (sa + div255(px[3] as u32 * inv_a)) as u8;
+                }
+            }
+            Some(cov_row) => {
+                for (px, &cov) in row.chunks_exact_mut(4).zip(cov_row) {
+                    if cov == 0 {
+                        continue;
+                    }
+                    let cov = cov as u32;
+                    if cov == 255 {
+                        px[0] = (sr + div255(px[0] as u32 * inv_a)) as u8;
+                        px[1] = (sg + div255(px[1] as u32 * inv_a)) as u8;
+                        px[2] = (sb + div255(px[2] as u32 * inv_a)) as u8;
+                        px[3] = (sa + div255(px[3] as u32 * inv_a)) as u8;
+                        continue;
+                    }
+                    let a = div255(sa * cov);
+                    let inv = 255 - a;
+                    let cr = div255(sr * cov);
+                    let cg = div255(sg * cov);
+                    let cb = div255(sb * cov);
+                    px[0] = (cr + div255(px[0] as u32 * inv)) as u8;
+                    px[1] = (cg + div255(px[1] as u32 * inv)) as u8;
+                    px[2] = (cb + div255(px[2] as u32 * inv)) as u8;
+                    px[3] = (a + div255(px[3] as u32 * inv)) as u8;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Kopiuje nieprzezroczysty obraz 1:1 (bez maski) wprost do bufora.
+fn blit_opaque(pixmap: &mut Pixmap, src: &ImageData, dx: i32, dy: i32) {
+    blit_opaque_impl(pixmap, src, dx, dy, None)
+}
+
+/// Wariant z maską clipu: piksele poza maską zostają nietknięte, a na krawędziach
+/// mieszamy źródło z tłem według pokrycia (antyaliasing clipu).
+fn blit_opaque_masked(pixmap: &mut Pixmap, src: &ImageData, dx: i32, dy: i32, mask: &Mask) {
+    blit_opaque_impl(pixmap, src, dx, dy, Some(mask))
+}
+
+fn blit_opaque_impl(pixmap: &mut Pixmap, src: &ImageData, dx: i32, dy: i32, mask: Option<&Mask>) {
+    let dw = pixmap.width() as i32;
+    let dh = pixmap.height() as i32;
+    let sw = src.width as i32;
+    let sh = src.height as i32;
+    let x0 = dx.max(0);
+    let x1 = (dx + sw).min(dw);
+    let y0 = dy.max(0);
+    let y1 = (dy + sh).min(dh);
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+    let copy_bytes = (x1 - x0) as usize * 4;
+    let src_stride = sw as usize * 4;
+    let dst_stride = dw as usize * 4;
+    let mask_width = mask.map(|m| m.width() as usize);
+    let mask_data = mask.map(|m| m.data());
+    let dst = pixmap.data_mut();
+    for y in y0..y1 {
+        let src_start = ((y - dy) as usize * src_stride) + (x0 - dx) as usize * 4;
+        let dst_start = y as usize * dst_stride + x0 as usize * 4;
+        let src_row = &src.rgba[src_start..src_start + copy_bytes];
+        let dst_row = &mut dst[dst_start..dst_start + copy_bytes];
+        let Some(mask_data) = mask_data else {
+            dst_row.copy_from_slice(src_row);
+            continue;
+        };
+        let stride = mask_width.unwrap_or(dw as usize);
+        let cov_row =
+            &mask_data[y as usize * stride + x0 as usize..y as usize * stride + x1 as usize];
+        for ((d, s), &cov) in dst_row
+            .chunks_exact_mut(4)
+            .zip(src_row.chunks_exact(4))
+            .zip(cov_row)
+        {
+            if cov == 0 {
+                continue;
+            }
+            if cov == 255 {
+                d.copy_from_slice(s);
+                continue;
+            }
+            let inv = 255 - cov as u32;
+            for c in 0..4 {
+                d[c] = (div255(s[c] as u32 * cov as u32) + div255(d[c] as u32 * inv)) as u8;
+            }
+        }
+    }
 }
 
 /// Rysuje obraz 1:1 z pominięciem w pełni przezroczystych pikseli.
@@ -525,6 +726,91 @@ mod tests {
         let idx = (y as usize * w + x as usize) * 4;
         let d = renderer.data();
         [d[idx], d[idx + 1], d[idx + 2], d[idx + 3]]
+    }
+
+    #[test]
+    fn opaque_image_is_copied_not_blended() {
+        let mut r = SoftwareRenderer::new(6, 6);
+        let mut rgba = Vec::new();
+        for _ in 0..4 {
+            rgba.extend_from_slice(&[0x12, 0x34, 0x56, 0xff]);
+        }
+        let img = ImageData::new(2, 2, rgba).with_opaque(true);
+        let mut s = Scene::new();
+        s.image(
+            Rect::from_xywh(2.0, 2.0, 2.0, 2.0),
+            std::sync::Arc::new(img),
+        );
+        r.draw(&s, 1.0, Color::WHITE);
+        assert_eq!(pixel(&r, 2, 2), [0x12, 0x34, 0x56, 0xff]);
+        assert_eq!(pixel(&r, 0, 0), [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn masked_opaque_image_respects_clip() {
+        let mut r = SoftwareRenderer::new(6, 6);
+        let rgba = [255u8, 0, 0, 255].repeat(16);
+        let img = ImageData::new(4, 4, rgba).with_opaque(true);
+        let mut s = Scene::new();
+        s.push_clip(Rect::from_xywh(0.0, 0.0, 2.0, 6.0));
+        s.image(
+            Rect::from_xywh(0.0, 0.0, 4.0, 4.0),
+            std::sync::Arc::new(img),
+        );
+        s.pop_clip();
+        r.draw(&s, 1.0, Color::WHITE);
+        assert_eq!(pixel(&r, 1, 2), [255, 0, 0, 255]);
+        assert_eq!(pixel(&r, 3, 2), [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn fractional_hairline_rect_does_not_panic() {
+        // tiny-skia ma bug w ścieżce AA dla prostokątów o ułamkowym położeniu
+        // i grubości ~1 px; renderer używa wtedy ścieżki bez AA.
+        let mut r = SoftwareRenderer::new(8, 8);
+        let mut s = Scene::new();
+        s.fill_rect(
+            Rect::from_xywh(3.5, 0.0, 1.0, 8.0),
+            Color::from_rgba8(0, 0, 0, 0xff),
+        );
+        r.draw(&s, 1.0, Color::WHITE);
+        let painted = [pixel(&r, 3, 4), pixel(&r, 4, 4)]
+            .iter()
+            .any(|p| p[0] < 128);
+        assert!(painted, "cienka linia powinna trafić w któryś piksel");
+    }
+
+    #[test]
+    fn fast_solid_rect_blends_alpha() {
+        let mut r = SoftwareRenderer::new(8, 8);
+        let mut s = Scene::new();
+        s.fill_rect(
+            Rect::from_xywh(0.0, 0.0, 8.0, 8.0),
+            Color::from_rgba8(0, 0, 0, 0x80),
+        );
+        r.draw(&s, 1.0, Color::WHITE);
+        let p = pixel(&r, 4, 4);
+        assert!(
+            (126..=129).contains(&p[0]),
+            "czarny 50% na białym powinien dać ~127, jest {}",
+            p[0]
+        );
+        assert_eq!(p[3], 255);
+    }
+
+    #[test]
+    fn fast_solid_rect_respects_clip_mask() {
+        let mut r = SoftwareRenderer::new(8, 8);
+        let mut s = Scene::new();
+        s.push_clip(Rect::from_xywh(0.0, 0.0, 4.0, 8.0));
+        s.fill_rect(
+            Rect::from_xywh(0.0, 0.0, 8.0, 8.0),
+            Color::from_rgba8(255, 0, 0, 255),
+        );
+        s.pop_clip();
+        r.draw(&s, 1.0, Color::WHITE);
+        assert_eq!(pixel(&r, 2, 4), [255, 0, 0, 255]);
+        assert_eq!(pixel(&r, 5, 4), [255, 255, 255, 255]);
     }
 
     #[test]

@@ -100,9 +100,13 @@ luna/                        # meta-repozytorium (dev + integracja)
   selene/                    # KOMPOZYTOR — [workspace]: Wayland (bez smithay: wayland-server + własna pętla)
   luna-greeter/              # LOGOWANIE — [workspace]: ekran logowania (frontend greetd)
   apps/                      # APLIKACJE — każda osobny [workspace]
-    luna-demo/               # demo aplikacji środowiska Luna; też render offline do PNG
+    luna-demo/               # dokumentacja widgetów (żywe przykłady, kod, warianty HeaderBar)
     luna-files/              # menedżer plików Luna Files
-    luna-settings/           # centrum ustawień środowiska i systemu
+    luna-media/              # przeglądarka obrazów i filmów (ffmpeg)
+    luna-editor/             # edytor tekstu i kodu z podświetlaniem składni
+    luna-clock/              # zegar, minutnik, stoper, strefy i prywatny kalendarz
+    luna-settings/          # centrum ustawień środowiska i systemu
+    luna-store/              # sklep: pacman/pag/apt/dnf/emerge/Flatpak + aktualizacje
     luna-terminal/           # terminal: PTY + VT100/xterm, font monospace, kolory ANSI
   de/                        # integracja sesji (wspólna dla pakietów)
     README.md                # opis środowiska, Selene i nazewnictwo
@@ -118,7 +122,9 @@ luna/                        # meta-repozytorium (dev + integracja)
 
 Mapowanie pojęć GTK/GDK/Gsk/libadwaita → libLuna: [`docs/architecture.md`](docs/architecture.md).
 Plan dalszej pracy: [`docs/roadmap.md`](docs/roadmap.md).
+Zegar i kalendarz: [`docs/clock.md`](docs/clock.md).
 Centrum ustawień: [`docs/settings.md`](docs/settings.md).
+Sklep z oprogramowaniem: [`docs/store.md`](docs/store.md).
 Zestaw ikon: [`docs/icons.md`](docs/icons.md).
 Menedżer logowania: [`docs/greeter.md`](docs/greeter.md).
 Osobne repozytoria i aktualizacja pojedynczych pakietów: [`docs/repositories.md`](docs/repositories.md).
@@ -186,11 +192,15 @@ Oba warianty używają wspólnego `target/` (dzięki temu `scripts/install.sh` w
 wszystkie binarki). Bezpośrednie `cargo` uruchomione w podkatalogu pakietu tworzy
 własny `<pakiet>/target/` — to normalne i nie wpływa na inne pakiety.
 
-Okno z demem (wymaga kompozytora Wayland, np. Selene):
+Okno dokumentacji widgetów (wymaga kompozytora Wayland, np. Selene):
 
 ```bash
 cargo run --manifest-path apps/luna-demo/Cargo.toml
 ```
+
+To okno pokazuje wyłącznie stronę „Widgety”: listę komponentów, działające przykłady,
+gotowy kod i noty „jak użyć”. Demo Ustawień pozostało jedynie jako narzędzia
+developerskie (`render`, `simulate`, `layout`) — nie jest już interfejsem aplikacji.
 
 Podgląd bez kompozytora — render do PNG (język, motyw i akcent do wyboru):
 
@@ -221,6 +231,9 @@ cargo test --manifest-path apps/luna-demo/Cargo.toml --test interaction       # 
 wpis sesji Wayland, **ikonę sesji** oraz ekran logowania `luna-greeter`):
 
 ```bash
+# instalacja bez roota — np. sam sklep w ~/.local
+./scripts/install.sh --user --only store
+
 # instalacja testowa do katalogu (bez ruszania systemu) — nic nie wymaga uprawnień
 ./scripts/install.sh --destdir /tmp/luna-test --prefix /usr
 
@@ -238,7 +251,7 @@ sudo ./scripts/install.sh --prefix /usr --only terminal
 ```
 
 Komponenty dla `--only`: `base`, `selene`, `luna`, `greeter`, `demo`, `settings`,
-`files`, `terminal`, `icons`. `base` instaluje tylko wspólne zasoby (sesja, tłumaczenia, motywy,
+`files`, `media`, `clock`, `store`, `editor`, `terminal`, `icons`. `base` instaluje tylko wspólne zasoby (sesja, tłumaczenia, motywy,
 ikona, licencja), a `icons` sam pastelowy pakiet ikon (`share/icons/Luna-Icons`:
 PNG 16–512 px + skalowalne SVG).
 
@@ -298,30 +311,22 @@ cargo run --manifest-path libluna/Cargo.toml -p libluna --example minimal
 > layout i drzewo widgetów, ten sam `run(...)` przyjmie deklaratywne drzewo — kod aplikacji
 > stanie się jeszcze krótszy.
 
-## Sterowanie w demo
+## Sterowanie w dokumentacji widgetów
 
-- **Mysz** — kliknij ikonę **`◧`** w HeaderBarze, aby zwinąć/rozwinąć pasek boczny
-  (ikona zmienia się w `▭`), **`☰`** aby otworzyć menu (zamyka się klikiem poza panelem),
-  lub kontrolkę **języka** (`DropDown`). Przycisk **„Opcje ▾”** otwiera **popover opcji**
-  (`Stepper` rozmiaru ikon, `RadioGroup` sortowania, `CheckButton` ukrytych plików).
-  Z menu **`☰` → „Styl”** wybierzesz **styl z pliku** (natychmiast stosowany i zapisywany),
-  a **`☰` → „O aplikacji”** otwiera **dolny panel**
-  (`BottomSheet` z karuzelą stron `Pager` i polem tekstowym `Entry` — klik = fokus, wpisywanie),
-  zamykany klikiem w tło, przyciskiem `✕` lub
-  przeciągnięciem w dół. W karcie **Pliki** kliknij element **okruszków** (nawigacja „w górę”),
-  **pole wyszukiwania** (fokus) lub **plik/katalog** (zaznaczenie); przełącznik `Lista | Siatka`
-  zmienia tryb `ItemView`, a **rolka/przeciąganie paska** przewija listę. Wpisany tekst w polu
-  **wyszukiwania filtruje** elementy; gdy nic nie pasuje, pojawia się ekran stanu (`StatusPage`)
-  z przyciskiem **„Wyczyść”**. Zmiana **koloru akcentu** pokazuje `Toast` z akcją **„Cofnij”**,
-  która przywraca poprzedni akcent (klik w treść powiadomienia zamyka je bez cofania). Klikaj segmenty `Jasny | Ciemny | Auto`, kropki
-  **koloru akcentu**, przełączniki OPCJA A / **Pasek dolny** / **Pasek boczny** i **przeciągaj**
-  suwak głośności oraz krawędź paska bocznego (150–460 px). Kontrolki okna `[—][□][✕]` działają
-  (minimalizacja/maksymalizacja/zamknięcie przez warstwę platformy).
-- **Klawiatura** — skróty: `l` = jasny/ciemny, `a` = następny akcent, `g` = następny język,
-  `b` = pokaż/ukryj pasek dolny, `s` = pokaż/ukryj pasek boczny, `v` = widok,
-  `o` = dolny panel („O aplikacji”), `Esc` = zamknij.
-- Zmiany wyglądu są **zapisywane** do `~/.config/luna/theme.conf` i wczytywane przy starcie.
-- Tryb systemowy (`Auto`) czyta zmienną `LUNA_SYSTEM_DARK=1` (docelowo portal D-Bus).
+- **Pasek tytułu (CSD)** — przeciągnij za tytuł, aby przesunąć okno; kontrolki
+  `[—][□][✕]` minimalizują, maksymalizują i zamykają okno.
+- **Lista widgetów** — wyszukiwarka filtruje po nazwie, opisie, źródle i kategorii;
+  klik wybiera widget, a `↑/↓`, `Home/End` i `←/→` przechodzą po liście.
+- **Działający przykład** — klikaj, przeciągaj i pisz w podglądzie. Widgety ze stanem
+  są oznaczone `INTERAKTYWNY`; pozostałe mają podgląd `PODGLĄD`.
+- **Kod** — jest zawsze widoczny; „Kopiuj kod” wysyła go do systemowego schowka.
+- **Jak użyć** — nota o stanie i metodach `*_at` dla wybranego widgetu.
+- **Motywy** — przełącznik `Jasny | Ciemny | Auto` w stopce listy; wybór jest zapisywany
+  do `~/.config/luna/theme.conf`. Tryb `Auto` czyta `LUNA_SYSTEM_DARK=1`.
+- **Pola tekstowe** — `Ctrl+C/X/V` działa w wyszukiwarce i polach przykładów;
+  `Esc` zdejmuje fokus.
+- **HeaderBar** — wpis w kategorii „Okna” pokazuje cztery warianty paska tytułu
+  (klasyczny, tytuł z lewej, kontrolki z lewej, z akcjami) i pozwala klikać kontrolki okna.
 
 ## Własny wygląd (motywy)
 
@@ -540,10 +545,11 @@ Nowe widgety — `Banner`, `Spinner`, `Tooltip` (`cargo run --manifest-path apps
 
 ![Banner, Spinner, Tooltip](docs/images/widgets.png)
 
-Galeria deweloperska — **wszystkie widgety** libLuny. Lista z wyszukiwarką po lewej,
-po prawej działający przykład (kliknięcia i klawiatura), przycisk
-„Pokaż przykładowy kod” oraz „Kopiuj” (systemowy schowek Wayland)
-(`cargo run --manifest-path apps/luna-demo/Cargo.toml --bin gallery` albo pozycja „Widgety” w demo):
+Galeria deweloperska — **wszystkie widgety** libLuny w formie dokumentacji. Lista z
+wyszukiwarką po lewej, po prawej działający przykład (kliknięcia i klawiatura),
+zawsze widoczny kod użycia z przyciskiem „Kopiuj kod” oraz nota „Jak użyć”
+(`cargo run --manifest-path apps/luna-demo/Cargo.toml --bin gallery` albo pozycja
+„Widgety” w demo; wybrany widget: `-- Slider /tmp/slider.png`):
 
 ![Galeria widgetów](docs/images/gallery.png)
 
@@ -565,6 +571,35 @@ Szczegóły: [`docs/terminal.md`](docs/terminal.md).
 
 ![Luna Terminal](docs/images/luna-terminal.png)
 
+Edytor tekstu i kodu (`luna-editor`) — lekki edytor na `CodeView` z libLuny:
+zakładki w headerbarze, numery linii, podświetlanie składni (Rust, TOML, JSON,
+Markdown, Shell, C/C++, Python, HTML/XML, CSS, JavaScript/TypeScript, PHP, YAML),
+zaznaczanie i schowek, undo/redo, wyszukiwanie (`Ctrl+F`), „Idź do linii” (`Ctrl+G`),
+wbudowany manager plików oraz panel projektu z podglądem plików (`Ctrl+B`), menu
+kontekstowym i tworzeniem/zmianą nazwy/usuwaniem plików. Ustawienia (`Ctrl+,`)
+zapisują szerokość tabulatora, auto-wcięcie i opcje drzewa w
+`~/.config/luna/editor.conf`. Zachowuje końce linii (LF/CRLF) i zapisuje atomowo.
+Otwieranie działa też z Plików („Otwórz za pomocą”) oraz z linii poleceń:
+`luna-editor plik.rs`. Szczegóły: [`docs/editor.md`](docs/editor.md).
+
+![Luna Editor](docs/images/luna-editor.png)
+
+![Luna Editor — motyw ciemny](docs/images/luna-editor-dark.png)
+
+![Luna Editor — panel projektu z podglądem](docs/images/luna-editor-workspace.png)
+
+Przeglądarka multimediów (`luna-media`) — galeria obrazów, RAW-ów, filmów i PDF-ów,
+podgląd z zoomem, pokaz slajdów, odtwarzacz wideo z dźwiękiem oraz czytnik PDF
+ze zmianą stron i zaznaczaniem tekstu. Obrazy PNG/JPEG/SVG dekodujemy natywnie,
+RAW-y przez osadzony podgląd JPEG lub pełną demozajkę `dcraw_emu`, pozostałe
+formaty i filmy — przez `ffmpeg`; strony PDF renderuje poppler, a dźwięk idzie do
+PipeWire/PulseAudio (`pw-play`/`paplay`).
+Szczegóły: [`docs/media.md`](docs/media.md).
+
+![Luna Media](docs/images/luna-media.png)
+
+![Luna Media — odtwarzacz](docs/images/luna-media-video.png)
+
 Przebieg interakcji (headless `simulate`) — m.in. menu `☰`, dolny panel, powiadomienie (`Toast`)
 karta 12 i ekran stanu („Brak wyników”) klatka 14:
 
@@ -582,4 +617,15 @@ i ujednolicić warstwę UI w czystym Rust. Bazą jest tu **libLuna**; dotychczas
 
 ## Licencja
 
-MIT
+**libLuna** jest dostępna na licencji **Mozilla Public License 2.0** (`MPL-2.0`).
+Pozostałe komponenty projektu (Luna, Selene i aplikacje) są objęte licencją
+**GNU General Public License v3.0 lub nowszą** (`GPL-3.0-or-later`), chyba że
+dany pakiet stanowi inaczej. Pełny tekst MPL-2.0: [`LICENSE`](LICENSE);
+każdy komponent ma też własny plik `LICENSE`
+(np. [`libluna/LICENSE`](libluna/LICENSE), [`apps/luna-files/LICENSE`](apps/luna-files/LICENSE)).
+
+Demo i dokumentacja widgetów libLuny (`apps/luna-demo`) oraz strona projektu są
+objęte MPL-2.0 razem z biblioteką. Pełny tekst GPLv3:
+<https://www.gnu.org/licenses/gpl-3.0.html>.
+
+© 2026 Mijagi Kutasamoto / Luna Project.

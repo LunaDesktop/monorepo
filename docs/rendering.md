@@ -52,6 +52,10 @@ implementacji. Przy braku EGL platforma wraca do CPU z jednym logiem.
   rozmiar/skala/tło, platforma pomija samo `renderer.draw`.
 - To **damage lite + scene fingerprint** — nadal nie zastępuje selektywnego rysowania
   sceny (pełny damage tracking raportowany przez widgety jest osobnym etapem).
+- **Świeży bufor `wl_shm`** (pierwszy albo drugi przy double bufferingu) dostaje
+  zawsze **całą** klatkę, nie tylko prostokąt damage. Inaczej po przełączeniu bufora
+  reszta powierzchni była pusta/stara i panel „migał” tapetą lub starą klatką
+  (widoczne jako przesunięty pasek).
 
 ## 2. Benchmark
 
@@ -108,6 +112,25 @@ rysuje ~0,5–2 ms/klatkę, panel powłoki ~1–3 ms.
 | 2560×1440 | icons | 750 | 9,98 | 100 | 369 |
 | 2560×1440 | mixed | 1800 | 57,87 | 17 | 64 |
 
+Dodatkowo **realistyczny pulpit** (tapeta + panel + okna klientów, tak jak w sesji):
+
+```sh
+cargo run --release --manifest-path libluna/Cargo.toml \
+    -p libluna-render --example scene_bench
+```
+
+| Scena (1920×1080) | Przed | Po |
+|---|---:|---:|
+| tło + okno 1920×1002 | 13,2 ms | **1,6 ms** |
+| tło + okno + zaokrąglony clip | 17,0 ms | **3,8 ms** |
+| desktop: panel + 2 okna | 19,0 ms | **3,3 ms** |
+| desktop + przygaszenie nieaktywnych | 31,1 ms | **6,3 ms** |
+| (1600×900) desktop + przygaszenie | 24,6 ms | **4,1 ms** |
+
+To odpowiada realnym liczbom z sesji DRM (bez `SELENE_GPU`): `SELENE_STATS=1`
+pokazywał **render 19–20 ms/klatkę**; po zmianach ta sama scena mieści się w 3–6 ms.
+Present (2 ms) i `wait_flip` (4 ms) zostają bez zmian.
+
 Dodatkowo: PNG 1920×1080 ≈ **13,6 ms**, 2,2 MiB; `VmHWM` procesu benchmarku
 ≈ **52 MiB** (fonty, cache glifów, bufor 1920×1080).
 
@@ -154,8 +177,20 @@ Dlatego kolejność to **damage → mniej komend → ewentualnie GPU**.
 - [x] **Cache ścieżek** (`PathCache`): zaokrąglenia, okręgi, łamane i wielokąty;
       2048 wpisów FIFO, kwantyzacja 0,25 px. Plus szybka ścieżka `Pixmap::fill_rect`
       dla zwykłych prostokątów.
+- [x] **Szybki blit obrazów** — nieprzezroczyste bufory 1:1 (`Xrgb8888`, ARGB bez
+      przezroczystości, wykrywane w `BufferData::to_rgba_with_opacity`) idą przez
+      `memcpy` wierszy, także pod maską clipu (`blit_opaque_masked`). Na pulpicie
+      1920×1080: 13,2 → **1,6 ms** na okno.
+- [x] **Szybki blend jednolitego prostokąta** — `fast_solid_rect` liczy source-over
+      wprost na `u8` (także z maską clipu). Przygaszanie nieaktywnych okien:
+      31,1 → **6,3 ms** dla całej sceny.
+- [x] **Culling i brak clipu na krawędziach** — okna poza monitorem nie budują maski
+      (≈2 ms/szt. na klatkę), a okno na całą szerokość wyjścia nie dostaje
+      zaokrąglonego clipu (narożniki i tak leżą na krawędzi ekranu).
 - [ ] **Cache rastrowy kształtów** (np. 9-slice dla kart/przycisków) — to dopiero
       zaatakuje dominujący koszt rasteryzacji zaokrągleń.
+- [ ] **Cache masek clipu** — maska pełnego bufora budowana jest co klatkę dla
+      każdego przyciętego okna (~1–2 ms); bounded mask + własne blity mogą to usunąć.
 - [x] **Sonda GPU** (`examples/gpu_probe`): EGL surfaceless + GLES2, pomiar
       kompozycji vs CPU i wykrywanie `EGL_EXT_image_dma_buf_import`. Wyniki i plan:
       [`docs/gpu.md`](gpu.md).
@@ -188,5 +223,6 @@ Dlatego kolejność to **damage → mniej komend → ewentualnie GPU**.
   oraz czas rysowania i wysyłki. Po scene fingerprint na bezczynnym ekranie Ustawień
   rysowanie spada z ~3,8 ms do ~0,2–0,6 ms na próbę klatki.
 - `SELENE_STATS=1` — kompozytor: FPS wyjścia i tempo kursora.
+  W trybie DRM wypisuje też rozbicie klatki: `render`, `present`, `wait_flip`.
 - `scripts/session-smoke.sh` — poprawność przepływu (nie wydajność).
 - Zrzuty: `Print` / `Super+F12` w Selene; podglądy headless renderują do PNG.

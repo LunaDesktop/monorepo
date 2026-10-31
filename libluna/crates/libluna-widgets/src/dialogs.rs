@@ -162,10 +162,10 @@ impl AlertDialog {
         self
     }
 
-    fn height(&self, theme: &Theme) -> f64 {
+    fn height(&self, theme: &Theme, text: &TextEngine) -> f64 {
         let pad = theme.spacing.lg;
         let header = theme.metrics.sheet.header;
-        let lines = self.body.split('\n').count().max(1) as f64;
+        let lines = self.wrapped_lines(theme, text).len().max(1) as f64;
         header
             + pad
             + lines * theme.typography.body.line_height
@@ -174,17 +174,23 @@ impl AlertDialog {
             + pad
     }
 
+    /// Zawija treść do szerokości okna (zachowuje jawne `\n`).
+    fn wrapped_lines(&self, theme: &Theme, text: &TextEngine) -> Vec<String> {
+        let width = (self.dialog.width - 2.0 * theme.spacing.lg).max(40.0);
+        wrap_text(&self.body, width, text, theme)
+    }
+
     pub fn rects(&self, size: Size, theme: &Theme, text: &TextEngine) -> AlertRects {
+        let lines = self.wrapped_lines(theme, text);
         let dialog = Dialog {
             title: self.dialog.title.clone(),
             width: self.dialog.width,
-            height: self.height(theme),
+            height: self.height(theme, text),
         };
         let d = dialog.rects(size, theme);
         let pad = theme.spacing.lg;
         let inner = d.content.deflate(Insets::new(pad, pad, 0.0, pad));
-        let lines = self.body.split('\n').count().max(1) as f64;
-        let body_h = lines * theme.typography.body.line_height;
+        let body_h = lines.len().max(1) as f64 * theme.typography.body.line_height;
         let body = Rect::from_xywh(inner.x(), inner.y(), inner.width(), body_h);
         let buttons = layout_buttons(
             &self.buttons,
@@ -219,17 +225,18 @@ impl AlertDialog {
 
     pub fn paint(&self, ctx: &mut PaintCtx, size: Size) {
         let theme = *ctx.theme;
+        let lines = self.wrapped_lines(&theme, ctx.text);
         let r = {
             let dialog = Dialog {
                 title: self.dialog.title.clone(),
                 width: self.dialog.width,
-                height: self.height(&theme),
+                height: self.height(&theme, ctx.text),
             };
             dialog.paint(ctx, size)
         };
         let pad = theme.spacing.lg;
         let inner = r.content.deflate(Insets::new(pad, pad, 0.0, pad));
-        for (i, line) in self.body.split('\n').enumerate() {
+        for (i, line) in lines.iter().enumerate() {
             ctx.label_left(
                 inner.x(),
                 inner.y() + i as f64 * theme.typography.body.line_height,
@@ -253,6 +260,49 @@ impl AlertDialog {
             );
         }
     }
+}
+
+/// Zawija tekst do `width`, zachowując jawne podziały linii.
+fn wrap_text(body: &str, width: f64, text: &TextEngine, theme: &Theme) -> Vec<String> {
+    let size = theme.typography.body.size;
+    let weight = weight::NORMAL;
+    let mut out = Vec::new();
+    for paragraph in body.split('\n') {
+        if paragraph.trim().is_empty() {
+            out.push(String::new());
+            continue;
+        }
+        let mut line = String::new();
+        for word in paragraph.split_whitespace() {
+            let candidate = if line.is_empty() {
+                word.to_owned()
+            } else {
+                format!("{line} {word}")
+            };
+            if text.measure(&candidate, size, weight).width <= width {
+                line = candidate;
+                continue;
+            }
+            if !line.is_empty() {
+                out.push(std::mem::take(&mut line));
+            }
+            // Słowo dłuższe niż cała linia — dzielimy po znakach.
+            let mut chunk = String::new();
+            for ch in word.chars() {
+                let probe = format!("{chunk}{ch}");
+                if !chunk.is_empty() && text.measure(&probe, size, weight).width > width {
+                    out.push(std::mem::take(&mut chunk));
+                }
+                chunk.push(ch);
+            }
+            line = chunk;
+        }
+        out.push(line);
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
 }
 
 fn layout_buttons(labels: &[String], area: Rect, theme: &Theme, text: &TextEngine) -> Vec<Rect> {
@@ -483,6 +533,24 @@ mod tests {
         assert!(d.close_at(size(), &theme, r.close.center()));
         assert!(d.scrim_at(size(), &theme, Point::new(5.0, 5.0)));
         assert!(!d.scrim_at(size(), &theme, r.panel.center()));
+    }
+
+    #[test]
+    fn alert_body_wraps_long_lines_and_keeps_explicit_breaks() {
+        let theme = Theme::light();
+        let text = TextEngine::system();
+        let long = "syntax highlighting ".repeat(30);
+        let alert = AlertDialog::new("O aplikacji", long);
+        let lines = alert.wrapped_lines(&theme, &text);
+        assert!(lines.len() > 2, "długi opis musi się zawinąć");
+        for line in &lines {
+            let width = text
+                .measure(line, theme.typography.body.size, weight::NORMAL)
+                .width;
+            assert!(width <= alert.dialog.width - 2.0 * theme.spacing.lg + 0.5);
+        }
+        let with_break = AlertDialog::new("T", "pierwsza\ndruga");
+        assert_eq!(with_break.wrapped_lines(&theme, &text).len(), 2);
     }
 
     #[test]

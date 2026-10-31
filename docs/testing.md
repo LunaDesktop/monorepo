@@ -91,10 +91,12 @@ więc test nie zależy od języka ani motywu z `~/.config`.
 3. **dmabuf** — `luna-control dmabuf`: `enabled=true` tylko przy GPU
    (`SELENE_GPU=1`/`LUNA_GPU=1`), `enabled=false` na CPU. Global nie może się
    pojawić bez backendu, który potrafi go wyświetlić.
-3. **Launcher + przypinanie** — klik w burger otwiera launcher, a PPM na pierwszym
-   kaflu zapisuje `pinned=` do `$XDG_CONFIG_HOME/luna/launcher.conf`; drugi PPM
-   (ta sama pozycja, bo przypięta aplikacja przeskakuje na początek) usuwa wpis.
-   To sprawdza całą drogę: hit-test kafla → `Launcher::toggle_pin` → zapis atomowy.
+3. **Launcher + ulubione** — klik w burger otwiera launcher, a PPM na pierwszym
+   kaflu otwiera menu kontekstowe; wybór „Dodaj do ulubionych” zapisuje `pinned=`
+   do `$XDG_CONFIG_HOME/luna/launcher.conf`; ponowne otwarcie menu i wybór
+   „Usuń z ulubionych” usuwa wpis. To sprawdza całą drogę: hit-test kafla →
+   menu PPM → `Launcher::toggle_pin` → zapis atomowy. Ten sam test pilnuje, że
+   `Esc` zamyka menu, a nie całą powłokę.
 4. **Okna** — `luna-settings` i terminale mapują się jako zwykłe okna.
 5. **Klawiatura** — znak wysłany skryptem trafia do procesu w PTY (`dd` zapisuje bajt).
 6. **Schowek między klientami** — terminal A kopiuje linię (`Ctrl+Shift+C`),

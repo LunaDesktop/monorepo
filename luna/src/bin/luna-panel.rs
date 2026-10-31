@@ -13,13 +13,15 @@
 
 use std::error::Error;
 
+use libluna_core::clock_state::{ClockActivity, StopwatchActivity, TimerActivity};
 use libluna_core::{Color, IconTheme, Rect, Size, Theme};
 use libluna_render::{gpu::GpuRenderer, Renderer, Scene, SoftwareRenderer, TextEngine};
 use libluna_widgets::{Hover, IconName, PaintCtx};
+use luna::calendar::CalendarEvent;
+use luna::network::{Security, WifiNetwork};
 use luna::notifications::{Notification, Notifications};
 use luna::osd::Osd;
 use luna::panel::{self, App, Launcher, LauncherView, PanelState, LAUNCHER_H, THICKNESS};
-use luna::system::WifiNetwork;
 
 /// Szerokość powierzchni (Full HD).
 const W: u32 = 1920;
@@ -91,25 +93,21 @@ fn main() -> Result<(), Box<dyn Error>> {
     })?;
 
     // ── 3) Popupy: Wi-Fi, dźwięk, kalendarz, sesja ──────────────────────────────
+    let demo = |ssid: &str, signal: u8, active: bool, security: Security| WifiNetwork {
+        ssid: ssid.to_owned(),
+        signal,
+        security,
+        active,
+        device: "/org/freedesktop/NetworkManager/Devices/3".to_owned(),
+        device_name: "wlp12s0f3u2".to_owned(),
+        ap_path: "/org/freedesktop/NetworkManager/AccessPoint/1".to_owned(),
+        frequency: 5220,
+        known: active,
+    };
     let networks = vec![
-        WifiNetwork {
-            ssid: "PaganNet".to_owned(),
-            signal: 92,
-            active: true,
-            security: "WPA2".into(),
-        },
-        WifiNetwork {
-            ssid: "Dom".to_owned(),
-            signal: 71,
-            active: false,
-            security: "WPA2".into(),
-        },
-        WifiNetwork {
-            ssid: "Sąsiad_5G".to_owned(),
-            signal: 44,
-            active: false,
-            security: "WPA3".into(),
-        },
+        demo("PaganNet", 92, true, Security::Wpa2),
+        demo("Dom", 71, false, Security::Wpa2),
+        demo("Sąsiad_5G", 44, false, Security::Wpa3),
     ];
     save(&theme, "docs/images/luna-popup-wifi.png", |ctx| {
         panel::paint_panel(&st, &hover, ctx, bar);
@@ -123,10 +121,94 @@ fn main() -> Result<(), Box<dyn Error>> {
         panel::paint_volume_popup(ctx, r, 65, false, &hover);
     })?;
 
+    let calendar_events = vec![
+        CalendarEvent {
+            date: "2026-10-08".to_owned(),
+            start_minute: Some(9 * 60 + 30),
+            title: "Wizyta u lekarza".to_owned(),
+        },
+        CalendarEvent {
+            date: "2026-10-08".to_owned(),
+            start_minute: Some(18 * 60),
+            title: "Kolacja z Anią".to_owned(),
+        },
+        CalendarEvent {
+            date: "2026-10-12".to_owned(),
+            start_minute: None,
+            title: "Urodziny Ali".to_owned(),
+        },
+    ];
+
     save(&theme, "docs/images/luna-popup-calendar.png", |ctx| {
         panel::paint_panel(&st, &hover, ctx, bar);
         let r = panel::calendar_popup_rect(bar, ctx.theme);
-        panel::paint_calendar_popup(ctx, r, &st.clock, &st.date, 2026, 10, 2026, 10, 8, Some(8));
+        panel::paint_calendar_popup_with_events(
+            ctx,
+            r,
+            &st.clock,
+            &st.date,
+            2026,
+            10,
+            2026,
+            10,
+            8,
+            Some(8),
+            &calendar_events,
+            "PL",
+            true,
+        );
+    })?;
+
+    // Kalendarz panelu ze świętami (listopad: Wszystkich Świętych i 11 listopada).
+    save(
+        &theme,
+        "docs/images/luna-popup-calendar-holidays.png",
+        |ctx| {
+            panel::paint_panel(&st, &hover, ctx, bar);
+            let r = panel::calendar_popup_rect(bar, ctx.theme);
+            panel::paint_calendar_popup_with_events(
+                ctx,
+                r,
+                &st.clock,
+                &st.date,
+                2026,
+                11,
+                2026,
+                10,
+                8,
+                Some(1),
+                &[],
+                "PL",
+                true,
+            );
+        },
+    )?;
+
+    // Widget aktywnego minutnika/stopera pod paskiem (aplikacja zamknięta).
+    save(&theme, "docs/images/luna-clock-widget.png", |ctx| {
+        panel::paint_panel(&st, &hover, ctx, bar);
+        let now = libluna_core::clock_state::now_unix();
+        let activity = ClockActivity {
+            pid: None,
+            updated_unix: now,
+            timer: Some(TimerActivity {
+                total_secs: 1_500,
+                running: true,
+                end_unix: now + 17 * 60 + 42,
+                remaining_secs: 0,
+                finished: false,
+            }),
+            stopwatch: Some(StopwatchActivity {
+                elapsed_millis: 83_400,
+                running: true,
+                updated_unix: now,
+                laps: Vec::new(),
+            }),
+        };
+        let area = Size::new(W as f64, H as f64);
+        if let Some(rect) = luna::clock_widget::visible_rect(area, &activity, now) {
+            luna::clock_widget::paint(ctx, rect, &activity, now, false);
+        }
     })?;
 
     save(&theme, "docs/images/luna-popup-session.png", |ctx| {
@@ -162,7 +244,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         nst.notifications = notes.history_len();
         panel::paint_panel(&nst, &hover, ctx, bar);
         let crect = panel::calendar_popup_rect(bar, ctx.theme);
-        panel::paint_calendar_popup(
+        panel::paint_calendar_popup_with_events(
             ctx,
             crect,
             &nst.clock,
@@ -173,6 +255,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             10,
             8,
             Some(8),
+            &calendar_events,
+            "PL",
+            true,
         );
         let nrect = panel::notification_center_rect(bar, ctx.theme, notes.history_len());
         panel::paint_notification_center(ctx, nrect, notes.history(), false, Some(0));

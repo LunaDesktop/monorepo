@@ -406,6 +406,60 @@ fn clamp_boundary(s: &str, i: usize) -> usize {
     b
 }
 
+impl crate::entry::TextInput for TextView {
+    fn insert_str(&mut self, s: &str) {
+        TextView::insert_str(self, s);
+    }
+    fn insert_char(&mut self, c: char) {
+        TextView::insert_char(self, c);
+    }
+    fn backspace(&mut self) {
+        TextView::backspace(self);
+    }
+    fn delete_forward(&mut self) {
+        TextView::delete_forward(self);
+    }
+    fn move_left(&mut self) {
+        TextView::move_left(self);
+    }
+    fn move_right(&mut self) {
+        TextView::move_right(self);
+    }
+    fn home(&mut self) {
+        TextView::home(self);
+    }
+    fn end(&mut self) {
+        TextView::end(self);
+    }
+    fn move_left_selecting(&mut self, shift: bool) {
+        TextView::move_left_selecting(self, shift);
+    }
+    fn move_right_selecting(&mut self, shift: bool) {
+        TextView::move_right_selecting(self, shift);
+    }
+    fn home_selecting(&mut self, shift: bool) {
+        TextView::home_selecting(self, shift);
+    }
+    fn end_selecting(&mut self, shift: bool) {
+        TextView::end_selecting(self, shift);
+    }
+    fn select_all(&mut self) {
+        TextView::select_all(self);
+    }
+    fn clear_selection(&mut self) {
+        TextView::clear_selection(self);
+    }
+    fn copy(&self) -> Option<String> {
+        TextView::copy(self)
+    }
+    fn cut(&mut self) -> Option<String> {
+        TextView::cut(self)
+    }
+    fn paste(&mut self, s: &str) {
+        TextView::paste(self, s);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

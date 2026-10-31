@@ -38,6 +38,37 @@ pub fn parse_config(text: &str) -> Option<PathBuf> {
     None
 }
 
+/// Zapisuje wybraną tapetę pulpitu (PNG) do `wallpaper.conf`.
+pub fn write_config(path: &Path) -> std::io::Result<()> {
+    let Some(config) = config_path() else {
+        return Err(std::io::Error::other("brak katalogu konfiguracji"));
+    };
+    if let Some(dir) = config.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(config, format_config(path))
+}
+
+/// Usuwa wybór tapety — kompozytor wróci do wbudowanej grafiki/gradientu.
+pub fn clear_config() -> std::io::Result<()> {
+    let Some(config) = config_path() else {
+        return Ok(());
+    };
+    match std::fs::remove_file(config) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+/// Zawartość `wallpaper.conf` (osobno, żeby dało się testować bez systemu plików).
+pub fn format_config(path: &Path) -> String {
+    format!(
+        "# Tapeta pulpitu Luny — zapisuje centrum ustawień\npath={}\n",
+        path.display()
+    )
+}
+
 /// Tapeta ustawiona przez użytkownika.
 ///
 /// Kolejność: `LUNA_WALLPAPER`, `SELENE_WALLPAPER`, potem
@@ -147,5 +178,12 @@ mod tests {
         );
         assert_eq!(parse_config("path=\n"), None);
         assert_eq!(parse_config("inny=1\n"), None);
+    }
+
+    #[test]
+    fn formatted_config_round_trips() {
+        let path = Path::new("/usr/share/wallpapers/pagan.png");
+        let text = format_config(path);
+        assert_eq!(parse_config(&text), Some(path.to_path_buf()));
     }
 }

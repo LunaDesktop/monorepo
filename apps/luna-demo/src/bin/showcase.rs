@@ -1,9 +1,8 @@
-//! „Luna — widgety”: pełne demo Ustawień libLuny w prawdziwym oknie.
+//! „Luna — widgety”: dokumentacja widgetów libLuny w prawdziwym oknie.
 //!
-//! To ta sama scena, którą widać na obrazach `docs/images/demo-step-*.png`:
-//! sidebar, motyw jasny/ciemny/auto, paleta akcentów, wybór języka, przełączniki,
-//! suwak, zakładki, pasek ścieżki, wyszukiwarka, lista/siatka plików, popovery
-//! (☰, Opcje, język), powiadomienie z „Cofnij” i dolny panel „O aplikacji”.
+//! Ten sam ekran co `luna-demo`: lista widgetów, działające przykłady, kod użycia
+//! i warianty `HeaderBar`. Pasek tytułu jest prawdziwym CSD (przeciąganie,
+//! minimalizacja, maksymalizacja, zamykanie).
 //!
 //! Uruchom: `cargo run -p luna-demo --bin showcase`
 

@@ -1,12 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
-  <polygon points="18,10.45 21.6,10.45 21.6,13.55 18,13.55" fill="#c7d2eb"/>
-  <polygon points="17.339,15.147 19.884,17.692 17.692,19.884 15.147,17.339" fill="#c7d2eb"/>
-  <polygon points="13.55,18 13.55,21.6 10.45,21.6 10.45,18" fill="#c7d2eb"/>
-  <polygon points="8.853,17.339 6.308,19.884 4.116,17.692 6.661,15.147" fill="#c7d2eb"/>
-  <polygon points="6,13.55 2.4,13.55 2.4,10.45 6,10.45" fill="#c7d2eb"/>
-  <polygon points="6.661,8.853 4.116,6.308 6.308,4.116 8.853,6.661" fill="#c7d2eb"/>
-  <polygon points="10.45,6 10.45,2.4 13.55,2.4 13.55,6" fill="#c7d2eb"/>
-  <polygon points="15.147,6.661 17.692,4.116 19.884,6.308 17.339,8.853" fill="#c7d2eb"/>
-  <circle cx="12" cy="12" r="7.6" fill="#c7d2eb"/>
-  <circle cx="12" cy="12" r="3" fill="#e9eef9"/>
+  <polygon points="17.52,9.48 22.08,10.44 22.08,13.56 17.52,14.52" fill="#c7d2eb"/>
+  <polygon points="17.685,14.121 20.231,18.025 18.025,20.231 14.121,17.685" fill="#c7d2eb"/>
+  <polygon points="14.52,17.52 13.56,22.08 10.44,22.08 9.48,17.52" fill="#c7d2eb"/>
+  <polygon points="9.879,17.685 5.975,20.231 3.769,18.025 6.315,14.121" fill="#c7d2eb"/>
+  <polygon points="6.48,14.52 1.92,13.56 1.92,10.44 6.48,9.48" fill="#c7d2eb"/>
+  <polygon points="6.315,9.879 3.769,5.975 5.975,3.769 9.879,6.315" fill="#c7d2eb"/>
+  <polygon points="9.48,6.48 10.44,1.92 13.56,1.92 14.52,6.48" fill="#c7d2eb"/>
+  <polygon points="14.121,6.315 18.025,3.769 20.231,5.975 17.685,9.879" fill="#c7d2eb"/>
+  <circle cx="12" cy="12" r="6.24" fill="none" stroke-width="2.52" stroke="#c7d2eb"/>
 </svg>

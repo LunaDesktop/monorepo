@@ -58,6 +58,32 @@ pub fn save_atomic(path: &Path, text: &str) -> io::Result<()> {
     })
 }
 
+/// Zapisuje tekst atomowo z prawami `0600` (dane prywatne użytkownika).
+pub fn save_atomic_private(path: &Path, text: &str) -> io::Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        file.write_all(text.as_bytes())?;
+        file.sync_all().ok();
+    }
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
 /// Bezpieczna nazwa/tekst z konfiguracji (bez znaków kontrolnych).
 pub fn clean_value(value: &str) -> Option<String> {
     let value = value.trim();

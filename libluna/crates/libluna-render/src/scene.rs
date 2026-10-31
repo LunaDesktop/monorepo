@@ -21,6 +21,16 @@ pub struct ImageData {
     /// Renderer używa wtedy blitowania z pomijaniem `alpha == 0` zamiast
     /// blendowania całego prostokąta — panele i popupy mają >50% pustych pikseli.
     pub sparse: bool,
+    /// Czy obraz jest **w pełni nieprzezroczysty** (każdy piksel ma `alpha == 255`).
+    /// Renderer może wtedy skopiować wiersze zamiast blendować piksel po pikselu.
+    /// Ustawiane przez kompozytor dla buforów `Xrgb8888`/`Xbgr8888`.
+    pub opaque: bool,
+    /// Skalowanie **najbliższym sąsiadem** zamiast bilinear.
+    ///
+    /// Dla klatek wideo odtwarzanych w czasie rzeczywistym interpolacja bilinear
+    /// potrafi zjeść większość budżetu klatki; lekko ostrzejsze krawędzie są
+    /// lepszym kompromisem niż 18 zamiast 30 fps.
+    pub nearest: bool,
 }
 
 impl ImageData {
@@ -30,12 +40,26 @@ impl ImageData {
             height,
             rgba,
             sparse: false,
+            opaque: false,
+            nearest: false,
         }
     }
 
     /// Oznacza obraz jako rzadki (patrz [`ImageData::sparse`]).
     pub fn with_sparse(mut self, sparse: bool) -> Self {
         self.sparse = sparse;
+        self
+    }
+
+    /// Oznacza obraz jako w pełni nieprzezroczysty (patrz [`ImageData::opaque`]).
+    pub fn with_opaque(mut self, opaque: bool) -> Self {
+        self.opaque = opaque;
+        self
+    }
+
+    /// Skalowanie najbliższym sąsiadem (patrz [`ImageData::nearest`]).
+    pub fn with_nearest(mut self, nearest: bool) -> Self {
+        self.nearest = nearest;
         self
     }
 
@@ -46,6 +70,8 @@ impl ImageData {
             height,
             rgba: vec![0; width as usize * height as usize * 4],
             sparse: true,
+            opaque: false,
+            nearest: false,
         }
     }
 }

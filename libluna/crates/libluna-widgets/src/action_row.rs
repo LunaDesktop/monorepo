@@ -54,20 +54,28 @@ impl ActionRow {
         let x = rect.x() + pad;
         match &self.subtitle {
             Some(subtitle) => {
-                let gap = theme.metrics.row.gap;
+                // Odstęp zależy od rozmiaru tekstu — przy skali dostępności (150 %)
+                // stały `gap` powodowałby nachodzenie tytułu na podtytuł.
+                let title_size = theme.typography.body.size;
+                let subtitle_size = theme.typography.caption.size;
+                let gap = theme
+                    .metrics
+                    .row
+                    .gap
+                    .max((title_size + subtitle_size) * 0.12);
                 ctx.label_left(
                     x,
-                    rect.center().y - gap / 2.0 - 2.0,
+                    rect.center().y - (subtitle_size + gap) / 2.0,
                     &self.title,
-                    theme.typography.body.size,
+                    title_size,
                     weight::NORMAL,
                     theme.colors.text,
                 );
                 ctx.label_left(
                     x,
-                    rect.center().y + gap / 2.0 + 5.0,
+                    rect.center().y + (title_size + gap) / 2.0,
                     subtitle,
-                    theme.typography.caption.size,
+                    subtitle_size,
                     weight::NORMAL,
                     theme.colors.dim_text,
                 );

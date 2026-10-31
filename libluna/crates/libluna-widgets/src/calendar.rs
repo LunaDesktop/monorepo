@@ -157,7 +157,9 @@ impl Calendar {
             let cell = self.day_rect(rect, &theme, day);
             let c = cell.center();
             let selected = day == self.selected;
-            let r = (cell.width().min(cell.height()) / 2.0 - 2.0).max(6.0);
+            // Wysokie komórki (np. kalendarz rozciągnięty na kartę) nie mogą
+            // zamieniać podświetlenia dnia w ogromne koło.
+            let r = (cell.width().min(cell.height()) / 2.0 - 2.0).clamp(6.0, 15.0);
             if selected {
                 ctx.scene.fill_rounded_rect(
                     Rect::from_xywh(c.x - r, c.y - r, r * 2.0, r * 2.0),

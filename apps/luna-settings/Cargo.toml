@@ -1,8 +1,8 @@
 [package]
 name = "luna-settings"
-version = "0.0.2"
+version = "0.0.8"
 edition = "2021"
-license = "MPL-2.0"
+license = "GPL-3.0-or-later"
 rust-version = "1.80"
 authors = ["Patryk Szkudlarek / libLuna contributors"]
 description = "Luna Settings — centrum ustawień środowiska i systemu (libLuna, bez GTK)."
@@ -13,12 +13,12 @@ description = "Luna Settings — centrum ustawień środowiska i systemu (libLun
 resolver = "2"
 
 [dependencies]
-libluna-core = { path = "../../libluna/crates/libluna-core", version = "0.0.4" }
-libluna-i18n = { path = "../../libluna/crates/libluna-i18n", version = "0.0.4" }
-libluna-render = { path = "../../libluna/crates/libluna-render", version = "0.0.4" }
-libluna-platform = { path = "../../libluna/crates/libluna-platform", version = "0.0.4" }
-libluna-widgets = { path = "../../libluna/crates/libluna-widgets", version = "0.0.4" }
-luna = { path = "../../luna", version = "0.0.3" }
+libluna-core = { path = "../../libluna/crates/libluna-core", version = "0.0.5" }
+libluna-i18n = { path = "../../libluna/crates/libluna-i18n", version = "0.0.5" }
+libluna-render = { path = "../../libluna/crates/libluna-render", version = "0.0.5" }
+libluna-platform = { path = "../../libluna/crates/libluna-platform", version = "0.0.5" }
+libluna-widgets = { path = "../../libluna/crates/libluna-widgets", version = "0.0.5" }
+luna = { path = "../../luna", version = "0.0.9" }
 zbus = { version = "5.12.0", features = ["blocking-api"] }
 
 [profile.dev.package."*"]

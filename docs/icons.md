@@ -13,12 +13,17 @@ każda rodzina ma własny, stały odcień, a kształt mówi, do czego ikona słu
   okno z promptem, aparat — obiektyw, koperta — klapkę. Kolor tylko wzmacnia
   rozpoznawanie; ikona działa też w trybie monochromatycznym.
 - **Jedna paleta na rodzinę.** Pliki i katalogi są maślane, multimedia różowe
-  i liliowe, urządzenia i stan — miętowe, ustawienia — perłowe.
+  i liliowe, urządzenia — błękitne, stan — miętowe, ustawienia — perłowe.
+- **Wspólny margines.** Każda ikona — pastelowa i monochromatyczna — mieści się
+  w tym samym bezpiecznym obszarze siatki 24×24 (margines ok. 2 jednostek).
+  Pilnuje tego test `every_icon_keeps_the_same_safe_margin`, więc nowe ikony nie
+  mogą „wystawać” poza rodzinę.
 - **Kontrolki zostają jednokolorowe.** Menu, lupka, strzałki, „×”, „−”, „□”,
   „✓” i „+” nie zmieniają odcienia, żeby nie rozstrajać paska i przycisków.
-- **Dwa style.** `Luna (pastel)` (domyślny) i `Monochrome`. Oba korzystają z tych
-  samych kształtów; monochromatyczny rysuje całość kolorem tekstu i **pomija
-  kolorowe zestawy zewnętrzne**, żeby interfejs był naprawdę jednokolorowy.
+- **Dwa style.** `Luna (pastel)` (domyślny) i `Monochrome`. Oba korzystają z tej
+  samej siatki 24×24, marginesów i języka kształtów; monochromatyczny rysuje
+  całość kolorem tekstu i **pomija kolorowe zestawy zewnętrzne**, żeby interfejs
+  był naprawdę jednokolorowy.
 - **Zestawy zewnętrzne.** Jeśli w Ustawieniach wybrano zestaw freedesktop
   (Papirus, Adwaita…), jego PNG mają pierwszeństwo dla ikon aplikacji i miejsc;
   brakujące pozycje nadal rysuje Luna.
@@ -31,7 +36,7 @@ każda rodzina ma własny, stały odcień, a kształt mówi, do czego ikona słu
 | Brzoskwiniowa | `#F5C2A3` | `#FCE7D9` | `#B8734A` | sklep, edycja, archiwum |
 | Różowa | `#F2B7C6` | `#FBE4EA` | `#B8697F` | muzyka, gry, zasilanie |
 | Liliowa | `#CBBEE8` | `#EDE7F8` | `#7B67AB` | zegar, czat, wideo, księżyc |
-| Błękitna | `#B5D5F1` | `#E4F0FB` | `#527FAE` | przeglądarka, dokument, kod |
+| Błękitna | `#B5D5F1` | `#E4F0FB` | `#527FAE` | przeglądarka, dokument, kod, urządzenia |
 | Miętowa | `#B2E1C9` | `#E2F5EC` | `#4C9274` | terminal, Wi‑Fi, bateria |
 | Papierowa | `#F1EDE3` | `#FBF9F3` | `#8B8794` | kartki, drukarka, zdjęcia |
 | Perłowa | `#C7D2EB` | `#E9EEF9` | `#65749C` | ustawienia, użytkownik, suwaki |
@@ -42,7 +47,7 @@ każda rodzina ma własny, stały odcień, a kształt mówi, do czego ikona słu
 |---|---|---|
 | `Files` | katalog z wystającą kartką | menedżer plików, launcher |
 | `Terminal` | okno terminala z promptem `>_` | terminal, taskbar |
-| `Settings` | koło zębate | Ustawienia, Quick Panel |
+| `Settings` | zębate koło — ten sam kształt w panelu i pakiecie ikon | Ustawienia, Quick Panel |
 | `Home` | dom z dachem, oknem i drzwiami | katalog domowy |
 | `Document` | kartka z zagiętym rogiem i liniami | dokumenty, PDF, tekst |
 | `Image` | ramka zdjęcia: słońce i góry | obrazy, galeria |
@@ -60,8 +65,10 @@ każda rodzina ma własny, stały odcień, a kształt mówi, do czego ikona słu
 | `Clock` | tarcza zegara | czas, historia |
 | `User` | sylwetka osoby | konto, ekran blokady |
 | `Wifi`, `Volume`, `Battery`, `Power`, `Bluetooth` | stan urządzeń | panel, OSD |
-| `Monitor`, `Screenshot`, `Sliders`, `Brightness` | ustawienia systemowe | Ustawienia, Quick Panel |
-| `Play`, `Pause`, `Moon` | sterowanie i tryb ciemny | odtwarzacz, przełącznik motywu |
+| `Monitor`, `Screenshot`, `Sliders` | ustawienia systemowe | Ustawienia, Quick Panel |
+| `Brightness`, `Moon`, `Auto` | słońce, sierp i koło pół na pół — tryby jasny/ciemny/auto | przełącznik motywu, Quick Panel |
+| `Play`, `Pause` | sterowanie odtwarzaniem | odtwarzacz |
+| `Refresh` | okrągła strzałka — odświeżanie | paski, listy, przyciski akcji |
 | `Pin` | pinezka | launcher, przypięte aplikacje |
 
 Kontrolki interfejsu (`Menu`, `Search`, strzałki, `Close`, `Pin`) są zawsze rysowane
@@ -120,10 +127,12 @@ zarówno dla PNG, jak i SVG, więc pakiet nie powiela tych samych plików.
 ### Ikony na paski i przyciski
 
 Nazwy plików są zgodne z freedesktop, więc wystarczy wskazać nazwę ikony
-(np. `folder`, `utilities-terminal`, `preferences-system`) — aplikacja dostanie
-SVG z `scalable/` i sama dobierze rozmiar. W kodzie na libLunie ten sam efekt
-daje `paint_icon` / `paint_named_icon`, które rysują identyczny kształt bez
-ładowania pliku.
+(np. `folder`, `utilities-terminal`, `preferences-system`, `view-refresh`) —
+aplikacja dostanie SVG z `scalable/` i sama dobierze rozmiar. Tryby motywu mają
+komplet: `display-brightness` (jasny), `weather-clear-night` (ciemny)
+i `theme-auto` (automatyczny). W kodzie na libLunie ten sam efekt daje
+`paint_icon` / `paint_named_icon`, które rysują identyczny kształt bez ładowania
+pliku.
 
 ### Aplikacje spoza zestawu
 

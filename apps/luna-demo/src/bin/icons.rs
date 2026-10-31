@@ -10,7 +10,7 @@ use libluna_core::{Rect, Size, Theme};
 use libluna_render::{Scene, SoftwareRenderer, TextEngine};
 use libluna_widgets::{paint_icon, IconName, PaintCtx};
 
-const COLS: usize = 7;
+const COLS: usize = 10;
 const CELL_W: f64 = 118.0;
 const CELL_H: f64 = 112.0;
 const MARGIN: f64 = 24.0;

@@ -210,6 +210,12 @@ impl ThemeSettings {
         self.dirty
     }
 
+    /// Oznacza motyw do ponownego rozwiązania (np. po zmianie ustawień dostępności,
+    /// które nie są częścią tego pliku).
+    pub fn touch(&mut self) {
+        self.dirty = true;
+    }
+
     /// Zdejmuje flagę „zmienione” (opcjonalnie zapisuje stan na dysk).
     pub fn clear_dirty(&mut self) {
         self.dirty = false;
@@ -226,13 +232,24 @@ impl ThemeSettings {
     }
 
     /// Jak [`resolve`](Self::resolve), ale nakłada też wybrany **styl** z pliku
-    /// (`~/.local/share/luna/themes/<nazwa>.theme` itd.).
-    pub fn resolve_themed(&self, system_dark: bool) -> Theme {
+    /// (`~/.local/share/luna/themes/<nazwa>.theme` itd.). **Bez** ustawień
+    /// dostępności — te dokłada [`resolve_themed`](Self::resolve_themed).
+    ///
+    /// Przydatne aplikacjom, które chcą same nałożyć aktualne ustawienia
+    /// dostępności (np. Ustawienia zmieniają je na żywo).
+    pub fn resolve_base(&self, system_dark: bool) -> Theme {
         let base = self.resolve(system_dark);
         match self.style.as_deref().and_then(crate::theme_file::load) {
             Some(patch) => patch.build(base),
             None => base,
         }
+    }
+
+    /// Jak [`resolve_base`](Self::resolve_base), ale nakłada też ustawienia
+    /// dostępności (skala tekstu, wysoki kontrast) z `accessibility.conf`.
+    pub fn resolve_themed(&self, system_dark: bool) -> Theme {
+        self.resolve_base(system_dark)
+            .with_accessibility(&crate::accessibility::AccessibilitySettings::load())
     }
 
     // --- Trwałość (prosty format `klucz = wartość`) ---

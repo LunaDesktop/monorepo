@@ -134,6 +134,8 @@ pub enum PasteTarget {
     GalleryEntry,
     GalleryPassword,
     GalleryExampleSearch,
+    GallerySearchBar,
+    GalleryNote,
 }
 
 impl Default for Demo {
@@ -1101,6 +1103,10 @@ fn active_paste_target(demo: &Demo) -> Option<PasteTarget> {
             crate::gallery_interactive::Focus::Search => {
                 return Some(PasteTarget::GalleryExampleSearch)
             }
+            crate::gallery_interactive::Focus::SearchBar => {
+                return Some(PasteTarget::GallerySearchBar)
+            }
+            crate::gallery_interactive::Focus::Note => return Some(PasteTarget::GalleryNote),
             crate::gallery_interactive::Focus::None => {}
         }
     }
@@ -1127,6 +1133,8 @@ fn handle_clipboard_key(demo: &mut Demo, ke: &KeyEvent) -> bool {
         PasteTarget::GalleryExampleSearch => {
             clipboard_command(&mut demo.gallery.example.search, ke)
         }
+        PasteTarget::GallerySearchBar => clipboard_command(&mut demo.gallery.example.bar_entry, ke),
+        PasteTarget::GalleryNote => clipboard_command(&mut demo.gallery.example.note, ke),
     };
     let Some(command) = command else {
         return false;
@@ -1160,6 +1168,8 @@ fn paste_into(demo: &mut Demo, text: &str) {
         PasteTarget::GalleryEntry => demo.gallery.example.entry.paste(text),
         PasteTarget::GalleryPassword => demo.gallery.example.password.paste(text),
         PasteTarget::GalleryExampleSearch => demo.gallery.example.search.paste(text),
+        PasteTarget::GallerySearchBar => demo.gallery.example.bar_entry.paste(text),
+        PasteTarget::GalleryNote => demo.gallery.example.note.paste(text),
     }
 }
 

@@ -7,9 +7,16 @@
 
 use std::io::{Seek, Write};
 use std::os::fd::{AsFd, OwnedFd};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use libluna_core::{ButtonState, Event, Modifiers, Point, PointerButton, Rect};
+use wayland_protocols::wp::cursor_shape::v1::server::wp_cursor_shape_device_v1::{
+    self, WpCursorShapeDeviceV1,
+};
+use wayland_protocols::wp::cursor_shape::v1::server::wp_cursor_shape_manager_v1::{
+    self, WpCursorShapeManagerV1,
+};
 use wayland_protocols::xdg::shell::server::{xdg_popup, xdg_surface, xdg_toplevel};
 use wayland_server::protocol::{wl_keyboard, wl_pointer, wl_seat, wl_surface, wl_touch};
 use wayland_server::{
@@ -19,7 +26,9 @@ use wayland_server::{
 use crate::compositor::SurfaceData;
 use crate::data;
 use crate::shell::{XdgSurfaceData, XdgToplevelData};
-use crate::state::{DragState, ResizeState, SavedGeom, State, TITLEBAR};
+use crate::state::{
+    CornerHint, CornerKind, CursorImage, DragState, ResizeState, SavedGeom, State, TITLEBAR,
+};
 use crate::sync::LockExt;
 
 /// Ile pikseli powierzchni odpowiada jednemu „ząbkowi” kółka myszy (`REL_WHEEL`).
@@ -243,9 +252,129 @@ macro_rules! empty_dispatch {
     };
 }
 
-empty_dispatch!(wl_pointer::WlPointer);
 empty_dispatch!(wl_keyboard::WlKeyboard);
 empty_dispatch!(wl_touch::WlTouch);
+
+impl Dispatch<wl_pointer::WlPointer, ()> for State {
+    fn request(
+        state: &mut Self,
+        _client: &Client,
+        _resource: &wl_pointer::WlPointer,
+        request: wl_pointer::Request,
+        _data: &(),
+        _handle: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        // Klient przysyła własny obraz kursora (starsze toolkitty, aplikacje malujące
+        // kursor same). `surface = None` = powrót do domyślnej strzałki.
+        if let wl_pointer::Request::SetCursor {
+            surface,
+            hotspot_x,
+            hotspot_y,
+            ..
+        } = request
+        {
+            crate::cursor::set_surface(state, surface, (hotspot_x, hotspot_y));
+        }
+    }
+}
+
+impl GlobalDispatch<WpCursorShapeManagerV1, ()> for State {
+    fn bind(
+        _state: &mut Self,
+        _handle: &DisplayHandle,
+        _client: &Client,
+        resource: New<WpCursorShapeManagerV1>,
+        _data: &(),
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        data_init.init(resource, ());
+    }
+}
+
+impl Dispatch<WpCursorShapeManagerV1, ()> for State {
+    fn request(
+        _state: &mut Self,
+        _client: &Client,
+        _resource: &WpCursorShapeManagerV1,
+        request: <WpCursorShapeManagerV1 as Resource>::Request,
+        _data: &(),
+        _handle: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        if let wp_cursor_shape_manager_v1::Request::GetPointer {
+            cursor_shape_device,
+            ..
+        } = request
+        {
+            data_init.init(cursor_shape_device, ());
+        }
+    }
+}
+
+impl Dispatch<WpCursorShapeDeviceV1, ()> for State {
+    fn request(
+        state: &mut Self,
+        _client: &Client,
+        _resource: &WpCursorShapeDeviceV1,
+        request: <WpCursorShapeDeviceV1 as Resource>::Request,
+        _data: &(),
+        _handle: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        if let wp_cursor_shape_device_v1::Request::SetShape { shape, .. } = request {
+            let WEnum::Value(shape) = shape else { return };
+            *state.cursor_image.lock_or_recover() = CursorImage::Shape(shape_name(shape));
+            // Kształt zastępuje obraz klienta — powierzchnia nie jest już potrzebna.
+            state.cursor_surface = None;
+        }
+    }
+}
+
+/// Nazwa kształtu `cursor-shape-v1` → plik w motywie XCursor (nazwy CSS).
+fn shape_name(shape: wp_cursor_shape_device_v1::Shape) -> String {
+    use wp_cursor_shape_device_v1::Shape;
+    let name = match shape {
+        Shape::Default => "left_ptr",
+        Shape::ContextMenu => "context-menu",
+        Shape::Help => "help",
+        Shape::Pointer => "pointer",
+        Shape::Progress => "progress",
+        Shape::Wait => "wait",
+        Shape::Cell => "cell",
+        Shape::Crosshair => "crosshair",
+        Shape::Text => "text",
+        Shape::VerticalText => "vertical-text",
+        Shape::Alias => "alias",
+        Shape::Copy => "copy",
+        Shape::Move => "move",
+        Shape::NoDrop => "no-drop",
+        Shape::NotAllowed => "not-allowed",
+        Shape::Grab => "grab",
+        Shape::Grabbing => "grabbing",
+        Shape::EResize => "e-resize",
+        Shape::NResize => "n-resize",
+        Shape::NeResize => "ne-resize",
+        Shape::NwResize => "nw-resize",
+        Shape::SResize => "s-resize",
+        Shape::SeResize => "se-resize",
+        Shape::SwResize => "sw-resize",
+        Shape::WResize => "w-resize",
+        Shape::EwResize => "ew-resize",
+        Shape::NsResize => "ns-resize",
+        Shape::NeswResize => "nesw-resize",
+        Shape::NwseResize => "nwse-resize",
+        Shape::ColResize => "col-resize",
+        Shape::RowResize => "row-resize",
+        Shape::AllScroll => "all-scroll",
+        Shape::ZoomIn => "zoom-in",
+        Shape::ZoomOut => "zoom-out",
+        Shape::DndAsk => "dnd-ask",
+        Shape::AllResize => "all-resize",
+        _ => "left_ptr",
+    };
+    name.to_owned()
+}
 
 /// Buduje deskryptor z mapą klawiszy (memfd + tekst XKB, zakończony NUL).
 fn make_keymap() -> Option<(OwnedFd, u32)> {
@@ -388,6 +517,58 @@ fn dismiss_popups(state: &mut State, pos: Point) {
         if let Some(w) = state.windows.lock_or_recover().get_mut(slot) {
             w.mapped = false;
         }
+    }
+    // Klawiatura nie może zostać na zamkniętym popupie — wraca do okna pod nim.
+    // Sprawdzamy **po** pętli: przy submenu może zostać jeszcze otwarte menu rodzica,
+    // do którego fokus ma wrócić dopiero wtedy, gdy zniknie cała hierarchia.
+    let focus_dead = state
+        .keyboard_focus
+        .as_ref()
+        .map(|(s, _)| *s)
+        .map(|s| {
+            state
+                .windows
+                .lock_or_recover()
+                .get(s)
+                .map(|w| w.popup && !w.mapped)
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+    if focus_dead {
+        refocus_after_popup(state);
+    }
+}
+
+/// Po zamknięciu popupu przywraca klawiaturę: najpierw nadrzędnemu menu (submenu),
+/// a gdy żadne menu nie zostało — najwyższemu zwykłemu oknu.
+///
+/// Bez tego fokus zostawał na ukrytej powierzchni menu i klawiatura „martwiła się”
+/// po wybraniu pozycji lub kliknięciu poza menu.
+pub(crate) fn refocus_after_popup(state: &mut State) {
+    let ws = *state.ws_current.lock_or_recover();
+    let slot = {
+        let windows = state.windows.lock_or_recover();
+        // Nadrzędne menu (submenu właśnie się zamknęło) ma pierwszeństwo przed oknem.
+        let top_popup = windows
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| w.popup && w.mapped && !w.minimized && w.in_workspace(ws))
+            .max_by_key(|(_, w)| w.z)
+            .map(|(i, _)| i);
+        top_popup.or_else(|| {
+            windows
+                .iter()
+                .enumerate()
+                .filter(|(_, w)| {
+                    w.mapped && !w.minimized && !w.layer && !w.popup && w.in_workspace(ws)
+                })
+                .max_by_key(|(_, w)| w.z)
+                .map(|(i, _)| i)
+        })
+    };
+    match slot {
+        Some(slot) => set_keyboard_focus(state, slot),
+        None => set_keyboard_focus(state, usize::MAX),
     }
 }
 
@@ -586,6 +767,7 @@ fn pointer_for(state: &State, surface: &wl_surface::WlSurface) -> Option<wl_poin
 }
 
 fn pointer_motion(state: &mut State, handle: &DisplayHandle, pos: Point) {
+    state.note_activity();
     state.pointer_pos = (pos.x, pos.y);
     if state.overview_on() {
         // W podglądzie ruch myszy tylko aktualizuje „ducha” przeciąganego okna.
@@ -622,9 +804,10 @@ fn pointer_motion(state: &mut State, handle: &DisplayHandle, pos: Point) {
         // pojawiają się względem starego miejsca.
         sync_x11_geometry(state, drag.slot);
     }
-    // Dolne rogi ekranu mogą przełączać przestrzenie (opcja w Ustawieniach).
-    // Działa też w trakcie przeciągania okna — okno przenosi się razem z kursorem.
-    maybe_switch_at_corner(state, pos);
+    // Rogi ekranu (opcja w Ustawieniach): zapamiętujemy wejście, a akcję wykona
+    // `tick_corner` po przytrzymaniu — dzięki temu poświata zdąży się pokazać.
+    // Działa też w trakcie przeciągania okna (okno przenosi się razem z kursorem).
+    note_corner(state, pos);
     // Przeciąganie danych (drag & drop) aktualizuje cel.
     if state.dnd.is_some() {
         data::dnd_motion(state, handle, (pos.x, pos.y));
@@ -651,6 +834,7 @@ fn pointer_button(
     button: PointerButton,
     st: ButtonState,
 ) {
+    state.note_activity();
     if button == PointerButton::Left {
         state.left_down = st == ButtonState::Pressed;
     }
@@ -897,6 +1081,10 @@ fn pointer_leave(state: &mut State) {
         }
     }
     state.pointer_focus = None;
+    // Kursor należał do klienta, który właśnie stracił wskaźnik. Nie pokazujemy
+    // jego kształtu nad inną aplikacją — nowy klient ustawi własny.
+    state.cursor_surface = None;
+    *state.cursor_image.lock_or_recover() = CursorImage::Default;
 }
 
 /// Zamyka grupę zdarzeń wskaźnika (`wl_pointer.frame`, protokół ≥ 5).
@@ -910,6 +1098,7 @@ fn pointer_frame(ptr: &wl_pointer::WlPointer) {
 }
 
 fn pointer_axis(state: &mut State, dx: f64, dy: f64) {
+    state.note_activity();
     let Some((_, surface)) = state.pointer_focus.clone() else {
         return;
     };
@@ -959,10 +1148,24 @@ fn pointer_axis(state: &mut State, dx: f64, dy: f64) {
 
 fn update_pointer_focus(state: &mut State, pos: Point) {
     let target = content_window(state, pos);
+    if std::env::var_os("SELENE_TRACE_POINTER").is_some() {
+        eprintln!(
+            "selene/pointer: pos=({:.0},{:.0}) target={target:?} focus={:?} pointers={}",
+            pos.x,
+            pos.y,
+            state.pointer_focus.as_ref().map(|(slot, _)| *slot),
+            state.pointers.len()
+        );
+    }
     let same = matches!((state.pointer_focus.as_ref(), target), (Some((s, _)), Some(t)) if *s == t);
     if same {
         return;
     }
+    let old_client = state
+        .pointer_focus
+        .as_ref()
+        .and_then(|(_, surface)| surface.client())
+        .map(|client| client.id());
     if let Some((_, surface)) = state.pointer_focus.clone() {
         if let Some(ptr) = pointer_for(state, &surface) {
             let serial = state.next_serial();
@@ -971,11 +1174,25 @@ fn update_pointer_focus(state: &mut State, pos: Point) {
         }
     }
     state.pointer_focus = None;
+    // Zmiana klienta: stary kształt (np. kursor gry albo Flatpaka) nie może
+    // "przykleić się" do nowego okna. Reset przed `enter` — nowy klient
+    // ustawi własny kursor w `wl_pointer.set_cursor`.
+    let new_client = target
+        .and_then(|slot| state.slots.get(slot))
+        .and_then(|surface| surface.client())
+        .map(|client| client.id());
+    if old_client != new_client {
+        state.cursor_surface = None;
+        *state.cursor_image.lock_or_recover() = CursorImage::Default;
+    }
     if let Some(slot) = target {
         if let Some(surface) = state.slots.get(slot).cloned() {
             let serial = state.next_serial();
             let (lx, ly) = content_local(state, slot, pos);
             if let Some(ptr) = pointer_for(state, &surface) {
+                if std::env::var_os("SELENE_TRACE_POINTER").is_some() {
+                    eprintln!("selene/pointer: enter slot={slot} ptr={ptr:?}");
+                }
                 let _ = ptr.send_event(wl_pointer::Event::Enter {
                     serial,
                     surface: surface.clone(),
@@ -1123,34 +1340,114 @@ fn output_rect_at(state: &State, pos: Point) -> (f64, f64, f64, f64) {
     }
 }
 
-/// Bok strefy „gorącego rogu” w dolnej części ekranu.
-const CORNER: f64 = 24.0;
-
-/// Przełącza przestrzeń, gdy kursor wchodzi w dolny róg ekranu.
+/// Bok strefy „gorącego rogu” (dolne rogi i lewy górny róg obszaru roboczego).
 ///
-/// Zapadka (`ws_corner_latch`) sprawia, że jedno wejście w róg to jedno
-/// przełączenie — dopiero wyjście i ponowne wejście działają znowu.
-fn maybe_switch_at_corner(state: &mut State, pos: Point) {
-    if !state.ws_corner_switch || state.locked {
-        state.ws_corner_latch = false;
-        return;
+/// Strefa jest mała celowo: to nie jest cała krawędź, tylko sam róg. Wjazd w nią
+/// po drodze do launchera nic nie robi — akcja czeka na przytrzymanie.
+const CORNER: f64 = 32.0;
+
+/// Jak długo kursor musi stać w rogu, zanim zadziała akcja.
+///
+/// Bez tego pośpiech przy panelu/launcherze otwierał podgląd albo przełączał
+/// przestrzeń przypadkiem. Poświata w rogu pokazuje, że odliczanie trwa.
+const CORNER_DWELL: Duration = Duration::from_millis(500);
+
+/// Który róg obejmuje punkt (o ile dana strefa jest włączona w Ustawieniach).
+fn corner_at(state: &State, pos: Point) -> Option<CornerKind> {
+    if state.locked {
+        return None;
     }
     let (ox, oy, ow, oh) = output_rect_at(state, pos);
-    let left = pos.x <= ox + CORNER && pos.y >= oy + oh - CORNER;
-    let right = pos.x >= ox + ow - CORNER && pos.y >= oy + oh - CORNER;
-    if !left && !right {
-        state.ws_corner_latch = false;
+    let top = inset_at(state, pos).min(oh);
+    if state.ws_overview_corner
+        && pos.x <= ox + CORNER
+        && pos.y >= oy + top
+        && pos.y <= oy + top + CORNER
+    {
+        return Some(CornerKind::TopLeft);
+    }
+    if state.ws_corner_switch {
+        if pos.x <= ox + CORNER && pos.y >= oy + oh - CORNER {
+            return Some(CornerKind::BottomLeft);
+        }
+        if pos.x >= ox + ow - CORNER && pos.y >= oy + oh - CORNER {
+            return Some(CornerKind::BottomRight);
+        }
+    }
+    None
+}
+
+/// Publikuje poświatę do wątku wyjścia (`None` = brak poświaty).
+fn publish_corner(state: &State, progress: f64) {
+    let hint = state.ws_corner_hover.and_then(|kind| {
+        (!state.ws_corner_latch).then_some(CornerHint {
+            kind,
+            progress,
+            top_inset: state.ws_corner_top,
+        })
+    });
+    state.overview.lock_or_recover().corner = hint;
+}
+
+/// Zapamiętuje wejście/wyjście z rogu. **Nie** wykonuje akcji — od tego jest
+/// [`tick_corner`], żeby przytrzymanie działało także bez ruchu myszy.
+fn note_corner(state: &mut State, pos: Point) {
+    let corner = corner_at(state, pos);
+    if corner == state.ws_corner_hover {
+        return;
+    }
+    state.ws_corner_hover = corner;
+    state.ws_corner_since = corner.map(|_| Instant::now());
+    state.ws_corner_top = if corner.is_some() {
+        inset_at(state, pos)
+    } else {
+        0.0
+    };
+    // Nowy róg = nowe odliczanie; zapadka z poprzedniego rogu nie może blokować.
+    state.ws_corner_latch = false;
+    publish_corner(state, 0.0);
+}
+
+/// Odlicza przytrzymanie w rogu i po [`CORNER_DWELL`] wykonuje akcję.
+///
+/// Wywoływane w każdej iteracji pętli głównej (także po wybudzeniu timerem),
+/// więc postęp poświaty nie zależy od ruchu wskaźnika.
+pub(crate) fn tick_corner(state: &mut State) {
+    let Some(kind) = state.ws_corner_hover else {
+        return;
+    };
+    if state.locked {
+        state.reset_corner();
         return;
     }
     if state.ws_corner_latch {
         return;
     }
+    let Some(since) = state.ws_corner_since else {
+        return;
+    };
+    let progress = (since.elapsed().as_secs_f64() / CORNER_DWELL.as_secs_f64()).clamp(0.0, 1.0);
+    if progress < 1.0 {
+        publish_corner(state, progress);
+        return;
+    }
+    // Akcja zadziała raz na wejście w róg — dopiero wyjście i powrót odblokuje ją znowu.
     state.ws_corner_latch = true;
+    publish_corner(state, 1.0);
+    activate_corner(state, kind);
+}
+
+/// Wykonuje akcję rogu: podgląd (lewy górny) albo zmiana przestrzeni (dolne).
+fn activate_corner(state: &mut State, kind: CornerKind) {
+    if kind == CornerKind::TopLeft {
+        state.set_overview(true);
+        return;
+    }
     let current = *state.ws_current.lock_or_recover();
-    let target = if left {
-        current.checked_sub(1)
-    } else {
-        (current + 1 < state.ws_count).then_some(current + 1)
+    let target = match kind {
+        CornerKind::BottomLeft => current.checked_sub(1),
+        CornerKind::BottomRight => (current + 1 < state.ws_count).then_some(current + 1),
+        CornerKind::TopLeft => return,
     };
     let Some(target) = target else {
         return;
@@ -1159,6 +1456,99 @@ fn maybe_switch_at_corner(state: &mut State, pos: Point) {
         move_window_to_workspace(state, drag.slot, target);
     }
     switch_workspace(state, target);
+}
+
+/// Akcja wynikająca z bezczynności (czysta decyzja — łatwa do testów).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IdleAction {
+    /// Zgaś ekran (czarna klatka, kursor schowany).
+    Blank,
+    /// Zablokuj sesję (`luna-lock`).
+    Lock,
+    /// Uśpij komputer (`systemctl suspend`).
+    Suspend,
+}
+
+/// Co powinno się stać po bezczynności — bez wykonywania akcji.
+///
+/// Progi są niezależne; `lock_on_blank` dokłada blokadę do wygaszenia, więc
+/// ekran nigdy nie gaśnie „bez zabezpieczenia”, jeśli użytkownik tego chce.
+pub(crate) fn idle_actions(state: &State) -> Vec<IdleAction> {
+    let mut actions = Vec::new();
+    if state.locked {
+        return actions;
+    }
+    let idle_secs = state.idle_last_input.elapsed().as_secs();
+    let cfg = state.idle;
+    if cfg.screen_off_secs > 0 && idle_secs >= u64::from(cfg.screen_off_secs) && !state.is_blanked()
+    {
+        actions.push(IdleAction::Blank);
+    }
+    let lock_due = cfg.lock_secs > 0 && idle_secs >= u64::from(cfg.lock_secs);
+    let blank_lock = cfg.lock_on_blank && actions.contains(&IdleAction::Blank);
+    if (lock_due || blank_lock) && !state.idle_lock_fired {
+        actions.push(IdleAction::Lock);
+    }
+    if cfg.suspend_secs > 0 && idle_secs >= u64::from(cfg.suspend_secs) && !state.idle_suspend_fired
+    {
+        actions.push(IdleAction::Suspend);
+    }
+    actions
+}
+
+/// Wykonuje akcje bezczynności (wywoływane w pętli głównej co ~1 s).
+pub(crate) fn tick_idle(state: &mut State) {
+    for action in idle_actions(state) {
+        match action {
+            IdleAction::Blank => state.set_blanked(true),
+            IdleAction::Lock => {
+                state.idle_lock_fired = true;
+                spawn_lock();
+            }
+            IdleAction::Suspend => {
+                state.idle_suspend_fired = true;
+                if !state.locked {
+                    state.idle_lock_fired = true;
+                    spawn_lock();
+                }
+                let _ = Command::new("systemctl")
+                    .arg("suspend")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn();
+            }
+        }
+    }
+}
+
+/// Ile milisekund do najbliższej akcji bezczynności (`None` = nic nie czeka).
+pub(crate) fn idle_wait_ms(state: &State) -> Option<i64> {
+    if state.locked {
+        return None;
+    }
+    let idle_secs = state.idle_last_input.elapsed().as_secs();
+    state
+        .idle
+        .next_deadline_secs(
+            idle_secs,
+            state.is_blanked(),
+            state.idle_lock_fired,
+            state.idle_suspend_fired,
+        )
+        .map(|secs| (secs.max(0.05) * 1000.0) as i64)
+}
+
+/// Uruchamia ekran blokady (`luna-lock` tworzy overlay i przejmuje klawiaturę).
+fn spawn_lock() {
+    if let Err(err) = Command::new("luna-lock")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        eprintln!("selene/idle: nie można uruchomić luna-lock: {err}");
+    }
 }
 
 /// Prostokąt monitora, na którym leży okno (x, y, szerokość, wysokość).
@@ -1619,6 +2009,9 @@ pub(crate) fn set_keyboard_focus(state: &mut State, slot: usize) {
     }
     state.keyboard_focus = None;
     if let Some(surface) = state.slots.get(slot).cloned() {
+        // Protokół: `wl_data_device.selection` musi dotrzeć bezpośrednio przed
+        // `wl_keyboard.enter` (klienci unieważniają ofertę po utracie fokusu).
+        crate::data::send_selection_for_slot(state, slot);
         if let Some(kb) = keyboard_for(state, &surface) {
             let serial = state.next_serial();
             let _ = kb.send_event(wl_keyboard::Event::Enter {
@@ -1661,6 +2054,7 @@ fn request_screenshot(state: &mut State) {
 }
 
 fn keyboard_key(state: &mut State, keysym: u32, keycode: u32, st: ButtonState) {
+    state.note_activity();
     sync_modifiers(state, keysym, st);
     if is_modifier_keysym(keysym) || is_lock_keysym(keysym) {
         return;
@@ -1720,8 +2114,9 @@ fn keyboard_key(state: &mut State, keysym: u32, keycode: u32, st: ButtonState) {
             }
             _ => {}
         }
-        // Skróty menedżera okien (Super + …) przechwytujemy przed klientem.
-        if state.sent_mods.logo && window_shortcut(state, keysym, st) {
+        // Skróty pulpitu z konfiguracji (`~/.config/luna/shortcuts.conf`)
+        // przechwytujemy przed klientem; domyślnie wymagają Super.
+        if window_shortcut(state, keysym, st) {
             return;
         }
     }
@@ -1750,104 +2145,95 @@ fn keyboard_key(state: &mut State, keysym: u32, keycode: u32, st: ButtonState) {
     }
 }
 
-/// Skróty menedżera okien z modyfikatorem Super. Zwraca `true`, gdy obsłużono.
+/// Skróty pulpitu z `shortcuts.conf`. Zwraca `true`, gdy obsłużono.
 fn window_shortcut(state: &mut State, keysym: u32, st: ButtonState) -> bool {
+    use libluna_core::shortcuts::{active, ShortcutAction};
+
+    let settings = active();
+    let mods = state.sent_mods;
+    // Przestrzenie robocze: Shift nie jest częścią kombinacji — decyduje o
+    // przeniesieniu okna zamiast przełączenia (Super+Shift+1 …).
+    let mut matched = None;
+    for action in ShortcutAction::ALL {
+        let Some(binding) = settings.binding(action) else {
+            continue;
+        };
+        let shift = match action {
+            ShortcutAction::Workspace(_) => false,
+            _ => mods.shift,
+        };
+        if binding.matches(mods.logo, mods.ctrl, mods.alt, shift, keysym) {
+            matched = Some(action);
+            break;
+        }
+    }
+    let Some(action) = matched else {
+        return false;
+    };
+    // Zjedz także zwolnienie klawisza, żeby nie trafiło do klienta.
     if st != ButtonState::Pressed {
-        // Zjedz także zwolnienia naszych klawiszy, by nie trafiły do klienta.
-        return matches!(
-            keysym,
-            0x006d | 0x0066 | 0x006c | 0x004c | 0xff52 | 0xff54 | 0xff09 | 0x0060 | 0x0031
-                ..=0x0038 | 0xff51 | 0xff53 | 0x0071 | 0xffc9
-        );
+        return true;
     }
     let focused = state.keyboard_focus.as_ref().map(|(s, _)| *s);
-    match keysym {
-        0xffc9 => {
-            // Super+F12 — zrzut ekranu. Realizuje go wątek wyjścia (ma gotowe klatki).
-            request_screenshot(state);
-            true
-        }
-        0x0071 => {
-            // Super+Q — zamknij okno.
+    match action {
+        ShortcutAction::CloseWindow => {
             if let Some(s) = focused {
                 send_close(state, s);
             }
-            true
         }
-        0xff51 => {
-            // Super+Left — kafelkuj do lewej połowy ekranu (snap).
-            if let Some(s) = focused {
-                snap_window(state, s, true);
-            }
-            true
-        }
-        0xff53 => {
-            // Super+Right — kafelkuj do prawej połowy ekranu (snap).
-            if let Some(s) = focused {
-                snap_window(state, s, false);
-            }
-            true
-        }
-        0x006d => {
-            // Super+M — minimalizuj/przywróć.
+        ShortcutAction::Minimize => {
             if let Some(s) = focused {
                 toggle_minimize(state, s);
             }
-            true
         }
-        0x0066 => {
-            // Super+F — pełny ekran.
+        ShortcutAction::Maximize => {
+            if let Some(s) = focused {
+                toggle_maximize(state, s);
+            }
+        }
+        ShortcutAction::Fullscreen => {
             if let Some(s) = focused {
                 toggle_fullscreen(state, s);
             }
-            true
         }
-        0x006c | 0x004c => {
-            // Super+L — wyloguj. Kończymy kompozytor (sesję), więc menedżer logowania
-            // wraca do greetera; jądro zwalnia mastera DRM przy zamknięciu deskryptorów.
+        ShortcutAction::RestoreWindow => {
+            if let Some(s) = focused {
+                restore_window(state, s);
+            }
+        }
+        ShortcutAction::SnapLeft => {
+            if let Some(s) = focused {
+                snap_window(state, s, true);
+            }
+        }
+        ShortcutAction::SnapRight => {
+            if let Some(s) = focused {
+                snap_window(state, s, false);
+            }
+        }
+        ShortcutAction::Overview => {
+            let on = state.overview_on();
+            state.set_overview(!on);
+        }
+        ShortcutAction::CycleWindows => cycle_windows(state),
+        ShortcutAction::Workspace(index) => {
+            if state.sent_mods.shift {
+                if let Some(s) = focused {
+                    move_window_to_workspace(state, s, index);
+                }
+            } else {
+                switch_workspace(state, index);
+            }
+        }
+        ShortcutAction::Screenshot => request_screenshot(state),
+        ShortcutAction::Logout => {
+            // Kończymy kompozytor (sesję), więc menedżer logowania wraca do greetera.
             println!("{}", libluna_i18n::tr("logging out"));
             crate::vt::restore();
             std::process::exit(0);
         }
-        0xff52 => {
-            // Super+Up — maksymalizuj/przywróć.
-            if let Some(s) = focused {
-                toggle_maximize(state, s);
-            }
-            true
-        }
-        0xff54 => {
-            // Super+Down — przywróć z maksymalizacji/fullscreenu.
-            if let Some(s) = focused {
-                restore_window(state, s);
-            }
-            true
-        }
-        0xff09 => {
-            // Super+Tab — podgląd okien i przestrzeni.
-            let on = state.overview_on();
-            state.set_overview(!on);
-            true
-        }
-        0x0060 => {
-            // Super+` — przełącz okna (przywraca zminimalizowane).
-            cycle_windows(state);
-            true
-        }
-        // Super+1..8 — przełącz przestrzeń; Super+Shift+1..8 — przenieś okno.
-        0x0031..=0x0038 => {
-            let ws = (keysym - 0x0031) as usize;
-            if state.sent_mods.shift {
-                if let Some(s) = focused {
-                    move_window_to_workspace(state, s, ws);
-                }
-            } else {
-                switch_workspace(state, ws);
-            }
-            true
-        }
-        _ => false,
     }
+    true
 }
 
 /// Strefa przyciągania okna po upuszczeniu przy krawędzi/narożniku monitora.
@@ -2307,6 +2693,162 @@ mod tests {
     use crate::state::{Window, BUTTON_W};
     use libluna_render::ImageData;
     use std::sync::Arc;
+
+    /// Symuluje przytrzymanie kursora w rogu przez pełny czas (`CORNER_DWELL`).
+    fn hold_in_corner(state: &mut State, pos: Point) {
+        note_corner(state, pos);
+        state.ws_corner_since = Some(Instant::now() - CORNER_DWELL - Duration::from_millis(1));
+        tick_corner(state);
+    }
+
+    #[test]
+    fn corners_open_overview_or_switch_workspace() {
+        let mut state = State::default();
+        state.ws_overview_corner = true;
+        hold_in_corner(&mut state, Point::new(4.0, 4.0));
+        assert!(state.overview_on(), "lewy górny róg ma otworzyć podgląd");
+
+        let mut state = State::default();
+        state.ws_overview_corner = false;
+        state.ws_corner_switch = true;
+        let before = *state.ws_current.lock_or_recover();
+        hold_in_corner(&mut state, Point::new(1279.0, 799.0));
+        assert_eq!(*state.ws_current.lock_or_recover(), before + 1);
+    }
+
+    #[test]
+    fn corner_needs_a_hold_and_shows_a_glow() {
+        let mut state = State::default();
+        state.ws_overview_corner = true;
+        // Sam wjazd w róg nie może nic otwierać — to była przyczyna „wariowania”
+        // przy zjeżdżaniu z panelu do launchera.
+        note_corner(&mut state, Point::new(4.0, 10.0));
+        assert!(!state.overview_on());
+        let hint = state
+            .overview
+            .lock_or_recover()
+            .corner
+            .expect("wejście w róg ma pokazać poświatę");
+        assert_eq!(hint.kind, CornerKind::TopLeft);
+        assert!(hint.progress < 0.1);
+
+        // Połowa czasu: poświata rośnie, ale akcja jeszcze nie zadziałała.
+        state.ws_corner_since = Some(Instant::now() - Duration::from_millis(250));
+        tick_corner(&mut state);
+        let hint = state.overview.lock_or_recover().corner.expect("poświata");
+        assert!(hint.progress > 0.2 && hint.progress < 0.8, "{hint:?}");
+        assert!(!state.overview_on());
+
+        // Wyjście z rogu gasi poświatę i zeruje zapadkę.
+        note_corner(&mut state, Point::new(400.0, 400.0));
+        assert!(state.overview.lock_or_recover().corner.is_none());
+        assert!(state.ws_corner_hover.is_none());
+    }
+
+    #[test]
+    fn corner_does_not_open_when_leaving_panel() {
+        // Droga „przycisk launchera → launcher”: zjazd z panelu prosto w dół
+        // przechodzi przez strefę rogu, ale przytrzymanie liczy się dopiero
+        // od wjazdu — jedno zdarzenie ruchu nie otwiera podglądu.
+        let mut state = State::default();
+        state.ws_overview_corner = true;
+        state.top_insets.insert(0, 36.0);
+        note_corner(&mut state, Point::new(16.0, 30.0));
+        assert!(state.ws_corner_hover.is_none(), "panel to nie róg");
+        note_corner(&mut state, Point::new(16.0, 40.0));
+        tick_corner(&mut state);
+        assert!(!state.overview_on());
+
+        // Przytrzymanie w rogu działa (także gdy panel ma wysokość 36 px).
+        state.ws_corner_since = Some(Instant::now() - CORNER_DWELL - Duration::from_millis(1));
+        tick_corner(&mut state);
+        assert!(state.overview_on());
+    }
+
+    #[test]
+    fn corner_acts_once_per_entry() {
+        let mut state = State::default();
+        state.ws_corner_switch = true;
+        let start = *state.ws_current.lock_or_recover();
+        hold_in_corner(&mut state, Point::new(1279.0, 799.0));
+        assert_eq!(*state.ws_current.lock_or_recover(), start + 1);
+        // Kolejne ticki bez wyjścia z rogu nie przełączają dalej.
+        for _ in 0..5 {
+            tick_corner(&mut state);
+        }
+        assert_eq!(*state.ws_current.lock_or_recover(), start + 1);
+        // Wyjście i ponowne wejście odblokowuje akcję.
+        note_corner(&mut state, Point::new(600.0, 400.0));
+        hold_in_corner(&mut state, Point::new(1279.0, 799.0));
+        assert_eq!(*state.ws_current.lock_or_recover(), start + 2);
+    }
+
+    #[test]
+    fn idle_blanks_then_wakes_on_activity() {
+        let mut state = State::default();
+        state.idle = libluna_core::idle::IdleSettings {
+            screen_off_secs: 1,
+            lock_secs: 0,
+            suspend_secs: 0,
+            lock_on_blank: false,
+        };
+        state.idle_last_input = Instant::now() - Duration::from_secs(2);
+        assert_eq!(idle_actions(&state), vec![IdleAction::Blank]);
+        tick_idle(&mut state);
+        assert!(state.is_blanked());
+        // Kolejny tick nie powtarza akcji.
+        assert!(idle_actions(&state).is_empty());
+        state.note_activity();
+        assert!(!state.is_blanked());
+    }
+
+    #[test]
+    fn idle_lock_is_independent_from_blanking() {
+        let mut state = State::default();
+        state.idle = libluna_core::idle::IdleSettings {
+            screen_off_secs: 60,
+            lock_secs: 30,
+            suspend_secs: 0,
+            lock_on_blank: false,
+        };
+        state.idle_last_input = Instant::now() - Duration::from_secs(40);
+        assert_eq!(idle_actions(&state), vec![IdleAction::Lock]);
+        // Zapadka: po „wykonaniu” blokady nie ma kolejnej akcji.
+        state.idle_lock_fired = true;
+        assert!(idle_actions(&state).is_empty());
+    }
+
+    #[test]
+    fn lock_on_blank_adds_a_lock_action() {
+        let mut state = State::default();
+        state.idle = libluna_core::idle::IdleSettings {
+            screen_off_secs: 10,
+            lock_secs: 0,
+            suspend_secs: 0,
+            lock_on_blank: true,
+        };
+        state.idle_last_input = Instant::now() - Duration::from_secs(11);
+        assert_eq!(
+            idle_actions(&state),
+            vec![IdleAction::Blank, IdleAction::Lock]
+        );
+    }
+
+    #[test]
+    fn idle_wait_points_at_the_next_deadline() {
+        let mut state = State::default();
+        state.idle = libluna_core::idle::IdleSettings {
+            screen_off_secs: 60,
+            lock_secs: 0,
+            suspend_secs: 0,
+            lock_on_blank: false,
+        };
+        state.idle_last_input = Instant::now();
+        let wait = idle_wait_ms(&state).expect("jest deadline");
+        assert!((50_000..=60_000).contains(&wait), "{wait}");
+        state.set_blanked(true);
+        assert!(idle_wait_ms(&state).is_none());
+    }
 
     #[test]
     fn modifier_mask_matches_xkb() {

@@ -331,7 +331,9 @@ pub fn overlay_children(parent: &WlSurface, base: Arc<ImageData>) -> Arc<ImageDa
         blend(dst, base.width, base.height, &img, pos);
     }
     match out {
-        Some(rgba) => Arc::new(ImageData::new(base.width, base.height, rgba)),
+        Some(rgba) => {
+            Arc::new(ImageData::new(base.width, base.height, rgba).with_opaque(base.opaque))
+        }
         None => base,
     }
 }

@@ -37,8 +37,12 @@ pub struct Incoming {
     pub actions: Vec<(String, String)>,
     /// `hint urgency = 2` (critical) — takich powiadomień nie wygaszamy automatycznie.
     pub critical: bool,
-    /// Ikona aplikacji (`app_icon` albo hint `image-path`/`desktop-entry`).
+    /// Ikona aplikacji (`app_icon` albo hint `image-path`).
     pub icon: Option<String>,
+    /// Hint `desktop-entry` — plik `.desktop` nadawcy (np. `eu.luna.Store.desktop`).
+    /// Powłoka używa go po kliknięciu toasta: aktywuje istniejące okno aplikacji
+    /// albo uruchamia ją, jeśli nie działa.
+    pub desktop_entry: Option<String>,
 }
 
 impl Incoming {
@@ -190,8 +194,8 @@ impl Server {
         let critical = hints.get("urgency").and_then(|v| u8::try_from(v).ok()) == Some(2);
         let icon = (!app_icon.trim().is_empty())
             .then(|| app_icon.trim().to_owned())
-            .or_else(|| hint_string(&hints, "image-path"))
-            .or_else(|| hint_string(&hints, "desktop-entry"));
+            .or_else(|| hint_string(&hints, "image-path"));
+        let desktop_entry = hint_string(&hints, "desktop-entry");
         let id = {
             let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
             let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
@@ -205,6 +209,7 @@ impl Server {
                 actions: acts,
                 critical,
                 icon,
+                desktop_entry,
             });
             id
         };
@@ -242,6 +247,65 @@ impl Server {
     }
 }
 
+/// Stan nazwy `org.freedesktop.Notifications` na magistrali sesyjnej.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NameState {
+    /// Nikt nie obsługuje nazwy — możemy ją zająć.
+    Free,
+    /// Nazwę trzyma stary/nieaktualny `luna-shell` — można ją przejąć.
+    Luna,
+    /// Nazwę trzyma inny daemon (dunst, mako, GNOME…) — nie odbieramy mu jej.
+    Other,
+}
+
+/// Sprawdza właściciela nazwy powiadomień (bez blokowania na dłużej niż zwykłe
+/// wywołanie D-Bus).
+fn notification_name_state() -> NameState {
+    let Ok(connection) = zbus::blocking::Connection::session() else {
+        return NameState::Free;
+    };
+    let has_owner: bool = connection
+        .call_method(
+            Some("org.freedesktop.DBus"),
+            "/org/freedesktop/DBus",
+            Some("org.freedesktop.DBus"),
+            "NameHasOwner",
+            &"org.freedesktop.Notifications",
+        )
+        .ok()
+        .and_then(|reply| reply.body().deserialize().ok())
+        .unwrap_or(false);
+    if !has_owner {
+        return NameState::Free;
+    }
+    let Ok(reply) = connection.call_method(
+        Some("org.freedesktop.Notifications"),
+        "/org/freedesktop/Notifications",
+        Some("org.freedesktop.Notifications"),
+        "GetServerInformation",
+        &(),
+    ) else {
+        return NameState::Other;
+    };
+    let Ok((name, vendor, _, _)) = reply
+        .body()
+        .deserialize::<(String, String, String, String)>()
+    else {
+        return NameState::Other;
+    };
+    if name == "Luna" || vendor == "libLuna" {
+        NameState::Luna
+    } else {
+        NameState::Other
+    }
+}
+
+/// Loguje pierwszą przyczynę braku rejestracji (retry nie może zasypać logu).
+fn warn_once(message: &str) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| eprintln!("luna-shell: powiadomienia: {message}"));
+}
+
 /// Uchwyt do usługi powiadomień (utrzymuje połączenie i kolejkę).
 pub struct NotificationsBus {
     queue: Queue,
@@ -254,32 +318,63 @@ impl NotificationsBus {
     /// Rejestruje powłokę jako daemon powiadomień na sesyjnej magistrali.
     ///
     /// `None`, gdy brak magistrali albo nazwę `org.freedesktop.Notifications` trzyma
-    /// już inny daemon. `waker` budzi pętlę UI po każdym odebranym powiadomieniu.
+    /// już **inny** daemon. Jeśli nazwę trzyma stary `luna-shell`, przejmujemy ją
+    /// (`ReplaceExisting`), żeby po restarcie powłoki powiadomienia znów działały.
+    /// `waker` budzi pętlę UI po każdym odebranym powiadomieniu.
     pub fn spawn(waker: WakeHandle) -> Option<Self> {
         let queue: Queue = Arc::new(Mutex::new(Vec::new()));
         let closes: CloseQueue = Arc::new(Mutex::new(Vec::new()));
         let live: LiveIds = Arc::new(Mutex::new(HashSet::new()));
-        let server = Server {
-            queue: Arc::clone(&queue),
-            closes: Arc::clone(&closes),
-            live: Arc::clone(&live),
-            next_id: Arc::new(AtomicU32::new(1)),
-            waker,
+        let next_id = Arc::new(AtomicU32::new(1));
+
+        let state = notification_name_state();
+        if state == NameState::Other {
+            warn_once("nazwę org.freedesktop.Notifications trzyma inny daemon — nie przejmuję jej");
+            return None;
+        }
+        let replace = state == NameState::Luna;
+
+        let build = || -> Result<zbus::blocking::Connection, String> {
+            let server = Server {
+                queue: Arc::clone(&queue),
+                closes: Arc::clone(&closes),
+                live: Arc::clone(&live),
+                next_id: Arc::clone(&next_id),
+                waker: waker.clone(),
+            };
+            zbus::blocking::connection::Builder::session()
+                .map_err(|err| format!("sesja D-Bus: {err}"))?
+                .name("org.freedesktop.Notifications")
+                .map_err(|err| format!("nazwa D-Bus: {err}"))?
+                .serve_at("/org/freedesktop/Notifications", server)
+                .map_err(|err| format!("interfejs D-Bus: {err}"))?
+                // Inne instancje Luny mogą nas później zastąpić (stary proces).
+                .allow_name_replacements(true)
+                .replace_existing_names(replace)
+                .build()
+                .map_err(|err| format!("rejestracja D-Bus: {err}"))
         };
-        let conn = zbus::blocking::connection::Builder::session()
-            .ok()?
-            .name("org.freedesktop.Notifications")
-            .ok()?
-            .serve_at("/org/freedesktop/Notifications", server)
-            .ok()?
-            .build()
-            .ok()?;
+        let conn = match build() {
+            Ok(conn) => conn,
+            Err(err) => {
+                warn_once(&err);
+                return None;
+            }
+        };
+        if replace {
+            warn_once("przejęto nazwę powiadomień po starym luna-shell");
+        }
         Some(Self {
             queue,
             closes,
             live,
             _conn: conn,
         })
+    }
+
+    /// Czy połączenie z magistralą nadal żyje (bus mógł zostać zrestartowany).
+    pub fn is_connected(&self) -> bool {
+        !self._conn.is_closed()
     }
 
     /// Opróżnia kolejkę (UI woła raz na klatkę).
@@ -397,5 +492,40 @@ mod tests {
             "Błąd w Vec<String> — sprawdź"
         );
         assert_eq!(plain_text("<a href=\"https://x\">link</a>"), "link");
+    }
+
+    /// Test integracyjny: rejestruje usługę i wysyła `Notify` przez magistralę.
+    /// Wymaga sesyjnej magistrali D-Bus, więc jest domyślnie pomijany.
+    #[test]
+    #[ignore = "wymaga sesyjnej magistrali D-Bus"]
+    fn integration_notify_reaches_queue() {
+        use std::collections::HashMap;
+
+        use libluna_platform::WakeHandle;
+        use zbus::zvariant::Value;
+
+        let bus = NotificationsBus::spawn(WakeHandle::detached()).expect("usługa powiadomień");
+        assert!(bus.is_connected());
+        let connection = zbus::blocking::Connection::session().expect("sesja D-Bus");
+        let actions: Vec<&str> = Vec::new();
+        let hints: HashMap<&str, Value<'_>> = HashMap::new();
+        let id: u32 = connection
+            .call_method(
+                Some("org.freedesktop.Notifications"),
+                "/org/freedesktop/Notifications",
+                Some("org.freedesktop.Notifications"),
+                "Notify",
+                &("Test", 0u32, "", "Tytuł", "Treść", actions, hints, 5000i32),
+            )
+            .expect("Notify")
+            .body()
+            .deserialize()
+            .expect("id");
+        let incoming = bus.drain();
+        assert_eq!(incoming.len(), 1);
+        assert_eq!(incoming[0].summary, "Tytuł");
+        assert_eq!(incoming[0].body, "Treść");
+        assert_eq!(incoming[0].id, id);
+        bus.signal_closed(id, 2);
     }
 }

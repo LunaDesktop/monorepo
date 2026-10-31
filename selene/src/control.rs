@@ -82,6 +82,28 @@ fn handle(state: &mut State, line: &str) {
                 );
             }
         }
+        // `idle-reload` — przeładuj `~/.config/luna/idle.conf` bez wylogowania.
+        // Ustawienia zapisują plik i wysyłają to polecenie; Selene od razu
+        // przelicza progi wygaszania/blokady/usypiania.
+        "idle-reload" => {
+            state.reload_idle();
+            if std::env::var("SELENE_STATS").is_ok() {
+                eprintln!(
+                    "selene/control: idle screen_off={} lock={} suspend={}",
+                    state.idle.screen_off_secs, state.idle.lock_secs, state.idle.suspend_secs
+                );
+            }
+        }
+        // `workspace-overview-corner <0|1>` — podgląd Super+Tab w lewym górnym rogu.
+        "workspace-overview-corner" => {
+            state.set_workspace_overview_corner(matches!(rest.trim(), "1" | "true" | "on"));
+            if std::env::var("SELENE_STATS").is_ok() {
+                eprintln!(
+                    "selene/control: workspace-overview-corner = {}",
+                    state.ws_overview_corner
+                );
+            }
+        }
         // `input repeat <opóźnienie_ms> <klawisze/s>` oraz `input natural-scroll <0|1>`.
         "input" => {
             let (what, values) = rest.split_once(' ').unwrap_or((rest, ""));
@@ -156,6 +178,32 @@ fn handle(state: &mut State, line: &str) {
                 crate::dmabuf::enabled()
             );
         }
+        // `cursor` — bieżący obraz kursora (kształt z `wp_cursor_shape_v1`,
+        // obraz klienta albo domyślna strzałka); `cursor shape <nazwa>` wymusza
+        // kształt do zrzutów/testów.
+        "cursor" => {
+            let rest = rest.trim();
+            if let Some(name) = rest.strip_prefix("shape ") {
+                let name = name.trim();
+                if !name.is_empty() {
+                    *state.cursor_image.lock_or_recover() =
+                        crate::state::CursorImage::Shape(name.to_owned());
+                }
+            } else if rest == "default" {
+                *state.cursor_image.lock_or_recover() = crate::state::CursorImage::Default;
+            }
+            let image = state.cursor_image.lock_or_recover().clone();
+            let (w, h) = match &image {
+                crate::state::CursorImage::Custom { data, .. } => (data.width, data.height),
+                _ => (0, 0),
+            };
+            eprintln!(
+                "selene/control: cursor image={image:?} surface={} size={w}x{h} pointers={} focus={:?}",
+                state.cursor_surface.is_some(),
+                state.pointers.len(),
+                state.pointer_focus.as_ref().map(|(slot, _)| *slot)
+            );
+        }
         // `outputs` — geometria monitorów (testy sesji liczą z niej współrzędne).
         "outputs" => {
             let outs = state.outputs.lock_or_recover();
@@ -208,6 +256,60 @@ fn handle(state: &mut State, line: &str) {
                 if std::env::var("SELENE_STATS").is_ok() {
                     eprintln!("selene/control: night light {percent}%");
                 }
+            }
+        }
+        // `output-mode <złącze> <WxH@Hz|auto>` — zmiana trybu monitora na żywo.
+        "output-mode" => {
+            let (name, value) = rest.split_once(' ').unwrap_or((rest, "auto"));
+            let name = name.trim();
+            if name.is_empty() {
+                return;
+            }
+            let value = value.trim();
+            let mode = if value.is_empty() || value.eq_ignore_ascii_case("auto") {
+                None
+            } else {
+                match libluna_core::OutputMode::parse(value) {
+                    Some(mode) => Some(mode),
+                    None => {
+                        if std::env::var("SELENE_STATS").is_ok() {
+                            eprintln!("selene/control: nieznany tryb {value}");
+                        }
+                        return;
+                    }
+                }
+            };
+            // Zapis, żeby wybór przetrwał restart sesji.
+            let mut settings = libluna_core::DisplaySettings::load();
+            settings.set_mode(name, mode);
+            let _ = settings.save();
+            *state.display_request.lock_or_recover() = Some((name.to_owned(), mode));
+            if std::env::var("SELENE_STATS").is_ok() {
+                eprintln!("selene/control: output {name} -> {value}");
+            }
+        }
+        // `output-position <złącze> <x> <y>` — przesunięcie monitora w układzie.
+        "output-position" => {
+            let mut parts = rest.split(' ');
+            let name = parts.next().unwrap_or_default().trim();
+            let x = parts
+                .next()
+                .and_then(|value| value.trim().parse::<i32>().ok());
+            let y = parts
+                .next()
+                .and_then(|value| value.trim().parse::<i32>().ok());
+            let (Some(x), Some(y)) = (x, y) else {
+                return;
+            };
+            if name.is_empty() {
+                return;
+            }
+            let mut settings = libluna_core::DisplaySettings::load();
+            settings.set_position(name, Some((x, y)));
+            let _ = settings.save();
+            *state.position_request.lock_or_recover() = Some((name.to_owned(), x, y));
+            if std::env::var("SELENE_STATS").is_ok() {
+                eprintln!("selene/control: output {name} at {x},{y}");
             }
         }
         // `power-saver <0|1>` — ograniczenie tempa prezentacji.

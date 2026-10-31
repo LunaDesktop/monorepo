@@ -20,6 +20,8 @@ pub struct WorkspaceLayout {
     names: Vec<String>,
     /// Włączanie przestrzeni przez najechanie/przeciągnięcie do dolnego rogu ekranu.
     corner_switch: bool,
+    /// Otwieranie podglądu (Super+Tab) przez lewy górny róg ekranu.
+    overview_corner: bool,
 }
 
 impl Default for WorkspaceLayout {
@@ -28,6 +30,7 @@ impl Default for WorkspaceLayout {
             count: 4,
             names: Vec::new(),
             corner_switch: false,
+            overview_corner: true,
         }
     }
 }
@@ -38,6 +41,7 @@ impl WorkspaceLayout {
             count: count.clamp(MIN_WORKSPACES, MAX_WORKSPACES),
             names: Vec::new(),
             corner_switch: false,
+            overview_corner: true,
         }
     }
 
@@ -52,6 +56,15 @@ impl WorkspaceLayout {
 
     pub fn set_corner_switch(&mut self, enabled: bool) {
         self.corner_switch = enabled;
+    }
+
+    /// Czy lewy górny róg otwiera podgląd okien i przestrzeni (Super+Tab).
+    pub fn overview_corner(&self) -> bool {
+        self.overview_corner
+    }
+
+    pub fn set_overview_corner(&mut self, enabled: bool) {
+        self.overview_corner = enabled;
     }
 
     pub fn set_count(&mut self, count: usize) {
@@ -106,6 +119,8 @@ impl WorkspaceLayout {
                 }
             } else if key == "corner_switch" {
                 layout.set_corner_switch(!matches!(value.as_str(), "false" | "0" | "no"));
+            } else if key == "overview_corner" {
+                layout.set_overview_corner(!matches!(value.as_str(), "false" | "0" | "no"));
             } else if let Some(index) = key
                 .strip_prefix("name")
                 .and_then(|rest| rest.parse::<usize>().ok())
@@ -124,6 +139,7 @@ impl WorkspaceLayout {
         );
         out.push_str(&format!("count = {}\n", self.count));
         out.push_str(&format!("corner_switch = {}\n", self.corner_switch));
+        out.push_str(&format!("overview_corner = {}\n", self.overview_corner));
         for index in 0..self.count {
             if let Some(name) = self.names.get(index).filter(|name| !name.is_empty()) {
                 out.push_str(&format!("name{} = {name}\n", index + 1));
@@ -150,10 +166,12 @@ mod tests {
 
     #[test]
     fn parses_count_and_names() {
-        let layout =
-            WorkspaceLayout::parse("count = 3\ncorner_switch = true\nname1 = Kod\nname3 = Gry\n");
+        let layout = WorkspaceLayout::parse(
+            "count = 3\ncorner_switch = true\noverview_corner = false\nname1 = Kod\nname3 = Gry\n",
+        );
         assert_eq!(layout.count(), 3);
         assert!(layout.corner_switch());
+        assert!(!layout.overview_corner());
         assert_eq!(layout.name(0), "Kod");
         assert_eq!(layout.name(1), "2");
         assert_eq!(layout.name(2), "Gry");
