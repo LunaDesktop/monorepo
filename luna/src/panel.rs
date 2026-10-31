@@ -6,15 +6,18 @@
 //! Panel ma po lewej **sam przycisk burger** (bez etykiety) — kliknięcie otwiera launcher.
 //! Launcher ma trzy widoki: **lista**, **siatka** i **karuzela**.
 
+use libluna_core::holidays::{self, Holiday};
 use libluna_core::style::weight;
 use libluna_core::{Color, IconTheme, Point, Rect, Size, Theme, ThemePreference};
 use libluna_i18n::{tr, tr_args};
 use libluna_render::TextEngine;
-use libluna_widgets::{paint_icon, paint_named_icon, Hover, IconName, PaintCtx};
+use libluna_widgets::{paint_icon, paint_icon_themed, paint_named_icon, Hover, IconName, PaintCtx};
 
+use crate::calendar::CalendarEvent;
+use crate::network::WifiNetwork;
 use crate::notifications::Notification;
 use crate::power::PowerAction;
-use crate::system::{BatteryStatus, WifiNetwork};
+use crate::system::BatteryStatus;
 use crate::toplevels::Task;
 use crate::tray::{TrayIcon, TrayItem, TrayMenuRow, TrayStatus};
 
@@ -89,6 +92,63 @@ pub struct PanelState {
     pub unseen: usize,
     /// Pozycje system traya (StatusNotifierItem).
     pub tray: Vec<TrayItem>,
+    /// Wskaźniki bezpieczeństwa (mikrofon/kamera/sieć).
+    pub security: SecurityIndicators,
+}
+
+/// Aktywne wskaźniki prywatności rysowane na pasku.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SecurityIndicators {
+    pub microphone: bool,
+    pub camera: bool,
+    /// Sieć pokazujemy tylko gdy jest alert (prośba/odmowa), nie przy każdym dozwolonym połączeniu.
+    pub network: bool,
+    pub alert: bool,
+}
+
+impl SecurityIndicators {
+    pub fn any(self) -> bool {
+        self.microphone || self.camera || self.network
+    }
+}
+
+/// Akcja w modalu zgody.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecurityChoice {
+    Allow,
+    Deny,
+}
+
+/// Rozmieszczenie modala „Luna Security”.
+#[derive(Debug, Clone, Copy)]
+pub struct SecurityDialogLayout {
+    pub card: Rect,
+    pub allow: Rect,
+    pub deny: Rect,
+}
+
+/// Modal jest wyśrodkowany pod paskiem; przy wąskim ekranie kurczy się do marginesów.
+pub fn security_dialog_layout(size: Size, theme: &Theme) -> SecurityDialogLayout {
+    let w = 560.0_f64.min((size.width - 64.0).max(360.0));
+    let h = 222.0;
+    let card = Rect::from_xywh(((size.width - w) / 2.0).max(16.0), THICKNESS + 72.0, w, h);
+    let bw = 148.0;
+    let bh = 36.0;
+    let pad = theme.spacing.lg;
+    let allow = Rect::from_xywh(card.right() - pad - bw, card.bottom() - pad - bh, bw, bh);
+    let deny = Rect::from_xywh(allow.x() - 8.0 - bw, allow.y(), bw, bh);
+    SecurityDialogLayout { card, allow, deny }
+}
+
+/// Trafienie w przycisk modala.
+pub fn security_dialog_hit(layout: SecurityDialogLayout, p: Point) -> Option<SecurityChoice> {
+    if layout.allow.contains(p) {
+        Some(SecurityChoice::Allow)
+    } else if layout.deny.contains(p) {
+        Some(SecurityChoice::Deny)
+    } else {
+        None
+    }
 }
 
 impl PanelState {
@@ -141,6 +201,7 @@ impl PanelState {
             notifications: 0,
             unseen: 0,
             tray: Vec::new(),
+            security: SecurityIndicators::default(),
         }
     }
 }
@@ -677,7 +738,7 @@ pub fn paint_session_menu(
         };
         let isz = 18.0;
         let icon_rect = Rect::from_xywh(row.x() + 8.0, row.center().y - isz / 2.0, isz, isz);
-        paint_icon(ctx, icon_name, icon_rect, t.colors.text);
+        panel_icon(ctx, icon_name, icon_rect, t.colors.text);
 
         ctx.label_left(
             icon_rect.right() + 10.0,
@@ -691,6 +752,18 @@ pub fn paint_session_menu(
 }
 
 /// ── Quick Panel (motyw + Wi-Fi + dźwięk + jasność) ──
+
+/// Bok ikony statusu/paska (spójny dla burgera, Quick Panelu i przełączników).
+pub const PANEL_ICON: f64 = 16.0;
+
+/// Ikony paska są **monochromatyczne** (kolor z motywu).
+///
+/// Pastelowe ilustracje i zewnętrzne zestawy PNG ignorują kolor, więc w jasnym
+/// motywie giną na jasnym tle — a status ma być czytelny w obu trybach. Ikony
+/// aplikacji (taskbar, launcher) zostają kolorowe, bo identyfikują program.
+fn panel_icon(ctx: &mut PaintCtx, name: IconName, rect: Rect, color: libluna_core::Color) {
+    paint_icon_themed(ctx, name, rect, color, libluna_core::IconTheme::Monochrome);
+}
 
 /// Prostokąt przycisku otwierającego Quick Panel (na lewo od kropek i przełączników).
 pub fn quick_button_rect(bar: Rect, theme: &Theme, text: &TextEngine, state: &PanelState) -> Rect {
@@ -851,13 +924,13 @@ fn paint_tray_icon(ctx: &mut PaintCtx, icon: &TrayIcon, rect: Rect) {
     match icon {
         TrayIcon::Named(name) => {
             if !paint_named_icon(ctx, Some(name), rect) {
-                paint_icon(ctx, IconName::Info, rect, ctx.theme.colors.text);
+                panel_icon(ctx, IconName::Info, rect, ctx.theme.colors.text);
             }
         }
         TrayIcon::Pixmap(image) => {
             ctx.scene.image(rect, image.clone());
         }
-        TrayIcon::None => paint_icon(ctx, IconName::Info, rect, ctx.theme.colors.text),
+        TrayIcon::None => panel_icon(ctx, IconName::Info, rect, ctx.theme.colors.text),
     }
 }
 
@@ -1018,7 +1091,7 @@ pub fn paint_tray_context_menu(
             color,
         );
         if row.submenu {
-            paint_icon(
+            panel_icon(
                 ctx,
                 IconName::ChevronRight,
                 Rect::from_xywh(r.right() - 20.0, r.center().y - 7.0, 14.0, 14.0),
@@ -1545,7 +1618,7 @@ pub fn paint_quick_panel(ctx: &mut PaintCtx, rect: Rect, data: &QuickData, hover
                 match data.preference {
                     ThemePreference::Light => IconName::Brightness,
                     ThemePreference::Dark => IconName::Moon,
-                    ThemePreference::System => IconName::Monitor,
+                    ThemePreference::System => IconName::Auto,
                 },
                 IconName::Settings,
             ])
@@ -1560,7 +1633,7 @@ pub fn paint_quick_panel(ctx: &mut PaintCtx, rect: Rect, data: &QuickData, hover
             } else {
                 t.colors.text
             };
-            paint_icon(
+            panel_icon(
                 ctx,
                 icon,
                 Rect::from_xywh(r.center().x - sz / 2.0, r.center().y - sz / 2.0, sz, sz),
@@ -1669,7 +1742,7 @@ pub fn paint_quick_panel(ctx: &mut PaintCtx, rect: Rect, data: &QuickData, hover
             libluna_widgets::hover_fill(t),
         );
     }
-    paint_icon(
+    panel_icon(
         ctx,
         IconName::Volume,
         Rect::from_xywh(l.mute.x() + 1.0, l.mute.y() + 1.0, 18.0, 18.0),
@@ -1759,7 +1832,7 @@ pub fn paint_quick_panel(ctx: &mut PaintCtx, rect: Rect, data: &QuickData, hover
         t.radius.small,
         t.colors.accent.scale_alpha(0.18),
     );
-    paint_icon(
+    panel_icon(
         ctx,
         IconName::Music,
         Rect::from_xywh(
@@ -1844,7 +1917,7 @@ pub fn paint_quick_panel(ctx: &mut PaintCtx, rect: Rect, data: &QuickData, hover
             ctx.scene
                 .fill_rounded_rect(r, r.height() / 2.0, libluna_widgets::hover_fill(t));
         }
-        paint_icon(
+        panel_icon(
             ctx,
             icon,
             Rect::from_xywh(r.center().x - 10.0, r.center().y - 10.0, 20.0, 20.0),
@@ -1866,7 +1939,7 @@ pub fn paint_quick_panel(ctx: &mut PaintCtx, rect: Rect, data: &QuickData, hover
             .fill_rounded_rect(play, play.width() / 2.0, libluna_widgets::hover_fill(t));
     }
     let playing = data.media.map(|m| m.playing).unwrap_or(false);
-    paint_icon(
+    panel_icon(
         ctx,
         if playing {
             IconName::Pause
@@ -1954,7 +2027,7 @@ pub fn paint_volume_popup(ctx: &mut PaintCtx, rect: Rect, pct: u8, muted: bool, 
     let pad = t.spacing.lg;
     let icon_sz = 18.0;
     let icon_rect = Rect::from_xywh(rect.x() + pad, rect.y() + pad, icon_sz, icon_sz);
-    paint_icon(
+    panel_icon(
         ctx,
         IconName::Volume,
         icon_rect,
@@ -2180,7 +2253,7 @@ pub fn paint_wifi_popup(
     let pad = t.spacing.lg;
     let icon_sz = 18.0;
     let icon_rect = Rect::from_xywh(rect.x() + pad, rect.y() + pad, icon_sz, icon_sz);
-    paint_icon(
+    panel_icon(
         ctx,
         IconName::Wifi,
         icon_rect,
@@ -2398,11 +2471,14 @@ pub enum CalendarAction {
     PrevMonth,
     NextMonth,
     SelectDay(u32),
+    /// Otwórz pełną aplikację `luna-clock` na wybranym dniu.
+    OpenApp,
 }
 
 pub fn calendar_popup_rect(bar: Rect, _theme: &Theme) -> Rect {
     let w = 320.0;
-    let h = 350.0;
+    // Więcej miejsca na plan dnia i „Otwórz kalendarz”.
+    let h = 424.0;
     let pad = 6.0;
     let x = (bar.center().x - w / 2.0).clamp(10.0, (bar.right() - w - 10.0).max(10.0));
     Rect::from_xywh(x, bar.bottom() + pad, w, h)
@@ -2454,6 +2530,18 @@ pub fn first_weekday_of_month(year: i64, month: u32) -> usize {
     }
 }
 
+/// Prostokąt przycisku „Otwórz kalendarz” (spójny dla rysowania i trafień).
+pub fn calendar_open_button_rect(rect: Rect, theme: &Theme) -> Rect {
+    let pad = theme.spacing.lg;
+    Rect::from_xywh(
+        rect.x() + pad,
+        rect.bottom() - pad - 30.0,
+        (rect.width() - 2.0 * pad).max(0.0),
+        30.0,
+    )
+}
+
+/// Rysuje kalendarz panelu wraz z planem wybranego dnia.
 pub fn paint_calendar_popup(
     ctx: &mut PaintCtx,
     rect: Rect,
@@ -2465,6 +2553,39 @@ pub fn paint_calendar_popup(
     today_month: u32,
     today_day: u32,
     selected_day: Option<u32>,
+) {
+    paint_calendar_popup_with_events(
+        ctx,
+        rect,
+        clock_str,
+        date_str,
+        view_year,
+        view_month,
+        today_year,
+        today_month,
+        today_day,
+        selected_day,
+        &[],
+        "",
+        true,
+    );
+}
+
+/// Wariant z wydarzeniami i świętami (kropki i plan dnia).
+pub fn paint_calendar_popup_with_events(
+    ctx: &mut PaintCtx,
+    rect: Rect,
+    clock_str: &str,
+    date_str: &str,
+    view_year: i64,
+    view_month: u32,
+    today_year: i64,
+    today_month: u32,
+    today_day: u32,
+    selected_day: Option<u32>,
+    events: &[CalendarEvent],
+    holiday_country: &str,
+    use_24h: bool,
 ) {
     let t = ctx.theme;
     ctx.scene
@@ -2569,6 +2690,14 @@ pub fn paint_calendar_popup(
     let cell_h = 28.0;
     let first_weekday = first_weekday_of_month(view_year, view_month);
     let total_days = days_in_month(view_year, view_month);
+    let month_holidays: Vec<Holiday> = if holiday_country.is_empty() {
+        Vec::new()
+    } else {
+        holidays::year_holidays(holiday_country, view_year as i32)
+            .into_iter()
+            .filter(|holiday| holiday.date.month == view_month)
+            .collect()
+    };
 
     for day in 1..=total_days {
         let cell_idx = first_weekday + (day - 1) as usize;
@@ -2580,6 +2709,9 @@ pub fn paint_calendar_popup(
 
         let is_today = view_year == today_year && view_month == today_month && day == today_day;
         let is_selected = selected_day == Some(day);
+        let day_key = format!("{view_year:04}-{view_month:02}-{day:02}");
+        let has_event = events.iter().any(|event| event.date == day_key);
+        let has_holiday = month_holidays.iter().any(|holiday| holiday.date.day == day);
 
         if is_today {
             ctx.scene
@@ -2614,7 +2746,131 @@ pub fn paint_calendar_popup(
                 t.colors.text,
             );
         }
+        if has_event {
+            ctx.scene.fill_circle(
+                Point::new(cx - if has_holiday { 3.0 } else { 0.0 }, cy + 9.0),
+                2.0,
+                if is_today {
+                    t.colors.accent_fg
+                } else {
+                    t.colors.accent
+                },
+            );
+        }
+        if has_holiday {
+            ctx.scene.fill_circle(
+                Point::new(cx + if has_event { 3.0 } else { 0.0 }, cy + 9.0),
+                2.0,
+                t.colors.warning,
+            );
+        }
     }
+
+    // Plan wybranego dnia + skrót do pełnego kalendarza.
+    let list_day = selected_day
+        .or_else(|| (view_year == today_year && view_month == today_month).then_some(today_day));
+    let list_top = grid_start_y + 6.0 * cell_h + 4.0;
+    let open = calendar_open_button_rect(rect, t);
+    let list_bottom = open.y() - 6.0;
+    if let Some(day) = list_day {
+        let key = format!("{view_year:04}-{view_month:02}-{day:02}");
+        let mut day_events: Vec<&CalendarEvent> =
+            events.iter().filter(|event| event.date == key).collect();
+        day_events.sort_by_key(|event| event.start_minute.unwrap_or(0));
+        let day_holidays: Vec<&Holiday> = month_holidays
+            .iter()
+            .filter(|holiday| holiday.date.day == day)
+            .collect();
+        let mut ey = list_top + 8.0;
+        let mut shown_events = 0usize;
+
+        if let Some(holiday) = day_holidays.first() {
+            ctx.scene
+                .fill_circle(Point::new(rect.x() + pad + 4.0, ey), 3.0, t.colors.warning);
+            ctx.label_left(
+                rect.x() + pad + 14.0,
+                ey,
+                &tr(holiday.name),
+                t.typography.caption.size,
+                weight::MEDIUM,
+                t.colors.warning,
+            );
+            ey += 17.0;
+        }
+
+        if day_events.is_empty() && day_holidays.is_empty() {
+            ctx.label_left(
+                rect.x() + pad,
+                ey,
+                &tr("No events"),
+                t.typography.caption.size,
+                weight::NORMAL,
+                t.colors.dim_text,
+            );
+        } else {
+            let max_events = if day_holidays.is_empty() { 2 } else { 1 };
+            for event in day_events.iter().take(max_events) {
+                if ey + 8.0 > list_bottom {
+                    break;
+                }
+                let time = match event.start_minute {
+                    Some(minute) if use_24h => format!("{:02}:{:02}", minute / 60, minute % 60),
+                    Some(minute) => {
+                        let suffix = if minute / 60 < 12 { "AM" } else { "PM" };
+                        let hour = match (minute / 60) % 12 {
+                            0 => 12,
+                            hour => hour,
+                        };
+                        format!("{hour}:{:02} {suffix}", minute % 60)
+                    }
+                    None => tr("All day"),
+                };
+                let time_width = ctx.measure(&time, t.typography.caption.size, weight::MEDIUM);
+                ctx.label_left(
+                    rect.x() + pad,
+                    ey,
+                    &time,
+                    t.typography.caption.size,
+                    weight::MEDIUM,
+                    t.colors.accent,
+                );
+                ctx.label_left(
+                    rect.x() + pad + time_width.max(42.0) + 10.0,
+                    ey,
+                    &event.title,
+                    t.typography.caption.size,
+                    weight::NORMAL,
+                    t.colors.text,
+                );
+                ey += 17.0;
+                shown_events += 1;
+            }
+            let extra = day_events.len().saturating_sub(shown_events);
+            if extra > 0 {
+                ctx.label_left(
+                    rect.x() + pad,
+                    ey,
+                    &format!("+{extra}"),
+                    t.typography.caption.size,
+                    weight::NORMAL,
+                    t.colors.dim_text,
+                );
+            }
+        }
+    }
+
+    ctx.scene
+        .fill_rounded_rect(open, t.radius.small, t.colors.accent.scale_alpha(0.18));
+    ctx.scene
+        .stroke_rounded_rect(open, t.radius.small, 1.0, t.colors.accent);
+    ctx.label_center(
+        open.center().x,
+        open.center().y,
+        &tr("Open calendar"),
+        t.typography.caption.size,
+        weight::BOLD,
+        t.colors.accent,
+    );
 }
 
 pub fn calendar_popup_hit(
@@ -2645,6 +2901,10 @@ pub fn calendar_popup_hit(
     );
     if next_btn.contains(p) {
         return Some(CalendarAction::NextMonth);
+    }
+
+    if calendar_open_button_rect(rect, theme).contains(p) {
+        return Some(CalendarAction::OpenApp);
     }
 
     let day_names_y = nav_y + arrow_btn_sz + theme.spacing.md;
@@ -2822,7 +3082,7 @@ pub fn paint_notification_center(
     if history.is_empty() {
         let cy = rect.center().y;
         let icon = Rect::from_xywh(rect.center().x - 16.0, cy - 44.0, 32.0, 32.0);
-        paint_icon(ctx, IconName::Info, icon, t.colors.dim_text);
+        panel_icon(ctx, IconName::Info, icon, t.colors.dim_text);
         ctx.label_center(
             rect.center().x,
             cy + 4.0,
@@ -2856,7 +3116,7 @@ pub fn paint_notification_center(
         let icon = Rect::from_xywh(r.x() + 4.0, r.center().y - 14.0, 28.0, 28.0);
         ctx.scene
             .fill_rounded_rect(icon, t.radius.small, t.colors.accent.scale_alpha(0.18));
-        paint_icon(
+        panel_icon(
             ctx,
             n.icon,
             Rect::from_xywh(icon.x() + 6.0, icon.y() + 6.0, 16.0, 16.0),
@@ -3123,7 +3383,7 @@ pub fn paint_task_menu(
         };
         let isz = 18.0;
         let icon_rect = Rect::from_xywh(row.x() + 8.0, row.center().y - isz / 2.0, isz, isz);
-        paint_icon(ctx, icon, icon_rect, t.colors.text);
+        panel_icon(ctx, icon, icon_rect, t.colors.text);
         let text_x = icon_rect.right() + 10.0;
         let avail = (row.right() - 8.0 - text_x).max(0.0);
         let label = ellipsize(
@@ -3141,6 +3401,162 @@ pub fn paint_task_menu(
             weight::NORMAL,
             t.colors.text,
         );
+    }
+}
+
+// ── Menu kontekstowe aplikacji w launcherze (PPM) ──
+
+/// Akcje menu kontekstowego aplikacji w launcherze.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppMenuAction {
+    /// Uruchom aplikację.
+    Launch,
+    /// Dodaj do ulubionych / usuń z ulubionych.
+    ToggleFavorite,
+    /// Uruchom z uprawnieniami administratora (`pkexec` → agent polkit Luny).
+    OpenAsAdmin,
+    /// Skopiuj polecenie uruchamiające do schowka.
+    CopyCommand,
+    /// Otwórz Sklep na pakiecie, żeby móc go odinstalować.
+    Uninstall,
+}
+
+/// Jedna pozycja menu kontekstowego aplikacji.
+///
+/// `action == None` oznacza separator — nie da się go kliknąć.
+#[derive(Debug, Clone)]
+pub struct AppMenuRow {
+    pub label: String,
+    pub action: Option<AppMenuAction>,
+    pub enabled: bool,
+    /// Pozycja niebezpieczna (np. odinstalowanie) — rysowana kolorem błędu.
+    pub danger: bool,
+}
+
+impl AppMenuRow {
+    /// Pozioma linia rozdzielająca grupy akcji.
+    pub fn separator() -> Self {
+        Self {
+            label: String::new(),
+            action: None,
+            enabled: false,
+            danger: false,
+        }
+    }
+}
+
+/// Wysokość pozycji menu aplikacji.
+pub const APP_MENU_ROW_H: f64 = 32.0;
+/// Wysokość separatora w menu aplikacji.
+pub const APP_MENU_SEPARATOR_H: f64 = 9.0;
+/// Szerokość menu aplikacji.
+pub const APP_MENU_W: f64 = 244.0;
+
+fn app_menu_row_h(row: &AppMenuRow) -> f64 {
+    if row.action.is_none() {
+        APP_MENU_SEPARATOR_H
+    } else {
+        APP_MENU_ROW_H
+    }
+}
+
+/// Prostokąt menu kontekstowego obok kafla `anchor`.
+///
+/// Menu otwiera się po prawej stronie kafla; gdy brakuje miejsca — po lewej.
+/// Całość jest przycinana do `bounds` (powierzchni powłoki), żeby nie wyszła
+/// poza ekran przy kafelkach na dole listy.
+pub fn app_menu_rect(anchor: Rect, rows: &[AppMenuRow], bounds: Rect, theme: &Theme) -> Rect {
+    let pad = theme.spacing.sm;
+    let h = 2.0 * pad + rows.iter().map(app_menu_row_h).sum::<f64>();
+    let gap = 8.0;
+    let min_x = bounds.x() + gap;
+    let max_x = (bounds.right() - APP_MENU_W - gap).max(min_x);
+    let mut x = anchor.right() + gap;
+    if x > max_x {
+        x = anchor.x() - APP_MENU_W - gap;
+    }
+    let x = x.clamp(min_x, max_x);
+    let min_y = bounds.y() + gap;
+    let max_y = (bounds.bottom() - h - gap).max(min_y);
+    let y = anchor.y().clamp(min_y, max_y);
+    Rect::from_xywh(x, y, APP_MENU_W, h)
+}
+
+/// Indeks klikniętej pozycji menu aplikacji (pomija separatory i wyłączone wpisy).
+pub fn app_menu_item_at(rect: Rect, rows: &[AppMenuRow], p: Point) -> Option<usize> {
+    if !rect.contains(p) {
+        return None;
+    }
+    let mut y = rect.y() + 6.0;
+    for (i, row) in rows.iter().enumerate() {
+        let h = app_menu_row_h(row);
+        let r = Rect::from_xywh(rect.x() + 6.0, y, rect.width() - 12.0, h);
+        if r.contains(p) {
+            return (row.enabled && row.action.is_some()).then_some(i);
+        }
+        y += h;
+    }
+    None
+}
+
+/// Rysuje menu kontekstowe aplikacji.
+pub fn paint_app_menu(ctx: &mut PaintCtx, rect: Rect, rows: &[AppMenuRow], hovered: Option<usize>) {
+    let t = ctx.theme;
+    ctx.scene
+        .fill_rounded_rect(rect, t.radius.medium, t.colors.card_bg);
+    ctx.scene
+        .stroke_rounded_rect(rect, t.radius.medium, 1.0, t.colors.border);
+    let mut y = rect.y() + 6.0;
+    for (i, row) in rows.iter().enumerate() {
+        let h = app_menu_row_h(row);
+        let r = Rect::from_xywh(rect.x() + 6.0, y, rect.width() - 12.0, h);
+        let Some(action) = row.action else {
+            ctx.scene.fill_rect(
+                Rect::from_xywh(r.x() + 8.0, r.center().y, r.width() - 16.0, 1.0),
+                t.colors.border,
+            );
+            y += h;
+            continue;
+        };
+        if hovered == Some(i) && row.enabled {
+            ctx.scene
+                .fill_rounded_rect(r, t.radius.small, libluna_widgets::hover_fill(t));
+        }
+        let color = if !row.enabled {
+            t.colors.dim_text
+        } else if row.danger {
+            t.colors.error
+        } else {
+            t.colors.text
+        };
+        let icon = match action {
+            AppMenuAction::Launch => IconName::Play,
+            AppMenuAction::ToggleFavorite => IconName::Star,
+            AppMenuAction::OpenAsAdmin => IconName::User,
+            AppMenuAction::CopyCommand => IconName::Edit,
+            AppMenuAction::Uninstall => IconName::Close,
+        };
+        let isz = 18.0;
+        let icon_rect = Rect::from_xywh(r.x() + 8.0, r.center().y - isz / 2.0, isz, isz);
+        panel_icon(ctx, icon, icon_rect, color);
+        let text_x = icon_rect.right() + 10.0;
+        let avail = (r.right() - 8.0 - text_x).max(0.0);
+        let label = ellipsize(
+            &row.label,
+            avail,
+            t.typography.body.size,
+            weight::NORMAL,
+            ctx.text,
+        );
+        ctx.label_left(
+            text_x,
+            r.center().y,
+            &label,
+            t.typography.body.size,
+            weight::NORMAL,
+            color,
+        );
+        y += h;
     }
 }
 
@@ -3430,7 +3846,7 @@ pub fn paint_panel(panel: &PanelState, hover: &Hover, ctx: &mut PaintCtx, rect: 
         },
     );
     let isz = burger.width() * 0.64;
-    paint_icon(
+    panel_icon(
         ctx,
         IconName::Menu,
         Rect::from_xywh(
@@ -3479,6 +3895,10 @@ pub fn paint_panel(panel: &PanelState, hover: &Hover, ctx: &mut PaintCtx, rect: 
         ctx.scene.fill_rounded_rect(dot, 3.0, t.colors.accent);
     }
 
+    if panel.security.any() {
+        paint_security_indicators(ctx, rect, clock_r, panel);
+    }
+
     // ── Prawa grupa (od prawej): przełączniki statusu i przestrzenie ──
     // Użytkownik i akcje sesji są w Quick Panelu — pasek nie powtarza ich etykiet.
 
@@ -3521,7 +3941,7 @@ pub fn paint_panel(panel: &PanelState, hover: &Hover, ctx: &mut PaintCtx, rect: 
                 t.colors.shade
             },
         );
-        paint_icon(ctx, IconName::ChevronRight, r, t.colors.text);
+        panel_icon(ctx, IconName::ChevronRight, r, t.colors.text);
     }
 
     // Przycisk Quick Panelu (motyw, Wi-Fi, dźwięk, jasność).
@@ -3535,11 +3955,252 @@ pub fn paint_panel(panel: &PanelState, hover: &Hover, ctx: &mut PaintCtx, rect: 
             t.colors.shade
         },
     );
-    paint_icon(
+    panel_icon(
         ctx,
         IconName::Sliders,
         Rect::from_xywh(qb.center().x - 7.5, qb.center().y - 7.5, 15.0, 15.0),
         t.colors.text,
+    );
+}
+
+/// Wskaźniki prywatności na pasku: mikrofon, kamera, alert sieciowy.
+///
+/// Rysujemy je między zegarem a prawą grupą przełączników. Jeśli miejsca jest
+/// za mało (wąski ekran), pomijamy je — ważniejszy jest taskbar i przełączniki.
+fn paint_security_indicators(ctx: &mut PaintCtx, bar: Rect, clock_r: Rect, panel: &PanelState) {
+    let t = *ctx.theme;
+    let mut icons: Vec<(IconName, Color)> = Vec::new();
+    if panel.security.microphone {
+        icons.push((IconName::Microphone, t.colors.error));
+    }
+    if panel.security.camera {
+        icons.push((IconName::Camera, t.colors.error));
+    }
+    if panel.security.network {
+        icons.push((IconName::Globe, t.colors.accent));
+    }
+    if icons.is_empty() {
+        return;
+    }
+    let isz = 15.0;
+    let gap = 6.0;
+    let pad = 6.0;
+    let width = 2.0 * pad + icons.len() as f64 * isz + (icons.len().saturating_sub(1) as f64) * gap;
+    let right_limit = toggle_rects(bar, &t, ctx.text, panel)
+        .first()
+        .map(|r| r.x())
+        .unwrap_or(bar.right() - 120.0);
+    let x = clock_r.right() + t.spacing.lg;
+    if x + width > right_limit - 8.0 {
+        return;
+    }
+    let chip = Rect::from_xywh(x, bar.center().y - 13.0, width, 26.0);
+    ctx.scene
+        .fill_rounded_rect(chip, t.radius.small, t.colors.shade);
+    ctx.scene
+        .stroke_rounded_rect(chip, t.radius.small, 1.0, t.colors.border);
+    let mut ix = chip.x() + pad;
+    for (icon, color) in icons {
+        paint_icon(
+            ctx,
+            icon,
+            Rect::from_xywh(ix, chip.center().y - isz / 2.0, isz, isz),
+            color,
+        );
+        ix += isz + gap;
+    }
+    if panel.security.alert {
+        let dot = Rect::from_xywh(chip.right() - 7.0, chip.y() + 4.0, 5.0, 5.0);
+        ctx.scene.fill_rounded_rect(dot, 2.5, t.colors.error);
+    }
+}
+
+/// Modal „Luna Security” — prośba o zgodę na mikrofon/kamerę/sieć.
+pub fn paint_security_dialog(
+    ctx: &mut PaintCtx,
+    layout: SecurityDialogLayout,
+    icon: IconName,
+    app: &str,
+    capability: &str,
+    message: &str,
+    remote: Option<&str>,
+    hover: Option<SecurityChoice>,
+) {
+    let t = *ctx.theme;
+    let card = layout.card;
+    ctx.scene
+        .fill_rounded_rect(card, t.radius.large, t.colors.card_bg);
+    ctx.scene
+        .stroke_rounded_rect(card, t.radius.large, 1.0, t.colors.border);
+    // Akcentowy pasek na górze karty — sygnał „to wymaga decyzji”.
+    ctx.scene.fill_rounded_rect(
+        Rect::from_xywh(
+            card.x() + t.radius.large,
+            card.y(),
+            card.width() - 2.0 * t.radius.large,
+            3.0,
+        ),
+        1.5,
+        t.colors.accent,
+    );
+
+    let pad = t.spacing.lg;
+    let icon_sz = 34.0;
+    let icon_rect = Rect::from_xywh(card.x() + pad, card.y() + pad, icon_sz, icon_sz);
+    ctx.scene
+        .fill_rounded_rect(icon_rect, icon_sz / 2.0, t.colors.accent.scale_alpha(0.14));
+    paint_icon(
+        ctx,
+        icon,
+        Rect::from_xywh(
+            icon_rect.center().x - 9.0,
+            icon_rect.center().y - 9.0,
+            18.0,
+            18.0,
+        ),
+        t.colors.accent,
+    );
+    let text_x = icon_rect.right() + t.spacing.md;
+    let cap = ellipsize(
+        capability,
+        card.right() - pad - text_x,
+        t.typography.caption.size,
+        weight::MEDIUM,
+        ctx.text,
+    );
+    ctx.label_left(
+        text_x,
+        card.y() + pad + 6.0,
+        &tr("Luna Security"),
+        t.typography.heading.size,
+        weight::BOLD,
+        t.colors.text,
+    );
+    ctx.label_left(
+        text_x,
+        card.y() + pad + 24.0,
+        &cap,
+        t.typography.caption.size,
+        weight::MEDIUM,
+        t.colors.dim_text,
+    );
+
+    let body_top = icon_rect.bottom() + t.spacing.md;
+    let app = ellipsize(
+        app,
+        card.width() - 2.0 * pad,
+        t.typography.body.size,
+        weight::BOLD,
+        ctx.text,
+    );
+    ctx.label_left(
+        card.x() + pad,
+        body_top,
+        &app,
+        t.typography.body.size,
+        weight::BOLD,
+        t.colors.text,
+    );
+    let message = ellipsize(
+        message,
+        card.width() - 2.0 * pad,
+        t.typography.body.size,
+        weight::NORMAL,
+        ctx.text,
+    );
+    ctx.label_left(
+        card.x() + pad,
+        body_top + 22.0,
+        &message,
+        t.typography.body.size,
+        weight::NORMAL,
+        t.colors.text,
+    );
+    if let Some(remote) = remote {
+        let line = format!("{}: {remote}", tr("Remote server"));
+        let line = ellipsize(
+            &line,
+            card.width() - 2.0 * pad,
+            t.typography.caption.size,
+            weight::NORMAL,
+            ctx.text,
+        );
+        ctx.label_left(
+            card.x() + pad,
+            body_top + 46.0,
+            &line,
+            t.typography.caption.size,
+            weight::NORMAL,
+            t.colors.dim_text,
+        );
+    }
+    ctx.label_left(
+        card.x() + pad,
+        layout.deny.y() - 10.0,
+        &tr("The decision will be remembered"),
+        t.typography.caption.size,
+        weight::NORMAL,
+        t.colors.dim_text,
+    );
+    paint_security_button(
+        ctx,
+        layout.deny,
+        &tr("Deny"),
+        false,
+        hover == Some(SecurityChoice::Deny),
+    );
+    paint_security_button(
+        ctx,
+        layout.allow,
+        &tr("Allow"),
+        true,
+        hover == Some(SecurityChoice::Allow),
+    );
+}
+
+fn paint_security_button(
+    ctx: &mut PaintCtx,
+    rect: Rect,
+    label: &str,
+    primary: bool,
+    hovered: bool,
+) {
+    let t = *ctx.theme;
+    if primary {
+        ctx.scene.fill_rounded_rect(
+            rect,
+            t.radius.small,
+            if hovered {
+                t.colors.accent.scale_alpha(0.86)
+            } else {
+                t.colors.accent
+            },
+        );
+    } else {
+        ctx.scene
+            .fill_rounded_rect(rect, t.radius.small, t.colors.card_bg);
+        ctx.scene.stroke_rounded_rect(
+            rect,
+            t.radius.small,
+            1.0,
+            if hovered {
+                t.colors.accent
+            } else {
+                t.colors.border
+            },
+        );
+    }
+    ctx.label_center(
+        rect.center().x,
+        rect.center().y,
+        label,
+        t.typography.body.size,
+        weight::MEDIUM,
+        if primary {
+            t.colors.accent_fg
+        } else {
+            t.colors.text
+        },
     );
 }
 
@@ -3557,7 +4218,7 @@ fn paint_toggle_pill(ctx: &mut PaintCtx, rect: Rect, toggle: &Toggle, hovered: b
     };
     let isz = 15.0;
     let ix = rect.x() + t.spacing.xs;
-    paint_icon(
+    panel_icon(
         ctx,
         toggle.icon,
         Rect::from_xywh(ix, rect.center().y - isz / 2.0, isz, isz),
@@ -3738,6 +4399,36 @@ pub fn launcher_app_at(
     apps.iter().position(|a| std::ptr::eq(a, target_app))
 }
 
+/// Prostokąt kafla aplikacji o indeksie `index` w `apps` (po filtrze launchera).
+///
+/// Służy do zakotwiczenia menu kontekstowego (PPM) przy właściwym kaflu —
+/// także po przewinięciu listy i w widoku karuzeli.
+pub fn launcher_app_rect(
+    apps: &[App],
+    launcher: &Launcher,
+    area: Rect,
+    theme: &Theme,
+    text: &TextEngine,
+    index: usize,
+) -> Option<Rect> {
+    let target = apps.get(index)?;
+    let filtered = launcher.filter_apps(apps);
+    let pos = filtered.iter().position(|app| std::ptr::eq(*app, target))?;
+    let content = launcher_rects(area, theme, text).content;
+    let sy = launcher.scroll;
+    let tile = match launcher.view {
+        LauncherView::Grid => grid_tile(content, pos),
+        LauncherView::List => list_row(content, pos),
+        LauncherView::Carousel => carousel_card(content, pos, launcher.carousel),
+    };
+    Some(Rect::from_xywh(
+        tile.x(),
+        tile.y() - sy,
+        tile.width(),
+        tile.height(),
+    ))
+}
+
 fn grid_tile(content: Rect, i: usize) -> Rect {
     let gap = 12.0;
     let cell_w = (content.width() - gap * (GRID_COLS as f64 - 1.0)) / GRID_COLS as f64;
@@ -3898,7 +4589,7 @@ pub fn paint_launcher(
     let hint_max = r.switcher.x() - t.spacing.sm - hint_x;
     if hint_max > 40.0 {
         let hint = ellipsize(
-            &tr("Right-click to pin"),
+            &tr("Right-click for options"),
             hint_max,
             t.typography.caption.size,
             weight::NORMAL,
@@ -3938,7 +4629,7 @@ pub fn paint_launcher(
         s_icon_sz,
         s_icon_sz,
     );
-    paint_icon(ctx, IconName::Search, s_icon_rect, t.colors.dim_text);
+    panel_icon(ctx, IconName::Search, s_icon_rect, t.colors.dim_text);
 
     let search_x = s_icon_rect.right() + t.spacing.sm;
     if launcher.search.is_empty() {
@@ -3963,7 +4654,7 @@ pub fn paint_launcher(
             },
         );
         let xsz = 10.0;
-        paint_icon(
+        panel_icon(
             ctx,
             IconName::Close,
             Rect::from_xywh(
@@ -4123,7 +4814,7 @@ fn paint_grid_tile(
         let badge = Rect::from_xywh(rect.right() - 26.0, rect.y() + 6.0, 20.0, 20.0);
         ctx.scene
             .fill_circle(badge.center(), badge.width() / 2.0, t.colors.shade);
-        paint_icon(
+        panel_icon(
             ctx,
             IconName::Pin,
             Rect::from_xywh(
@@ -4212,7 +4903,7 @@ fn paint_list_row(
         );
         ctx.scene
             .fill_circle(badge.center(), badge.width() / 2.0, t.colors.shade);
-        paint_icon(
+        panel_icon(
             ctx,
             IconName::Pin,
             Rect::from_xywh(
@@ -4298,7 +4989,7 @@ fn paint_carousel_card(
         let badge = Rect::from_xywh(rect.right() - 30.0, rect.y() + 10.0, 22.0, 22.0);
         ctx.scene
             .fill_circle(badge.center(), badge.width() / 2.0, t.colors.shade);
-        paint_icon(
+        panel_icon(
             ctx,
             IconName::Pin,
             Rect::from_xywh(
@@ -4371,6 +5062,168 @@ pub fn accent_soft(theme: &Theme) -> Color {
 }
 
 #[cfg(test)]
+mod app_menu_tests {
+    use super::*;
+
+    fn rows() -> Vec<AppMenuRow> {
+        vec![
+            AppMenuRow {
+                label: "Open".into(),
+                action: Some(AppMenuAction::Launch),
+                enabled: true,
+                danger: false,
+            },
+            AppMenuRow {
+                label: "Add to favorites".into(),
+                action: Some(AppMenuAction::ToggleFavorite),
+                enabled: true,
+                danger: false,
+            },
+            AppMenuRow::separator(),
+            AppMenuRow {
+                label: "Uninstall".into(),
+                action: Some(AppMenuAction::Uninstall),
+                enabled: false,
+                danger: true,
+            },
+        ]
+    }
+
+    #[test]
+    fn menu_hit_test_skips_separator_and_disabled_rows() {
+        let theme = Theme::light();
+        let anchor = Rect::from_xywh(400.0, 200.0, 120.0, 100.0);
+        let bounds = Rect::from_xywh(0.0, 0.0, 1280.0, 680.0);
+        let menu = app_menu_rect(anchor, &rows(), bounds, &theme);
+
+        let y = |i: usize| {
+            let mut y = menu.y() + 6.0;
+            for row in rows().iter().take(i) {
+                y += app_menu_row_h(row);
+            }
+            y + app_menu_row_h(&rows()[i]) / 2.0
+        };
+        assert_eq!(
+            app_menu_item_at(menu, &rows(), Point::new(menu.center().x, y(0))),
+            Some(0)
+        );
+        assert_eq!(
+            app_menu_item_at(menu, &rows(), Point::new(menu.center().x, y(1))),
+            Some(1)
+        );
+        assert_eq!(
+            app_menu_item_at(menu, &rows(), Point::new(menu.center().x, y(2))),
+            None,
+            "separator nie może być klikalny"
+        );
+        assert_eq!(
+            app_menu_item_at(menu, &rows(), Point::new(menu.center().x, y(3))),
+            None,
+            "wyłączona pozycja nie może być klikalna"
+        );
+    }
+
+    #[test]
+    fn menu_opens_on_the_left_when_there_is_no_room_on_the_right() {
+        let theme = Theme::light();
+        let bounds = Rect::from_xywh(0.0, 0.0, 1280.0, 680.0);
+        let anchor = Rect::from_xywh(1200.0, 200.0, 60.0, 60.0);
+        let menu = app_menu_rect(anchor, &rows(), bounds, &theme);
+        assert!(
+            menu.right() <= anchor.x(),
+            "menu powinno zmieścić się po lewej"
+        );
+        assert!(menu.x() >= bounds.x());
+        assert!(menu.bottom() <= bounds.bottom());
+    }
+
+    #[test]
+    fn menu_is_clamped_at_the_bottom_edge() {
+        let theme = Theme::light();
+        let bounds = Rect::from_xywh(0.0, 0.0, 1280.0, 680.0);
+        let anchor = Rect::from_xywh(400.0, 660.0, 120.0, 80.0);
+        let menu = app_menu_rect(anchor, &rows(), bounds, &theme);
+        assert!(menu.y() >= bounds.y());
+        assert!(menu.bottom() <= bounds.bottom());
+    }
+}
+
+#[cfg(test)]
+mod security_ui_tests {
+    use super::*;
+
+    #[test]
+    fn security_dialog_buttons_are_inside_card_and_hittable() {
+        let theme = Theme::light();
+        let size = Size::new(1280.0, 680.0);
+        let layout = security_dialog_layout(size, &theme);
+        assert!(layout.card.x() >= 0.0);
+        assert!(layout.card.right() <= size.width);
+        assert!(layout.allow.right() <= layout.card.right());
+        assert!(layout.deny.x() >= layout.card.x());
+        assert_eq!(
+            security_dialog_hit(layout, layout.allow.center()),
+            Some(SecurityChoice::Allow)
+        );
+        assert_eq!(
+            security_dialog_hit(layout, layout.deny.center()),
+            Some(SecurityChoice::Deny)
+        );
+        assert_eq!(
+            security_dialog_hit(
+                layout,
+                Point::new(layout.card.center().x, layout.card.y() + 4.0)
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn security_indicators_default_to_none() {
+        assert!(!SecurityIndicators::default().any());
+        assert!(SecurityIndicators {
+            microphone: true,
+            ..Default::default()
+        }
+        .any());
+    }
+
+    #[test]
+    fn security_dialog_paints_without_panic() {
+        use libluna_render::{Scene, TextEngine};
+        let theme = Theme::light();
+        let text = TextEngine::none();
+        let mut scene = Scene::new();
+        let mut ctx = PaintCtx::new(&mut scene, &theme, &text);
+        let layout = security_dialog_layout(Size::new(1280.0, 680.0), &theme);
+        paint_security_dialog(
+            &mut ctx,
+            layout,
+            IconName::Globe,
+            "Firefox",
+            &tr("Network"),
+            "Firefox chce wysyłać dane poza ten komputer",
+            Some("1.1.1.1:443"),
+            Some(SecurityChoice::Allow),
+        );
+        assert!(!scene.is_empty());
+
+        let bar = Rect::from_xywh(0.0, 0.0, 1280.0, THICKNESS);
+        let mut panel = PanelState::sample();
+        panel.security = SecurityIndicators {
+            microphone: true,
+            camera: true,
+            network: true,
+            alert: true,
+        };
+        let mut scene = Scene::new();
+        let mut ctx = PaintCtx::new(&mut scene, &theme, &text);
+        paint_panel(&panel, &Hover::new(), &mut ctx, bar);
+        assert!(!scene.is_empty());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use libluna_render::{Scene, TextEngine};
@@ -4395,6 +5248,31 @@ mod tests {
         // Kropki idą w lewo (wyższy indeks bliżej prawej) i nie zachodzą na siebie.
         assert!(rects[3].x() > rects[0].x());
         assert!(rects[0].right() <= rects[1].x());
+    }
+
+    #[test]
+    fn panel_icons_stay_monochrome_in_both_themes() {
+        // Ikony paska (w tym przycisk Quick Panelu) nie mogą zależeć od pastelowych
+        // ilustracji ani zewnętrznego zestawu PNG — w jasnym motywie ginęły na tle.
+        let text = TextEngine::none();
+        let count = |theme: &Theme| {
+            let mut scene = Scene::new();
+            let mut ctx = PaintCtx::new(&mut scene, theme, &text);
+            panel_icon(
+                &mut ctx,
+                IconName::Sliders,
+                Rect::from_xywh(0.0, 0.0, PANEL_ICON, PANEL_ICON),
+                theme.colors.text,
+            );
+            scene.len()
+        };
+        let light = count(&Theme::light());
+        let dark = count(&Theme::dark());
+        assert!(light > 0, "ikona Quick Panelu musi coś rysować");
+        assert_eq!(
+            light, dark,
+            "ten sam wektor w obu motywach (kolor bierze się z motywu)"
+        );
     }
 
     #[test]
@@ -4848,11 +5726,16 @@ mod tests {
 
         let wrect = wifi_popup_rect(bar, &theme, &text, &st);
         assert!(wrect.width() > 100.0);
-        let networks = vec![crate::system::WifiNetwork {
+        let networks = vec![crate::network::WifiNetwork {
             ssid: "TestNet".into(),
             signal: 80,
+            security: crate::network::Security::Wpa2,
             active: false,
-            security: "WPA2".into(),
+            device: "/dev".into(),
+            device_name: "wlp1".into(),
+            ap_path: "/ap".into(),
+            frequency: 2412,
+            known: false,
         }];
         let whit = wifi_popup_hit(
             wrect,
@@ -4886,6 +5769,46 @@ mod tests {
             10,
         );
         assert_eq!(prev_hit, Some(CalendarAction::PrevMonth));
+
+        let open = calendar_open_button_rect(cal_rect, &theme);
+        assert_eq!(
+            calendar_popup_hit(cal_rect, &theme, open.center(), 2026, 10),
+            Some(CalendarAction::OpenApp)
+        );
+    }
+
+    #[test]
+    fn calendar_popup_paints_events_and_open_button() {
+        let theme = Theme::dark();
+        let text = TextEngine::none();
+        let bar = Rect::from_xywh(0.0, 0.0, 1280.0, THICKNESS);
+        let rect = calendar_popup_rect(bar, &theme);
+        let events = vec![CalendarEvent {
+            date: "2026-10-08".to_owned(),
+            start_minute: Some(9 * 60 + 30),
+            title: "Lekarz".to_owned(),
+        }];
+        let mut scene = Scene::new();
+        let mut ctx = PaintCtx::new(&mut scene, &theme, &text);
+        paint_calendar_popup_with_events(
+            &mut ctx,
+            rect,
+            "12:00",
+            "czwartek, 08.10.2026",
+            2026,
+            10,
+            2026,
+            10,
+            8,
+            Some(8),
+            &events,
+            "PL",
+            true,
+        );
+        assert!(
+            scene.len() > 20,
+            "kalendarz z planem dnia powinien coś narysować"
+        );
     }
 
     #[test]

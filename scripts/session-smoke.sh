@@ -29,6 +29,7 @@ shell_bin="${LUNA_SHELL_BIN:-$bin_dir/luna-shell}"
 term_bin="${LUNA_TERMINAL_BIN:-$bin_dir/luna-terminal}"
 settings_bin="${LUNA_SETTINGS_BIN:-$bin_dir/luna-settings}"
 lock_bin="${LUNA_LOCK_BIN:-$bin_dir/luna-lock}"
+security_bin="${LUNA_SECURITY_BIN:-$bin_dir/luna-security}"
 
 say() { printf '\033[1m==> %s\033[0m\n' "$*"; }
 note() { printf '    %s\n' "$*"; }
@@ -39,7 +40,7 @@ fail() {
     exit 1
 }
 
-for bin in "$selene_bin" "$shell_bin" "$term_bin" "$settings_bin" "$lock_bin"; do
+for bin in "$selene_bin" "$shell_bin" "$term_bin" "$settings_bin" "$lock_bin" "$security_bin"; do
     [ -x "$bin" ] || fail "brak binarki: $bin (zbuduj: ./scripts/workspaces.sh build --release)"
 done
 command -v python3 >/dev/null 2>&1 || fail "wymagany python3 (sterowanie luna-control)"
@@ -249,8 +250,8 @@ else
     note "dmabuf wyłączony (CPU)"
 fi
 
-# ── Launcher: PPM przypina/odpina aplikację ─────────────────────────────────
-say "launcher: PPM przypina aplikację (stan w launcher.conf)"
+# ── Launcher: menu PPM → ulubione ───────────────────────────────────────────
+say "launcher: menu PPM dodaje/usuwa ulubione (stan w launcher.conf)"
 launcher_conf="$rt/config/luna/launcher.conf"
 # Szerokość wyjścia bierzemy z kompozytora — nie zakładamy 1280 px.
 # Szerokość powierzchni panelu bierzemy z jej bufora (`data=WxH`) — w trybie
@@ -273,18 +274,27 @@ tile_x=$((content_x + cell / 2))
 send_input "click 20 20" # burger w lewym górnym rogu paska
 sleep 0.6
 # Pierwszy kafel siatki launchera (te same stałe co `launcher_rects`).
-send_input "rclick $tile_x 206"
-sleep 0.8
+tile_y=206
+send_input "rclick $tile_x $tile_y"
+sleep 0.6
+# Menu otwiera się po prawej stronie kafla. Druga pozycja to „Dodaj do ulubionych”.
+menu_item_x=$((tile_x + cell / 2 + 8 + 40))
+menu_item_y=222
+send_input "click $menu_item_x $menu_item_y"
+sleep 0.6
 if ! grep -q '^pinned=' "$launcher_conf" 2>/dev/null; then
-    fail "PPM nie przypiął aplikacji (brak wpisu w $launcher_conf)"
+    fail "menu PPM nie dodało aplikacji do ulubionych (brak wpisu w $launcher_conf)"
 fi
-note "aplikacja przypięta"
-send_input "rclick $tile_x 206" # ta sama pozycja = ta sama (już przypięta) aplikacja
-sleep 0.8
+note "aplikacja dodana do ulubionych"
+# Ta sama pozycja = ta sama (już przypięta) aplikacja; menu pokazuje „Usuń z ulubionych”.
+send_input "rclick $tile_x $tile_y"
+sleep 0.6
+send_input "click $menu_item_x $menu_item_y"
+sleep 0.6
 if grep -q '^pinned=' "$launcher_conf" 2>/dev/null; then
-    fail "drugi PPM nie odpiął aplikacji"
+    fail "menu PPM nie usunęło aplikacji z ulubionych"
 fi
-note "aplikacja odpięta"
+note "aplikacja usunięta z ulubionych"
 press_key 1 # Esc zamyka launcher
 sleep 0.4
 
@@ -385,6 +395,40 @@ sleep 0.8
 [ ! -s "$locked" ] || fail "ekran blokady nie przejął klawiatury (terminal dostał znak)"
 note "ekran blokady przejął klawiaturę (odblokowanie hasłem pozostaje ręczne)"
 
+# ── luna-security: daemon i polityka zgód ───────────────────────────────────
+say "luna-security: daemon + CLI"
+mkdir -p "$rt/state"
+sec_env="-u LUNA_STATS XDG_RUNTIME_DIR=$rt XDG_CONFIG_HOME=$rt/config XDG_STATE_HOME=$rt/state"
+start security env $sec_env "$security_bin" daemon
+ready="$rt/luna-security/ready"
+i=0
+while [ "$i" -lt 50 ]; do
+    [ -f "$ready" ] && break
+    kill -0 "$(cat "$rt/security.pid")" 2>/dev/null ||
+        fail "luna-security zakończył się przy starcie (zobacz $rt/security.log)"
+    sleep 0.2
+    i=$((i + 1))
+done
+[ -f "$ready" ] || fail "luna-security nie opublikował pliku ready"
+note "ready: pid $(cat "$ready")"
+
+env $sec_env "$security_bin" status --json | grep -q '"activities"' ||
+    fail "luna-security status --json zwrócił niepoprawny wynik"
+note "status --json działa"
+
+env $sec_env "$security_bin" allow smoke-test mic >/dev/null ||
+    fail "luna-security allow nie powiodło się"
+conf="$rt/config/luna/security.conf"
+grep -q '^allow=smoke-test:mic' "$conf" ||
+    fail "polityka nie zapisała zgody: $(cat "$conf" 2>/dev/null)"
+env $sec_env "$security_bin" reset smoke-test >/dev/null ||
+    fail "luna-security reset nie powiodło się"
+if grep -q 'smoke-test' "$conf"; then
+    fail "reset nie usunął wpisu z polityki"
+fi
+note "zgoda zapisana i usunięta"
+stop security
+
 # ── Zakończenie ─────────────────────────────────────────────────────────────
 say "zakończenie procesów"
 stop lock
@@ -397,7 +441,7 @@ stop settings
 stop shell
 stop selene
 
-for name in lock term-a term-b term-c term-d term-e settings shell selene; do
+for name in lock term-a term-b term-c term-d term-e settings shell selene security; do
     [ -f "$rt/$name.pid" ] || continue
     pid="$(cat "$rt/$name.pid")"
     [ -n "$pid" ] || continue

@@ -79,21 +79,18 @@ pub fn chevron_left(paint: &mut PaintCtx, color: Color, center: Point, size: f64
 
 /// Lupka (wyszukiwanie); środek w `center`, bok `size`.
 pub fn search(paint: &mut PaintCtx, color: Color, center: Point, size: f64) {
-    let r = size * 0.34;
-    let c = Point::new(center.x - size * 0.08, center.y - size * 0.08);
-    paint.scene.stroke_rounded_rect(
-        Rect::from_xywh(c.x - r, c.y - r, r * 2.0, r * 2.0),
-        r,
-        1.6,
-        color,
-    );
-    let a = Point::new(c.x + r * 0.75, c.y + r * 0.75);
-    paint.scene.stroke_line(
-        a,
-        Point::new(a.x + size * 0.28, a.y + size * 0.28),
-        1.6,
-        color,
-    );
+    // Lupka: okrąg + rączka pod 45°. Wcześniejsza wersja rysowała okrąg
+    // jako zaokrąglony prostokąt i zaczynała rączkę wewnątrz koła — ikona
+    // wyglądała jak klucz i była przesunięta w lewo/górę.
+    let r = size * 0.30;
+    let c = Point::new(center.x - size * 0.06, center.y - size * 0.06);
+    paint.scene.stroke_circle(c, r, 1.7, color);
+
+    let d = std::f64::consts::FRAC_1_SQRT_2;
+    let start = Point::new(c.x + r * d, c.y + r * d);
+    let end = Point::new(c.x + (r + size * 0.22) * d, c.y + (r + size * 0.22) * d);
+    // `stroke_polyline` ma zaokrąglone końce — rączka nie wygląda na uciętą.
+    paint.scene.stroke_polyline(&[start, end], 1.7, color);
 }
 
 /// Ikona katalogu (folder) w prostokącie `box_`.
@@ -336,14 +333,16 @@ pub fn lock(paint: &mut PaintCtx, color: Color, center: Point, size: f64) {
 /// Koło zębate (ustawienia); środek w `center`, bok `size`.
 pub fn gear(paint: &mut PaintCtx, color: Color, center: Point, size: f64) {
     use std::f64::consts::TAU;
-    let ring = size * 0.28;
-    let tooth_in = size * 0.24;
-    let tooth_out = size * 0.48;
+    // Proporcje dobrane do siatki 24×24: całe koło mieści się w bezpiecznym
+    // obszarze ~2..22, tak jak pozostałe ikony zestawu.
+    let ring = size * 0.26;
+    let tooth_in = size * 0.23;
+    let tooth_out = size * 0.42;
     for k in 0..8 {
         let a = k as f64 * TAU / 8.0;
         let (c, s) = (a.cos(), a.sin());
         let (px, py) = (-s, c);
-        let (base, tip) = (size * 0.11, size * 0.07);
+        let (base, tip) = (size * 0.105, size * 0.065);
         paint.scene.fill_polygon(
             &[
                 Point::new(
@@ -366,7 +365,7 @@ pub fn gear(paint: &mut PaintCtx, color: Color, center: Point, size: f64) {
             color,
         );
     }
-    paint.scene.stroke_circle(center, ring, size * 0.11, color);
+    paint.scene.stroke_circle(center, ring, size * 0.105, color);
 }
 
 /// Restart (strzałka w kółko); środek w `center`, bok `size`.
@@ -511,14 +510,22 @@ pub enum IconName {
     Sliders,
     Play,
     Pause,
+    /// Okrągła strzałka — odświeżanie / ponowne wczytanie.
+    Refresh,
     Moon,
+    /// Tryb automatyczny (systemowy) — pół słońca, pół księżyca.
+    Auto,
     /// Pinezka — „przypnij do launchera”.
     Pin,
+    /// Mikrofon — wskaźnik bezpieczeństwa (aplikacja używa mikrofonu).
+    Microphone,
+    /// Aparat — wskaźnik bezpieczeństwa (aplikacja używa kamery).
+    Camera,
 }
 
 impl IconName {
     /// Wszystkie ikony z pakietu (kolejność = kolejność w galerii).
-    pub const ALL: [IconName; 48] = [
+    pub const ALL: [IconName; 52] = [
         IconName::Menu,
         IconName::Search,
         IconName::Files,
@@ -565,8 +572,12 @@ impl IconName {
         IconName::Sliders,
         IconName::Play,
         IconName::Pause,
+        IconName::Refresh,
         IconName::Moon,
+        IconName::Auto,
         IconName::Pin,
+        IconName::Microphone,
+        IconName::Camera,
     ];
 
     /// Nazwa ikony (do galerii/diagnostyki).
@@ -618,8 +629,12 @@ impl IconName {
             IconName::Sliders => "Sliders",
             IconName::Play => "Play",
             IconName::Pause => "Pause",
+            IconName::Refresh => "Refresh",
             IconName::Moon => "Moon",
+            IconName::Auto => "Auto",
             IconName::Pin => "Pin",
+            IconName::Microphone => "Microphone",
+            IconName::Camera => "Camera",
         }
     }
 }
@@ -660,6 +675,33 @@ fn arc(c: Point, r: f64, a0: f64, a1: f64, segs: usize) -> Vec<Point> {
             Point::new(c.x + r * a.cos(), c.y + r * a.sin())
         })
         .collect()
+}
+
+/// Grocik strzałki odświeżania na końcu łuku (współrzędne siatki 24×24).
+///
+/// `angle` to kąt końca łuku w stopniach; `forward` to długość grocika wzdłuż
+/// kierunku obrotu, a `wing` — połowa rozpiętości jego podstawy. Zwraca trzy
+/// punkty trójkąta: skrzydło–tip–skrzydło. Grocik leży **za** końcem łuku, dzięki
+/// czemu czyta się jak strzałka, a nie jak zadzior.
+fn refresh_arrowhead(
+    cx: f64,
+    cy: f64,
+    r: f64,
+    angle: f64,
+    forward: f64,
+    wing: f64,
+) -> [(f64, f64); 3] {
+    let a = angle.to_radians();
+    let (sin, cos) = (a.sin(), a.cos());
+    let base = (cx + r * cos, cy + r * sin);
+    let tangent = (-sin, cos);
+    let normal = (cos, sin);
+    let tip = (base.0 + tangent.0 * forward, base.1 + tangent.1 * forward);
+    [
+        (base.0 + normal.0 * wing, base.1 + normal.1 * wing),
+        tip,
+        (base.0 - normal.0 * wing, base.1 - normal.1 * wing),
+    ]
 }
 
 /// Rysuje ikonę z pakietu w prostokącie `rect` w zadanym kolorze (styl symboliczny).
@@ -1185,10 +1227,18 @@ pub fn paint_icon_themed(
         paint_pastel(paint, name, &g);
         return;
     }
+    // Zębate koło ustawień rysujemy wspólnym helperem — dokładnie ten sam
+    // kształt trafia do pastelowego pakietu ikon i na pasek.
+    if name == IconName::Settings {
+        gear(paint, color, g.p(12.0, 12.0), g.d(24.0));
+        return;
+    }
     let w = g.d(2.0);
     let scene = &mut *paint.scene;
 
     match name {
+        // Obsłużone wcześniej wspólnym helperem `gear` (ten sam kształt co pasek).
+        IconName::Settings => {}
         IconName::Menu => {
             for y in [6.5, 12.0, 17.5] {
                 scene.stroke_line(g.p(4.0, y), g.p(20.0, y), w, color);
@@ -1210,27 +1260,6 @@ pub fn paint_icon_themed(
                 ],
                 color,
             );
-        }
-        IconName::Settings => {
-            // Koło zębate: gruby pierścień + 8 krótkich, prostokątnych zębów.
-            // (Wcześniej był to okrąg z promieniami — wizualnie prawie identyczny
-            // z ikoną `Brightness`, czyli „motyw/jasność”.)
-            scene.stroke_circle(g.p(12.0, 12.0), g.d(12.4), g.d(3.2), color);
-            for k in 0..8 {
-                let a = (k as f64 * 45.0).to_radians();
-                let (c, s) = (a.cos(), a.sin());
-                let (px, py) = (-s, c);
-                let (r0, r1, hw) = (5.6, 9.4, 1.75);
-                scene.fill_polygon(
-                    &[
-                        g.p(12.0 + r0 * c - hw * px, 12.0 + r0 * s - hw * py),
-                        g.p(12.0 + r1 * c - hw * px, 12.0 + r1 * s - hw * py),
-                        g.p(12.0 + r1 * c + hw * px, 12.0 + r1 * s + hw * py),
-                        g.p(12.0 + r0 * c + hw * px, 12.0 + r0 * s + hw * py),
-                    ],
-                    color,
-                );
-            }
         }
         IconName::Terminal => {
             scene.stroke_rounded_rect(
@@ -1291,7 +1320,7 @@ pub fn paint_icon_themed(
         }
         IconName::Wifi => {
             scene.fill_circle(g.p(12.0, 18.0), g.d(1.4), color);
-            for r in [4.0, 7.5, 11.0] {
+            for r in [4.0, 7.0, 10.2] {
                 scene.stroke_polyline(
                     &arc(g.p(12.0, 18.0), g.d(r), 200.0, 340.0, 10),
                     g.d(1.9),
@@ -1321,7 +1350,7 @@ pub fn paint_icon_themed(
         }
         IconName::Battery => {
             scene.stroke_rounded_rect(
-                Rect::from_xywh(g.p(2.0, 7.0).x, g.p(2.0, 7.0).y, g.d(17.0), g.d(10.0)),
+                Rect::from_xywh(g.p(3.0, 7.0).x, g.p(3.0, 7.0).y, g.d(16.0), g.d(10.0)),
                 g.d(2.5),
                 w,
                 color,
@@ -1332,7 +1361,7 @@ pub fn paint_icon_themed(
                 color,
             );
             scene.fill_rounded_rect(
-                Rect::from_xywh(g.p(4.5, 9.5).x, g.p(4.5, 9.5).y, g.d(9.5), g.d(5.0)),
+                Rect::from_xywh(g.p(5.0, 9.5).x, g.p(5.0, 9.5).y, g.d(9.0), g.d(5.0)),
                 g.d(1.2),
                 color,
             );
@@ -1470,8 +1499,8 @@ pub fn paint_icon_themed(
                 let a = (k as f64 * 45.0).to_radians();
                 let (c, s) = (a.cos(), a.sin());
                 scene.stroke_line(
-                    g.p(12.0 + 6.4 * c, 12.0 + 6.4 * s),
-                    g.p(12.0 + 9.2 * c, 12.0 + 9.2 * s),
+                    g.p(12.0 + 6.2 * c, 12.0 + 6.2 * s),
+                    g.p(12.0 + 8.9 * c, 12.0 + 8.9 * s),
                     g.d(2.0),
                     color,
                 );
@@ -1653,26 +1682,16 @@ pub fn paint_icon_themed(
             );
         }
         IconName::Monitor => {
+            // Czysty ekran (ikona `video-display`) — bez linii EKG, która myliła
+            // ją z monitorem aktywności.
             scene.stroke_rounded_rect(
                 Rect::from_xywh(g.p(3.0, 4.5).x, g.p(3.0, 4.5).y, g.d(18.0), g.d(12.0)),
                 g.d(2.0),
                 w,
                 color,
             );
-            scene.stroke_line(g.p(12.0, 16.5), g.p(12.0, 19.5), g.d(1.8), color);
-            scene.stroke_line(g.p(8.0, 20.5), g.p(16.0, 20.5), g.d(1.8), color);
-            scene.stroke_polyline(
-                &[
-                    g.p(6.0, 11.0),
-                    g.p(9.0, 11.0),
-                    g.p(10.5, 8.0),
-                    g.p(12.5, 14.0),
-                    g.p(14.0, 11.0),
-                    g.p(18.0, 11.0),
-                ],
-                g.d(1.6),
-                color,
-            );
+            scene.stroke_line(g.p(12.0, 16.5), g.p(12.0, 19.0), g.d(1.8), color);
+            scene.stroke_line(g.p(8.0, 20.0), g.p(16.0, 20.0), g.d(1.8), color);
         }
         IconName::Screenshot => {
             scene.stroke_rounded_rect(
@@ -1695,35 +1714,88 @@ pub fn paint_icon_themed(
             }
         }
         IconName::Play => {
-            scene.fill_polygon(&[g.p(8.0, 5.0), g.p(19.0, 12.0), g.p(8.0, 19.0)], color);
+            scene.fill_polygon(&[g.p(7.6, 4.6), g.p(19.2, 12.0), g.p(7.6, 19.4)], color);
         }
         IconName::Pause => {
             scene.fill_rounded_rect(
-                Rect::from_xywh(g.p(7.5, 5.5).x, g.p(7.5, 5.5).y, g.d(3.2), g.d(13.0)),
+                Rect::from_xywh(g.p(7.2, 4.8).x, g.p(7.2, 4.8).y, g.d(3.4), g.d(14.4)),
                 g.d(1.0),
                 color,
             );
             scene.fill_rounded_rect(
-                Rect::from_xywh(g.p(13.3, 5.5).x, g.p(13.3, 5.5).y, g.d(3.2), g.d(13.0)),
+                Rect::from_xywh(g.p(13.4, 4.8).x, g.p(13.4, 4.8).y, g.d(3.4), g.d(14.4)),
                 g.d(1.0),
                 color,
             );
         }
+        IconName::Refresh => {
+            // Okrągła strzałka z grocikiem — ten sam kształt w pastelu i monochromie.
+            scene.stroke_polyline(&arc(g.p(12.0, 12.0), g.d(7.6), 45.0, 315.0, 28), w, color);
+            let [a, b, c] = refresh_arrowhead(12.0, 12.0, 7.6, 315.0, 3.2, 2.4);
+            scene.fill_polygon(&[g.p(a.0, a.1), g.p(b.0, b.1), g.p(c.0, c.1)], color);
+        }
         IconName::Moon => {
-            scene.stroke_circle(g.p(12.0, 12.0), g.d(7.5), w, color);
-            // Wewnętrzny łuk — sierp księżyca / ikona motywu ciemnego.
-            let pts: Vec<Point> = (0..=12)
-                .map(|i| {
-                    let a = -std::f64::consts::FRAC_PI_2 + i as f64 * std::f64::consts::PI / 12.0;
-                    g.p(15.0 + 4.5 * a.cos(), 12.0 + 6.5 * a.sin())
-                })
-                .collect();
-            scene.stroke_polyline(&pts, g.d(1.6), color);
+            // Ten sam sierp co w wariancie pastelowym — wcześniej monochromatyczna
+            // wersja była pustym kołem i nie czytała się jako tryb ciemny.
+            let outer = arc(g.p(12.0, 12.0), g.d(8.6), 271.4, 27.0, 18);
+            let inner = arc(g.p(16.2, 9.5), g.d(7.3), 62.0, 236.0, 16);
+            let mut pts = outer;
+            pts.extend(inner.iter().skip(1).copied());
+            let first = pts[0];
+            pts.push(first);
+            scene.stroke_polyline(&pts, w, color);
+        }
+        IconName::Auto => {
+            // Pół jasnego, pół ciemnego koła — czytelny „tryb automatyczny”.
+            scene.stroke_circle(g.p(12.0, 12.0), g.d(7.8), w, color);
+            let mut half = vec![g.p(12.0, 12.0)];
+            half.extend(arc(g.p(12.0, 12.0), g.d(7.8), -90.0, 90.0, 18));
+            scene.fill_polygon(&half, color);
         }
         IconName::Pin => {
             // Pinezka „mapowa”: zaokrąglona główka i zwężenie do ostrza.
             scene.fill_circle(g.p(12.0, 9.0), g.d(5.6), color);
             scene.fill_polygon(&[g.p(7.6, 11.2), g.p(16.4, 11.2), g.p(12.0, 21.0)], color);
+        }
+        IconName::Microphone => {
+            // Kapsuła mikrofonu + pałąk i podstawa (wskaźnik „mikrofon aktywny”).
+            scene.stroke_rounded_rect(
+                Rect::from_xywh(g.p(8.6, 3.8).x, g.p(8.6, 3.8).y, g.d(6.8), g.d(10.4)),
+                g.d(3.4),
+                w,
+                color,
+            );
+            scene.stroke_polyline(
+                &[
+                    g.p(6.2, 10.8),
+                    g.p(6.6, 13.2),
+                    g.p(8.2, 15.8),
+                    g.p(12.0, 17.0),
+                    g.p(15.8, 15.8),
+                    g.p(17.4, 13.2),
+                    g.p(17.8, 10.8),
+                ],
+                w,
+                color,
+            );
+            scene.stroke_line(g.p(12.0, 17.0), g.p(12.0, 20.2), w, color);
+            scene.stroke_line(g.p(8.8, 20.2), g.p(15.2, 20.2), w, color);
+        }
+        IconName::Camera => {
+            // Korpus kamery, „garb” z tyłu i obiektyw (wskaźnik „aparat aktywny”).
+            scene.stroke_rounded_rect(
+                Rect::from_xywh(g.p(3.6, 7.2).x, g.p(3.6, 7.2).y, g.d(16.8), g.d(11.6)),
+                g.d(2.2),
+                w,
+                color,
+            );
+            scene.fill_rounded_rect(
+                Rect::from_xywh(g.p(9.2, 5.0).x, g.p(9.2, 5.0).y, g.d(5.6), g.d(3.4)),
+                g.d(1.0),
+                color,
+            );
+            scene.stroke_circle(g.p(12.0, 13.2), g.d(4.2), w, color);
+            scene.fill_circle(g.p(12.0, 13.2), g.d(1.3), color);
         }
     }
 }
@@ -1805,6 +1877,8 @@ fn has_pastel_art(name: IconName) -> bool {
             | IconName::Check
             | IconName::Plus
             | IconName::Pin
+            | IconName::Microphone
+            | IconName::Camera
     )
 }
 
@@ -1882,6 +1956,11 @@ impl PastelPainter<'_, '_> {
 
 /// Rysuje pastelową ilustrację ikony w siatce `g`.
 fn paint_pastel(paint: &mut PaintCtx, name: IconName, g: &Grid) {
+    // Ustawienia: to samo zębate koło co na pasku, tylko w pastelowym liliu.
+    if name == IconName::Settings {
+        gear(paint, PASTEL_PERIWINKLE.base, g.p(12.0, 12.0), g.d(24.0));
+        return;
+    }
     let mut p = PastelPainter {
         scene: &mut *paint.scene,
         g,
@@ -1898,25 +1977,6 @@ fn paint_pastel(paint: &mut PaintCtx, name: IconName, g: &Grid) {
                 p.line(12.3, y, 17.3, y, 1.1, PASTEL_PAPER.ink);
             }
             p.rect(4.2, 8.9, 6.0, 1.0, 0.5, PASTEL_BUTTER.soft);
-        }
-        IconName::Settings => {
-            for k in 0..8 {
-                let a = (k as f64 * 45.0).to_radians();
-                let (c, s) = (a.cos(), a.sin());
-                let (px, py) = (-s, c);
-                let (r0, r1, hw) = (6.0, 9.6, 1.55);
-                p.poly(
-                    &[
-                        (12.0 + r0 * c - hw * px, 12.0 + r0 * s - hw * py),
-                        (12.0 + r1 * c - hw * px, 12.0 + r1 * s - hw * py),
-                        (12.0 + r1 * c + hw * px, 12.0 + r1 * s + hw * py),
-                        (12.0 + r0 * c + hw * px, 12.0 + r0 * s + hw * py),
-                    ],
-                    PASTEL_PERIWINKLE.base,
-                );
-            }
-            p.circle(12.0, 12.0, 7.6, PASTEL_PERIWINKLE.base);
-            p.circle(12.0, 12.0, 3.0, PASTEL_PERIWINKLE.soft);
         }
         IconName::Terminal => {
             p.rect(3.0, 4.5, 18.0, 15.0, 2.6, PASTEL_MINT.base);
@@ -1986,10 +2046,10 @@ fn paint_pastel(paint: &mut PaintCtx, name: IconName, g: &Grid) {
             p.poly(&[(4.2, 20.8), (5.4, 15.8), (8.6, 17.8)], PASTEL_PEACH.ink);
         }
         IconName::Wifi => {
-            for r in [4.2, 7.8, 11.2] {
-                p.arc(12.0, 18.2, r, 200.0, 340.0, 10, 2.1, PASTEL_MINT.ink);
+            for r in [4.0, 7.0, 10.2] {
+                p.arc(12.0, 18.0, r, 200.0, 340.0, 10, 1.9, PASTEL_MINT.ink);
             }
-            p.circle(12.0, 18.2, 1.5, PASTEL_MINT.ink);
+            p.circle(12.0, 18.0, 1.4, PASTEL_MINT.ink);
         }
         IconName::Volume => {
             p.poly(
@@ -2009,10 +2069,10 @@ fn paint_pastel(paint: &mut PaintCtx, name: IconName, g: &Grid) {
             }
         }
         IconName::Battery => {
-            p.rect(2.0, 7.0, 17.0, 10.0, 2.6, PASTEL_MINT.soft);
-            p.outline(2.0, 7.0, 17.0, 10.0, 2.6, 1.4, PASTEL_MINT.ink);
-            p.rect(19.4, 10.5, 2.4, 3.0, 1.0, PASTEL_MINT.ink);
-            p.rect(4.6, 9.6, 9.4, 4.8, 1.2, PASTEL_MINT.base);
+            p.rect(3.0, 7.0, 16.0, 10.0, 2.6, PASTEL_MINT.soft);
+            p.outline(3.0, 7.0, 16.0, 10.0, 2.6, 1.4, PASTEL_MINT.ink);
+            p.rect(19.6, 10.5, 2.4, 3.0, 1.0, PASTEL_MINT.ink);
+            p.rect(5.0, 9.6, 9.0, 4.8, 1.2, PASTEL_MINT.base);
         }
         IconName::Power => {
             p.arc(12.0, 12.0, 7.5, -60.0, 240.0, 28, 2.4, PASTEL_ROSE.ink);
@@ -2057,11 +2117,11 @@ fn paint_pastel(paint: &mut PaintCtx, name: IconName, g: &Grid) {
                 let a = (k as f64 * 45.0).to_radians();
                 let (c, s) = (a.cos(), a.sin());
                 p.line(
-                    12.0 + 6.6 * c,
-                    12.0 + 6.6 * s,
-                    12.0 + 9.4 * c,
-                    12.0 + 9.4 * s,
-                    2.2,
+                    12.0 + 6.2 * c,
+                    12.0 + 6.2 * s,
+                    12.0 + 8.9 * c,
+                    12.0 + 8.9 * s,
+                    2.1,
                     PASTEL_BUTTER.base,
                 );
             }
@@ -2206,26 +2266,14 @@ fn paint_pastel(paint: &mut PaintCtx, name: IconName, g: &Grid) {
         IconName::Monitor => {
             p.rect(3.0, 4.5, 18.0, 12.0, 2.2, PASTEL_SKY.base);
             p.rect(4.6, 6.1, 14.8, 8.8, 1.2, PASTEL_SKY.soft);
-            p.stroke(
-                &[
-                    (6.2, 11.0),
-                    (8.8, 11.0),
-                    (10.4, 8.4),
-                    (12.4, 13.4),
-                    (14.0, 10.4),
-                    (17.8, 10.4),
-                ],
-                1.5,
-                PASTEL_MINT.ink,
-            );
-            p.line(12.0, 16.5, 12.0, 19.3, 1.8, PASTEL_SKY.ink);
-            p.line(8.4, 20.6, 15.6, 20.6, 1.8, PASTEL_SKY.ink);
+            p.line(12.0, 16.5, 12.0, 19.0, 1.8, PASTEL_SKY.ink);
+            p.line(8.4, 19.8, 15.6, 19.8, 1.8, PASTEL_SKY.ink);
         }
         IconName::Screenshot => {
-            p.rect(3.0, 7.0, 18.0, 12.0, 2.2, PASTEL_LILAC.base);
-            p.rect(9.0, 4.5, 6.0, 3.4, 1.0, PASTEL_LILAC.base);
+            p.rect(3.0, 7.0, 18.0, 12.0, 2.2, PASTEL_SKY.base);
+            p.rect(9.0, 4.5, 6.0, 3.4, 1.0, PASTEL_SKY.base);
             p.circle(12.0, 13.0, 3.7, PASTEL_PAPER.soft);
-            p.circle(12.0, 13.0, 2.2, PASTEL_LILAC.ink);
+            p.circle(12.0, 13.0, 2.2, PASTEL_SKY.ink);
             p.circle(13.1, 11.9, 0.6, PASTEL_PAPER.soft);
             p.circle(18.0, 9.6, 1.1, PASTEL_BUTTER.base);
         }
@@ -2241,11 +2289,16 @@ fn paint_pastel(paint: &mut PaintCtx, name: IconName, g: &Grid) {
             }
         }
         IconName::Play => {
-            p.poly(&[(8.0, 5.0), (19.0, 12.0), (8.0, 19.0)], PASTEL_MINT.base);
+            p.poly(&[(7.6, 4.6), (19.2, 12.0), (7.6, 19.4)], PASTEL_MINT.base);
         }
         IconName::Pause => {
-            p.rect(7.5, 5.5, 3.2, 13.0, 1.0, PASTEL_MINT.base);
-            p.rect(13.3, 5.5, 3.2, 13.0, 1.0, PASTEL_MINT.base);
+            p.rect(7.2, 4.8, 3.4, 14.4, 1.0, PASTEL_MINT.base);
+            p.rect(13.4, 4.8, 3.4, 14.4, 1.0, PASTEL_MINT.base);
+        }
+        IconName::Refresh => {
+            p.arc(12.0, 12.0, 7.6, 45.0, 315.0, 28, 2.2, PASTEL_MINT.base);
+            let [a, b, c] = refresh_arrowhead(12.0, 12.0, 7.6, 315.0, 3.2, 2.4);
+            p.poly(&[a, b, c], PASTEL_MINT.base);
         }
         IconName::Moon => {
             let outer = arc(Point::new(12.0, 12.0), 8.6, 271.4, 27.0, 18);
@@ -2255,6 +2308,19 @@ fn paint_pastel(paint: &mut PaintCtx, name: IconName, g: &Grid) {
             p.poly(&points, PASTEL_LILAC.base);
             p.circle(8.2, 8.8, 1.0, PASTEL_LILAC.soft);
         }
+        IconName::Auto => {
+            // Pół słońca (jasny), pół księżyca (ciemny) — jak na stronie i w pasku.
+            p.circle(12.0, 12.0, 8.2, PASTEL_BUTTER.base);
+            let mut right: Vec<(f64, f64)> = vec![(12.0, 12.0)];
+            right.extend(
+                arc(Point::new(12.0, 12.0), 8.2, -90.0, 90.0, 18)
+                    .iter()
+                    .map(|pt| (pt.x, pt.y)),
+            );
+            p.poly(&right, PASTEL_LILAC.base);
+            p.line(12.0, 3.9, 12.0, 20.1, 1.0, PASTEL_PERIWINKLE.ink);
+            p.outline(3.8, 3.8, 16.4, 16.4, 8.2, 1.2, PASTEL_PERIWINKLE.ink);
+        }
         _ => {}
     }
 }
@@ -2263,7 +2329,7 @@ fn paint_pastel(paint: &mut PaintCtx, name: IconName, g: &Grid) {
 mod icon_tests {
     use super::*;
     use libluna_core::Theme;
-    use libluna_render::{Scene, TextEngine};
+    use libluna_render::{Scene, SoftwareRenderer, TextEngine};
 
     #[test]
     fn fallback_prefers_hicolor_and_skips_high_contrast() {
@@ -2331,6 +2397,68 @@ mod icon_tests {
                 assert!(
                     !scene.is_empty(),
                     "ikona {name:?} nic nie rysuje (styl {})",
+                    style.name()
+                );
+            }
+        }
+    }
+
+    /// Zwraca widoczne granice ikony w jednostkach siatki 24×24.
+    fn painted_bounds(name: IconName, style: IconTheme) -> (f64, f64, f64, f64) {
+        const PX: u32 = 120;
+        let theme = Theme::light();
+        let text = TextEngine::none();
+        let mut scene = Scene::new();
+        {
+            let mut ctx = PaintCtx::new(&mut scene, &theme, &text);
+            paint_icon_themed(
+                &mut ctx,
+                name,
+                Rect::from_xywh(0.0, 0.0, PX as f64, PX as f64),
+                theme.colors.text,
+                style,
+            );
+        }
+        let mut renderer = SoftwareRenderer::new(PX, PX);
+        renderer.draw(&scene, 1.0, Color::TRANSPARENT);
+        let data = renderer.data();
+        let (mut x0, mut y0, mut x1, mut y1) = (PX, PX, 0u32, 0u32);
+        for y in 0..PX {
+            for x in 0..PX {
+                if data[((y * PX + x) * 4 + 3) as usize] > 8 {
+                    x0 = x0.min(x);
+                    y0 = y0.min(y);
+                    x1 = x1.max(x);
+                    y1 = y1.max(y);
+                }
+            }
+        }
+        let s = 24.0 / PX as f64;
+        (
+            x0 as f64 * s,
+            y0 as f64 * s,
+            (x1 + 1) as f64 * s,
+            (y1 + 1) as f64 * s,
+        )
+    }
+
+    #[test]
+    fn every_icon_keeps_the_same_safe_margin() {
+        // Wszystkie ikony — pastelowe i monochromatyczne — muszą trzymać ten sam
+        // margines w siatce 24×24. Pilnuje to spójności optycznej po zmianach
+        // geometrii (np. zbyt długich promieni słońca albo zębów koła zębatego).
+        for style in IconTheme::ALL {
+            for name in IconName::ALL {
+                let (x0, y0, x1, y1) = painted_bounds(name, style);
+                assert!(
+                    x1 > x0 && y1 > y0,
+                    "ikona {name:?}/{} jest pusta",
+                    style.name()
+                );
+                assert!(
+                    x0 >= 1.2 && y0 >= 1.2 && x1 <= 22.8 && y1 <= 22.8,
+                    "ikona {name:?}/{} wychodzi poza margines: \
+                     {x0:.1},{y0:.1}..{x1:.1},{y1:.1} (dozwolone 1.2..22.8)",
                     style.name()
                 );
             }

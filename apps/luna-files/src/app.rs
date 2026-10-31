@@ -15,6 +15,7 @@ use libluna_widgets::{
 };
 
 use crate::model::{format_mtime, human_size, now_secs, DirView, Entry, Kind, SortKey};
+use crate::open_with::OpenWithDialog;
 use crate::ops::{Job, Ops, OpsEvent};
 use crate::places::{self, Mount, Place};
 use crate::prefs::Prefs;
@@ -192,6 +193,8 @@ pub struct ContextMenu {
 #[derive(Debug, Clone, Copy)]
 pub enum MenuCmd {
     Open,
+    /// Otwiera okno wyboru aplikacji dla pliku.
+    OpenWith,
     OpenTerminal,
     Copy,
     Cut,
@@ -355,6 +358,8 @@ pub struct App {
     pub settings_open: bool,
     /// Okno „O aplikacji” (modal).
     pub about: Option<AlertDialog>,
+    /// Okno „Otwórz za pomocą…” (modal).
+    pub open_with: Option<OpenWithDialog>,
     /// Motyw wybrany w Ustawieniach — aplikowany przez pętlę klatki.
     pub pending_theme: Option<ThemePreference>,
     /// Bieżąca preferencja motywu (do podświetlenia w Ustawieniach).
@@ -417,6 +422,7 @@ impl App {
             prefs,
             settings_open: false,
             about: None,
+            open_with: None,
             pending_theme: None,
             theme_pref: ThemePreference::System,
             pending_close: false,
@@ -607,7 +613,7 @@ impl App {
         }
     }
 
-    /// Otwiera zaznaczony wpis (katalog → nawigacja, plik → `xdg-open`).
+    /// Otwiera zaznaczony wpis (katalog → nawigacja, plik → aplikacja domyślna).
     pub fn open_selected(&mut self) {
         let Some(entry) = self.pane().primary().cloned() else {
             return;
@@ -615,10 +621,26 @@ impl App {
         if entry.is_dir {
             self.navigate(self.active, entry.path);
         } else {
-            let _ = std::process::Command::new("xdg-open")
-                .arg(&entry.path)
-                .spawn();
+            self.open_file(&entry.path);
         }
+    }
+
+    /// Otwiera plik: domyślną aplikacją albo oknem „Otwórz za pomocą…”.
+    ///
+    /// Okno pojawia się, gdy typ pliku jest nierozpoznany (np. `application/octet-stream`)
+    /// albo system nie ma dla niego domyślnej aplikacji.
+    pub fn open_file(&mut self, path: &Path) {
+        if crate::open_with::recognized_default(path).is_some()
+            && crate::open_with::open_default(path).is_ok()
+        {
+            return;
+        }
+        self.show_open_with(path.to_path_buf());
+    }
+
+    /// Pokazuje okno wyboru aplikacji dla pliku.
+    pub fn show_open_with(&mut self, path: PathBuf) {
+        self.open_with = Some(OpenWithDialog::load(path));
     }
 
     /// Otwiera terminal w bieżącym katalogu.
@@ -1320,7 +1342,9 @@ pub fn run(title_key: &str, app_id: &str) -> Result<(), Box<dyn Error>> {
         .app_id(app_id)
         .initial_size(1120, 720)
         .settings(settings)
-        .system_dark(system_dark);
+        .system_dark(system_dark)
+        // Esc zamyka menu/podglądy, ale nie całe okno.
+        .escape_to_exit(false);
 
     let mut app = App::with_prefs(start, prefs);
     app.status = app.status_text();

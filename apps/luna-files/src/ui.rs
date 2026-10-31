@@ -12,9 +12,9 @@ use libluna_core::{
 };
 use libluna_render::{Scene, TextEngine};
 use libluna_widgets::{
-    clipboard_command, icon, AlertDialog, Button, ControlsSide, Entry as TextEntry, HeaderBar,
-    IconName, Menu, MenuEntry, PaintCtx, PathBar, PreferencesDialog, Switch, Tab, TabBar,
-    TextClipboardCommand, TextInput, ViewMode, ViewSwitcher, WindowControl,
+    clipboard_command, icon, AlertDialog, Button, ButtonVariant, ControlsSide, Dialog,
+    Entry as TextEntry, HeaderBar, IconName, Menu, MenuEntry, PaintCtx, PathBar, PreferencesDialog,
+    Switch, Tab, TabBar, TextClipboardCommand, TextInput, ViewMode, ViewSwitcher, WindowControl,
 };
 
 use crate::app::{
@@ -24,6 +24,7 @@ use crate::app::{
 use crate::archive;
 use crate::list;
 use crate::model::{format_mtime, human_size, SortKey};
+use crate::open_with::{self, DesktopApp, OpenWithDialog, ROW_H as OPEN_ROW_H};
 use crate::ops::Job;
 use crate::places;
 use crate::prefs;
@@ -312,6 +313,9 @@ pub fn paint(app: &App, scene: &mut Scene, size: Size, theme: &Theme, text: &Tex
     }
     if let Some(about) = &app.about {
         about.paint(&mut ctx, size);
+    }
+    if let Some(open_with) = &app.open_with {
+        paint_open_with(&mut ctx, open_with, size);
     }
 }
 
@@ -1106,6 +1110,425 @@ fn paint_settings(ctx: &mut PaintCtx, app: &App, size: Size) {
     Button::new(libluna_i18n::tr("Done")).paint(ctx, lay.done);
 }
 
+// ---------------------------------------------------------------------------
+// „Otwórz za pomocą…”
+// ---------------------------------------------------------------------------
+
+/// Szerokość okna wyboru aplikacji.
+const OPEN_WITH_WIDTH: f64 = 520.0;
+
+struct OpenWithLayout {
+    name: Rect,
+    list: Rect,
+    remember: Rect,
+    remember_label: Rect,
+    open: Rect,
+    cancel: Rect,
+}
+
+fn open_with_dialog(count: usize, remember: bool, theme: &Theme) -> Dialog {
+    let pad = theme.spacing.lg;
+    let gap = theme.spacing.md;
+    let rows = count.clamp(1, open_with::MAX_VISIBLE_ROWS) as f64;
+    let switch_h = if remember {
+        theme.metrics.switch.height.max(20.0)
+    } else {
+        0.0
+    };
+    let height = theme.metrics.sheet.header
+        + pad
+        + theme.typography.body.line_height
+        + gap
+        + rows * OPEN_ROW_H
+        + gap
+        + switch_h
+        + gap
+        + theme.metrics.button.height
+        + pad;
+    Dialog::new(libluna_i18n::tr("Open with")).size(OPEN_WITH_WIDTH, height)
+}
+
+fn open_with_layout(
+    ow: &OpenWithDialog,
+    size: Size,
+    theme: &Theme,
+    text: &TextEngine,
+) -> OpenWithLayout {
+    let remember = ow.can_remember();
+    let rects = open_with_dialog(ow.apps.len(), remember, theme).rects(size, theme);
+    let pad = theme.spacing.lg;
+    let gap = theme.spacing.md;
+    let inner = rects.content.deflate(Insets::new(pad, pad, pad, pad));
+
+    let mut y = inner.y();
+    let line = theme.typography.body.line_height;
+    let name = Rect::from_xywh(inner.x(), y, inner.width(), line);
+    y += line + gap;
+    let rows = ow.apps.len().clamp(1, open_with::MAX_VISIBLE_ROWS) as f64;
+    let list = Rect::from_xywh(inner.x(), y, inner.width(), rows * OPEN_ROW_H);
+    y += list.height() + gap;
+
+    let (sw, sh) = Switch::new(false).size(theme);
+    let switch_h = if remember { sh.max(20.0) } else { 0.0 };
+    let remember_row = Rect::from_xywh(inner.x(), y, inner.width(), switch_h);
+    let remember = Rect::from_xywh(
+        inner.right() - sw,
+        remember_row.center().y - sh / 2.0,
+        sw,
+        sh,
+    );
+    let remember_label = Rect::from_xywh(
+        inner.x(),
+        remember_row.y(),
+        (inner.width() - sw - gap).max(1.0),
+        switch_h,
+    );
+    y += switch_h + gap;
+
+    let btn_h = theme.metrics.button.height;
+    let open_w = Button::new(libluna_i18n::tr("Open"))
+        .variant(ButtonVariant::Suggested)
+        .width(text, theme);
+    let cancel_w = Button::new(libluna_i18n::tr("Cancel")).width(text, theme);
+    let button_y = (inner.bottom() - btn_h).max(y);
+    let open = Rect::from_xywh(inner.right() - open_w, button_y, open_w, btn_h);
+    let cancel = Rect::from_xywh(open.x() - gap - cancel_w, button_y, cancel_w, btn_h);
+
+    OpenWithLayout {
+        name,
+        list,
+        remember,
+        remember_label,
+        open,
+        cancel,
+    }
+}
+
+fn paint_open_with(ctx: &mut PaintCtx, ow: &OpenWithDialog, size: Size) {
+    let theme = *ctx.theme;
+    let lay = open_with_layout(ow, size, &theme, ctx.text);
+    open_with_dialog(ow.apps.len(), ow.can_remember(), &theme).paint(ctx, size);
+
+    let body = theme.typography.body.size;
+    let caption = theme.typography.caption.size;
+
+    // Nazwa pliku po lewej, typ MIME po prawej.
+    let file_name = ow
+        .path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| ow.path.display().to_string());
+    let mime = ow.mime.clone().unwrap_or_default();
+    let mime_w = ctx.measure(&mime, caption, weight::NORMAL);
+    let name_w = (lay.name.width() - mime_w - 8.0).max(24.0);
+    let name = libluna_widgets::display::ellipsize(&file_name, name_w, body, ctx.text);
+    ctx.label_left(
+        lay.name.x(),
+        lay.name.center().y,
+        &name,
+        body,
+        weight::BOLD,
+        theme.colors.text,
+    );
+    ctx.label_right(
+        lay.name.right(),
+        lay.name.center().y,
+        &mime,
+        caption,
+        weight::NORMAL,
+        theme.colors.dim_text,
+    );
+
+    // Lista aplikacji (przewijana).
+    ctx.scene.fill_rounded_rect(
+        lay.list,
+        theme.radius.medium,
+        theme.colors.shade.scale_alpha(0.5),
+    );
+    let mut scroll = ow.scroll;
+    scroll.set_content_height(ow.apps.len() as f64 * OPEN_ROW_H);
+    scroll.set_offset(ow.scroll.offset(), lay.list);
+    ctx.scene.push_clip(lay.list);
+    for index in 0..ow.apps.len() {
+        let row = Rect::from_xywh(
+            lay.list.x() + 2.0,
+            lay.list.y() + index as f64 * OPEN_ROW_H - scroll.offset(),
+            (lay.list.width() - 4.0).max(1.0),
+            OPEN_ROW_H,
+        );
+        if row.bottom() < lay.list.y() || row.y() > lay.list.bottom() {
+            continue;
+        }
+        paint_open_with_row(ctx, ow, index, row);
+    }
+    ctx.scene.pop_clip();
+    scroll.paint_scrollbar(ctx, lay.list);
+
+    if ow.apps.is_empty() {
+        ctx.label_center(
+            lay.list.center().x,
+            lay.list.center().y,
+            &libluna_i18n::tr("No applications found"),
+            body,
+            weight::NORMAL,
+            theme.colors.dim_text,
+        );
+    }
+
+    if ow.can_remember() {
+        Switch::new(ow.remember).paint(ctx, lay.remember);
+        ctx.label_left(
+            lay.remember_label.x(),
+            lay.remember.center().y,
+            &libluna_i18n::tr("Always use for this file type"),
+            body,
+            weight::NORMAL,
+            theme.colors.text,
+        );
+    }
+
+    let enabled = ow.selected_app().is_some_and(|app| app.available());
+    Button::new(libluna_i18n::tr("Open"))
+        .variant(ButtonVariant::Suggested)
+        .enabled(enabled)
+        .paint(ctx, lay.open);
+    Button::new(libluna_i18n::tr("Cancel")).paint(ctx, lay.cancel);
+}
+
+fn paint_open_with_row(ctx: &mut PaintCtx, ow: &OpenWithDialog, index: usize, row: Rect) {
+    let theme = *ctx.theme;
+    let app = &ow.apps[index];
+    let selected = ow.selected == Some(index);
+    let available = app.available();
+    if selected {
+        ctx.scene
+            .fill_rounded_rect(row, theme.radius.small, theme.colors.accent);
+    } else if ow.hovered == Some(index) {
+        ctx.scene
+            .fill_rounded_rect(row, theme.radius.small, theme.colors.shade);
+    }
+    let fg = if selected {
+        theme.colors.accent_fg
+    } else if available {
+        theme.colors.text
+    } else {
+        theme.colors.dim_text
+    };
+    let icon_rect = Rect::from_xywh(row.x() + 8.0, row.center().y - 11.0, 22.0, 22.0);
+    if !libluna_widgets::paint_named_icon(ctx, app.icon.as_deref(), icon_rect) {
+        icon::paint_icon(ctx, IconName::App, icon_rect, fg);
+    }
+
+    let body = theme.typography.body.size;
+    let caption = theme.typography.caption.size;
+    let name = app.display_name(libluna_i18n::locale().language());
+    let badge = if ow.default_id.as_deref() == Some(app.desktop_id.as_str()) {
+        libluna_i18n::tr("Default")
+    } else {
+        String::new()
+    };
+    let badge_w = if badge.is_empty() {
+        0.0
+    } else {
+        ctx.measure(&badge, caption, weight::NORMAL) + 12.0
+    };
+    let name_w = (row.width() - 38.0 - 8.0 - badge_w).max(20.0);
+    let label = libluna_widgets::display::ellipsize(name, name_w, body, ctx.text);
+    ctx.label_left(
+        row.x() + 38.0,
+        row.center().y,
+        &label,
+        body,
+        if selected {
+            weight::MEDIUM
+        } else {
+            weight::NORMAL
+        },
+        fg,
+    );
+    if !badge.is_empty() {
+        ctx.label_right(
+            row.right() - 8.0,
+            row.center().y,
+            &badge,
+            caption,
+            weight::NORMAL,
+            if selected {
+                theme.colors.accent_fg
+            } else {
+                theme.colors.dim_text
+            },
+        );
+    }
+}
+
+/// Akcja wyliczona bez trzymania pożyczki stanu okna.
+#[derive(Clone, Copy)]
+enum OpenWithAct {
+    None,
+    Close,
+    Open,
+    OpenAt(usize),
+    Select(usize),
+    ToggleRemember,
+    Hover(Option<usize>),
+    Scroll(f64, Rect),
+    Move(i32, f64),
+}
+
+/// Modalne okno „Otwórz za pomocą…” pochłania całe wejście.
+fn on_open_with_events(
+    app: &mut App,
+    events: &[Event],
+    size: Size,
+    theme: &Theme,
+    text: &TextEngine,
+) {
+    let mut finish = None;
+    for event in events {
+        let act = {
+            let Some(ow) = app.open_with.as_ref() else {
+                return;
+            };
+            let lay = open_with_layout(ow, size, theme, text);
+            let dialog = open_with_dialog(ow.apps.len(), ow.can_remember(), theme);
+            match event {
+                Event::PointerButton(pe)
+                    if pe.button == PointerButton::Left && pe.state == ButtonState::Pressed =>
+                {
+                    let p = pe.position;
+                    if dialog.close_at(size, theme, p)
+                        || dialog.scrim_at(size, theme, p)
+                        || lay.cancel.contains(p)
+                    {
+                        OpenWithAct::Close
+                    } else if lay.open.contains(p) {
+                        if ow.selected_app().is_some_and(|app| app.available()) {
+                            OpenWithAct::Open
+                        } else {
+                            OpenWithAct::None
+                        }
+                    } else if ow.can_remember()
+                        && (lay.remember.contains(p) || lay.remember_label.contains(p))
+                    {
+                        OpenWithAct::ToggleRemember
+                    } else if let Some(index) = ow.index_at(lay.list, p) {
+                        if !ow.apps[index].available() {
+                            OpenWithAct::None
+                        } else {
+                            let now = Instant::now();
+                            let double = ow.last_click.is_some_and(|(last, at)| {
+                                last == index && now.duration_since(at) < Duration::from_millis(400)
+                            });
+                            if double {
+                                OpenWithAct::OpenAt(index)
+                            } else {
+                                OpenWithAct::Select(index)
+                            }
+                        }
+                    } else {
+                        OpenWithAct::None
+                    }
+                }
+                Event::PointerMotion { position, .. } => {
+                    OpenWithAct::Hover(ow.index_at(lay.list, *position))
+                }
+                Event::Scroll(se) if lay.list.contains(se.position) => {
+                    OpenWithAct::Scroll(se.dy, lay.list)
+                }
+                Event::Key(ke) if ke.state == ButtonState::Pressed => match ke.keysym {
+                    0xff1b => OpenWithAct::Close,
+                    0xff0d | 0xff8d => {
+                        if ow.selected_app().is_some_and(|app| app.available()) {
+                            OpenWithAct::Open
+                        } else {
+                            OpenWithAct::None
+                        }
+                    }
+                    0xff52 => OpenWithAct::Move(-1, lay.list.height()),
+                    0xff54 => OpenWithAct::Move(1, lay.list.height()),
+                    _ => OpenWithAct::None,
+                },
+                _ => OpenWithAct::None,
+            }
+        };
+
+        let Some(ow) = app.open_with.as_mut() else {
+            return;
+        };
+        match act {
+            OpenWithAct::None => {}
+            OpenWithAct::Close => {
+                finish = Some(false);
+                break;
+            }
+            OpenWithAct::Open => {
+                finish = Some(true);
+                break;
+            }
+            OpenWithAct::OpenAt(index) => {
+                ow.selected = Some(index);
+                ow.last_click = None;
+                finish = Some(true);
+                break;
+            }
+            OpenWithAct::Select(index) => {
+                ow.selected = Some(index);
+                ow.last_click = Some((index, Instant::now()));
+            }
+            OpenWithAct::ToggleRemember => ow.remember = !ow.remember,
+            OpenWithAct::Hover(index) => ow.hovered = index,
+            OpenWithAct::Scroll(dy, viewport) => {
+                ow.scroll
+                    .set_content_height(ow.apps.len() as f64 * OPEN_ROW_H);
+                ow.scroll.on_scroll(dy, viewport);
+            }
+            OpenWithAct::Move(delta, viewport) => {
+                ow.move_selection(delta);
+                ow.scroll_to_selection(viewport);
+            }
+        }
+    }
+
+    match finish {
+        Some(false) => app.open_with = None,
+        Some(true) => open_with_confirm(app),
+        None => {}
+    }
+}
+
+/// Uruchamia wybraną aplikację (opcjonalnie zapisując skojarzenie typu MIME).
+fn open_with_confirm(app: &mut App) {
+    let Some(ow) = app.open_with.take() else {
+        return;
+    };
+    let Some(index) = ow.selected else {
+        app.open_with = Some(ow);
+        return;
+    };
+    if !ow.apps.get(index).is_some_and(DesktopApp::available) {
+        // Wpis bez programu — nie zamykamy okna, użytkownik może wybrać inny.
+        app.open_with = Some(ow);
+        return;
+    }
+    let Some(chosen) = ow.apps.get(index).cloned() else {
+        return;
+    };
+    if ow.remember {
+        if let Some(mime) = ow.mime.as_deref() {
+            if let Err(err) = open_with::set_default_app(mime, &chosen.desktop_id) {
+                if crate::app::debug() {
+                    eprintln!("luna-files: xdg-mime default: {err}");
+                }
+                app.show_toast(libluna_i18n::tr("Could not set the default application"));
+            }
+        }
+    }
+    if let Err(err) = open_with::launch(&chosen, &ow.path) {
+        app.show_toast(err);
+    }
+}
+
 /// Obsługuje klik w otwartym oknie Ustawień (modal blokuje resztę).
 fn on_settings_press(app: &mut App, p: Point, size: Size, theme: &Theme) {
     let lay = settings_layout(size, theme);
@@ -1158,6 +1581,12 @@ pub fn handle_events(
 ) {
     let lay = layout(app, size, theme, text);
     let ch = chrome(app, &lay, theme);
+
+    // Modal „Otwórz za pomocą…” jest najwyżej — pochłania całe wejście.
+    if app.open_with.is_some() {
+        on_open_with_events(app, events, size, theme, text);
+        return;
+    }
 
     // Modale (Ustawienia, O aplikacji) pochłaniają całe wejście.
     if app.settings_open {
@@ -1608,9 +2037,7 @@ fn on_left_press(
                     if entry.is_dir {
                         app.navigate(i, entry.path);
                     } else {
-                        let _ = std::process::Command::new("xdg-open")
-                            .arg(&entry.path)
-                            .spawn();
+                        app.open_file(&entry.path);
                     }
                 }
             } else {
@@ -2410,6 +2837,11 @@ fn menu_entries(app: &App, target: &MenuTarget) -> (Vec<MenuEntry>, Vec<Option<M
     match target {
         MenuTarget::Item(..) => {
             m.action(tr("Open"), Some("Enter"), MenuCmd::Open);
+            if let MenuTarget::Item(_, is_dir) = target {
+                if !*is_dir {
+                    m.action(tr("Open with…"), None, MenuCmd::OpenWith);
+                }
+            }
             m.action(tr("Preview"), Some("Space"), MenuCmd::TogglePreview);
             m.action(tr("Open in Terminal"), Some("F4"), MenuCmd::OpenTerminal);
             m.sep();
@@ -2550,7 +2982,14 @@ fn run_menu(app: &mut App, index: usize) {
                 if is_dir {
                     app.navigate(app.active, path);
                 } else {
-                    let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
+                    app.open_file(&path);
+                }
+            }
+        }
+        MenuCmd::OpenWith => {
+            if let Some((path, is_dir)) = target {
+                if !is_dir {
+                    app.show_open_with(path);
                 }
             }
         }
@@ -2746,6 +3185,27 @@ mod tests {
         let png = renderer.encode_png().expect("PNG");
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../docs/images/luna-files.png");
+        std::fs::write(path, png).expect("zapis PNG");
+    }
+
+    #[test]
+    #[ignore = "generuje podgląd do docs/images (uruchom ręcznie)"]
+    fn render_open_with_preview() {
+        let icons = libluna_core::IconSettings::load();
+        libluna_core::icons::set_active_icon_set(icons.external);
+        libluna_core::icons::set_active_icon_theme(icons.theme);
+        let mut app = app();
+        app.show_open_with(PathBuf::from("/home/luna/Dokumenty/umowa-2026.raw"));
+        let theme = Theme::dark();
+        let text = TextEngine::system();
+        let size = Size::new(1120.0, 720.0);
+        let mut scene = Scene::new();
+        paint(&app, &mut scene, size, &theme, &text);
+        let mut renderer = libluna_render::SoftwareRenderer::new(1120, 720);
+        renderer.draw(&scene, 1.0, theme.colors.window_bg);
+        let png = renderer.encode_png().expect("PNG");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/images/luna-files-open-with.png");
         std::fs::write(path, png).expect("zapis PNG");
     }
 
@@ -3085,5 +3545,165 @@ mod tests {
         }
         assert!(target.exists(), "plik powinien zostać przeniesiony");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn open_with_demo() -> OpenWithDialog {
+        let apps = vec![
+            open_with::parse_desktop_entry(
+                "[Desktop Entry]\nType=Application\nName=Editor\nExec=sh %U\nIcon=org.gnome.gedit\nMimeType=text/plain;\n",
+                "gedit.desktop",
+            )
+            .unwrap(),
+            open_with::parse_desktop_entry(
+                "[Desktop Entry]\nType=Application\nName=Inny program\nExec=sh %f\n",
+                "inny.desktop",
+            )
+            .unwrap(),
+        ];
+        OpenWithDialog::new(
+            PathBuf::from("/tmp/notatka.txt"),
+            Some("text/plain".to_owned()),
+            Some("gedit.desktop".to_owned()),
+            apps,
+        )
+    }
+
+    fn key_event(keysym: u32) -> Event {
+        Event::Key(KeyEvent {
+            keysym,
+            keycode: 0,
+            text: None,
+            state: ButtonState::Pressed,
+            modifiers: Modifiers::default(),
+            repeat: false,
+        })
+    }
+
+    #[test]
+    fn open_with_dialog_renders_panel_and_fits_inside() {
+        let mut app = app();
+        app.open_with = Some(open_with_demo());
+        let theme = Theme::light();
+        let text = TextEngine::system();
+        let size = Size::new(1120.0, 720.0);
+        let ow = app.open_with.as_ref().unwrap();
+        let lay = open_with_layout(ow, size, &theme, &text);
+        let panel = open_with_dialog(ow.apps.len(), ow.can_remember(), &theme)
+            .rects(size, &theme)
+            .panel;
+        for rect in [lay.name, lay.list, lay.remember, lay.open, lay.cancel] {
+            assert!(panel.contains(rect.center()), "kontrolka poza panelem");
+        }
+        let mut scene = Scene::new();
+        paint(&app, &mut scene, size, &theme, &text);
+        let mut renderer = libluna_render::SoftwareRenderer::new(1120, 720);
+        renderer.draw(&scene, 1.0, theme.colors.window_bg);
+        let px = |x: usize, y: usize| {
+            let i = (y * 1120 + x) * 4;
+            renderer.data()[i..i + 4].to_vec()
+        };
+        assert_ne!(
+            px(panel.center().x as usize, panel.center().y as usize),
+            px(10, 700)
+        );
+    }
+
+    #[test]
+    fn file_menu_offers_open_with_but_folder_menu_does_not() {
+        let app = app();
+        let dir = std::env::temp_dir();
+        let (_, file_cmds) = menu_entries(&app, &MenuTarget::Item(dir.join("notatka.txt"), false));
+        assert!(file_cmds
+            .iter()
+            .flatten()
+            .any(|cmd| matches!(cmd, MenuCmd::OpenWith)));
+        let (_, dir_cmds) = menu_entries(&app, &MenuTarget::Item(dir, true));
+        assert!(dir_cmds
+            .iter()
+            .flatten()
+            .all(|cmd| !matches!(cmd, MenuCmd::OpenWith)));
+    }
+
+    #[test]
+    fn open_with_dialog_closes_on_escape() {
+        let theme = Theme::light();
+        let text = TextEngine::system();
+        let size = Size::new(1120.0, 720.0);
+
+        let mut app = app();
+        app.open_with = Some(open_with_demo());
+        handle_events(&mut app, &[key_event(0xff1b)], size, &theme, &text);
+        assert!(app.open_with.is_none());
+    }
+
+    #[test]
+    fn open_with_dialog_closes_on_cancel_click() {
+        let theme = Theme::light();
+        let text = TextEngine::system();
+        let size = Size::new(1120.0, 720.0);
+        let mut app = app();
+        app.open_with = Some(open_with_demo());
+        let lay = open_with_layout(app.open_with.as_ref().unwrap(), size, &theme, &text);
+        handle_events(
+            &mut app,
+            &[Event::PointerButton(libluna_core::PointerEvent {
+                position: lay.cancel.center(),
+                button: PointerButton::Left,
+                state: ButtonState::Pressed,
+                modifiers: Modifiers::default(),
+            })],
+            size,
+            &theme,
+            &text,
+        );
+        assert!(app.open_with.is_none());
+    }
+
+    #[test]
+    fn open_with_dialog_click_selects_row() {
+        let mut app = app();
+        app.open_with = Some(open_with_demo());
+        let theme = Theme::light();
+        let text = TextEngine::system();
+        let size = Size::new(1120.0, 720.0);
+        let lay = open_with_layout(app.open_with.as_ref().unwrap(), size, &theme, &text);
+        let second = Point::new(lay.list.x() + 20.0, lay.list.y() + OPEN_ROW_H * 1.5);
+        handle_events(
+            &mut app,
+            &[Event::PointerButton(libluna_core::PointerEvent {
+                position: second,
+                button: PointerButton::Left,
+                state: ButtonState::Pressed,
+                modifiers: Modifiers::default(),
+            })],
+            size,
+            &theme,
+            &text,
+        );
+        assert_eq!(app.open_with.as_ref().unwrap().selected, Some(1));
+    }
+
+    #[test]
+    fn open_with_remember_switch_is_clickable() {
+        let mut app = app();
+        app.open_with = Some(open_with_demo());
+        let theme = Theme::light();
+        let text = TextEngine::system();
+        let size = Size::new(1120.0, 720.0);
+        let lay = open_with_layout(app.open_with.as_ref().unwrap(), size, &theme, &text);
+        let before = app.open_with.as_ref().unwrap().remember;
+        handle_events(
+            &mut app,
+            &[Event::PointerButton(libluna_core::PointerEvent {
+                position: lay.remember.center(),
+                button: PointerButton::Left,
+                state: ButtonState::Pressed,
+                modifiers: Modifiers::default(),
+            })],
+            size,
+            &theme,
+            &text,
+        );
+        assert_ne!(app.open_with.as_ref().unwrap().remember, before);
     }
 }

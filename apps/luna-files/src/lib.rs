@@ -4,6 +4,7 @@ pub mod app;
 pub mod archive;
 pub mod list;
 pub mod model;
+pub mod open_with;
 pub mod ops;
 pub mod places;
 pub mod prefs;

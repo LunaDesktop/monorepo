@@ -11,6 +11,8 @@ Dostępne binarki:
 | `luna-files` | podstawowa nazwa aplikacji (okno „Pliki”) |
 | `gaminedes` | alias — ta sama aplikacja, inna nazwa okna i App ID |
 
+![Okno „Otwórz za pomocą…”](../../docs/images/luna-files-open-with.png)
+
 ## Co już działa
 
 **Nawigacja i widok**
@@ -38,7 +40,13 @@ Dostępne binarki:
   (`Shift+Delete`), **przywracanie z kosza** na pierwotną ścieżkę oraz opróżnianie
   kosza z potwierdzeniem;
 - zmiana nazwy (`F2`), nowy folder (`Ctrl+N`), odświeżanie (`F5`/`Ctrl+R`),
-  otwieranie plików przez `xdg-open`, terminal w katalogu (`F4`);
+  otwieranie plików domyślną aplikacją (`xdg-open`), terminal w katalogu (`F4`);
+- **„Otwórz za pomocą…”** (menu kontekstowe pliku) — lista aplikacji z wpisów
+  `.desktop`, ikony, podpowiedź typu MIME i znacznik aplikacji domyślnej;
+  dwuklik na nieznanym typie (albo brak domyślnej aplikacji) otwiera to okno samo,
+  a wybór jest zapamiętywany przez `xdg-mime default` w `mimeapps.list`
+  (przełącznik „Zawsze używaj dla tego typu plików” jest domyślnie włączony
+  dla rozpoznanych typów MIME — można go wyłączyć, by otworzyć plik jednorazowo);
 - **Właściwości** pokazują rozmiar katalogu liczony rekurencyjnie w tle
   (liczba plików i podkatalogów), bez blokowania UI.
 
@@ -77,6 +85,7 @@ Dostępne binarki:
 |---|---|
 | `model.rs` | wpisy katalogu, sortowanie, filtr, rozmiary i daty (testy bez UI) |
 | `list.rs` | lista z kolumnami, nagłówki sortowania, wirtualizacja wierszy |
+| `open_with.rs` | skaner wpisów `.desktop`, MIME (`xdg-mime`), rozwĳanie `Exec=`, okno wyboru aplikacji |
 | `trash.rs` | kosz XDG: `files/` + `info/*.trashinfo`, kolizje nazw, `EXDEV` |
 | `places.rs` | miejsca XDG, montowania (`/proc/self/mountinfo`), `statvfs`, UDisks2 |
 | `ops.rs` | wielowątkowa kolejka kopiuj/przenieś/usuń/zmień nazwę/pakuj/wypakuj |
@@ -108,5 +117,9 @@ Dostępne binarki:
 - MTP/PTP (telefony) przez GVFS/libmtp, LUKS i montowanie partycji systemowych;
 - miniatury obrazów i wideo, podgląd PDF, kolumny (Miller), masowa zmiana nazw;
 - bezpośrednie sygnały UDisks2 (`InterfacesAdded/Removed`) zamiast odpytywania;
-- systemowy schowek dla „Kopiuj ścieżkę” (wymaga API schowka w `libluna-platform`);
-- „Otwórz za pomocą…” z wyborem aplikacji i zapamiętywaniem domyślnych.
+- systemowy schowek dla „Kopiuj ścieżkę” (wymaga API schowka w `libluna-platform`).
+
+## Licencja
+
+GNU GPL v3.0 lub nowsza (`GPL-3.0-or-later`) — pełny tekst w [`LICENSE`](LICENSE).
+© 2026 Luna Project.

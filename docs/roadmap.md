@@ -84,6 +84,12 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
 - **Edycja tekstu**: `Entry`/`SearchEntry`/`PasswordEntry`/`TextView` mają **zaznaczanie**
   (`set_selection`, `select_all`, zakres, Shift+strzałki/Ctrl+A) oraz operacje schowka
   (`copy`/`cut`/`paste`); `TextInput` rozszerzono o metody zaznaczania.
+- **`CodeView`** (edytor kodu): kolorowane spany (`Span`/`TokenKind`), gutter
+  z numerami linii, bieżąca linia, przewijanie w obu osiach, trafianie kursorem
+  i zaznaczanie myszą. Paleta tokenów jest częścią motywu (`Theme::syntax`,
+  nadpisywalna kluczami `syntax.*`); pierwszy konsument to `apps/luna-editor`,
+  który łączy wiele plików w zakładki (`TabBar`), ma wbudowany manager plików
+  i panel projektu z podglądem.
 - `libluna-platform`: realne akcje okna z `Frame` (`close`/`minimize`/`toggle_maximize`).
   **Klatki animacji**: `Frame::delta_time()` + `Frame::request_frame()` (płynne ~60 Hz, gdy trwa
   animacja; bez tego okno odświeża się tylko na zdarzenia).
@@ -212,13 +218,18 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
   strzałki (lista ±1, siatka kolumny/wiersze, karuzela karty), `Enter` uruchamia zaznaczoną
   pozycję, `Esc` zamyka; zaznaczenie automatycznie przewija się do widoku
   (`Launcher::navigate` + `ensure_selection_visible`).
-  ✅ **Przypięte i ostatnio używane**: PPM na aplikacji przypina ją (pinezka, pozycja
-  przesuwa się na górę), kolejne przypięte idą w kolejności dodania, a po nich lista
-  „ostatnio używanych” (8 pozycji, bez duplikatów). Stan przetrwa przelogowanie w
-  `~/.config/luna/launcher.conf` (`luna::launcher_conf`, klucze = nazwy plików
-  `.desktop`); usunięcie aplikacji z systemu nie psuje konfiguracji — wpis po prostu
-  znika z listy. Kolejność jest częścia kontraktu: indeksy w rysowaniu, hit-testach
-  i nawigacji klawiatury liczy jedno `Launcher::filter_apps`.
+  ✅ **Przypięte i ostatnio używane**: PPM na aplikacji otwiera menu kontekstowe
+  (otwórz, dodaj/usuń z ulubionych, otwórz jako administrator przez polkit,
+  kopiuj polecenie uruchamiające, odinstaluj → Sklep na pakiecie). Wybór
+  „Dodaj do ulubionych” przypina pozycję na górę listy, kolejne przypięte idą
+  w kolejności dodania, a po nich lista „ostatnio używanych” (8 pozycji, bez
+  duplikatów). Stan przetrwa przelogowanie w `~/.config/luna/launcher.conf`
+  (`luna::launcher_conf`, klucze = nazwy plików `.desktop`); usunięcie aplikacji
+  z systemu nie psuje konfiguracji — wpis po prostu znika z listy. Kolejność jest
+  częścią kontraktu: indeksy w rysowaniu, hit-testach i nawigacji klawiatury
+  liczy jedno `Launcher::filter_apps`. ✅ **Odświeżanie po instalacji**: powłoka
+  porównuje tani znacznik katalogów `applications/` (`apps::stamp`) i przebudowuje
+  listę, gdy pojawi się nowy plik `.desktop` — bez restartu i bez utraty pozycji.
   ✅ **`luna-shell`** (bin) uruchamia panel jako prawdziwą **powierzchnię
   warstwową** (`wlr-layer-shell` po stronie klienta w `libluna-platform`); bez kompozytora
   kończy się czytelnym `NoCompositor`. ✅ **OSD** (`osd.rs`) i **powiadomienia** (`notifications.rs`)
@@ -238,6 +249,12 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
 - **Luna Settings** (`apps/luna-settings`) — centrum ustawień środowiska i systemu
   (wygląd, język, dźwięk, ekrany, zasilanie, powiadomienia, informacje o systemie):
   pierwsza wersja działa; plan i zakres w **[`docs/settings.md`](settings.md)**.
+- **Luna Clock** (`apps/luna-clock`) — zegar, minutnik, stoper, strefy czasowe
+  i kalendarz z wydarzeniami, świętami offline i automatycznym motywem;
+  panel czyta ten sam plik wydarzeń i otwiera aplikację na wybranym dniu.
+  Po zamknięciu aplikacji działający minutnik/stoper trafia do **widgetu pod paskiem**
+  (`active.conf` + `luna::clock_widget`), co jest pierwszym krokiem do systemu widgetów.
+  Szczegóły i zasady prywatności: **[`docs/clock.md`](clock.md)**.
 
 ## Później (poza MVP)
 - **Pakiety ikon** (kolejny krok razem z centrum ustawień): manifest `icons.toml`
@@ -284,6 +301,14 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
 | Spinner / Tooltip | `libluna-widgets` | obie |
 | StatusBar / bottom info | `libluna-widgets` | obie |
 | StatusPage (pusty stan) | `libluna-widgets` | Files |
+
+## Bezpieczeństwo i prywatność (`luna-security`)
+
+✅ **Monitor prywatności**: daemon wykrywa użycie mikrofonu/kamery (PipeWire +
+`/proc/<pid>/fd`) i publiczne połączenia sieciowe, pokazuje ikony na panelu i prosi
+o zgodę modalem w powłoce; decyzje zapisuje w `~/.config/luna/security.conf`.
+CLI: `luna-security status/pending/allow/deny/reset/log/scan/watch`.
+Szczegóły i ograniczenia (brak blokowania pakietów): [`docs/security.md`](security.md).
 
 ## Kompozytor (Selene)
 

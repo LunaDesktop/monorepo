@@ -300,6 +300,13 @@ rm -f "$rt/luna-keyring-ready" 2>/dev/null || true
 if command -v luna-keyring >/dev/null 2>&1; then
     ts "uruchamiam luna-keyring"
     luna-keyring &
+
+    # Korektor (PipeWire + LADSPA): jeśli użytkownik włączył go w ustawieniach,
+    # łańcuch filtrów wstaje razem z sesją. `luna-eq start` nic nie robi, gdy
+    # korektor jest wyłączony; błędy trafiają do ~/.cache/luna/equalizer.log.
+    if command -v luna-eq >/dev/null 2>&1; then
+        ( luna-eq start >/dev/null 2>&1 || true ) &
+    fi
     # Krótkie oczekiwanie na zajęcie nazwy `org.freedesktop.secrets`. Aplikacje
     # uruchamiane zaraz po zalogowaniu (Zed, VS Code) inaczej nie widzą keyringu.
     k=0
@@ -330,6 +337,13 @@ else
             break
         fi
     done
+fi
+
+# Monitor prywatności (mikrofon/kamera/sieć i zgody aplikacji).
+# Startuje przed powłoką, żeby panel od razu miał stan; błędy nie blokują sesji.
+if command -v luna-security >/dev/null 2>&1; then
+    ts "uruchamiam luna-security"
+    luna-security daemon >/dev/null 2>&1 &
 fi
 
 # Powłoka Luna (panel, launcher, OSD).

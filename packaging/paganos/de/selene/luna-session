@@ -6,8 +6,20 @@
 # nested — ustaw wtedy SELENE_BACKEND=nested (albo wyloguj bieżącą sesję).
 set -eu
 
-# Ctrl+C / Ctrl+\ w terminalu nie mogą kończyć sesji (patrz de/session/luna-session).
+# Ctrl+C / Ctrl+\ w terminalu nie mogą kończyć sesji. Sygnały z terminala trafiają
+# do grupy procesów, w której działają też selene i luna-shell — ignorujemy je tutaj,
+# a dzieci dziedziczą SIG_IGN. Dziecko PTY w luna-terminal resetuje SIGINT do SIG_DFL,
+# więc powłoka w terminalu nadal normalnie dostaje przerwanie.
+#
+# Sama ignorancja nie wystarczała: konsola jądra wysyłała SIGINT do procesu `greetd`
+# nadzorującego sesję (logind kończył wtedy sesję = „wylogowanie”). Dlatego Selene
+# przejmuje pierwszy plan VT (zob. `selene/src/vt.rs`).
 trap '' INT QUIT
+
+# Diagnostyka: gdy sesję kończy sygnał (np. `loginctl terminate-session` z menu
+# zasilania albo greeter), w logu zostaje ślad — bez tego sesja po prostu znikała.
+trap 'ts "sygnał TERM — kończę sesję"; exit 143' TERM
+trap 'ts "sygnał HUP — kończę sesję"; exit 129' HUP
 
 export XDG_CURRENT_DESKTOP=Luna
 # Pełny, przewidywalny PATH: menedżery logowania potrafią go obciąć (bez `/usr/sbin`
@@ -62,7 +74,75 @@ fi
 
 # Kompozytor w tle, a po nim powłoka Luna (panel/OSD).
 rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+# Binarki zainstalowane przez użytkownika (np. `install -m755 ... ~/.local/bin`)
+# mają pierwszeństwo przed systemowymi — pozwala to testować/aktualizować Lunę
+# bez roota, a sesja zawsze uruchamia najnowszą powłokę i kompozytor.
+export PATH="$HOME/.local/bin:$PATH"
 ts() { printf '%s luna-session: %s\n' "$(date +%H:%M:%S)" "$*"; }
+# `locale -a` wypisuje `pl_PL.utf8`, a my używamy tagów typu `pl_PL.UTF-8`.
+# Porównujemy po usunięciu myślników i wielkości liter.
+has_locale() {
+    [ -n "$1" ] || return 1
+    command -v locale >/dev/null 2>&1 || return 1
+    norm="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d '-')"
+    locale -a 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -Fxq "$norm"
+}
+
+# Język wybrany w Ustawieniach Luny. Ustawiamy `LANGUAGE` (gettext) i — gdy locale
+# jest wygenerowane — `LANG`; reszta aplikacji libLuny czyta ten sam plik sama.
+luna_locale_file="${XDG_CONFIG_HOME:-$HOME/.config}/luna/locale.conf"
+if [ -r "$luna_locale_file" ]; then
+    luna_lang="$(sed -n 's/^[[:space:]]*language[[:space:]]*=[[:space:]]*//p' "$luna_locale_file" | head -n 1 | tr -d '[:space:]')"
+    case "$luna_lang" in
+        pl) luna_locale="pl_PL.UTF-8" ;;
+        en) luna_locale="en_US.UTF-8" ;;
+        de) luna_locale="de_DE.UTF-8" ;;
+        *)  luna_locale="" ;;
+    esac
+    if [ -n "$luna_lang" ]; then
+        export LANGUAGE="$luna_lang"
+        if [ -n "$luna_locale" ] && has_locale "$luna_locale"; then
+            export LANG="$luna_locale"
+        elif [ -n "$luna_locale" ] && [ -d "$HOME/.local/share/locale/$luna_locale" ]; then
+            # Locale wygenerowane bez roota przez Ustawienia (`localedef`).
+            export LANG="$luna_locale"
+            export LOCPATH="$HOME/.local/share/locale"
+        fi
+        ts "język z Ustawień: $luna_lang${luna_locale:+ ($luna_locale)}"
+    fi
+fi
+
+# Region, formaty i strefa czasowa z Ustawień Luny (`region.conf`).
+# To ustawienia użytkownika — nie wymagają roota; systemowa strefa zostaje nietknięta.
+luna_region_file="${XDG_CONFIG_HOME:-$HOME/.config}/luna/region.conf"
+if [ -r "$luna_region_file" ]; then
+    luna_region_locale="$(sed -n 's/^[[:space:]]*locale[[:space:]]*=[[:space:]]*//p' "$luna_region_file" | head -n 1 | tr -d '[:space:]')"
+    luna_region_tz="$(sed -n 's/^[[:space:]]*timezone[[:space:]]*=[[:space:]]*//p' "$luna_region_file" | head -n 1 | tr -d '[:space:]')"
+    if [ -n "$luna_region_locale" ]; then
+        if has_locale "$luna_region_locale"; then
+            export LC_TIME="$luna_region_locale"
+        elif [ -d "$HOME/.local/share/locale/$luna_region_locale" ]; then
+            export LC_TIME="$luna_region_locale"
+            export LOCPATH="$HOME/.local/share/locale"
+            ts "format czasu z Ustawień: $luna_region_locale"
+        else
+            ts "locale z Ustawień niewygenerowane: $luna_region_locale (pomijam)"
+        fi
+    fi
+    if [ -n "$luna_region_tz" ] && [ -f "/usr/share/zoneinfo/$luna_region_tz" ]; then
+        export TZ="$luna_region_tz"
+        ts "strefa czasowa z Ustawień: $luna_region_tz"
+    fi
+fi
+
+# Język ma obowiązywać w **całej sesji**, nie tylko w aplikacjach libLuny.
+# D-Bus i systemd user przekazują `LANGUAGE` nowo uruchamianym programom.
+if command -v dbus-update-activation-environment >/dev/null 2>&1; then
+    dbus-update-activation-environment --systemd LANGUAGE LANG LC_TIME TZ >/dev/null 2>&1 || true
+fi
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl --user import-environment LANGUAGE LANG LC_TIME TZ >/dev/null 2>&1 || true
+fi
 
 ts "uruchamiam selene"
 # Sprzątanie po poprzedniej sesji: zamki gniazd zostają po nagłym zabiciu kompozytora.
@@ -76,8 +156,20 @@ rm -f "$rt/luna-display" 2>/dev/null || true
 # Liczba monitorów z poprzedniej sesji też jest nieaktualna.
 rm -f "$rt/luna-outputs" 2>/dev/null || true
 rm -f "$rt"/wayland-*.lock 2>/dev/null || true
-selene &
-selene_pid=$!
+# Selene potrzebuje deskryptora terminala sesji, żeby przejąć pierwszy plan VT
+# (patrz `selene/src/vt.rs`) — inaczej Ctrl+C na konsoli wysyła SIGINT do całej grupy
+# procesów VT, ginie proces `greetd` nadzorujący sesję i logind ją kończy.
+# Uwaga: `selene &` w nieinteraktywnej powłoce dostaje stdin=/dev/null, dlatego
+# przekazujemy kopię naszego stdin jawnie.
+if [ -t 0 ]; then
+    exec 3<&0
+    selene 0<&3 &
+    selene_pid=$!
+    exec 3<&-
+else
+    selene &
+    selene_pid=$!
+fi
 
 # Czekamy na **marker gotowości** zapisany przez Selene (a nie na plik gniazda, który
 # mógł zostać po poprzedniej sesji). Marker zawiera nazwę gniazda, na którym Selene
@@ -208,6 +300,13 @@ rm -f "$rt/luna-keyring-ready" 2>/dev/null || true
 if command -v luna-keyring >/dev/null 2>&1; then
     ts "uruchamiam luna-keyring"
     luna-keyring &
+
+    # Korektor (PipeWire + LADSPA): jeśli użytkownik włączył go w ustawieniach,
+    # łańcuch filtrów wstaje razem z sesją. `luna-eq start` nic nie robi, gdy
+    # korektor jest wyłączony; błędy trafiają do ~/.cache/luna/equalizer.log.
+    if command -v luna-eq >/dev/null 2>&1; then
+        ( luna-eq start >/dev/null 2>&1 || true ) &
+    fi
     # Krótkie oczekiwanie na zajęcie nazwy `org.freedesktop.secrets`. Aplikacje
     # uruchamiane zaraz po zalogowaniu (Zed, VS Code) inaczej nie widzą keyringu.
     k=0
@@ -238,6 +337,13 @@ else
             break
         fi
     done
+fi
+
+# Monitor prywatności (mikrofon/kamera/sieć i zgody aplikacji).
+# Startuje przed powłoką, żeby panel od razu miał stan; błędy nie blokują sesji.
+if command -v luna-security >/dev/null 2>&1; then
+    ts "uruchamiam luna-security"
+    luna-security daemon >/dev/null 2>&1 &
 fi
 
 # Powłoka Luna (panel, launcher, OSD).
@@ -271,4 +377,7 @@ else
 fi
 
 # Sesja żyje, dopóki działa kompozytor.
-wait "$selene_pid"
+status=0
+wait "$selene_pid" || status=$?
+ts "selene zakończył się (status $status) — kończę sesję"
+exit "$status"

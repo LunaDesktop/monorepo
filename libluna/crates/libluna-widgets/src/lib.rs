@@ -51,6 +51,8 @@
 //!   kontenery GTK4 (`Box` = stos drzewa układu: [`Node::hbox`]/[`Node::vbox`]).
 //! - [`MenuButton`], [`SearchBar`], [`Expander`], [`Statusbar`], [`Calendar`] — kolejne widgety GTK4.
 //! - [`Image`], [`TextView`] — obrazek (ikony wektorowe) i pole wielolinijkowe (GTK4).
+//! - [`CodeView`] — edytor kodu: kolorowane spany, gutter z numerami linii,
+//!   bieżąca linia, przewijanie w obu osiach i trafianie kursorem w tekst.
 //! - [`Popover`], [`ColumnView`], [`Assistant`] — generyczny popover, tabela i kreator kroków (GTK4).
 //! - [`Scrollbar`]/[`Adjustment`], [`ColorChooser`] — przewijanie (obie osie) i paleta kolorów.
 //! - Animacje (`libluna-core::motion`): `Easing`/`lerp`/`Animation`; użyte w [`Revealer`],
@@ -85,6 +87,7 @@ pub mod calendar;
 pub mod card;
 pub mod check_button;
 pub mod clipboard;
+pub mod code_view;
 pub mod color_chooser;
 pub mod column_view;
 pub mod containers;
@@ -151,6 +154,7 @@ pub use calendar::Calendar;
 pub use card::Card;
 pub use check_button::CheckButton;
 pub use clipboard::{clipboard_command, TextClipboardCommand};
+pub use code_view::{token_color, CodeMetrics, CodeView, Span, TokenKind};
 pub use color_chooser::ColorChooser;
 pub use column_view::{Column, ColumnView};
 pub use containers::{
