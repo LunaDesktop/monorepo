@@ -68,7 +68,7 @@ każda rodzina ma własny, stały odcień, a kształt mówi, do czego ikona słu
 | `Monitor`, `Screenshot`, `Sliders` | ustawienia systemowe | Ustawienia, Quick Panel |
 | `Brightness`, `Moon`, `Auto` | słońce, sierp i koło pół na pół — tryby jasny/ciemny/auto | przełącznik motywu, Quick Panel |
 | `Play`, `Pause` | sterowanie odtwarzaniem | odtwarzacz |
-| `Refresh` | okrągła strzałka — odświeżanie | paski, listy, przyciski akcji |
+| `Refresh` | gruba okrągła strzałka z wyraźnym grocikiem — odświeżanie | paski, listy, przyciski akcji |
 | `Pin` | pinezka | launcher, przypięte aplikacje |
 
 Kontrolki interfejsu (`Menu`, `Search`, strzałki, `Close`, `Pin`) są zawsze rysowane
