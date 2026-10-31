@@ -2106,7 +2106,7 @@ mod tests {
     use crate::sessions::SessionKind;
     use libluna_core::{Accent, GreeterSettings, ThemePreference};
     use libluna_render::{SoftwareRenderer, TextEngine};
-    use std::io::Read;
+    use std::io::{Read, Write};
     use std::os::unix::net::UnixListener;
 
     fn sample_users() -> Vec<User> {
@@ -2182,12 +2182,25 @@ mod tests {
         String::from_utf8(payload).unwrap()
     }
 
+    fn write_frame(stream: &mut std::os::unix::net::UnixStream, payload: &str) {
+        stream
+            .write_all(&(payload.len() as u32).to_ne_bytes())
+            .unwrap();
+        stream.write_all(payload.as_bytes()).unwrap();
+        stream.flush().unwrap();
+    }
+
     #[test]
     fn pending_password_is_sent_without_second_enter() {
         let path = test_socket_path();
         let listener = UnixListener::bind(&path).expect("bind");
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept");
+            // Nowe połączenie najpierw anuluje ewentualną sesję-sierotę.
+            let line = read_frame(&mut stream);
+            assert!(line.contains("cancel_session"), "{line}");
+            write_frame(&mut stream, r#"{"type":"success"}"#);
+
             let line = read_frame(&mut stream);
             assert!(line.contains("post_auth_message_response"), "{line}");
             assert!(line.contains("hunter2"), "{line}");
