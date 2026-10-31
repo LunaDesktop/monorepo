@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.0.5"
+version = "0.0.7"
 edition = "2021"
 license = "MPL-2.0"
 rust-version = "1.80"
@@ -18,12 +18,12 @@ authors = ["Patryk Szkudlarek / libLuna contributors"]
 repository = "https://github.com/mijsys/libLuna"
 
 [workspace.dependencies]
-libluna-core = { path = "crates/libluna-core", version = "0.0.5" }
-libluna-i18n = { path = "crates/libluna-i18n", version = "0.0.5" }
-libluna-render = { path = "crates/libluna-render", version = "0.0.5" }
-libluna-platform = { path = "crates/libluna-platform", version = "0.0.5" }
-libluna-widgets = { path = "crates/libluna-widgets", version = "0.0.5" }
-libluna = { path = "crates/libluna", version = "0.0.5" }
+libluna-core = { path = "crates/libluna-core", version = "0.0.7" }
+libluna-i18n = { path = "crates/libluna-i18n", version = "0.0.7" }
+libluna-render = { path = "crates/libluna-render", version = "0.0.7" }
+libluna-platform = { path = "crates/libluna-platform", version = "0.0.7" }
+libluna-widgets = { path = "crates/libluna-widgets", version = "0.0.7" }
+libluna = { path = "crates/libluna", version = "0.0.7" }
 
 tiny-skia = "0.11"
 # Ikony aplikacji często istnieją tylko jako SVG (Adwaita, Papirus).

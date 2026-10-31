@@ -1729,9 +1729,9 @@ pub fn paint_icon_themed(
             );
         }
         IconName::Refresh => {
-            // Okrągła strzałka z grocikiem — ten sam kształt w pastelu i monochromie.
-            scene.stroke_polyline(&arc(g.p(12.0, 12.0), g.d(7.6), 45.0, 315.0, 28), w, color);
-            let [a, b, c] = refresh_arrowhead(12.0, 12.0, 7.6, 315.0, 3.2, 2.4);
+            // Okrągła strzałka z wyraźnym grocikiem — ten sam kształt w pastelu i monochromie.
+            scene.stroke_polyline(&arc(g.p(12.0, 12.0), g.d(7.2), 45.0, 315.0, 28), w, color);
+            let [a, b, c] = refresh_arrowhead(12.0, 12.0, 7.2, 315.0, 4.6, 3.2);
             scene.fill_polygon(&[g.p(a.0, a.1), g.p(b.0, b.1), g.p(c.0, c.1)], color);
         }
         IconName::Moon => {
@@ -2296,8 +2296,8 @@ fn paint_pastel(paint: &mut PaintCtx, name: IconName, g: &Grid) {
             p.rect(13.4, 4.8, 3.4, 14.4, 1.0, PASTEL_MINT.base);
         }
         IconName::Refresh => {
-            p.arc(12.0, 12.0, 7.6, 45.0, 315.0, 28, 2.2, PASTEL_MINT.base);
-            let [a, b, c] = refresh_arrowhead(12.0, 12.0, 7.6, 315.0, 3.2, 2.4);
+            p.arc(12.0, 12.0, 7.2, 45.0, 315.0, 28, 2.4, PASTEL_MINT.base);
+            let [a, b, c] = refresh_arrowhead(12.0, 12.0, 7.2, 315.0, 4.6, 3.2);
             p.poly(&[a, b, c], PASTEL_MINT.base);
         }
         IconName::Moon => {

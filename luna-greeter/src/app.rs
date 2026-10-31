@@ -574,7 +574,9 @@ impl GreeterApp {
                 description,
             } => {
                 eprintln!("luna-greeter: greetd {error_type}: {description}");
-                self.worker = None;
+                // Worker zostaje: jego wątek anulował nieudaną sesję i dalej
+                // obsługuje to samo połączenie, więc kolejna próba nie wymaga
+                // ponownego łączenia się z greetd.
                 self.pending_secret = None;
                 self.phase = Phase::Idle;
                 self.password.clear();

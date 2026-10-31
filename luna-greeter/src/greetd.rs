@@ -310,6 +310,13 @@ impl Emitter {
     }
 }
 
+/// Anuluje sesję pod konfiguracją i czyta odpowiedź greetd.
+///
+/// Zwraca `false`, gdy połączenie jest już martwe.
+fn cancel_session(client: &mut Client) -> bool {
+    client.send(&Request::CancelSession).is_ok() && client.read().is_ok()
+}
+
 fn run(socket: &Path, rx: Receiver<Command>, emitter: Emitter) {
     let mut client = match Client::connect(socket) {
         Ok(client) => client,
@@ -320,6 +327,20 @@ fn run(socket: &Path, rx: Receiver<Command>, emitter: Emitter) {
             return;
         }
     };
+
+    // Wyczyść sesję pozostawioną w greetd przez poprzednią instancję greetera.
+    // Bez tego `create_session` kończy się błędem „a session is already being
+    // configured” aż do restartu greetd (greetd trzyma sesję w `configuring`,
+    // gdy klient rozłączy się, nie wysyłając `cancel_session`).
+    if !cancel_session(&mut client) {
+        emitter.emit(Event::Disconnected {
+            message: format!(
+                "{}: nie można wyczyścić poprzedniej sesji",
+                socket.display()
+            ),
+        });
+        return;
+    }
     emitter.emit(Event::Connected);
 
     while let Ok(command) = rx.recv() {
@@ -371,7 +392,12 @@ fn run(socket: &Path, rx: Receiver<Command>, emitter: Emitter) {
                         error_type,
                         description,
                     });
-                    return;
+                    // greetd zostawia nieudaną sesję w stanie „konfigurowana”.
+                    // Anulujemy ją od razu — inaczej każde kolejne logowanie
+                    // kończy się „a session is already being configured”,
+                    // dopóki greetd nie zostanie zrestartowany.
+                    cancel_session(&mut client);
+                    break;
                 }
                 Err(error) => {
                     emitter.emit(Event::Disconnected {
@@ -452,8 +478,13 @@ mod tests {
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept");
 
+            // Nowe połączenie najpierw czyści ewentualną sesję-sierotę.
             let line = read_frame(&mut stream);
-            assert!(line.contains("create_session"));
+            assert!(line.contains("cancel_session"), "{line}");
+            write_frame(&mut stream, r#"{"type":"success"}"#);
+
+            let line = read_frame(&mut stream);
+            assert!(line.contains("create_session"), "{line}");
             assert!(line.contains("\"patryk\""));
             write_frame(
                 &mut stream,
@@ -498,6 +529,83 @@ mod tests {
             worker.recv_timeout(Duration::from_secs(2)),
             Some(Event::Started)
         );
+        server.join().expect("serwer testowy");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn auth_error_cancels_session_and_allows_retry() {
+        let path = socket_path();
+        let listener = UnixListener::bind(&path).expect("bind");
+        let server_path = path.clone();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+
+            // 1. Czyszczenie na starcie.
+            let line = read_frame(&mut stream);
+            assert!(line.contains("cancel_session"), "{line}");
+            write_frame(&mut stream, r#"{"type":"success"}"#);
+
+            // 2. Pierwsza próba logowania — złe hasło.
+            let line = read_frame(&mut stream);
+            assert!(line.contains("create_session"), "{line}");
+            write_frame(
+                &mut stream,
+                r#"{"type":"auth_message","auth_message_type":"secret","auth_message":"Password: "}"#,
+            );
+            let line = read_frame(&mut stream);
+            assert!(line.contains("post_auth_message_response"), "{line}");
+            write_frame(
+                &mut stream,
+                r#"{"type":"error","error_type":"auth_error","description":"pam_authenticate: Authentication failure"}"#,
+            );
+
+            // 3. Worker MUSI anulować sesję, inaczej greetd zablokuje kolejne logowania.
+            let line = read_frame(&mut stream);
+            assert!(line.contains("cancel_session"), "{line}");
+            write_frame(&mut stream, r#"{"type":"success"}"#);
+
+            // 4. Druga próba na tym samym połączeniu ma wystartować normalnie.
+            let line = read_frame(&mut stream);
+            assert!(line.contains("create_session"), "{line}");
+            write_frame(
+                &mut stream,
+                r#"{"type":"auth_message","auth_message_type":"secret","auth_message":"Password: "}"#,
+            );
+        });
+
+        let worker = Worker::spawn(server_path.clone(), None);
+        assert_eq!(
+            worker.recv_timeout(Duration::from_secs(2)),
+            Some(Event::Connected)
+        );
+        assert!(worker.send(Command::Begin {
+            username: "patryk".to_owned()
+        }));
+        assert!(matches!(
+            worker.recv_timeout(Duration::from_secs(2)),
+            Some(Event::Prompt {
+                kind: AuthKind::Secret,
+                ..
+            })
+        ));
+        assert!(worker.send(Command::Respond {
+            response: "zle-haslo".to_owned()
+        }));
+        match worker.recv_timeout(Duration::from_secs(2)) {
+            Some(Event::ServerError { error_type, .. }) => assert_eq!(error_type, "auth_error"),
+            other => panic!("oczekiwano auth_error, jest {other:?}"),
+        }
+        assert!(worker.send(Command::Begin {
+            username: "patryk".to_owned()
+        }));
+        assert!(matches!(
+            worker.recv_timeout(Duration::from_secs(2)),
+            Some(Event::Prompt {
+                kind: AuthKind::Secret,
+                ..
+            })
+        ));
         server.join().expect("serwer testowy");
         let _ = std::fs::remove_file(path);
     }

@@ -1,6 +1,6 @@
 [package]
 name = "luna-terminal"
-version = "0.0.3"
+version = "0.0.4"
 edition = "2021"
 license = "GPL-3.0-or-later"
 rust-version = "1.80"
@@ -13,11 +13,11 @@ description = "Luna Terminal — emulator terminala środowiska Luna (libLuna, P
 resolver = "2"
 
 [dependencies]
-libluna-core = { path = "../../libluna/crates/libluna-core", version = "0.0.5" }
-libluna-i18n = { path = "../../libluna/crates/libluna-i18n", version = "0.0.5" }
-libluna-render = { path = "../../libluna/crates/libluna-render", version = "0.0.5" }
-libluna-platform = { path = "../../libluna/crates/libluna-platform", version = "0.0.5" }
-libluna-widgets = { path = "../../libluna/crates/libluna-widgets", version = "0.0.5" }
+libluna-core = { path = "../../libluna/crates/libluna-core", version = "0.0.7" }
+libluna-i18n = { path = "../../libluna/crates/libluna-i18n", version = "0.0.7" }
+libluna-render = { path = "../../libluna/crates/libluna-render", version = "0.0.7" }
+libluna-platform = { path = "../../libluna/crates/libluna-platform", version = "0.0.7" }
+libluna-widgets = { path = "../../libluna/crates/libluna-widgets", version = "0.0.7" }
 libc = "0.2"
 
 [profile.dev.package."*"]

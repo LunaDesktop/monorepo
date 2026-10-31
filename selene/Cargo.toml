@@ -1,6 +1,6 @@
 [package]
 name = "selene"
-version = "0.0.9"
+version = "0.0.11"
 edition = "2021"
 license = "GPL-3.0-or-later"
 rust-version = "1.80"
@@ -16,11 +16,11 @@ name = "selene"
 path = "src/main.rs"
 
 [dependencies]
-libluna-core = { path = "../libluna/crates/libluna-core", version = "0.0.5" }
-libluna-render = { path = "../libluna/crates/libluna-render", version = "0.0.5" }
-libluna-i18n = { path = "../libluna/crates/libluna-i18n", version = "0.0.5" }
-libluna-platform = { path = "../libluna/crates/libluna-platform", version = "0.0.5" }
-libluna-widgets = { path = "../libluna/crates/libluna-widgets", version = "0.0.5" }
+libluna-core = { path = "../libluna/crates/libluna-core", version = "0.0.7" }
+libluna-render = { path = "../libluna/crates/libluna-render", version = "0.0.7" }
+libluna-i18n = { path = "../libluna/crates/libluna-i18n", version = "0.0.7" }
+libluna-platform = { path = "../libluna/crates/libluna-platform", version = "0.0.7" }
+libluna-widgets = { path = "../libluna/crates/libluna-widgets", version = "0.0.7" }
 
 wayland-server = "0.31"
 wayland-protocols = { version = "0.32", features = ["server", "unstable", "staging"] }

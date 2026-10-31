@@ -284,15 +284,15 @@ checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "libluna-core"
-version = "0.0.5"
+version = "0.0.7"
 
 [[package]]
 name = "libluna-i18n"
-version = "0.0.5"
+version = "0.0.7"
 
 [[package]]
 name = "libluna-platform"
-version = "0.0.5"
+version = "0.0.7"
 dependencies = [
  "calloop",
  "libc",
@@ -305,7 +305,7 @@ dependencies = [
 
 [[package]]
 name = "libluna-render"
-version = "0.0.5"
+version = "0.0.7"
 dependencies = [
  "fontdue",
  "libluna-core",
@@ -315,7 +315,7 @@ dependencies = [
 
 [[package]]
 name = "libluna-widgets"
-version = "0.0.5"
+version = "0.0.7"
 dependencies = [
  "libluna-core",
  "libluna-render",
@@ -347,7 +347,7 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "luna-greeter"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "libc",
  "libluna-core",
