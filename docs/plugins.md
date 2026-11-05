@@ -71,7 +71,7 @@ setting = api_key|Klucz API|secret||
 | `description` | nie | Opis w menedżerze |
 | `entry` | tak | Program względem katalogu wtyczki |
 | `interpreter` | nie | Np. `python3`, `node`, `sh`. Bez niego plik musi być wykonywalny |
-| `command` | tak (≥1) | Polecenie widoczne w UI |
+| `command` | tak (≥1) | Polecenie widoczne w UI (wymagane, chyba że wtyczka ma tylko `chat`) |
 | `chat` | nie | `chat = true` — wtyczka obsługuje panel czatu (patrz niżej) |
 | `setting` | nie | Pole konfiguracji |
 

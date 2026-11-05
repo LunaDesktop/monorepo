@@ -927,7 +927,7 @@ fn resolve(root: &Path, path: &str) -> Result<PathBuf, String> {
 
 /// Rysuje panel czatu (wołane z `ui::paint`).
 pub fn paint(app: &mut App, ctx: &mut PaintCtx, lay: &Layout) {
-    if !app.chat.visible {
+    if !app.chat.visible || !available(app) {
         return;
     }
     let theme = *ctx.theme;
@@ -1168,7 +1168,7 @@ pub fn handle_events(
     _theme: &Theme,
     _text: &TextEngine,
 ) -> bool {
-    if !app.chat.visible {
+    if !app.chat.visible || !available(app) {
         return false;
     }
     let panel = lay.chat;
