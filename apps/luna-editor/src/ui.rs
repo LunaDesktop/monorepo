@@ -2525,7 +2525,14 @@ mod tests {
     /// Ten sam układ, jaki widzi obsługa zdarzeń (zależny od wtyczek w systemie).
     fn test_layout(app: &App, theme: &Theme) -> Layout {
         let chat = crate::chat::available(app);
-        layout(size(), theme, app.workspace.visible, false, chat && app.chat.visible, chat)
+        layout(
+            size(),
+            theme,
+            app.workspace.visible,
+            false,
+            chat && app.chat.visible,
+            chat,
+        )
     }
 
     fn theme() -> Theme {

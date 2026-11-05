@@ -2046,7 +2046,9 @@ esac
         std::env::set_var("XDG_CONFIG_HOME", &base);
 
         let mut app = App::new();
-        app.plugins.plugins = vec![chat_plugin(&std::env::temp_dir().join("luna-chat-plugin-dir"))];
+        app.plugins.plugins = vec![chat_plugin(
+            &std::env::temp_dir().join("luna-chat-plugin-dir"),
+        )];
         apply_model(&mut app, "model-2");
         assert_eq!(
             app.plugins.plugins[0].values().get("model"),
