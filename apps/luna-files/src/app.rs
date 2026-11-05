@@ -348,6 +348,8 @@ pub struct App {
     pub status: String,
     /// Zakładka pod kursorem (podświetlenie w pasku tytułu).
     pub tab_hover: Option<usize>,
+    /// Segment paska ścieżki pod kursorem.
+    pub path_hover: Option<usize>,
     /// Ostatnia pozycja kursora w oknie (do podświetlania przycisków).
     pub pointer: Option<Point>,
     /// Kontrolka okna pod kursorem (— □ ✕).
@@ -417,6 +419,7 @@ impl App {
             last_mount_refresh: Instant::now() - Duration::from_secs(10),
             status: String::new(),
             tab_hover: None,
+            path_hover: None,
             pointer: None,
             controls_hover: None,
             prefs,
@@ -936,7 +939,7 @@ impl App {
             }
         }
 
-        self.sidebar = NavList::new(entries);
+        self.sidebar = NavList::new(entries).monochrome(true);
         self.sidebar.set_icons(icons);
         self.sidebar_actions = actions;
         self.sidebar_entry_action = mapping;

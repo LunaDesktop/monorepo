@@ -8,12 +8,12 @@ use std::time::{Duration, Instant};
 
 use libluna_core::style::weight;
 use libluna_core::{
-    ButtonState, Color, Event, Insets, KeyEvent, Point, PointerButton, Rect, Size, Theme,
+    ButtonState, Color, Event, IconTheme, Insets, KeyEvent, Point, PointerButton, Rect, Size, Theme,
 };
 use libluna_render::{Scene, TextEngine};
 use libluna_widgets::{
-    paint_icon, Button, ButtonVariant, ControlsSide, HeaderBar, IconName, MenuButton, PaintCtx,
-    PathBar, ToggleButton, WindowControl,
+    paint_icon, paint_icon_themed, Button, ButtonVariant, ControlsSide, HeaderBar, IconName,
+    MenuButton, PaintCtx, PathBar, ToggleButton, WindowControl,
 };
 
 use crate::app::{display_dir, App, Mode};
@@ -477,7 +477,7 @@ fn paint_sidebar(ctx: &mut PaintCtx, app: &App, lay: &Layout) {
             ctx.theme.colors.text
         };
         let icon = Rect::from_xywh(row.x() + 8.0, row.center().y - 9.0, 18.0, 18.0);
-        paint_icon(ctx, place.icon, icon, color);
+        paint_icon_themed(ctx, place.icon, icon, color, IconTheme::Monochrome);
         ctx.label_left(
             row.x() + 34.0,
             row.center().y,

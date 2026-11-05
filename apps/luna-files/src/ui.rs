@@ -315,7 +315,7 @@ pub fn paint(app: &App, scene: &mut Scene, size: Size, theme: &Theme, text: &Tex
         about.paint(&mut ctx, size);
     }
     if let Some(open_with) = &app.open_with {
-        paint_open_with(&mut ctx, open_with, size);
+        paint_open_with(&mut ctx, open_with, size, app.pointer);
     }
 }
 
@@ -371,7 +371,7 @@ fn paint_nav(ctx: &mut PaintCtx, app: &App, ch: &Chrome) {
     };
     ctx.scene
         .fill_rounded_rect(ch.sidebar_toggle, ctx.theme.radius.small, sidebar_bg);
-    sidebar_icon(
+    icon::sidebar_icon(
         ctx,
         ctx.theme.colors.text,
         ch.sidebar_toggle,
@@ -406,7 +406,8 @@ fn paint_nav(ctx: &mut PaintCtx, app: &App, ch: &Chrome) {
     } else if pane.search_active {
         pane.search.paint(ctx, ch.path);
     } else {
-        let bar = PathBar::new(path_components(&pane.dir.path));
+        let mut bar = PathBar::new(path_components(&pane.dir.path));
+        bar.set_hovered(app.path_hover);
         bar.paint(ctx, ch.path);
     }
 
@@ -890,17 +891,6 @@ fn is_hovered(app: &App, rect: Rect) -> bool {
 }
 
 /// Ikona przełącznika paska bocznego (◧ / ▭) — jak w pozostałych aplikacjach Luny.
-fn sidebar_icon(ctx: &mut PaintCtx, color: Color, box_: Rect, filled: bool) {
-    let c = box_.center();
-    let (w, h) = (18.0, 14.0);
-    let outer = Rect::from_xywh(c.x - w / 2.0, c.y - h / 2.0, w, h);
-    ctx.scene.stroke_rounded_rect(outer, 3.0, 1.5, color);
-    if filled {
-        let inner = Rect::from_xywh(outer.x() + 2.0, outer.y() + 2.0, w * 0.36, h - 4.0);
-        ctx.scene.fill_rounded_rect(inner, 2.0, color);
-    }
-}
-
 fn icon_up(ctx: &mut PaintCtx, rect: Rect, enabled: bool, hover: bool) {
     if enabled && hover {
         ctx.scene
@@ -1092,6 +1082,10 @@ fn paint_settings(ctx: &mut PaintCtx, app: &App, size: Size) {
         .position(|p| *p == app.theme_pref)
         .unwrap_or(2);
     theme_switcher.set_selected(theme_index);
+    let hover = app
+        .pointer
+        .and_then(|p| theme_switcher.index_at(lay.theme_seg, p));
+    theme_switcher.set_hovered(hover);
     theme_switcher.paint(ctx, lay.theme_seg);
 
     let mut view_switcher = ViewSwitcher::new([libluna_i18n::tr("List"), libluna_i18n::tr("Grid")]);
@@ -1099,15 +1093,27 @@ fn paint_settings(ctx: &mut PaintCtx, app: &App, size: Size) {
         ViewMode::List => 0,
         ViewMode::Grid => 1,
     });
+    let hover = app
+        .pointer
+        .and_then(|p| view_switcher.index_at(lay.view_seg, p));
+    view_switcher.set_hovered(hover);
     view_switcher.paint(ctx, lay.view_seg);
 
     // Nazwy języków pokazujemy natywnie — tak jak w systemowych ustawieniach.
     let mut lang_switcher = ViewSwitcher::new(["Polski", "English", "Deutsch"]);
     lang_switcher.set_selected(prefs::language_index(&app.prefs.language));
+    let hover = app
+        .pointer
+        .and_then(|p| lang_switcher.index_at(lay.lang_seg, p));
+    lang_switcher.set_hovered(hover);
     lang_switcher.paint(ctx, lay.lang_seg);
 
-    Switch::new(app.pane().dir.show_hidden()).paint(ctx, lay.hidden_switch);
-    Button::new(libluna_i18n::tr("Done")).paint(ctx, lay.done);
+    let mut hidden = Switch::new(app.pane().dir.show_hidden());
+    hidden.set_hovered(is_hovered(app, lay.hidden_switch));
+    hidden.paint(ctx, lay.hidden_switch);
+    let mut done = Button::new(libluna_i18n::tr("Done"));
+    done.set_hovered(is_hovered(app, lay.done));
+    done.paint(ctx, lay.done);
 }
 
 // ---------------------------------------------------------------------------
@@ -1204,9 +1210,10 @@ fn open_with_layout(
     }
 }
 
-fn paint_open_with(ctx: &mut PaintCtx, ow: &OpenWithDialog, size: Size) {
+fn paint_open_with(ctx: &mut PaintCtx, ow: &OpenWithDialog, size: Size, pointer: Option<Point>) {
     let theme = *ctx.theme;
     let lay = open_with_layout(ow, size, &theme, ctx.text);
+    let hovered = |rect: Rect| pointer.is_some_and(|p| rect.contains(p));
     open_with_dialog(ow.apps.len(), ow.can_remember(), &theme).paint(ctx, size);
 
     let body = theme.typography.body.size;
@@ -1288,11 +1295,14 @@ fn paint_open_with(ctx: &mut PaintCtx, ow: &OpenWithDialog, size: Size) {
     }
 
     let enabled = ow.selected_app().is_some_and(|app| app.available());
-    Button::new(libluna_i18n::tr("Open"))
+    let mut open = Button::new(libluna_i18n::tr("Open"))
         .variant(ButtonVariant::Suggested)
-        .enabled(enabled)
-        .paint(ctx, lay.open);
-    Button::new(libluna_i18n::tr("Cancel")).paint(ctx, lay.cancel);
+        .enabled(enabled);
+    open.set_hovered(hovered(lay.open));
+    open.paint(ctx, lay.open);
+    let mut cancel = Button::new(libluna_i18n::tr("Cancel"));
+    cancel.set_hovered(hovered(lay.cancel));
+    cancel.paint(ctx, lay.cancel);
 }
 
 fn paint_open_with_row(ctx: &mut PaintCtx, ow: &OpenWithDialog, index: usize, row: Rect) {
@@ -1716,6 +1726,7 @@ pub fn handle_events(
                     app.tooltip = None;
                     app.controls_hover = None;
                     app.tab_hover = None;
+                    app.path_hover = None;
                     app.sidebar.set_hovered(None);
                     for pane in &mut app.panes {
                         pane.view.set_hovered(None);
@@ -1742,6 +1753,9 @@ pub fn handle_events(
                     None
                 };
                 app.tab_hover = tab_hover;
+                let ch = chrome(app, &lay, theme);
+                app.path_hover = PathBar::new(path_components(&app.pane().dir.path))
+                    .index_at(ch.path, text, theme, p);
                 let _hovered =
                     app.sidebar
                         .index_at(lay.sidebar.deflate(Insets::splat(6.0)), p, theme);
@@ -1780,6 +1794,7 @@ pub fn handle_events(
                 app.pointer = None;
                 app.controls_hover = None;
                 app.tab_hover = None;
+                app.path_hover = None;
                 app.tooltip = None;
                 if !app.drag.as_ref().is_some_and(|drag| drag.active) {
                     app.drag = None;

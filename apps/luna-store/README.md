@@ -34,6 +34,10 @@ Najważniejsze cechy:
   źródeł, historię i dziennik `~/.cache/luna/store/operations.log`,
 - gdy `pkexec` nie jest setuid (kod 127), Sklep prosi o hasło we własnym oknie
   i używa `sudo -S` — hasło idzie przez `stdin`, nigdy przez `argv` ani log,
+- **cykliczny sync w tle**: co `refresh_minutes` minut (domyślnie 60) Sklep
+  sprawdza statusy aktualizacji wszystkich źródeł, a katalogi odświeża tylko
+  gdy cache jest starszy; nowe aktualizacje wywołują powiadomienie, a ręczne
+  odświeżenie resetuje licznik,
 - **powiadomienia systemowe** po instalacji/aktualizacji, o dostępnych
   aktualizacjach i o błędach; kliknięcie otwiera Sklep albo aktywuje jego
   istniejące okno (`desktop-entry = eu.luna.Store.desktop`),

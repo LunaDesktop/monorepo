@@ -1,6 +1,6 @@
 [package]
 name = "luna-files"
-version = "0.0.4"
+version = "0.0.5"
 edition = "2021"
 license = "GPL-3.0-or-later"
 rust-version = "1.80"
@@ -13,11 +13,11 @@ description = "Luna Files — menedżer plików środowiska Luna (libLuna, bez G
 resolver = "2"
 
 [dependencies]
-libluna-core = { path = "../../libluna/crates/libluna-core", version = "0.0.7" }
-libluna-i18n = { path = "../../libluna/crates/libluna-i18n", version = "0.0.7" }
-libluna-render = { path = "../../libluna/crates/libluna-render", version = "0.0.7" }
-libluna-platform = { path = "../../libluna/crates/libluna-platform", version = "0.0.7" }
-libluna-widgets = { path = "../../libluna/crates/libluna-widgets", version = "0.0.7" }
+libluna-core = { path = "../../libluna/crates/libluna-core", version = "0.0.8" }
+libluna-i18n = { path = "../../libluna/crates/libluna-i18n", version = "0.0.8" }
+libluna-render = { path = "../../libluna/crates/libluna-render", version = "0.0.8" }
+libluna-platform = { path = "../../libluna/crates/libluna-platform", version = "0.0.8" }
+libluna-widgets = { path = "../../libluna/crates/libluna-widgets", version = "0.0.8" }
 rustix = { version = "0.38", features = ["fs"] }
 libc = "0.2"
 jpeg-decoder = { version = "0.3", default-features = false }
