@@ -336,6 +336,8 @@ pub struct App {
     pub pending_properties: Option<PendingProperties>,
     /// Przeciąganie plików (portal wewnętrzny, nie Wayland DnD).
     pub drag: Option<DragState>,
+    /// Pliki, które trzeba przekazać kompozytorowi jako przeciąganie poza okno.
+    pub pending_external_drag: Option<Vec<PathBuf>>,
     pub clipboard: Option<Clipboard>,
     /// Tekst do systemowego schowka (odbierany przez pętlę klatki).
     pub text_clipboard: Option<String>,
@@ -411,6 +413,7 @@ impl App {
             tooltip: None,
             pending_properties: None,
             drag: None,
+            pending_external_drag: None,
             clipboard: None,
             text_clipboard: None,
             text_paste_requested: false,
@@ -1378,6 +1381,12 @@ pub fn run(title_key: &str, app_id: &str) -> Result<(), Box<dyn Error>> {
         if app.text_paste_requested {
             app.text_paste_requested = false;
             frame.paste_from_clipboard();
+        }
+
+        // Przeciągnięcie poza okno: oddaj pliki kompozytorowi (Wayland DnD,
+        // `text/uri-list`), żeby upuszczenie w przeglądarce/innej aplikacji działało.
+        if let Some(paths) = app.pending_external_drag.take() {
+            frame.start_file_drag(paths);
         }
 
         if app.pending_close {

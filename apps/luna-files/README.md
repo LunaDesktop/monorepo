@@ -29,6 +29,10 @@ Dostępne binarki:
 - **przeciąganie plików** myszą: upuszczenie na folder (w tym na drugi panel),
   miejsce w panelu bocznym, zamontowany nośnik albo Kosz przenosi zaznaczenie;
   `Ctrl` podczas przeciągania kopiuje, a cel jest podświetlany (Kosz na czerwono);
+- **przeciąganie poza okno** (Wayland DnD): gdy przeciąganie opuści okno, pliki
+  idą do kompozytora jako `text/uri-list` + `text/plain` (`file://…`), więc można
+  je upuścić w przeglądarce (pole uploadu), innym menedżerze plików, edytorze
+  albo kliencie poczty. Odbiorca decyduje, czy kopiuje, czy przenosi;
 - wielokrotne zaznaczanie: `Ctrl+klik`, `Shift+klik` (zakres), `Shift+↑/↓`, `Ctrl+A`;
   belka statusu pokazuje liczbę **i łączny rozmiar** zaznaczonych;
 - menu kontekstowe (prawy przycisk) i menu główne (☰) — wszystkie napisy przez i18n.

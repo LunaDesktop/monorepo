@@ -10,6 +10,7 @@
 
 use std::cell::RefCell;
 use std::error::Error;
+use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
@@ -34,7 +35,7 @@ use smithay_client_toolkit::{
     data_device_manager::{
         data_device::{DataDevice, DataDeviceData, DataDeviceHandler},
         data_offer::{DataOfferHandler, DragOffer, SelectionOffer},
-        data_source::{CopyPasteSource, DataSourceHandler},
+        data_source::{CopyPasteSource, DataSourceHandler, DragSource},
         DataDeviceManagerState, ReadPipe, WritePipe,
     },
     delegate_compositor, delegate_data_device, delegate_keyboard, delegate_layer, delegate_output,
@@ -314,6 +315,8 @@ pub struct WindowActions {
     pub resize_requested: Option<u8>,
     /// Tekst do umieszczenia w systemowym schowku (`wl_data_device`).
     pub clipboard: Option<String>,
+    /// Pliki do przeciągnięcia poza aplikację (Wayland DnD, `text/uri-list`).
+    pub drag: Option<Vec<PathBuf>>,
     /// Prośba o odczyt schowka; wynik przyjdzie jako [`Event::Paste`].
     pub paste_requested: bool,
     /// Nowy tytuł okna (dla `xdg_toplevel`); używane przy zmianie języka.
@@ -410,6 +413,21 @@ impl Frame<'_> {
     /// [`Event::Paste`](libluna_core::Event::Paste) w jednej z kolejnych klatek.
     pub fn paste_from_clipboard(&mut self) {
         self.actions.paste_requested = true;
+    }
+
+    /// Rozpoczyna przeciąganie plików **poza aplikację** (Wayland DnD).
+    ///
+    /// Odbiorca (przeglądarka, inny menedżer plików, edytor) dostaje listę
+    /// `text/uri-list` z absolutnymi ścieżkami (`file://…`) oraz `text/plain`
+    /// z samymi ścieżkami. Kompozytor przejmuje wskaźnik do końca przeciągania,
+    /// więc wywołaj to w reakcji na ruch po wciśnięciu przycisku.
+    ///
+    /// Upuszczenie w innym oknie nie zmienia plików w tej aplikacji — decyzję
+    /// „przenieś czy kopiuj” podejmuje odbiorca (oferujemy `copy` i `move`).
+    pub fn start_file_drag(&mut self, paths: Vec<PathBuf>) {
+        if !paths.is_empty() {
+            self.actions.drag = Some(paths);
+        }
     }
 
     /// Czas od poprzedniej klatki w sekundach (do kroku animacji).
@@ -744,6 +762,8 @@ where
         data_device: None,
         clipboard_source: None,
         clipboard_text: None,
+        drag_source: None,
+        drag_paths: None,
         conn: conn.clone(),
         paste_text: Arc::new(Mutex::new(None)),
         paste_busy: Arc::new(AtomicBool::new(false)),
@@ -879,6 +899,10 @@ struct App {
     clipboard_source: Option<CopyPasteSource>,
     /// Tekst aktualnie oferowany w schowku (wysyłany na żądanie innej aplikacji).
     clipboard_text: Option<String>,
+    /// Aktywne źródło przeciągania plików — musi żyć do końca operacji.
+    drag_source: Option<DragSource>,
+    /// Pliki oferowane w trwającym przeciąganiu.
+    drag_paths: Option<Vec<PathBuf>>,
     /// Połączenie Waylanda — `flush` po zleceniu odczytu schowka.
     conn: Connection,
     /// Wynik odczytu schowka, przekazywany z wątku do pętli.
@@ -1139,6 +1163,9 @@ impl App {
         if let Some(text) = self.actions.clipboard.take() {
             self.set_clipboard(text);
         }
+        if let Some(paths) = self.actions.drag.take() {
+            self.start_file_drag(paths);
+        }
         if self.actions.paste_requested {
             self.actions.paste_requested = false;
             // Jesteśmy właścicielem schowka — mamy tekst lokalnie. Odpytywanie
@@ -1226,6 +1253,33 @@ impl App {
         self.clipboard_text = Some(text);
         // Poprzednie źródło zostanie zniszczone dopiero po podmianie — zgodnie z protokołem.
         self.clipboard_source = Some(source);
+    }
+
+    /// Rozpoczyna Wayland DnD z listą plików (`text/uri-list`).
+    ///
+    /// Serial musi pochodzić z wciśnięcia przycisku — bierzemy ostatni zapisany
+    /// przycisk wskaźnika. Brak `wl_data_device` (stary kompozytor) oznacza, że
+    /// przeciąganie poza okno po prostu nie zadziała.
+    fn start_file_drag(&mut self, paths: Vec<PathBuf>) {
+        let (Some(manager), Some(device)) = (&self.data_device_manager, &self.data_device) else {
+            return;
+        };
+        if self.last_pointer_serial == 0 {
+            return;
+        }
+        let source = manager.create_drag_and_drop_source(
+            &self.qh,
+            ["text/uri-list", "text/plain;charset=utf-8", "text/plain"],
+            DndAction::Copy | DndAction::Move,
+        );
+        self.drag_paths = Some(paths);
+        source.start_drag(
+            device,
+            self.target.surface(),
+            None,
+            self.last_pointer_serial,
+        );
+        self.drag_source = Some(source);
     }
 
     /// Wczytuje tekst ze schowka w wątku tła (odpytanie oferty może czekać na źródło).
@@ -2077,41 +2131,77 @@ impl DataSourceHandler for App {
         _: &Connection,
         _: &QueueHandle<Self>,
         source: &WlDataSource,
-        _: String,
+        mime: String,
         mut fd: WritePipe,
     ) {
         use std::io::Write;
         // Stare oferty mogą jeszcze żyć po podmianie schowka — nie wysyłajmy
         // im nowej treści, tylko aktualnemu źródłu.
-        let current = self
+        let is_clipboard = self
             .clipboard_source
             .as_ref()
             .is_some_and(|owned| owned.inner().id() == source.id());
-        if !current {
-            return;
-        }
-        if let Some(text) = &self.clipboard_text {
-            // Tekst jest mały (limit pipe'a to zwykle 64 KiB), więc nie blokujemy pętli.
-            let _ = fd.write_all(text.as_bytes());
+        let is_drag = self
+            .drag_source
+            .as_ref()
+            .is_some_and(|owned| owned.inner().id() == source.id());
+        let body = if is_clipboard {
+            self.clipboard_text.clone()
+        } else if is_drag {
+            self.drag_paths.as_deref().map(|paths| {
+                if mime.contains("uri-list") {
+                    uri_list(paths)
+                } else {
+                    paths
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                }
+            })
+        } else {
+            None
+        };
+        if let Some(body) = body {
+            // Treść jest mała (limit pipe'a to zwykle 64 KiB), więc nie blokujemy pętli.
+            let _ = fd.write_all(body.as_bytes());
             let _ = fd.flush();
         }
     }
 
     fn cancelled(&mut self, _: &Connection, _: &QueueHandle<Self>, source: &WlDataSource) {
-        // Inna aplikacja przejęła selekcję — nasze źródło nie jest już potrzebne.
-        let current = self
+        // Inna aplikacja przejęła selekcję albo odbiorca anulował przeciąganie.
+        let is_clipboard = self
             .clipboard_source
             .as_ref()
             .is_some_and(|owned| owned.inner().id() == source.id());
-        if current {
+        if is_clipboard {
             self.clipboard_source = None;
             self.clipboard_text = None;
+        }
+        let is_drag = self
+            .drag_source
+            .as_ref()
+            .is_some_and(|owned| owned.inner().id() == source.id());
+        if is_drag {
+            self.drag_source = None;
+            self.drag_paths = None;
         }
     }
 
     fn dnd_dropped(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource) {}
 
-    fn dnd_finished(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource) {}
+    fn dnd_finished(&mut self, _: &Connection, _: &QueueHandle<Self>, source: &WlDataSource) {
+        // Upuszczenie zakończone — źródło nie jest już potrzebne.
+        let is_drag = self
+            .drag_source
+            .as_ref()
+            .is_some_and(|owned| owned.inner().id() == source.id());
+        if is_drag {
+            self.drag_source = None;
+            self.drag_paths = None;
+        }
+    }
 
     fn action(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource, _: DndAction) {}
 }
@@ -2189,6 +2279,33 @@ impl Dispatch<wl_region::WlRegion, ()> for App {
     }
 }
 
+/// Linia `text/uri-list` dla jednej ścieżki (`file:///home/…`).
+///
+/// Kodujemy wszystko poza znakami unreserved i `/` — spacje, `#`, `?`
+/// i znaki spoza ASCII muszą być procentowane, inaczej odbiorca utnie ścieżkę.
+fn file_uri(path: &std::path::Path) -> String {
+    let mut out = String::from("file://");
+    for byte in path.to_string_lossy().bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                out.push(byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+/// Zawartość `text/uri-list` (linie CRLF, na końcu pusta linia).
+pub fn uri_list(paths: &[PathBuf]) -> String {
+    let mut out = String::new();
+    for path in paths {
+        out.push_str(&file_uri(path));
+        out.push_str("\r\n");
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2205,6 +2322,19 @@ mod tests {
         assert_eq!(resize_edge(2 | 4), xdg_toplevel::ResizeEdge::BottomLeft);
         assert_eq!(resize_edge(2 | 8), xdg_toplevel::ResizeEdge::BottomRight);
         assert_eq!(resize_edge(0), xdg_toplevel::ResizeEdge::None);
+    }
+
+    #[test]
+    fn uri_list_encodes_spaces_and_non_ascii() {
+        let paths = vec![
+            PathBuf::from("/home/ula/Moje dokumenty/raport #1.pdf"),
+            PathBuf::from("/tmp/zażółć.txt"),
+        ];
+        assert_eq!(
+            uri_list(&paths),
+            "file:///home/ula/Moje%20dokumenty/raport%20%231.pdf\r\n\
+             file:///tmp/za%C5%BC%C3%B3%C5%82%C4%87.txt\r\n"
+        );
     }
 
     #[test]

@@ -1796,7 +1796,13 @@ pub fn handle_events(
                 app.tab_hover = None;
                 app.path_hover = None;
                 app.tooltip = None;
-                if !app.drag.as_ref().is_some_and(|drag| drag.active) {
+                // Aktywne przeciąganie opuszczające okno → przeciąganie systemowe
+                // (upuszczenie w przeglądarce, innym menedżerze plików itd.).
+                if app.drag.as_ref().is_some_and(|drag| drag.active) {
+                    if let Some(drag) = app.drag.take() {
+                        app.pending_external_drag = Some(drag.paths);
+                    }
+                } else {
                     app.drag = None;
                 }
                 app.sidebar.set_hovered(None);
@@ -3497,6 +3503,31 @@ mod tests {
         // Sprzątanie bez wykonywania zadania.
         app.drag = None;
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn leaving_the_window_hands_the_drag_to_the_compositor() {
+        let mut app = app();
+        let path = std::env::temp_dir().join("przenies.txt");
+        app.drag = Some(DragState {
+            paths: vec![path.clone()],
+            start: Point::new(10.0, 10.0),
+            active: true,
+            copy: false,
+            target: None,
+            target_rect: None,
+        });
+        let theme = Theme::light();
+        let text = TextEngine::none();
+        handle_events(
+            &mut app,
+            &[Event::PointerLeave],
+            Size::new(1120.0, 720.0),
+            &theme,
+            &text,
+        );
+        assert!(app.drag.is_none(), "wewnętrzne przeciąganie kończy się");
+        assert_eq!(app.pending_external_drag, Some(vec![path]));
     }
 
     #[test]
