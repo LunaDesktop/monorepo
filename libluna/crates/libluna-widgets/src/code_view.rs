@@ -12,9 +12,14 @@ use libluna_core::style::weight;
 use libluna_core::{Color, Point, Rect, Theme};
 use libluna_render::TextEngine;
 
+use std::time::{Duration, Instant};
+
 use crate::ctx::PaintCtx;
 use crate::display::Orientation;
 use crate::scrollbar::Scrollbar;
+
+/// Pełny cykl migania kursora (pół na widoczny, pół na ukryty).
+const BLINK_CYCLE: Duration = Duration::from_millis(1200);
 
 /// Rodzaj fragmentu tekstu do pokolorowania.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +82,12 @@ pub struct CodeView {
     starts: Vec<usize>,
     /// Najdłuższa linia w znakach (do zakresu przewijania poziomego).
     max_chars: usize,
+    /// Początek bieżącej fazy migania kursora.
+    blink_anchor: Instant,
+    /// Stan z poprzedniej klatki — zmiana tekstu/kursora/fokusu resetuje miganie.
+    last_cursor: usize,
+    last_text_len: usize,
+    last_focused: bool,
 }
 
 impl Default for CodeView {
@@ -92,6 +103,10 @@ impl Default for CodeView {
             tab_width: 4,
             starts: vec![0],
             max_chars: 0,
+            blink_anchor: Instant::now(),
+            last_cursor: 0,
+            last_text_len: 0,
+            last_focused: false,
         }
     }
 }
@@ -614,10 +629,10 @@ impl CodeView {
         let body = theme.typography.body;
         let caption = theme.typography.caption;
 
+        // Płaska, zaokrąglona powierzchnia — bez ramki, żeby panel nie wyglądał
+        // jak uniesiona karta. Zaokrąglenie zostaje, spójne z resztą libLuny.
         ctx.scene
             .fill_rounded_rect(rect, theme.radius.medium, colors.view_bg);
-        ctx.scene
-            .stroke_rounded_rect(rect, theme.radius.medium, 1.0, colors.border);
 
         ctx.scene
             .fill_rect(metrics.gutter, colors.shade.scale_alpha(0.35));
@@ -725,7 +740,21 @@ impl CodeView {
             self.paint_line_text(ctx, &metrics, start, end, y, body.size);
         }
 
-        if self.focused {
+        // Miganie kursora: każda zmiana tekstu, pozycji kursora lub fokusu
+        // zaczyna nowy cykl, więc kursor jest od razu widoczny po wpisaniu znaku.
+        let now = Instant::now();
+        if self.cursor != self.last_cursor
+            || self.text.len() != self.last_text_len
+            || self.focused != self.last_focused
+        {
+            self.blink_anchor = now;
+            self.last_cursor = self.cursor;
+            self.last_text_len = self.text.len();
+            self.last_focused = self.focused;
+        }
+        let blink_on = self.blink_visible_at(now);
+
+        if self.focused && blink_on {
             let line = current_line;
             let start = self.starts[line];
             let prefix = expand_tabs(&self.text[start..self.cursor], self.tab_width);
@@ -833,6 +862,12 @@ impl CodeView {
         );
     }
 
+    /// Czy kursor ma być widoczny w danej chwili (faza migania).
+    fn blink_visible_at(&self, now: Instant) -> bool {
+        let cycle = BLINK_CYCLE.as_millis();
+        now.duration_since(self.blink_anchor).as_millis() % cycle < cycle / 2
+    }
+
     fn reindex(&mut self) {
         self.starts.clear();
         self.starts.push(0);
@@ -922,6 +957,17 @@ mod tests {
         assert_eq!(view.cursor(), 5);
         view.move_down(false);
         assert_eq!(view.cursor(), 11);
+    }
+
+    #[test]
+    fn cursor_blinks_and_resets_on_activity() {
+        let mut view = CodeView::new();
+        let anchor = Instant::now();
+        view.blink_anchor = anchor;
+        assert!(view.blink_visible_at(anchor));
+        assert!(view.blink_visible_at(anchor + Duration::from_millis(500)));
+        assert!(!view.blink_visible_at(anchor + Duration::from_millis(700)));
+        assert!(view.blink_visible_at(anchor + Duration::from_millis(1300)));
     }
 
     #[test]

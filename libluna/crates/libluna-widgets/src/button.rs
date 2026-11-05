@@ -109,13 +109,26 @@ impl Button {
         // Spójnie z polami tekstowymi i menu — miękkie, zaokrąglone kontrolki.
         let radius = theme.radius.medium;
         let strong = self.pressed || self.hovered;
+        // Warianty kolorowe też muszą reagować na kursor — w przeciwnym razie
+        // główne akcje (Zainstaluj/Otwórz) wyglądają martwo pod myszą.
+        let tinted = |base: Color| {
+            if self.pressed {
+                base.lerp(Color::BLACK, 0.10)
+            } else if self.hovered {
+                base.lerp(Color::WHITE, 0.12)
+            } else {
+                base
+            }
+        };
 
         match self.variant {
             ButtonVariant::Suggested => {
-                ctx.scene.fill_rounded_rect(rect, radius, colors.accent);
+                ctx.scene
+                    .fill_rounded_rect(rect, radius, tinted(colors.accent));
             }
             ButtonVariant::Destructive => {
-                ctx.scene.fill_rounded_rect(rect, radius, colors.error);
+                ctx.scene
+                    .fill_rounded_rect(rect, radius, tinted(colors.error));
             }
             ButtonVariant::Default => {
                 ctx.scene

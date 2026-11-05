@@ -278,15 +278,15 @@ checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "libluna-core"
-version = "0.0.7"
+version = "0.0.8"
 
 [[package]]
 name = "libluna-i18n"
-version = "0.0.7"
+version = "0.0.8"
 
 [[package]]
 name = "libluna-platform"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "calloop",
  "libc",
@@ -299,7 +299,7 @@ dependencies = [
 
 [[package]]
 name = "libluna-render"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "fontdue",
  "libluna-core",
@@ -309,7 +309,7 @@ dependencies = [
 
 [[package]]
 name = "libluna-widgets"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "libluna-core",
  "libluna-render",
@@ -335,9 +335,9 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "log"
-version = "0.4.34"
+version = "0.4.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
+checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "luna-demo"

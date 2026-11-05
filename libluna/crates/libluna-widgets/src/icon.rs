@@ -456,6 +456,21 @@ pub fn burger(paint: &mut PaintCtx, color: Color, center: Point, size: f64, widt
     }
 }
 
+/// Ikona przełącznika paska bocznego — wspólna dla wszystkich aplikacji Luny.
+///
+/// Prostokąt z wypełnioną lewą kolumną, gdy pasek boczny jest widoczny
+/// (`filled`), albo sam kontur, gdy jest schowany.
+pub fn sidebar_icon(paint: &mut PaintCtx, color: Color, rect: Rect, filled: bool) {
+    let c = rect.center();
+    let (w, h) = (18.0, 14.0);
+    let outer = Rect::from_xywh(c.x - w / 2.0, c.y - h / 2.0, w, h);
+    paint.scene.stroke_rounded_rect(outer, 3.0, 1.5, color);
+    if filled {
+        let inner = Rect::from_xywh(outer.x() + 2.0, outer.y() + 2.0, w * 0.36, h - 4.0);
+        paint.scene.fill_rounded_rect(inner, 2.0, color);
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Nazwany pakiet ikon symbolicznych — rysowany wektorowo, w stylu Luny.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1300,11 +1315,9 @@ pub fn paint_icon_themed(
                 ],
                 color,
             );
-            scene.stroke_polyline(
-                &[g.p(9.0, 8.0), g.p(9.0, 6.0), g.p(15.0, 6.0), g.p(15.0, 8.0)],
-                g.d(1.8),
-                color,
-            );
+            // Uchwyt torby jako łuk — bez tego przy 16–18 px czyta się jak kosz.
+            let handle = arc(g.p(12.0, 8.2), g.d(3.0), 180.0, 360.0, 10);
+            scene.stroke_polyline(&handle, g.d(1.8), color);
         }
         IconName::Edit => {
             scene.fill_polygon(

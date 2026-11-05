@@ -4,10 +4,10 @@
 //! Etykiety podaje aplikacja (już przetłumaczone) — widget nie zna i18n.
 
 use libluna_core::style::weight;
-use libluna_core::{Point, Rect, Theme};
+use libluna_core::{IconTheme, Point, Rect, Theme};
 
 use crate::ctx::PaintCtx;
-use crate::icon::{paint_icon, IconName};
+use crate::icon::{paint_icon, paint_icon_themed, IconName};
 
 /// Element menu nawigacji.
 #[derive(Debug, Clone)]
@@ -36,6 +36,8 @@ pub struct NavList {
     icons: Vec<Option<IconName>>,
     selected: Option<usize>,
     hovered: Option<usize>,
+    /// Wymuś monochromatyczne ikony (np. w panelach bocznych aplikacji).
+    monochrome: bool,
 }
 
 impl NavList {
@@ -45,7 +47,15 @@ impl NavList {
             icons: Vec::new(),
             selected: None,
             hovered: None,
+            monochrome: false,
         }
+    }
+
+    /// Rysuje ikony wierszy jako monochromatyczne symbole, niezależnie od
+    /// globalnego zestawu ikon. Używane przez panele boczne aplikacji.
+    pub fn monochrome(mut self, on: bool) -> Self {
+        self.monochrome = on;
+        self
     }
 
     /// Ustawia ikony wierszy (indeks zgodny z [`NavList::entries`]).
@@ -174,7 +184,11 @@ impl NavList {
                         let icon_rect =
                             Rect::from_xywh(item.x() + 6.0, item.center().y - 9.0, 18.0, 18.0);
                         let color = if selected { colors.accent } else { colors.text };
-                        paint_icon(ctx, icon, icon_rect, color);
+                        if self.monochrome {
+                            paint_icon_themed(ctx, icon, icon_rect, color, IconTheme::Monochrome);
+                        } else {
+                            paint_icon(ctx, icon, icon_rect, color);
+                        }
                         item.x() + 30.0
                     } else {
                         let dot = Rect::from_xywh(item.x() + 8.0, item.center().y - 4.0, 8.0, 8.0);
