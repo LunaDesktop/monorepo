@@ -12,6 +12,8 @@ zbudować, przetestować i wydać niezależnie od reszty środowiska.
 | `luna-greeter/` | `luna-greeter` | libluna | ekran logowania dla greetd |
 | `apps/luna-demo/` | `luna-demo` | libluna | demo / galeria widgetów |
 | `apps/luna-files/` | `luna-files` | libluna | menedżer plików |
+| `apps/luna-media/` | `luna-media` | libluna | odtwarzacz wideo i przeglądarka multimediów |
+| `apps/luna-editor/` | `luna-editor` | libluna | edytor kodu z wtyczkami instalowanymi z zewnątrz |
 | `apps/luna-eq/` | `luna-eq` | — (wtyczka LADSPA) | korektor graficzny dla PipeWire |
 | `apps/luna-settings/` | `luna-settings` | libluna, luna | centrum ustawień |
 | `apps/luna-clock/` | `luna-clock` | libluna | zegar, minutnik, stoper i kalendarz |
