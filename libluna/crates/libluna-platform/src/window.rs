@@ -650,6 +650,20 @@ where
                     app.queue(Event::Paste(text));
                 }
             }
+            // Wątek odczytu upuszczonych plików (`text/uri-list`) zakończył pracę.
+            let dropped = app
+                .drop_data
+                .lock()
+                .ok()
+                .and_then(|mut guard| guard.take());
+            if let Some((position, copy, paths)) = dropped {
+                app.queue(Event::DragLeave);
+                app.queue(Event::Drop {
+                    position,
+                    paths,
+                    copy,
+                });
+            }
         })?;
     let wake = WakeHandle { ping };
 
@@ -764,6 +778,10 @@ where
         clipboard_text: None,
         drag_source: None,
         drag_paths: None,
+        drag_pos: None,
+        drag_move: false,
+        drop_data: Arc::new(Mutex::new(None)),
+        drop_busy: Arc::new(AtomicBool::new(false)),
         conn: conn.clone(),
         paste_text: Arc::new(Mutex::new(None)),
         paste_busy: Arc::new(AtomicBool::new(false)),
@@ -903,6 +921,14 @@ struct App {
     drag_source: Option<DragSource>,
     /// Pliki oferowane w trwającym przeciąganiu.
     drag_paths: Option<Vec<PathBuf>>,
+    /// Ostatnia pozycja przeciągania **z innej aplikacji** (dla zdarzenia `Drop`).
+    drag_pos: Option<Point>,
+    /// Czy kompozytor wybrał przenoszenie (a nie kopiowanie).
+    drag_move: bool,
+    /// Wynik odczytu `text/uri-list` z upuszczonej oferty.
+    drop_data: Arc<Mutex<Option<(Point, bool, Vec<PathBuf>)>>>,
+    /// Jeden odczyt upuszczonych danych naraz.
+    drop_busy: Arc<AtomicBool>,
     /// Połączenie Waylanda — `flush` po zleceniu odczytu schowka.
     conn: Connection,
     /// Wynik odczytu schowka, przekazywany z wątku do pętli.
@@ -2211,20 +2237,124 @@ impl DataDeviceHandler for App {
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
-        _: &WlDataDevice,
-        _: f64,
-        _: f64,
+        device: &WlDataDevice,
+        x: f64,
+        y: f64,
         _: &WlSurface,
     ) {
+        self.accept_drag(device);
+        self.drag_pos = Some(Point::new(x, y));
+        self.queue(Event::DragHover {
+            position: Point::new(x, y),
+            move_hint: self.drag_move,
+        });
     }
 
-    fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {}
+    fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {
+        self.drag_pos = None;
+        self.queue(Event::DragLeave);
+    }
 
-    fn motion(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice, _: f64, _: f64) {}
+    fn motion(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        device: &WlDataDevice,
+        x: f64,
+        y: f64,
+    ) {
+        self.accept_drag(device);
+        self.drag_pos = Some(Point::new(x, y));
+        self.queue(Event::DragHover {
+            position: Point::new(x, y),
+            move_hint: self.drag_move,
+        });
+    }
 
     fn selection(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {}
 
-    fn drop_performed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {}
+    fn drop_performed(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        device: &WlDataDevice,
+    ) {
+        self.read_drop(device);
+    }
+}
+
+impl App {
+    /// Akceptuje ofertę przeciągania, jeśli zawiera pliki (`text/uri-list`).
+    ///
+    /// Bez `accept` źródło dostaje informację, że upuszczenie jest niemożliwe
+    /// (i np. przeglądarka pokaże „zakaz”).
+    fn accept_drag(&mut self, device: &WlDataDevice) {
+        let Some(data) = device.data::<DataDeviceData>() else {
+            return;
+        };
+        let Some(offer) = data.drag_offer() else {
+            return;
+        };
+        let Some(mime) = drag_mime(&offer) else {
+            return;
+        };
+        self.drag_move = offer.selected_action.contains(DndAction::Move);
+        offer.set_actions(DndAction::Copy | DndAction::Move, DndAction::Copy);
+        offer.accept_mime_type(offer.serial, Some(mime));
+    }
+
+    /// Wczytuje `text/uri-list` z upuszczonej oferty w wątku tła.
+    fn read_drop(&mut self, device: &WlDataDevice) {
+        if self.drop_busy.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let Some(data) = device.data::<DataDeviceData>() else {
+            self.drop_busy.store(false, Ordering::SeqCst);
+            return;
+        };
+        let Some(offer) = data.drag_offer() else {
+            self.drop_busy.store(false, Ordering::SeqCst);
+            return;
+        };
+        let Some(mime) = drag_mime(&offer) else {
+            self.drop_busy.store(false, Ordering::SeqCst);
+            return;
+        };
+        let Ok(mut pipe) = offer.receive(mime.clone()) else {
+            self.drop_busy.store(false, Ordering::SeqCst);
+            return;
+        };
+        offer.finish();
+        let position = self.drag_pos.unwrap_or_else(|| Point::new(0.0, 0.0));
+        let copy = !offer.selected_action.contains(DndAction::Move);
+        self.drag_pos = None;
+
+        let slot = Arc::clone(&self.drop_data);
+        let busy = Arc::clone(&self.drop_busy);
+        let wake = self.wake.clone();
+        let spawned = std::thread::Builder::new()
+            .name("luna-drop".into())
+            .spawn(move || {
+                use std::io::Read;
+                let mut text = String::new();
+                let _ = pipe.read_to_string(&mut text);
+                let paths = if mime.contains("uri-list") {
+                    parse_uri_list(&text)
+                } else {
+                    parse_path_list(&text)
+                };
+                if !paths.is_empty() {
+                    if let Ok(mut guard) = slot.lock() {
+                        *guard = Some((position, copy, paths));
+                    }
+                }
+                busy.store(false, Ordering::SeqCst);
+                wake.wake();
+            });
+        if spawned.is_err() {
+            self.drop_busy.store(false, Ordering::SeqCst);
+        }
+    }
 }
 
 impl DataOfferHandler for App {
@@ -2296,6 +2426,74 @@ fn file_uri(path: &std::path::Path) -> String {
     out
 }
 
+/// Pierwszy MIME z oferty nadający się na pliki (`text/uri-list`, potem `text/plain`).
+fn drag_mime(offer: &smithay_client_toolkit::data_device_manager::data_offer::DragOffer) -> Option<String> {
+    offer.with_mime_types(|types| {
+        types
+            .iter()
+            .find(|mime| mime.contains("uri-list"))
+            .cloned()
+            .or_else(|| {
+                types
+                    .iter()
+                    .find(|mime| mime.starts_with("text/plain"))
+                    .cloned()
+            })
+    })
+}
+
+/// Dekoduje `%XX` (UTF-8) ze ścieżki URI.
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).ok();
+            if let Some(byte) = hex.and_then(|hex| u8::from_str_radix(hex, 16).ok()) {
+                out.push(byte);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Zamienia `file://…` na ścieżkę lokalną (obsługuje `file:///…` i `file://localhost/…`).
+fn uri_to_path(line: &str) -> Option<PathBuf> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+    if let Some(rest) = line.strip_prefix("file://") {
+        let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+        if !rest.starts_with('/') {
+            return None;
+        }
+        let decoded = percent_decode(rest);
+        return (!decoded.is_empty()).then(|| PathBuf::from(decoded));
+    }
+    line.starts_with('/')
+        .then(|| PathBuf::from(percent_decode(line)))
+}
+
+/// Parsuje `text/uri-list` (linie CRLF, komentarze `#`).
+pub fn parse_uri_list(text: &str) -> Vec<PathBuf> {
+    text.lines().filter_map(uri_to_path).collect()
+}
+
+/// Parsuje listę ścieżek (jedna na linię) — zapas dla odbiorców wysyłających `text/plain`.
+pub fn parse_path_list(text: &str) -> Vec<PathBuf> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && line.starts_with('/'))
+        .map(|line| PathBuf::from(percent_decode(line)))
+        .collect()
+}
+
 /// Zawartość `text/uri-list` (linie CRLF, na końcu pusta linia).
 pub fn uri_list(paths: &[PathBuf]) -> String {
     let mut out = String::new();
@@ -2335,6 +2533,26 @@ mod tests {
             "file:///home/ula/Moje%20dokumenty/raport%20%231.pdf\r\n\
              file:///tmp/za%C5%BC%C3%B3%C5%82%C4%87.txt\r\n"
         );
+    }
+
+    #[test]
+    fn parses_dropped_uris_and_paths() {
+        let text = "# komentarz\r\nfile:///home/ula/Moje%20pliki/a.txt\r\n\
+                    file://localhost/tmp/b%20c.txt\r\n/nie/uri.txt\r\n";
+        assert_eq!(
+            parse_uri_list(text),
+            vec![
+                PathBuf::from("/home/ula/Moje pliki/a.txt"),
+                PathBuf::from("/tmp/b c.txt"),
+                PathBuf::from("/nie/uri.txt"),
+            ]
+        );
+        assert_eq!(
+            parse_path_list("/tmp/a\n\n/tmp/za%C5%BC\nwzględna"),
+            vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/zaż")]
+        );
+        // Obce schematy i puste linie są ignorowane.
+        assert!(parse_uri_list("https://example.com/x\r\n\r\n").is_empty());
     }
 
     #[test]

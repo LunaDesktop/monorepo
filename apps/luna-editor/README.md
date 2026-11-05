@@ -29,6 +29,8 @@ Podświetlanie składni rysuje `CodeView` z `libluna-widgets`, a zakładki —
   w Edytor. Pierwsza oficjalna wtyczka to **AI Writer** (Gemini, OpenAI,
   Claude, DeepSeek, OpenRouter, Mistral, Groq, Ollama). Dokumentacja dla
   twórców: [`../../docs/plugins.md`](../../docs/plugins.md).
+- **upuszczanie plików** w oknie: pliki otwierają się w zakładkach, a katalog
+  staje się projektem (panel po lewej),
 - **panel czatu z asystentem AI** (`Ctrl+Shift+A`, tylko przy wtyczce
   z `chat = true`): asystent widzi strukturę projektu, treść małych plików
   i aktywny dokument, a w rozmowie może czytać i zapisywać pliki. Zmiany

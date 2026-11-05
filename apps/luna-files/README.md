@@ -33,6 +33,11 @@ Dostępne binarki:
   idą do kompozytora jako `text/uri-list` + `text/plain` (`file://…`), więc można
   je upuścić w przeglądarce (pole uploadu), innym menedżerze plików, edytorze
   albo kliencie poczty. Odbiorca decyduje, czy kopiuje, czy przenosi;
+- **przyjmowanie plików z innych aplikacji**: upuszczenie w oknie Plików
+  (z przeglądarki, innego menedżera, archiwum) kopiuje je do folderu pod
+  kursorem, panelu bocznego, Kosza lub — gdy nie ma folderu pod kursorem —
+  do bieżącego katalogu panelu. Cel jest podświetlany w trakcie przeciągania,
+  a akcję `move`/`copy` wybiera kompozytor (modyfikatory przy przeciąganiu);
 - wielokrotne zaznaczanie: `Ctrl+klik`, `Shift+klik` (zakres), `Shift+↑/↓`, `Ctrl+A`;
   belka statusu pokazuje liczbę **i łączny rozmiar** zaznaczonych;
 - menu kontekstowe (prawy przycisk) i menu główne (☰) — wszystkie napisy przez i18n.

@@ -2160,6 +2160,22 @@ fn handle_normal(
                 app.paste_text(value);
             }
         }
+        Event::Drop { paths, .. } => {
+            // Przeciągnięcie plików z menedżera: otwórz je w zakładkach,
+            // a katalog ustaw jako projekt.
+            let mut opened = false;
+            for path in paths {
+                if path.is_dir() {
+                    app.workspace.set_root(path.clone());
+                } else if path.is_file() {
+                    app.open_path(path.clone());
+                    opened = true;
+                }
+            }
+            if opened {
+                app.focus_editor();
+            }
+        }
         _ => {}
     }
 }
@@ -2697,6 +2713,35 @@ mod tests {
         }];
         app.chat.visible = true;
         app
+    }
+
+    #[test]
+    fn dropping_a_file_opens_it_in_a_tab() {
+        let dir = std::env::temp_dir().join("luna-editor-drop-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("upuszczony.txt");
+        std::fs::write(&path, "treść\n").unwrap();
+
+        let mut app = App::new();
+        let theme = theme();
+        let text = TextEngine::none();
+        handle_events(
+            &mut app,
+            &[Event::Drop {
+                position: Point::new(10.0, 10.0),
+                paths: vec![path.clone()],
+                copy: true,
+            }],
+            size(),
+            &theme,
+            &text,
+        );
+        assert!(app
+            .docs
+            .iter()
+            .any(|doc| doc.path.as_deref() == Some(path.as_path())));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

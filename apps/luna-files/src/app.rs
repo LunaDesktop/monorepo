@@ -252,6 +252,16 @@ pub enum DropTarget {
     Trash,
 }
 
+/// Przeciąganie plików **z innej aplikacji** nad oknem.
+#[derive(Debug, Clone)]
+pub struct ExternalDrag {
+    /// Cel pod kursorem (folder, panel boczny, Kosz) albo `None`.
+    pub target: Option<DropTarget>,
+    pub target_rect: Option<Rect>,
+    /// Kompozytor wybrał przenoszenie (a nie kopiowanie).
+    pub move_hint: bool,
+}
+
 /// Trwające przeciąganie plików z panelu.
 #[derive(Debug, Clone)]
 pub struct DragState {
@@ -338,6 +348,8 @@ pub struct App {
     pub drag: Option<DragState>,
     /// Pliki, które trzeba przekazać kompozytorowi jako przeciąganie poza okno.
     pub pending_external_drag: Option<Vec<PathBuf>>,
+    /// Przeciąganie z innej aplikacji (podświetlenie celu i upuszczenie).
+    pub extern_drag: Option<ExternalDrag>,
     pub clipboard: Option<Clipboard>,
     /// Tekst do systemowego schowka (odbierany przez pętlę klatki).
     pub text_clipboard: Option<String>,
@@ -414,6 +426,7 @@ impl App {
             pending_properties: None,
             drag: None,
             pending_external_drag: None,
+            extern_drag: None,
             clipboard: None,
             text_clipboard: None,
             text_paste_requested: false,

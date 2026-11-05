@@ -18,8 +18,8 @@ use libluna_widgets::{
 };
 
 use crate::app::{
-    App, ContextMenu, DragState, DropTarget, EditState, HoverTip, MenuCmd, MenuTarget, Pane,
-    SideAction, TextPasteTarget, SPLIT_GAP,
+    App, ContextMenu, DragState, DropTarget, EditState, ExternalDrag, HoverTip, MenuCmd, MenuTarget,
+    Pane, SideAction, TextPasteTarget, SPLIT_GAP,
 };
 use crate::archive;
 use crate::list;
@@ -538,14 +538,19 @@ fn paint_panes(ctx: &mut PaintCtx, app: &App, lay: &Layout) {
 
 /// Podświetlenie celu i „duch” przeciąganych plików.
 fn paint_drag(ctx: &mut PaintCtx, app: &App, size: Size) {
-    let Some(drag) = &app.drag else {
+    // Podświetlenie celu: przeciąganie wewnętrzne albo pliki z innej aplikacji.
+    let (target, target_rect, internal) = if let Some(drag) = &app.drag {
+        if !drag.active {
+            return;
+        }
+        (drag.target.clone(), drag.target_rect, Some(drag))
+    } else if let Some(drop) = &app.extern_drag {
+        (drop.target.clone(), drop.target_rect, None)
+    } else {
         return;
     };
-    if !drag.active {
-        return;
-    }
-    if let Some(rect) = drag.target_rect {
-        let color = if matches!(drag.target, Some(DropTarget::Trash)) {
+    if let Some(rect) = target_rect {
+        let color = if matches!(target, Some(DropTarget::Trash)) {
             ctx.theme.colors.error
         } else {
             ctx.theme.colors.accent
@@ -554,6 +559,9 @@ fn paint_drag(ctx: &mut PaintCtx, app: &App, size: Size) {
             .fill_rounded_rect(rect, 6.0, color.scale_alpha(0.16));
         ctx.scene.stroke_rounded_rect(rect, 6.0, 1.5, color);
     }
+    let Some(drag) = internal else {
+        return;
+    };
     let Some(pointer) = app.pointer else {
         return;
     };
@@ -1790,6 +1798,44 @@ pub fn handle_events(
                     });
                 }
             }
+            Event::DragHover {
+                position,
+                move_hint,
+            } => {
+                // Przeciąganie z innej aplikacji: podświetlamy cel pod kursorem.
+                let (target, rect) = drop_target_at(app, &lay, *position, theme);
+                app.extern_drag = Some(ExternalDrag {
+                    target,
+                    target_rect: rect,
+                    move_hint: *move_hint,
+                });
+                app.tooltip = None;
+                app.controls_hover = None;
+                app.tab_hover = None;
+                app.path_hover = None;
+                app.sidebar.set_hovered(None);
+                for pane in &mut app.panes {
+                    pane.view.set_hovered(None);
+                }
+                continue;
+            }
+            Event::DragLeave => {
+                app.extern_drag = None;
+                continue;
+            }
+            Event::Drop {
+                position,
+                paths,
+                copy,
+            } => {
+                app.extern_drag = None;
+                if let Some((_, job)) =
+                    external_drop_job(app, &lay, *position, paths.clone(), *copy, theme)
+                {
+                    app.submit(job);
+                }
+                continue;
+            }
             Event::PointerLeave => {
                 app.pointer = None;
                 app.controls_hover = None;
@@ -2180,6 +2226,27 @@ fn drop_target_at(
 }
 
 /// Buduje zadanie dla upuszczenia; `copy` (Ctrl) decyduje o kopiowaniu.
+/// Cel i zadanie dla plików upuszczonych z innej aplikacji.
+///
+/// Kolejność: folder/Kosz pod kursorem → katalog bieżący panelu pod kursorem.
+fn external_drop_job(
+    app: &App,
+    lay: &Layout,
+    point: Point,
+    paths: Vec<PathBuf>,
+    copy: bool,
+    theme: &Theme,
+) -> Option<(DropTarget, Job)> {
+    let (target, _) = drop_target_at(app, lay, point, theme);
+    let target = target.or_else(|| {
+        let count = if app.split { 2 } else { 1 };
+        (0..count)
+            .find(|index| lay.panes[*index].contains(point))
+            .map(|index| DropTarget::Directory(app.panes[index].dir.path.clone()))
+    })?;
+    drag_job(target.clone(), paths, copy).map(|job| (target, job))
+}
+
 fn drag_job(target: DropTarget, paths: Vec<PathBuf>, copy: bool) -> Option<Job> {
     match target {
         DropTarget::Trash => {
@@ -3502,6 +3569,66 @@ mod tests {
         );
         // Sprzątanie bez wykonywania zadania.
         app.drag = None;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn external_drop_on_folder_builds_move_job() {
+        let root = std::env::temp_dir().join("luna-files-external-drop-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("cel")).unwrap();
+        let source = std::env::temp_dir().join("luna-files-external-source.txt");
+        std::fs::write(&source, b"x").unwrap();
+
+        let app = App::new(root.clone());
+        let theme = Theme::light();
+        let text = TextEngine::system();
+        let size = Size::new(1120.0, 720.0);
+        let lay = layout(&app, size, &theme, &text);
+        let pr = pane_rects(&app, &lay, 0, &theme);
+        let rows = file_rows(&app.panes[0], pr.items);
+        let entries = app.panes[0].dir.visible_entries();
+        let dir_index = entries.iter().position(|e| e.name == "cel").unwrap();
+        let dir_pos = app.panes[0]
+            .view
+            .slot_rect(rows, dir_index, &theme)
+            .center();
+
+        let (target, job) =
+            external_drop_job(&app, &lay, dir_pos, vec![source.clone()], false, &theme)
+                .expect("upuszczenie na folder powinno dać zadanie");
+        assert_eq!(target, DropTarget::Directory(root.join("cel")));
+        assert!(matches!(job, Job::Move { .. }));
+
+        // Ctrl (copy = true) — kopiowanie zamiast przenoszenia.
+        let (_, copied) =
+            external_drop_job(&app, &lay, dir_pos, vec![source.clone()], true, &theme).unwrap();
+        assert!(matches!(copied, Job::Copy { .. }));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn external_drop_on_empty_area_targets_the_current_directory() {
+        let root = std::env::temp_dir().join("luna-files-external-empty-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.txt"), b"x").unwrap();
+        let source = std::env::temp_dir().join("luna-files-external-source-2.txt");
+        std::fs::write(&source, b"x").unwrap();
+
+        let app = App::new(root.clone());
+        let theme = Theme::light();
+        let text = TextEngine::system();
+        let size = Size::new(1120.0, 720.0);
+        let lay = layout(&app, size, &theme, &text);
+        let pr = pane_rects(&app, &lay, 0, &theme);
+        let empty = Point::new(pr.items.right() - 8.0, pr.items.bottom() - 8.0);
+
+        let (target, job) =
+            external_drop_job(&app, &lay, empty, vec![source.clone()], true, &theme)
+                .expect("upuszczenie w panelu powinno trafić do bieżącego katalogu");
+        assert_eq!(target, DropTarget::Directory(root.clone()));
+        assert!(matches!(job, Job::Copy { .. }));
         let _ = std::fs::remove_dir_all(&root);
     }
 

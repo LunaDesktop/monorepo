@@ -111,6 +111,23 @@ pub enum Event {
     Text(String),
     /// Tekst wklejony ze schowka systemowego (odpowiedź na `Frame::paste_from_clipboard`).
     Paste(String),
+    /// Przeciąganie z innej aplikacji jest nad oknem (`position` w pikselach logicznych).
+    ///
+    /// `move_hint` mówi, że odbiorca może przenieść pliki zamiast je kopiować
+    /// (akcja wybrana przez kompozytor na podstawie źródła i modyfikatorów).
+    DragHover {
+        position: Point,
+        move_hint: bool,
+    },
+    /// Przeciąganie opuściło okno albo zostało anulowane.
+    DragLeave,
+    /// Upuszczono pliki z innej aplikacji.
+    Drop {
+        position: Point,
+        paths: Vec<std::path::PathBuf>,
+        /// `true` = kopiuj, `false` = przenieś.
+        copy: bool,
+    },
     Window(WindowEvent),
 }
 
