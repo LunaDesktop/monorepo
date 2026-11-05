@@ -23,7 +23,12 @@ Podświetlanie składni rysuje `CodeView` z `libluna-widgets`, a zakładki —
   `~/.config/luna/editor.conf`,
 - zachowanie LF/CRLF i BOM, atomowy zapis, ochrona przed plikami binarnymi
   i zbyt dużymi,
-- dialogi i powiadomienia bez zależności od GTK.
+- dialogi i powiadomienia bez zależności od GTK,
+- **wtyczki instalowane z GitHuba** (menu `Plugins…`, `Ctrl+Shift+P`):
+  zewnętrzne procesy z manifestem `plugin.conf`, bez wbudowywania kodu
+  w Edytor. Pierwsza oficjalna wtyczka to **AI Writer** (Gemini, OpenAI,
+  Claude, DeepSeek, OpenRouter, Mistral, Groq, Ollama). Dokumentacja dla
+  twórców: [`../../docs/plugins.md`](../../docs/plugins.md).
 
 ## Uruchomienie
 
@@ -43,6 +48,7 @@ cargo run --bin editor-render -- --folder ../../apps/luna-editor/src --preview s
 cargo run --bin editor-render -- --no-workspace --browser open ../../docs/images/luna-editor-browser.png
 cargo run --bin editor-render -- --no-workspace --about ../../docs/images/luna-editor-about.png
 cargo run --bin editor-render -- --no-workspace --settings ../../docs/images/luna-editor-settings.png
+cargo run --bin editor-render -- --plugins ../../docs/images/luna-editor-plugins.png
 ```
 
 ## Licencja

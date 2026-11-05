@@ -4,7 +4,7 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use libluna_core::{Rect, ThemeSettings, WindowEvent};
+use libluna_core::{Point, Rect, ThemeSettings, WindowEvent};
 use libluna_i18n::{set_locale, tr};
 use libluna_platform::{run as run_app, AppConfig, Frame};
 use libluna_widgets::{
@@ -13,6 +13,8 @@ use libluna_widgets::{
 
 use crate::browser::{BrowserMode, BrowserOutcome, FileBrowser};
 use crate::document::{find_all, Document, LineEnding};
+use crate::plugin_ui::PluginUi;
+use crate::plugins::{self, Job, Output, RunRequest};
 use crate::prefs::Prefs;
 use crate::syntax::Language;
 use crate::workspace::{Row, Workspace};
@@ -29,6 +31,9 @@ pub enum AfterSave {
 pub struct Confirm {
     pub after: AfterSave,
     pub dialog: AlertDialog,
+    /// Czy okno oferuje „Zapisz” (trzy przyciski). Gdy któregoś pliku nie da
+    /// się zapisać bez ścieżki, zostają tylko „Odrzuć” i „Anuluj”.
+    pub can_save: bool,
 }
 
 /// Okno „Idź do linii”.
@@ -135,11 +140,15 @@ pub struct App {
     pub status: Option<String>,
     pub menu: Menu,
     pub menu_open: bool,
+    /// Mapowanie pozycji menu na polecenia wtyczek (indeks wtyczki, indeks polecenia).
+    menu_map: Vec<Option<(usize, usize)>>,
     pub hover_control: Option<WindowControl>,
     pub hover_menu: bool,
     pub hover_workspace_toggle: bool,
     pub hover_workspace_row: Option<usize>,
     pub hover_workspace_open: bool,
+    /// Ostatnia pozycja kursora — podświetlenie przycisków w dialogach.
+    pub pointer: Option<Point>,
     pub pending: Pending,
     pub reveal_cursor: bool,
     pub clipboard_text: Option<String>,
@@ -148,6 +157,10 @@ pub struct App {
     pub drag_anchor: usize,
     pub workspace_focused: bool,
     last_workspace_click: Option<(Instant, PathBuf)>,
+    /// Zainstalowane wtyczki i praca w tle.
+    pub plugins: plugins::PluginHost,
+    /// Stan okien wtyczek (menedżer, ustawienia, pytanie o instrukcję).
+    pub plugin_ui: PluginUi,
 }
 
 impl Default for App {
@@ -187,13 +200,15 @@ impl App {
             error: None,
             after_save: None,
             status: None,
-            menu: Menu::new(menu_entries()),
+            menu: Menu::new(Vec::new()),
             menu_open: false,
+            menu_map: Vec::new(),
             hover_control: None,
             hover_menu: false,
             hover_workspace_toggle: false,
             hover_workspace_row: None,
             hover_workspace_open: false,
+            pointer: None,
             pending: Pending::default(),
             reveal_cursor: true,
             clipboard_text: None,
@@ -202,8 +217,11 @@ impl App {
             drag_anchor: 0,
             workspace_focused: false,
             last_workspace_click: None,
+            plugins: plugins::PluginHost::new(),
+            plugin_ui: PluginUi::new(),
         };
         app.docs[0].view.set_tab_width(app.prefs.tab_width);
+        app.rebuild_menu();
         app.activate_active();
         app
     }
@@ -383,6 +401,7 @@ impl App {
             self.confirm = Some(Confirm {
                 after: AfterSave::CloseTab(index),
                 dialog: save_confirm(tr("Save changes before closing the tab?")),
+                can_save: true,
             });
         } else {
             self.remove_tab(index);
@@ -430,6 +449,7 @@ impl App {
         self.confirm = Some(Confirm {
             after: AfterSave::CloseWindow,
             dialog,
+            can_save: all_have_paths,
         });
     }
 
@@ -437,6 +457,7 @@ impl App {
         let Some(confirm) = self.confirm.take() else {
             return;
         };
+        let can_save = confirm.can_save;
         match confirm.after {
             AfterSave::CloseTab(index) => match action {
                 0 => {
@@ -446,11 +467,19 @@ impl App {
                 1 => self.remove_tab(index),
                 _ => {}
             },
-            AfterSave::CloseWindow => match action {
-                0 => self.save_all(),
-                1 => self.pending.close = true,
-                _ => {}
-            },
+            AfterSave::CloseWindow => {
+                if can_save {
+                    match action {
+                        0 => self.save_all(),
+                        1 => self.pending.close = true,
+                        _ => {}
+                    }
+                } else if action == 0 {
+                    // Okno ma tylko „Odrzuć” i „Anuluj” — nie próbuj zapisywać
+                    // plików bez ścieżki.
+                    self.pending.close = true;
+                }
+            }
         }
     }
 
@@ -1200,6 +1229,10 @@ impl App {
     }
 
     pub fn menu_action(&mut self, index: usize) {
+        if let Some(Some((plugin, command))) = self.menu_map.get(index).copied() {
+            crate::plugin_ui::start(self, plugin, command);
+            return;
+        }
         match index {
             0 => self.new_file(),
             1 => self.open_open_browser(),
@@ -1212,9 +1245,205 @@ impl App {
             10 => self.redo(),
             12 => self.toggle_workspace(),
             13 => self.open_folder_browser(),
-            15 => self.open_settings(),
-            16 => self.show_about(),
+            15 => self.open_plugins(),
+            16 => self.open_settings(),
+            17 => self.show_about(),
             _ => {}
+        }
+    }
+
+    /// Odbudowuje menu: pozycje bazowe + polecenia zainstalowanych wtyczek.
+    pub fn rebuild_menu(&mut self) {
+        let (entries, map) = menu_entries_with_plugins(&self.plugins.plugins);
+        self.menu = Menu::new(entries);
+        self.menu_map = map;
+    }
+
+    // ── Wtyczki ────────────────────────────────────────────────────────────
+
+    /// Otwiera menedżer wtyczek (odświeża listę z dysku).
+    pub fn open_plugins(&mut self) {
+        self.menu_open = false;
+        self.hover_menu = false;
+        self.hover_workspace_toggle = false;
+        self.hover_workspace_row = None;
+        self.hover_workspace_open = false;
+        self.plugins.reload();
+        self.rebuild_menu();
+        self.plugin_ui.open = true;
+        self.plugin_ui.form = None;
+        self.plugin_ui.prompt = None;
+        self.plugin_ui.status = None;
+        if self.plugin_ui.selected >= self.plugins.plugins.len() {
+            self.plugin_ui.selected = 0;
+        }
+    }
+
+    /// Uruchamia polecenie wtyczki w tle i wstawia wynik do dokumentu.
+    pub fn start_plugin(&mut self, plugin_index: usize, command_index: usize, instruction: String) {
+        let Some(plugin) = self.plugins.plugins.get(plugin_index).cloned() else {
+            return;
+        };
+        let Some(command) = plugin.commands.get(command_index).cloned() else {
+            return;
+        };
+        let settings = plugin.values();
+        let (path, language, payload) = crate::plugin_ui::payload_for(self, command.context);
+        let receiver = plugins::spawn_run(RunRequest {
+            plugin: plugin.clone(),
+            command: command.clone(),
+            settings,
+            instruction,
+            path,
+            language,
+            payload,
+        });
+        self.plugins.job = Some(Job::Run {
+            receiver,
+            doc: self.active,
+            output: command.output,
+            title: command.title.clone(),
+        });
+        self.plugin_ui.open = false;
+        self.plugin_ui.prompt = None;
+        self.status = Some(format!("{}: {}", plugin.name, tr("Working…")));
+    }
+
+    /// Sprawdza, czy praca w tle (instalacja/uruchomienie) się zakończyła.
+    pub fn poll_plugins(&mut self) {
+        use std::sync::mpsc::TryRecvError;
+        let Some(job) = self.plugins.job.take() else {
+            return;
+        };
+        match job {
+            Job::Install(receiver) => match receiver.try_recv() {
+                Ok(Ok(summary)) => {
+                    self.plugins.reload();
+                    self.rebuild_menu();
+                    self.plugin_ui.status = Some(summary.clone());
+                    self.status = Some(summary);
+                    if self.plugin_ui.selected >= self.plugins.plugins.len() {
+                        self.plugin_ui.selected = self.plugins.plugins.len().saturating_sub(1);
+                    }
+                }
+                Ok(Err(error)) => {
+                    self.plugin_ui.status = Some(error.clone());
+                    self.status = None;
+                    self.show_error(error);
+                }
+                Err(TryRecvError::Empty) => {
+                    self.plugins.job = Some(Job::Install(receiver));
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.status = None;
+                    self.show_error(tr("Installation ended without a result"));
+                }
+            },
+            Job::Run {
+                receiver,
+                doc,
+                output,
+                title,
+            } => match receiver.try_recv() {
+                Ok(Ok(text)) => {
+                    self.apply_plugin_output(doc, output, &text);
+                    self.status = Some(format!("{title}: {}", tr("Done")));
+                }
+                Ok(Err(error)) => {
+                    self.status = None;
+                    self.show_error(error);
+                }
+                Err(TryRecvError::Empty) => {
+                    self.plugins.job = Some(Job::Run {
+                        receiver,
+                        doc,
+                        output,
+                        title,
+                    });
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.status = None;
+                    self.show_error(tr("Plugin ended without a result"));
+                }
+            },
+            Job::Models {
+                receiver,
+                plugin,
+                setting,
+            } => match receiver.try_recv() {
+                Ok(Ok(models)) => {
+                    if let Some(form) = self.plugin_ui.form.as_mut() {
+                        if form.plugin == plugin && setting < form.options.len() {
+                            let previous = form
+                                .options
+                                .get(setting)
+                                .and_then(|options| {
+                                    options.get(*form.selections.get(setting).unwrap_or(&0))
+                                })
+                                .cloned();
+                            form.options[setting] = models;
+                            form.selections[setting] = previous
+                                .and_then(|value| {
+                                    form.options[setting]
+                                        .iter()
+                                        .position(|model| *model == value)
+                                })
+                                .unwrap_or(0);
+                            form.loading[setting] = false;
+                            form.needs_refresh[setting] = false;
+                            form.pending_open = Some(setting);
+                            form.error = None;
+                        }
+                    }
+                    self.status = Some(tr("Models loaded"));
+                }
+                Ok(Err(error)) => {
+                    if let Some(form) = self.plugin_ui.form.as_mut() {
+                        if form.plugin == plugin && setting < form.loading.len() {
+                            form.loading[setting] = false;
+                            form.pending_open = None;
+                            form.error = Some(error);
+                        }
+                    }
+                    self.status = None;
+                }
+                Err(TryRecvError::Empty) => {
+                    self.plugins.job = Some(Job::Models {
+                        receiver,
+                        plugin,
+                        setting,
+                    });
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.status = None;
+                    if let Some(form) = self.plugin_ui.form.as_mut() {
+                        if form.plugin == plugin && setting < form.loading.len() {
+                            form.loading[setting] = false;
+                            form.pending_open = None;
+                            form.error = Some(tr("Models ended without a result"));
+                        }
+                    }
+                }
+            },
+        }
+    }
+
+    fn apply_plugin_output(&mut self, index: usize, output: Output, text: &str) {
+        if index >= self.docs.len() {
+            return;
+        }
+        match output {
+            Output::Insert | Output::ReplaceSelection => {
+                let clean = text.trim_end_matches(|ch| ch == '\r' || ch == '\n');
+                self.docs[index].insert_text(clean);
+            }
+            Output::ReplaceDocument => self.docs[index].replace_all(text),
+            Output::Append => self.docs[index].append(text),
+        }
+        if index == self.active {
+            self.after_edit();
+        } else {
+            self.sync_tabs();
         }
     }
 
@@ -1293,16 +1522,45 @@ fn menu_entries() -> Vec<MenuEntry> {
         MenuEntry::action(tr("Toggle workspace")).shortcut("Ctrl+B"),
         MenuEntry::action(tr("Open folder")),
         MenuEntry::separator(),
+        MenuEntry::action(tr("Plugins…")).shortcut("Ctrl+Shift+P"),
         MenuEntry::action(tr("Settings")).shortcut("Ctrl+,"),
         MenuEntry::action(tr("About")),
     ]
 }
 
+/// Menu bazowe + polecenia wtyczek (na końcu, po separatorze).
+fn menu_entries_with_plugins(
+    plugins: &[crate::plugins::Plugin],
+) -> (Vec<MenuEntry>, Vec<Option<(usize, usize)>>) {
+    let mut entries = menu_entries();
+    let mut map: Vec<Option<(usize, usize)>> = vec![None; entries.len()];
+    let with_commands = plugins.iter().any(|plugin| !plugin.commands.is_empty());
+    if with_commands {
+        entries.push(MenuEntry::separator());
+        map.push(None);
+    }
+    for (plugin_index, plugin) in plugins.iter().enumerate() {
+        if plugin.commands.is_empty() {
+            continue;
+        }
+        entries.push(MenuEntry::section(plugin.name.clone()));
+        map.push(None);
+        for (command_index, command) in plugin.commands.iter().enumerate() {
+            entries.push(MenuEntry::action(command.title.clone()));
+            map.push(Some((plugin_index, command_index)));
+        }
+    }
+    (entries, map)
+}
+
+/// Indeks „Plugins” w menu.
+pub const MENU_PLUGINS: usize = 15;
+
 /// Indeks „Settings” w menu.
-pub const MENU_SETTINGS: usize = 15;
+pub const MENU_SETTINGS: usize = 16;
 
 /// Indeks „About” w menu.
-pub const MENU_ABOUT: usize = 16;
+pub const MENU_ABOUT: usize = 17;
 
 // ── Start ───────────────────────────────────────────────────────────────────
 
@@ -1331,7 +1589,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         let language = libluna_i18n::locale().language().to_owned();
         if language != ui_language {
             ui_language = language;
-            app.menu = Menu::new(menu_entries());
+            app.rebuild_menu();
         }
         frame.set_title(app.window_title());
         crate::ui::handle_events(&mut app, frame.events, frame.size, &frame.theme, frame.text);
@@ -1343,6 +1601,8 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             frame.paste_from_clipboard();
         }
         app.apply_pending(frame);
+        app.poll_plugins();
+        crate::plugin_ui::tick(&mut app, frame.size, &frame.theme);
         app.save_prefs_if_dirty();
         crate::ui::paint(&mut app, frame.scene, frame.size, &frame.theme, frame.text);
         frame.request_frame_after(Duration::from_millis(300));
@@ -1419,6 +1679,21 @@ mod tests {
         assert!(app.confirm.is_some());
         app.answer_confirm(1);
         assert!(app.pending.close);
+    }
+
+    #[test]
+    fn discarding_pathless_files_closes_without_saving() {
+        let mut app = App::new();
+        app.insert_text("x");
+        assert!(app.doc().path.is_none());
+        app.request_close();
+        let confirm = app.confirm.as_ref().unwrap();
+        assert!(!confirm.can_save);
+        // W oknie są tylko „Odrzuć” i „Anuluj” — pierwszy przycisk zamyka,
+        // nie próbuje zapisywać pliku bez ścieżki.
+        app.answer_confirm(0);
+        assert!(app.pending.close);
+        assert!(app.error.is_none());
     }
 
     #[test]
@@ -1687,6 +1962,47 @@ mod tests {
             .rows
             .iter()
             .any(|row| row.path == dir.join("src/main.rs")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plugin_output_is_inserted_into_the_active_document() {
+        let dir =
+            std::env::temp_dir().join(format!("luna-editor-plugin-app-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("run.sh"), "#!/bin/sh\nprintf 'X'\n").unwrap();
+
+        let mut app = App::new();
+        app.insert_text("abc");
+        app.plugins.plugins = vec![plugins::Plugin {
+            dir: dir.clone(),
+            id: "test".into(),
+            name: "Test".into(),
+            version: "1".into(),
+            author: String::new(),
+            description: String::new(),
+            entry: "run.sh".into(),
+            interpreter: Some("sh".into()),
+            commands: vec![plugins::PluginCommand {
+                id: "insert".into(),
+                title: "Insert".into(),
+                prompt: false,
+                context: plugins::Context::Document,
+                output: Output::Insert,
+            }],
+            settings: Vec::new(),
+        }];
+        app.start_plugin(0, 0, String::new());
+        for _ in 0..300 {
+            app.poll_plugins();
+            if app.plugins.job.is_none() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(app.plugins.job.is_none(), "plugin job did not finish");
+        assert_eq!(app.doc().view.text(), "abcX");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

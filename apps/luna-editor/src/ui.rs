@@ -2,14 +2,15 @@
 
 use libluna_core::style::weight;
 use libluna_core::{
-    ButtonState, Color, Event, Insets, KeyEvent, Point, PointerButton, Rect, Size, Theme,
-    WindowEvent,
+    ButtonState, Color, Event, IconTheme, Insets, KeyEvent, Point, PointerButton, Rect, Size,
+    Theme, WindowEvent,
 };
 use libluna_i18n::tr;
 use libluna_render::{Scene, TextEngine};
 use libluna_widgets::{
-    clipboard_command, paint_icon, Button, ButtonVariant, ControlsSide, HeaderBar, IconName,
-    PaintCtx, PreferencesDialog, Switch, TextClipboardCommand, ViewSwitcher, WindowControl,
+    clipboard_command, hover_fill, paint_icon, paint_icon_themed, sidebar_icon, Button,
+    ButtonVariant, ControlsSide, HeaderBar, IconName, PaintCtx, PreferencesDialog, Switch,
+    TextClipboardCommand, ViewSwitcher, WindowControl,
 };
 
 use crate::app::{App, PromptKind};
@@ -49,12 +50,7 @@ pub struct Layout {
 pub fn layout(size: Size, theme: &Theme, workspace_visible: bool, find_open: bool) -> Layout {
     let header = Rect::from_xywh(0.0, 0.0, size.width, theme.metrics.headerbar.height);
     let pad = theme.spacing.md.min((size.width * 0.04).max(8.0));
-    let status = Rect::from_xywh(
-        pad,
-        size.height - STATUS_H - 6.0,
-        (size.width - 2.0 * pad).max(0.0),
-        STATUS_H,
-    );
+    let status = Rect::from_xywh(0.0, size.height - STATUS_H, size.width, STATUS_H);
     let header_content = HeaderBar::new()
         .controls(ControlsSide::Right)
         .controls_layout(header, theme)
@@ -87,7 +83,7 @@ pub fn layout(size: Size, theme: &Theme, workspace_visible: bool, find_open: boo
         0.0,
         header.bottom(),
         workspace_w,
-        (status.y() - 8.0 - header.bottom()).max(0.0),
+        (status.y() - header.bottom()).max(0.0),
     );
     let workspace_root = Rect::from_xywh(
         workspace.x() + pad,
@@ -102,9 +98,9 @@ pub fn layout(size: Size, theme: &Theme, workspace_visible: bool, find_open: boo
         26.0,
     );
     let workspace_preview = Rect::from_xywh(
-        workspace.x() + 6.0,
-        (workspace.bottom() - PREVIEW_H - 6.0).max(workspace.y() + 42.0),
-        (workspace.width() - 12.0).max(0.0),
+        workspace.x(),
+        (workspace.bottom() - PREVIEW_H).max(workspace.y() + 42.0),
+        workspace.width(),
         PREVIEW_H,
     );
     let workspace_tree = Rect::from_xywh(
@@ -114,40 +110,40 @@ pub fn layout(size: Size, theme: &Theme, workspace_visible: bool, find_open: boo
         (workspace_preview.y() - 6.0 - (workspace_root.bottom() + 6.0)).max(0.0),
     );
 
+    let editor_left = if workspace_visible {
+        workspace.right() + pad
+    } else {
+        pad
+    };
     let find_bar = Rect::from_xywh(
-        workspace.right() + pad,
-        header.bottom() + 6.0,
-        (size.width - pad - (workspace.right() + pad)).max(0.0),
+        editor_left,
+        header.bottom() + pad,
+        (size.width - pad - editor_left).max(0.0),
         if find_open { FIND_H } else { 0.0 },
     );
     let find_entry = Rect::from_xywh(
-        find_bar.x() + 6.0,
+        find_bar.x(),
         find_bar.y() + 4.0,
-        (find_bar.width() - 12.0 - 34.0 - 90.0).max(40.0),
+        (find_bar.width() - 34.0 - 90.0).max(40.0),
         (FIND_H - 8.0).max(20.0),
     );
     let find_close = Rect::from_xywh(
-        find_bar.right() - 6.0 - 28.0,
+        find_bar.right() - 28.0,
         find_bar.center().y - 14.0,
         28.0,
         28.0,
     );
 
-    let editor_left = if workspace_visible {
-        workspace.right() + 8.0
-    } else {
-        pad
-    };
     let editor_top = if find_open {
-        find_bar.bottom() + 6.0
+        find_bar.bottom() + pad
     } else {
-        header.bottom() + 6.0
+        header.bottom() + pad
     };
     let editor = Rect::from_xywh(
         editor_left,
         editor_top,
         (size.width - pad - editor_left).max(0.0),
-        (status.y() - 8.0 - editor_top).max(0.0),
+        (status.y() - pad - editor_top).max(0.0),
     );
 
     Layout {
@@ -182,17 +178,13 @@ pub fn paint(app: &mut App, scene: &mut Scene, size: Size, theme: &Theme, text: 
         &mut ctx,
         lay.workspace_toggle,
         app.hover_workspace_toggle,
-        app.workspace.visible,
+        false,
     );
-    paint_icon(
+    sidebar_icon(
         &mut ctx,
-        IconName::Files,
-        lay.workspace_toggle.deflate(Insets::splat(6.0)),
-        if app.workspace.visible {
-            colors.accent
-        } else {
-            colors.text
-        },
+        colors.text,
+        lay.workspace_toggle,
+        app.workspace.visible,
     );
 
     app.tabs.paint(&mut ctx, lay.tabs);
@@ -238,6 +230,7 @@ pub fn paint(app: &mut App, scene: &mut Scene, size: Size, theme: &Theme, text: 
     if app.settings_open {
         paint_settings(app, &mut ctx, size);
     }
+    crate::plugin_ui::paint(app, &mut ctx, size);
     if let Some(confirm) = &app.confirm {
         confirm.dialog.paint(&mut ctx, size);
     }
@@ -288,11 +281,12 @@ fn paint_workspace(app: &App, ctx: &mut PaintCtx, lay: &Layout) {
         colors.text,
     );
     paint_header_button(ctx, lay.workspace_folder, false, false);
-    paint_icon(
+    paint_icon_themed(
         ctx,
         IconName::Files,
         lay.workspace_folder.deflate(Insets::splat(7.0)),
         colors.dim_text,
+        IconTheme::Monochrome,
     );
 
     let row_h = WORKSPACE_ROW_H;
@@ -318,7 +312,7 @@ fn paint_workspace(app: &App, ctx: &mut PaintCtx, lay: &Layout) {
         } else {
             file_icon(&row.name)
         };
-        paint_icon(
+        paint_icon_themed(
             ctx,
             icon,
             Rect::from_xywh(x, y + 5.0, 16.0, 16.0),
@@ -327,6 +321,7 @@ fn paint_workspace(app: &App, ctx: &mut PaintCtx, lay: &Layout) {
             } else {
                 colors.dim_text
             },
+            IconTheme::Monochrome,
         );
         let name = elide(
             ctx,
@@ -375,10 +370,12 @@ fn paint_preview(app: &App, ctx: &mut PaintCtx, lay: &Layout) {
     let theme = *ctx.theme;
     let colors = theme.colors;
     let card = lay.workspace_preview;
-    ctx.scene
-        .fill_rounded_rect(card, theme.radius.medium, colors.card_bg);
-    ctx.scene
-        .stroke_rounded_rect(card, theme.radius.medium, 1.0, colors.border);
+    // Podgląd jest częścią panelu bocznego: bez własnego tła i ramki, tylko
+    // delikatny separator — żadnej „wysepki” na tle sidebaru.
+    ctx.scene.fill_rect(
+        Rect::from_xywh(card.x(), card.y(), card.width(), 1.0),
+        colors.border,
+    );
     let Some(preview) = &app.workspace.preview else {
         ctx.label_center(
             card.center().x,
@@ -463,10 +460,8 @@ fn paint_preview(app: &App, ctx: &mut PaintCtx, lay: &Layout) {
 fn paint_find_bar(app: &App, ctx: &mut PaintCtx, lay: &Layout) {
     let theme = *ctx.theme;
     let colors = theme.colors;
-    ctx.scene
-        .fill_rounded_rect(lay.find_bar, theme.radius.medium, colors.card_bg);
-    ctx.scene
-        .stroke_rounded_rect(lay.find_bar, theme.radius.medium, 1.0, colors.border);
+    // Samo pole wyszukiwania jest kontrolką (zaokrągloną) — pasek nie ma
+    // własnego tła, więc nie tworzy dodatkowej wysepki nad edytorem.
     if let Some(find) = &app.find {
         find.entry.paint(ctx, lay.find_entry);
         let count = if find.matches.is_empty() {
@@ -502,8 +497,10 @@ fn paint_status(app: &App, ctx: &mut PaintCtx, lay: &Layout) {
     let theme = *ctx.theme;
     let colors = theme.colors;
     let caption = theme.typography.caption;
+    let pad = theme.spacing.md.min((lay.status.width() * 0.04).max(8.0));
+    // Płaski pasek statusu: pełna szerokość, oddzielony samą linią.
     ctx.scene.fill_rect(
-        Rect::from_xywh(0.0, lay.status.y() - 6.0, lay.status.width() + 24.0, 1.0),
+        Rect::from_xywh(lay.status.x(), lay.status.y(), lay.status.width(), 1.0),
         colors.border,
     );
     let mut left = app.file_label();
@@ -514,9 +511,14 @@ fn paint_status(app: &App, ctx: &mut PaintCtx, lay: &Layout) {
         left.push_str("  ·  ");
         left.push_str(status);
     }
-    let left = elide(ctx, &left, lay.status.width() * 0.55, caption.size);
+    let left = elide(
+        ctx,
+        &left,
+        (lay.status.width() - 2.0 * pad) * 0.55,
+        caption.size,
+    );
     ctx.label_left(
-        lay.status.x(),
+        lay.status.x() + pad,
         lay.status.center().y,
         &left,
         caption.size,
@@ -526,7 +528,7 @@ fn paint_status(app: &App, ctx: &mut PaintCtx, lay: &Layout) {
 
     let (line, column) = app.view().line_col();
     let position = format!("{} {}, {} {}", tr("Ln"), line, tr("Col"), column);
-    let mut right = lay.status.right();
+    let mut right = lay.status.right() - pad;
     for value in ["UTF-8", app.line_ending().label()] {
         let width = ctx.measure(value, caption.size, weight::NORMAL);
         ctx.label_right(
@@ -646,6 +648,8 @@ fn paint_browser(app: &App, ctx: &mut PaintCtx, size: Size) {
     let theme = *ctx.theme;
     let colors = theme.colors;
     let lay = browser_layout(size);
+    let pointer = app.pointer;
+    let hovered = |rect: Rect| pointer.is_some_and(|p| rect.contains(p));
     ctx.scene
         .fill_rect(Rect::from_size(size), Color::rgba(0.0, 0.0, 0.0, 0.45));
     ctx.scene
@@ -660,7 +664,7 @@ fn paint_browser(app: &App, ctx: &mut PaintCtx, size: Size) {
         weight::BOLD,
         colors.text,
     );
-    paint_header_button(ctx, lay.close, false, false);
+    paint_header_button(ctx, lay.close, hovered(lay.close), false);
     paint_icon(
         ctx,
         IconName::Close,
@@ -668,7 +672,7 @@ fn paint_browser(app: &App, ctx: &mut PaintCtx, size: Size) {
         colors.dim_text,
     );
 
-    paint_header_button(ctx, lay.up, false, false);
+    paint_header_button(ctx, lay.up, hovered(lay.up), false);
     paint_icon(
         ctx,
         IconName::ChevronLeft,
@@ -701,6 +705,9 @@ fn paint_browser(app: &App, ctx: &mut PaintCtx, size: Size) {
         if browser.dir == path {
             ctx.scene
                 .fill_rounded_rect(rect, theme.radius.small, colors.shade);
+        } else if hovered(rect) {
+            ctx.scene
+                .fill_rounded_rect(rect, theme.radius.small, hover_fill(&theme));
         }
         ctx.label_left(
             rect.x() + 4.0,
@@ -730,6 +737,9 @@ fn paint_browser(app: &App, ctx: &mut PaintCtx, size: Size) {
         if browser.selected == Some(index) {
             ctx.scene
                 .fill_rounded_rect(rect, theme.radius.small, colors.accent.scale_alpha(0.20));
+        } else if hovered(rect) {
+            ctx.scene
+                .fill_rounded_rect(rect, theme.radius.small, hover_fill(&theme));
         }
         let icon = if entry.is_dir {
             IconName::Files
@@ -793,10 +803,12 @@ fn paint_browser(app: &App, ctx: &mut PaintCtx, size: Size) {
             colors.warning,
         );
     }
-    Button::new(browser.action_label())
-        .variant(ButtonVariant::Suggested)
-        .paint(ctx, lay.action);
-    Button::new(tr("Cancel")).paint(ctx, lay.cancel);
+    let mut action = Button::new(browser.action_label()).variant(ButtonVariant::Suggested);
+    action.set_hovered(hovered(lay.action));
+    action.paint(ctx, lay.action);
+    let mut cancel = Button::new(tr("Cancel"));
+    cancel.set_hovered(hovered(lay.cancel));
+    cancel.paint(ctx, lay.cancel);
 }
 
 // ── Okno nazwy w panelu projektu ────────────────────────────────────────────
@@ -908,10 +920,13 @@ fn paint_prompt(app: &App, ctx: &mut PaintCtx, size: Size) {
             theme.colors.warning,
         );
     }
-    Button::new(label)
-        .variant(ButtonVariant::Suggested)
-        .paint(ctx, lay.submit);
-    Button::new(tr("Cancel")).paint(ctx, lay.cancel);
+    let pointer = app.pointer;
+    let mut submit = Button::new(label).variant(ButtonVariant::Suggested);
+    submit.set_hovered(pointer.is_some_and(|p| lay.submit.contains(p)));
+    submit.paint(ctx, lay.submit);
+    let mut cancel = Button::new(tr("Cancel"));
+    cancel.set_hovered(pointer.is_some_and(|p| lay.cancel.contains(p)));
+    cancel.paint(ctx, lay.cancel);
 }
 
 // ── Ustawienia programu ─────────────────────────────────────────────
@@ -1025,6 +1040,8 @@ fn paint_settings(app: &App, ctx: &mut PaintCtx, size: Size) {
         }
     }
 
+    let pointer = app.pointer;
+    let hovered = |rect: Rect| pointer.is_some_and(|p| rect.contains(p));
     let mut widths = ViewSwitcher::new(TAB_WIDTHS.iter().map(|width| width.to_string()));
     widths.set_selected(
         TAB_WIDTHS
@@ -1032,14 +1049,26 @@ fn paint_settings(app: &App, ctx: &mut PaintCtx, size: Size) {
             .position(|width| *width == app.prefs.tab_width)
             .unwrap_or(1),
     );
+    let width_hover = pointer.and_then(|p| widths.index_at(lay.tab_width, p));
+    widths.set_hovered(width_hover);
     widths.paint(ctx, lay.tab_width);
 
-    Switch::new(app.prefs.auto_indent).paint(ctx, lay.auto_indent);
-    Switch::new(app.prefs.show_hidden).paint(ctx, lay.show_hidden);
-    Switch::new(app.prefs.skip_build_dirs).paint(ctx, lay.skip_build);
-    Switch::new(app.prefs.show_workspace).paint(ctx, lay.show_workspace);
+    let mut auto_indent = Switch::new(app.prefs.auto_indent);
+    auto_indent.set_hovered(hovered(lay.auto_indent));
+    auto_indent.paint(ctx, lay.auto_indent);
+    let mut show_hidden = Switch::new(app.prefs.show_hidden);
+    show_hidden.set_hovered(hovered(lay.show_hidden));
+    show_hidden.paint(ctx, lay.show_hidden);
+    let mut skip_build = Switch::new(app.prefs.skip_build_dirs);
+    skip_build.set_hovered(hovered(lay.skip_build));
+    skip_build.paint(ctx, lay.skip_build);
+    let mut show_workspace = Switch::new(app.prefs.show_workspace);
+    show_workspace.set_hovered(hovered(lay.show_workspace));
+    show_workspace.paint(ctx, lay.show_workspace);
 
-    Button::new(tr("Done")).paint(ctx, lay.done);
+    let mut done = Button::new(tr("Done"));
+    done.set_hovered(hovered(lay.done));
+    done.paint(ctx, lay.done);
 }
 
 fn settings_hit(size: Size, theme: &Theme, point: Point) -> Option<SettingsHit> {
@@ -1202,10 +1231,13 @@ fn paint_goto(app: &App, ctx: &mut PaintCtx, size: Size) {
             theme.colors.warning,
         );
     }
-    Button::new(tr("Go"))
-        .variant(ButtonVariant::Suggested)
-        .paint(ctx, lay.submit);
-    Button::new(tr("Cancel")).paint(ctx, lay.cancel);
+    let pointer = app.pointer;
+    let mut submit = Button::new(tr("Go")).variant(ButtonVariant::Suggested);
+    submit.set_hovered(pointer.is_some_and(|p| lay.submit.contains(p)));
+    submit.paint(ctx, lay.submit);
+    let mut cancel = Button::new(tr("Cancel"));
+    cancel.set_hovered(pointer.is_some_and(|p| lay.cancel.contains(p)));
+    cancel.paint(ctx, lay.cancel);
 }
 
 fn menu_panel(
@@ -1263,6 +1295,11 @@ pub fn handle_events(
 ) {
     let lay = layout(size, theme, app.workspace.visible, app.find.is_some());
     for event in events {
+        match event {
+            Event::PointerMotion { position, .. } => app.pointer = Some(*position),
+            Event::PointerLeave => app.pointer = None,
+            _ => {}
+        }
         if let Event::Window(WindowEvent::CloseRequested) = event {
             app.request_close();
             continue;
@@ -1275,6 +1312,8 @@ pub fn handle_events(
             handle_alert(app, event, size, theme, text, AlertTarget::Overwrite);
         } else if app.pending_delete.is_some() {
             handle_alert(app, event, size, theme, text, AlertTarget::Delete);
+        } else if crate::plugin_ui::is_open(app) {
+            crate::plugin_ui::handle_events(app, event, size, theme, text);
         } else if app.settings_open {
             handle_settings(app, event, size, theme);
         } else if app.browser.is_some() {
@@ -2161,6 +2200,7 @@ fn handle_editor_key(app: &mut App, key: &KeyEvent, lay: &Layout, theme: &Theme)
             0x66 => app.toggle_find(),
             0x67 => app.open_goto_dialog(),
             0x2c => app.open_settings(),
+            0x70 if shift => app.open_plugins(),
             0x61 => {
                 app.view_mut().select_all();
                 app.focus_editor();
@@ -2500,10 +2540,9 @@ mod tests {
         assert!(!app.workspace.visible);
         let hidden = layout(size(), &theme, app.workspace.visible, false);
         assert_eq!(hidden.workspace.width(), 0.0);
-        assert_eq!(
-            hidden.editor.x(),
-            theme.spacing.md.min((size().width * 0.04).max(8.0))
-        );
+        let pad = theme.spacing.md.min((size().width * 0.04).max(8.0));
+        assert_eq!(hidden.editor.x(), pad);
+        assert_eq!(hidden.editor.right(), size().width - pad);
         click(&mut app, lay.workspace_toggle.center());
         assert!(app.workspace.visible);
     }

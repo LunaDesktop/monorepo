@@ -1,7 +1,7 @@
 //! Renderuje Luna Editor do PNG — podgląd bez kompozytora Wayland.
 //!
 //! Użycie:
-//!   `cargo run --bin editor-render -- [--dark] [--lang CODE] [--file PATH] [--find QUERY] [--about] [--no-workspace] [--tree-menu] [--prompt new-file|new-folder|rename] [--settings] [wyjście.png]`
+//!   `cargo run --bin editor-render -- [--dark] [--lang CODE] [--file PATH] [--find QUERY] [--about] [--no-workspace] [--tree-menu] [--prompt new-file|new-folder|rename] [--settings] [--plugins] [wyjście.png]`
 
 use std::error::Error;
 use std::path::PathBuf;
@@ -58,6 +58,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut tree_menu = false;
     let mut prompt: Option<String> = None;
     let mut settings = false;
+    let mut plugins_open = false;
     let mut out: Option<String> = None;
 
     let mut index = 0;
@@ -107,6 +108,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             "--settings" => {
                 settings = true;
+                index += 1;
+            }
+            "--plugins" => {
+                plugins_open = true;
                 index += 1;
             }
             "--prompt" => {
@@ -208,6 +213,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     if settings {
         app.open_settings();
+    }
+    if plugins_open {
+        app.open_plugins();
     }
 
     let text_engine = TextEngine::mono();

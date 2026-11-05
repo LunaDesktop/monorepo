@@ -161,6 +161,33 @@ impl Document {
         self.replace_selection(&plain);
     }
 
+    /// Zamienia całą treść dokumentu (np. wynik wtyczki).
+    pub fn replace_all(&mut self, text: &str) {
+        let plain: String = text
+            .chars()
+            .filter(|ch| *ch == '\n' || *ch == '\t' || !ch.is_control())
+            .collect();
+        let removed = self.view.text().to_owned();
+        let cursor_before = self.view.cursor();
+        self.view.replace_range(0, removed.len(), &plain);
+        self.record(0, removed, plain, cursor_before);
+    }
+
+    /// Dopisuje tekst na końcu dokumentu.
+    pub fn append(&mut self, text: &str) {
+        let plain: String = text
+            .chars()
+            .filter(|ch| *ch == '\n' || *ch == '\t' || !ch.is_control())
+            .collect();
+        if plain.is_empty() {
+            return;
+        }
+        let start = self.view.text().len();
+        let cursor_before = self.view.cursor();
+        self.view.replace_range(start, start, &plain);
+        self.record(start, String::new(), plain, cursor_before);
+    }
+
     pub fn newline(&mut self) {
         let cursor = self.view.cursor();
         let line = self.view.cursor_line();
