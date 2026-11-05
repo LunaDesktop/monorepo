@@ -1,0 +1,613 @@
+#!/bin/sh
+# luna-install-backend — referencyjny backend instalacji Luny.
+#
+# Kontrakt wywołania ustala luna-installer:
+#   --mode erase|free|manual --disk /dev/sdX --filesystem ext4|btrfs|xfs
+#   --swap 0|2|4|8 --encrypt yes|no --bootloader grub|none
+#   --update yes|no --firmware uefi|bios --hostname HOST --username LOGIN
+#   --full-name "IMIĘ NAZWISKO" --locale pl_PL.UTF-8 --timezone Europe/Warsaw
+#   --keyboard-layout pl --keyboard-variant "" --keyboard-model pc105
+#   --autologin yes|no --root-mode locked|same|custom
+#   [--root-partition /dev/... --efi-partition /dev/... --swap-partition /dev/...]
+#
+# Sekrety (stdin, kolejne linie):
+#   1) hasło użytkownika
+#   2) hasło roota (tylko dla --root-mode custom; inaczej pusta linia)
+#   3) hasło LUKS (tylko dla --encrypt yes; inaczej pusta linia)
+#
+# Ten program MA PRAWO zniszczyć dane na wskazanym dysku. Uruchamiaj go tylko
+# z poziomu instalatora, po świadomym potwierdzeniu przez użytkownika.
+
+set -eu
+
+MODE=
+DISK=
+FILESYSTEM=ext4
+SWAP_SIZE=2
+ENCRYPT=no
+BOOTLOADER=grub
+UPDATE=no
+FIRMWARE=bios
+HOSTNAME_VALUE=
+USERNAME=
+FULL_NAME=
+LOCALE=
+TIMEZONE=
+KB_LAYOUT=us
+KB_VARIANT=
+KB_MODEL=pc105
+AUTOLOGIN=no
+ROOT_MODE=locked
+ROOT_PART=
+EFI_PART=
+SWAP_PART=
+TARGET=${LUNA_INSTALL_TARGET:-/mnt/luna-install}
+NEW_ESP=0
+ROOT_DEV=
+MAPPER=luna-root
+TARGET_MOUNTED=0
+LUKS_OPEN=0
+
+USER_PASSWORD=
+ROOT_PASSWORD=
+LUKS_PASSPHRASE=
+
+say() { printf '%s\n' "$*"; }
+step() { printf 'STEP: %s\n' "$*"; }
+progress() { printf 'PROGRESS: %s\n' "$*"; }
+die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+    cat <<'EOF'
+Usage: luna-install-backend --mode erase|free|manual --disk DEVICE [options]
+See the comment block at the top of this file for the full contract.
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --mode)             MODE=${2:-}; shift 2 ;;
+        --disk)             DISK=${2:-}; shift 2 ;;
+        --filesystem)       FILESYSTEM=${2:-}; shift 2 ;;
+        --swap)             SWAP_SIZE=${2:-}; shift 2 ;;
+        --encrypt)          ENCRYPT=${2:-}; shift 2 ;;
+        --bootloader)       BOOTLOADER=${2:-}; shift 2 ;;
+        --update)           UPDATE=${2:-}; shift 2 ;;
+        --firmware)         FIRMWARE=${2:-}; shift 2 ;;
+        --hostname)         HOSTNAME_VALUE=${2:-}; shift 2 ;;
+        --username)         USERNAME=${2:-}; shift 2 ;;
+        --full-name)        FULL_NAME=${2:-}; shift 2 ;;
+        --locale)           LOCALE=${2:-}; shift 2 ;;
+        --timezone)         TIMEZONE=${2:-}; shift 2 ;;
+        --keyboard-layout)  KB_LAYOUT=${2:-}; shift 2 ;;
+        --keyboard-variant) KB_VARIANT=${2:-}; shift 2 ;;
+        --keyboard-model)   KB_MODEL=${2:-}; shift 2 ;;
+        --autologin)        AUTOLOGIN=${2:-}; shift 2 ;;
+        --root-mode)        ROOT_MODE=${2:-}; shift 2 ;;
+        --root-partition)   ROOT_PART=${2:-}; shift 2 ;;
+        --efi-partition)    EFI_PART=${2:-}; shift 2 ;;
+        --swap-partition)   SWAP_PART=${2:-}; shift 2 ;;
+        --help|-h)          usage; exit 0 ;;
+        *) die "unknown argument: $1" ;;
+    esac
+done
+
+[ "$(id -u)" -eq 0 ] || die "must run as root (use pkexec through luna-installer)"
+[ -n "$DISK" ] || die "missing --disk"
+[ -b "$DISK" ] || die "not a block device: $DISK"
+[ -n "$HOSTNAME_VALUE" ] || die "missing --hostname"
+[ -n "$USERNAME" ] || die "missing --username"
+[ -n "$FULL_NAME" ] || die "missing --full-name"
+[ -n "$LOCALE" ] || die "missing --locale"
+[ -n "$TIMEZONE" ] || die "missing --timezone"
+
+case "$MODE" in erase|free|manual) ;; *) die "unsupported mode: $MODE" ;; esac
+case "$FILESYSTEM" in ext4|btrfs|xfs) ;; *) die "unsupported filesystem: $FILESYSTEM" ;; esac
+case "$SWAP_SIZE" in 0|2|4|8) ;; *) die "unsupported swap size: $SWAP_SIZE" ;; esac
+case "$ENCRYPT" in yes|no) ;; *) die "unsupported encryption flag: $ENCRYPT" ;; esac
+case "$BOOTLOADER" in grub|none) ;; *) die "unsupported boot loader: $BOOTLOADER" ;; esac
+case "$UPDATE" in yes|no) ;; *) die "unsupported update flag: $UPDATE" ;; esac
+case "$FIRMWARE" in uefi|bios) ;; *) die "unsupported firmware: $FIRMWARE" ;; esac
+case "$AUTOLOGIN" in yes|no) ;; *) die "unsupported autologin flag: $AUTOLOGIN" ;; esac
+case "$ROOT_MODE" in locked|same|custom) ;; *) die "unsupported root mode: $ROOT_MODE" ;; esac
+
+case "$HOSTNAME_VALUE" in *[!A-Za-z0-9-]*|-*|*-) die "invalid hostname" ;; esac
+case "$USERNAME" in *[!a-z0-9_-]*|[!a-z_]*|"") die "invalid username" ;; esac
+case "$USERNAME" in root|daemon|bin|sys|nobody) die "reserved username" ;; esac
+case "$LOCALE" in *[!A-Za-z0-9_.@-]*) die "invalid locale" ;; esac
+case "$TIMEZONE" in *..*|*[!A-Za-z0-9_/+.-]*) die "invalid timezone" ;; esac
+case "$KB_LAYOUT" in *[!A-Za-z0-9_-]*) die "invalid keyboard layout" ;; esac
+case "$KB_VARIANT" in *[!A-Za-z0-9_-]*) die "invalid keyboard variant" ;; esac
+case "$KB_MODEL" in *[!A-Za-z0-9_-]*) die "invalid keyboard model" ;; esac
+
+IFS= read -r USER_PASSWORD || USER_PASSWORD=
+IFS= read -r ROOT_PASSWORD || ROOT_PASSWORD=
+IFS= read -r LUKS_PASSPHRASE || LUKS_PASSPHRASE=
+[ -n "$USER_PASSWORD" ] || die "empty user password on stdin"
+if [ "$ROOT_MODE" = custom ] && [ -z "$ROOT_PASSWORD" ]; then die "missing root password"; fi
+if [ "$ENCRYPT" = yes ] && [ -z "$LUKS_PASSPHRASE" ]; then die "missing LUKS passphrase"; fi
+if [ "$ENCRYPT" = yes ] && [ -z "$(command -v cryptsetup || true)" ]; then die "cryptsetup is required for encryption"; fi
+[ -n "$(command -v rsync || true)" ] || die "rsync is required"
+[ -n "$(command -v blkid || true)" ] || die "blkid is required"
+if [ "$BOOTLOADER" = grub ] && [ -z "$(command -v grub-install || true)" ]; then die "grub-install is required"; fi
+
+BASE=$(basename "$DISK")
+if [ -e "/sys/class/block/$BASE/partition" ]; then
+    die "$DISK is a partition, not a whole disk"
+fi
+if awk -v d="$DISK" '$1 == d || index($1, d) == 1 { found = 1 } END { exit found ? 0 : 1 }' /proc/mounts; then
+    die "$DISK (or one of its partitions) is mounted — refusing to erase it"
+fi
+
+SIZE_BYTES=0
+if command -v blockdev >/dev/null 2>&1; then
+    SIZE_BYTES=$(blockdev --getsize64 "$DISK" 2>/dev/null || echo 0)
+elif [ -r "/sys/class/block/$BASE/size" ]; then
+    SIZE_BYTES=$(( $(cat "/sys/class/block/$BASE/size") * 512 ))
+fi
+[ "$SIZE_BYTES" -ge $((8 * 1024 * 1024 * 1024)) ] || die "disk is smaller than 8 GiB"
+
+EFI=0
+[ "$FIRMWARE" = uefi ] && EFI=1
+
+LIVE_ROOT=${LUNA_LIVE_ROOT:-}
+if [ -z "$LIVE_ROOT" ]; then
+    for candidate in /run/live/rootfs /lib/live/mount/rootfs; do
+        if [ -d "$candidate" ]; then LIVE_ROOT=$candidate; break; fi
+    done
+fi
+[ -n "$LIVE_ROOT" ] && [ -d "$LIVE_ROOT" ] || LIVE_ROOT=/
+
+part_path() {
+    case "$BASE" in
+        nvme*|mmcblk*) printf '%s' "${DISK}p$1" ;;
+        *)             printf '%s' "${DISK}$1" ;;
+    esac
+}
+
+max_partnum() {
+    if command -v parted >/dev/null 2>&1; then
+        parted -m -s "$DISK" unit s print 2>/dev/null | \
+            awk -F: '/^[0-9]+:/ { if ($1+0 > m) m = $1+0 } END { print m+0 }'
+    else
+        ls "/sys/class/block" 2>/dev/null | grep -c "^$BASE" || true
+    fi
+}
+
+find_esp() {
+    if command -v lsblk >/dev/null 2>&1; then
+        lsblk -P -b -o NAME,PARTTYPE,FSTYPE "$DISK" 2>/dev/null | while IFS= read -r line; do
+            case "$line" in
+                *NAME=*)
+                    name=$(printf '%s' "$line" | sed -n 's/.*NAME="\([^"]*\)".*/\1/p')
+                    [ "$name" = "$BASE" ] && continue
+                    case "$line" in
+                        *c12a7328-f81f-11d2-ba4b-00a0c93ec93b*|*FSTYPE=\"vfat\"*|*FSTYPE=\"fat32\"*)
+                            printf '/dev/%s\n' "$name"
+                            break
+                            ;;
+                    esac
+                    ;;
+            esac
+        done
+    fi
+}
+
+largest_free_region() {
+    # Wyjście: START END (sektory) albo puste.
+    if ! command -v parted >/dev/null 2>&1; then
+        return 1
+    fi
+    parted -m -s "$DISK" unit s print free 2>/dev/null | \
+        awk -F: '$5 ~ /^free/ {
+            s = $2; gsub("s", "", s);
+            e = $3; gsub("s", "", e);
+            sz = $4; gsub("s", "", sz);
+            if (sz + 0 > best) { best = sz + 0; start = s + 0; end = e + 0 }
+        } END {
+            if (best > 0) printf "%s %s\n", start, end;
+        }'
+}
+
+create_partition() {
+    start=$1
+    end=$2
+    part_type=$3
+    label=$4
+    num=$5
+    if command -v parted >/dev/null 2>&1; then
+        parted -s "$DISK" mkpart "$label" "$part_type" "${start}s" "${end}s" >/dev/null
+    else
+        die "parted is required for free-space/manual partitioning"
+    fi
+    if [ "$part_type" = fat32 ]; then
+        parted -s "$DISK" set "$num" esp on >/dev/null 2>&1 || true
+    fi
+}
+
+wipe_signatures() {
+    if command -v wipefs >/dev/null 2>&1; then
+        wipefs -a "$1" >/dev/null 2>&1 || true
+    fi
+}
+
+cleanup() {
+    set +e
+    if [ "$LUKS_OPEN" = 1 ]; then
+        umount -R "$TARGET" 2>/dev/null
+        cryptsetup close "$MAPPER" 2>/dev/null
+    fi
+    for dir in dev/pts dev proc sys run boot/efi boot; do
+        if mountpoint -q "$TARGET/$dir" 2>/dev/null; then umount -R "$TARGET/$dir" 2>/dev/null; fi
+    done
+    if mountpoint -q "$TARGET" 2>/dev/null; then umount -R "$TARGET" 2>/dev/null; fi
+    TARGET_MOUNTED=0
+}
+trap cleanup EXIT
+
+progress 5
+step "Preparing partitions ($MODE)"
+
+if [ "$MODE" = erase ]; then
+    if command -v sgdisk >/dev/null 2>&1; then
+        sgdisk --zap-all "$DISK" >/dev/null
+        if [ "$EFI" = "1" ]; then
+            sgdisk -n 1:0:+512M -t 1:ef00 -c 1:"LUNA-EFI" \
+                   -n 2:0:0 -t 2:8300 -c 2:"LUNA-ROOT" "$DISK" >/dev/null
+        else
+            sgdisk -n 1:0:+2M -t 1:ef02 -c 1:"LUNA-BIOS" \
+                   -n 2:0:0 -t 2:8300 -c 2:"LUNA-ROOT" "$DISK" >/dev/null
+        fi
+        EFI_PART=$(part_path 1)
+        ROOT_PART=$(part_path 2)
+        if [ "$EFI" = "1" ]; then NEW_ESP=1; fi
+    elif command -v parted >/dev/null 2>&1; then
+        wipe_signatures "$DISK"
+        parted -s "$DISK" mklabel gpt
+        if [ "$EFI" = "1" ]; then
+            parted -s "$DISK" mkpart ESP fat32 1MiB 513MiB set 1 esp on
+            parted -s "$DISK" mkpart LUNA-ROOT ext4 513MiB 100%
+            EFI_PART=$(part_path 1)
+            ROOT_PART=$(part_path 2)
+            NEW_ESP=1
+        else
+            parted -s "$DISK" mkpart BIOS 1MiB 3MiB set 1 bios_grub on
+            parted -s "$DISK" mkpart LUNA-ROOT ext4 3MiB 100%
+            ROOT_PART=$(part_path 2)
+        fi
+    else
+        die "sgdisk or parted is required"
+    fi
+elif [ "$MODE" = free ]; then
+    region=$(largest_free_region || true)
+    [ -n "$region" ] || die "no unallocated space found on $DISK"
+    set -- $region
+    free_start=$1
+    free_end=$2
+    ESP_EXISTING=$(find_esp | head -n 1)
+    if [ "$EFI" = "1" ] && [ -n "$ESP_EXISTING" ]; then
+        EFI_PART=$ESP_EXISTING
+    elif [ "$EFI" = "1" ]; then
+        esp_end=$(( free_start + 1048576 - 1 ))
+        [ "$esp_end" -lt "$free_end" ] || die "free space is too small for an EFI partition"
+        num=$(max_partnum)
+        num=$((num + 1))
+        create_partition "$free_start" "$esp_end" fat32 LUNA-EFI "$num"
+        EFI_PART=$(part_path "$num")
+        NEW_ESP=1
+        free_start=$(( esp_end + 1 ))
+    else
+        bios_end=$(( free_start + 4095 ))
+        if [ "$bios_end" -lt "$free_end" ]; then
+            num=$(max_partnum)
+            num=$((num + 1))
+            parted -s "$DISK" mkpart LUNA-BIOS "${free_start}s" "${bios_end}s" >/dev/null
+            parted -s "$DISK" set "$num" bios_grub on >/dev/null 2>&1 || true
+            free_start=$(( bios_end + 1 ))
+        fi
+    fi
+    [ $(( free_end - free_start )) -ge $(( 20 * 1024 * 1024 * 1024 / 512 )) ] || \
+        die "free space is smaller than 20 GiB"
+    num=$(max_partnum)
+    num=$((num + 1))
+    create_partition "$free_start" "$free_end" ext4 LUNA-ROOT "$num"
+    ROOT_PART=$(part_path "$num")
+else
+    [ -n "$ROOT_PART" ] || die "manual mode requires --root-partition"
+    [ "$EFI" = "1" ] && [ -z "$EFI_PART" ] && die "manual UEFI mode requires --efi-partition"
+    [ -b "$ROOT_PART" ] || die "not a block device: $ROOT_PART"
+    if [ -n "$EFI_PART" ] && [ ! -b "$EFI_PART" ]; then die "not a block device: $EFI_PART"; fi
+    if [ -n "$SWAP_PART" ] && [ ! -b "$SWAP_PART" ]; then die "not a block device: $SWAP_PART"; fi
+    if awk -v p="$ROOT_PART" '$1 == p { found = 1 } END { exit found ? 0 : 1 }' /proc/mounts; then
+        die "$ROOT_PART is mounted"
+    fi
+    if [ -n "$SWAP_PART" ] && { [ "$SWAP_PART" = "$ROOT_PART" ] || [ "$SWAP_PART" = "$EFI_PART" ]; }; then
+        die "swap partition must be different from the root/EFI partitions"
+    fi
+    wipe_signatures "$ROOT_PART"
+fi
+
+partprobe "$DISK" >/dev/null 2>&1 || true
+command -v udevadm >/dev/null 2>&1 && udevadm settle --timeout=10 >/dev/null 2>&1 || true
+sleep 1
+[ -n "$ROOT_PART" ] && [ -b "$ROOT_PART" ] || die "root partition did not appear"
+if [ "$EFI" = "1" ]; then
+    [ -n "$EFI_PART" ] && [ -b "$EFI_PART" ] || die "EFI partition did not appear"
+fi
+
+progress 15
+step "Preparing the root filesystem"
+
+wipe_signatures "$ROOT_PART"
+if [ "$ENCRYPT" = "yes" ]; then
+    step "Creating LUKS2 container on $ROOT_PART"
+    printf '%s' "$LUKS_PASSPHRASE" | cryptsetup luksFormat --type luks2 --batch-mode --key-file - "$ROOT_PART"
+    printf '%s' "$LUKS_PASSPHRASE" | cryptsetup open --key-file - "$ROOT_PART" "$MAPPER"
+    LUKS_OPEN=1
+    ROOT_DEV="/dev/mapper/$MAPPER"
+else
+    ROOT_DEV=$ROOT_PART
+fi
+
+case "$FILESYSTEM" in
+    ext4) mkfs.ext4 -F -L LUNA-ROOT "$ROOT_DEV" >/dev/null ;;
+    xfs)  command -v mkfs.xfs >/dev/null 2>&1 || die "mkfs.xfs is required"; mkfs.xfs -f -L LUNA-ROOT "$ROOT_DEV" >/dev/null ;;
+    btrfs) command -v mkfs.btrfs >/dev/null 2>&1 || die "mkfs.btrfs is required"; mkfs.btrfs -f -L LUNA-ROOT "$ROOT_DEV" >/dev/null ;;
+esac
+
+mkdir -p "$TARGET"
+if mountpoint -q "$TARGET" 2>/dev/null; then umount -R "$TARGET"; fi
+mount "$ROOT_DEV" "$TARGET"
+TARGET_MOUNTED=1
+if [ "$FILESYSTEM" = btrfs ]; then
+    btrfs subvolume create "$TARGET/@" >/dev/null
+    btrfs subvolume create "$TARGET/@home" >/dev/null
+    umount "$TARGET"
+    mount -o "subvol=@,compress=zstd:1,noatime" "$ROOT_DEV" "$TARGET"
+    mkdir -p "$TARGET/home"
+    mount -o "subvol=@home,compress=zstd:1,noatime" "$ROOT_DEV" "$TARGET/home"
+fi
+mkdir -p "$TARGET/boot/efi"
+if [ "$EFI" = "1" ]; then
+    if [ "$NEW_ESP" = "1" ]; then
+        if command -v mkfs.fat >/dev/null 2>&1; then
+            mkfs.fat -F32 -n LUNA-EFI "$EFI_PART" >/dev/null
+        else
+            command -v mkfs.vfat >/dev/null 2>&1 || die "mkfs.fat/mkfs.vfat is required"
+            mkfs.vfat -F32 -n LUNA-EFI "$EFI_PART" >/dev/null
+        fi
+    fi
+    mount "$EFI_PART" "$TARGET/boot/efi"
+fi
+
+if [ -n "$SWAP_PART" ]; then
+    step "Preparing swap partition"
+    wipe_signatures "$SWAP_PART"
+    mkswap -L LUNA-SWAP "$SWAP_PART" >/dev/null
+fi
+
+progress 25
+step "Copying the live system (this can take a while)"
+rsync -aHAX --one-file-system \
+    --exclude=/proc --exclude=/sys --exclude=/dev --exclude=/run \
+    --exclude=/tmp --exclude=/mnt --exclude=/media --exclude=/lost+found \
+    --exclude=/var/tmp/* --exclude=/swapfile \
+    "$LIVE_ROOT"/ "$TARGET"/
+
+progress 60
+step "Preparing the new system"
+printf '%s\n' "$HOSTNAME_VALUE" > "$TARGET/etc/hostname"
+cat > "$TARGET/etc/hosts" <<EOF
+127.0.0.1   localhost
+127.0.1.1   $HOSTNAME_VALUE
+::1         localhost ip6-localhost ip6-loopback
+EOF
+
+ROOT_UUID=$(blkid -s UUID -o value "$ROOT_DEV")
+[ -n "$ROOT_UUID" ] || die "cannot read UUID of $ROOT_DEV"
+{
+    printf '# /etc/fstab — wygenerowane przez Luna Installer\n'
+    if [ "$FILESYSTEM" = btrfs ]; then
+        printf 'UUID=%s / btrfs defaults,noatime,compress=zstd:1,subvol=@ 0 1\n' "$ROOT_UUID"
+        printf 'UUID=%s /home btrfs defaults,noatime,compress=zstd:1,subvol=@home 0 2\n' "$ROOT_UUID"
+    else
+        printf 'UUID=%s / %s defaults 0 1\n' "$ROOT_UUID" "$FILESYSTEM"
+    fi
+    if [ "$EFI" = "1" ]; then
+        EFI_UUID=$(blkid -s UUID -o value "$EFI_PART")
+        printf 'UUID=%s /boot/efi vfat umask=0077 0 2\n' "$EFI_UUID"
+    fi
+    if [ -n "$SWAP_PART" ]; then
+        SWAP_UUID=$(blkid -s UUID -o value "$SWAP_PART")
+        printf 'UUID=%s none swap sw 0 0\n' "$SWAP_UUID"
+    fi
+} > "$TARGET/etc/fstab"
+
+if [ "$ENCRYPT" = "yes" ]; then
+    LUKS_UUID=$(cryptsetup luksUUID "$ROOT_PART")
+    printf '%s UUID=%s none luks,discard\n' "$MAPPER" "$LUKS_UUID" > "$TARGET/etc/crypttab"
+fi
+
+if [ "$SWAP_SIZE" != "0" ] && [ -z "$SWAP_PART" ]; then
+    step "Creating ${SWAP_SIZE} GiB swap file"
+    if [ "$FILESYSTEM" = btrfs ] && command -v btrfs >/dev/null 2>&1; then
+        btrfs filesystem mkswapfile --size "${SWAP_SIZE}g" "$TARGET/swapfile" >/dev/null
+    else
+        if ! fallocate -l "${SWAP_SIZE}G" "$TARGET/swapfile" 2>/dev/null; then
+            dd if=/dev/zero of="$TARGET/swapfile" bs=1M count=$((SWAP_SIZE * 1024)) status=none
+        fi
+    fi
+    chmod 600 "$TARGET/swapfile"
+    mkswap "$TARGET/swapfile" >/dev/null
+    printf '/swapfile none swap sw 0 0\n' >> "$TARGET/etc/fstab"
+fi
+
+mkdir -p "$TARGET/usr/share/zoneinfo"
+printf '%s\n' "$TIMEZONE" > "$TARGET/etc/timezone"
+if [ -e "$TARGET/usr/share/zoneinfo/$TIMEZONE" ]; then
+    ln -sf "/usr/share/zoneinfo/$TIMEZONE" "$TARGET/etc/localtime"
+fi
+if [ -d "$TARGET/etc" ]; then
+    printf '%s UTF-8\n' "$LOCALE" > "$TARGET/etc/locale.gen"
+    printf 'LANG=%s\n' "$LOCALE" > "$TARGET/etc/locale.conf"
+fi
+
+mkdir -p "$TARGET/etc/default" "$TARGET/etc/X11/xorg.conf.d"
+cat > "$TARGET/etc/default/keyboard" <<EOF
+XKBMODEL="$KB_MODEL"
+XKBLAYOUT="$KB_LAYOUT"
+XKBVARIANT="$KB_VARIANT"
+XKBOPTIONS=""
+BACKSPACE="guess"
+EOF
+cat > "$TARGET/etc/vconsole.conf" <<EOF
+KEYMAP=$KB_LAYOUT
+FONT=
+EOF
+cat > "$TARGET/etc/X11/xorg.conf.d/00-keyboard.conf" <<EOF
+Section "InputClass"
+    Identifier "system-keyboard"
+    MatchIsKeyboard "on"
+    Option "XkbLayout" "$KB_LAYOUT"
+    Option "XkbModel" "$KB_MODEL"
+    Option "XkbVariant" "$KB_VARIANT"
+EndSection
+EOF
+if ! grep -q '^XKB_DEFAULT_LAYOUT=' "$TARGET/etc/environment" 2>/dev/null; then
+    {
+        printf 'XKB_DEFAULT_LAYOUT=%s\n' "$KB_LAYOUT"
+        printf 'XKB_DEFAULT_MODEL=%s\n' "$KB_MODEL"
+        printf 'XKB_DEFAULT_VARIANT=%s\n' "$KB_VARIANT"
+    } >> "$TARGET/etc/environment"
+fi
+
+mount --bind /dev "$TARGET/dev"
+mount --bind /dev/pts "$TARGET/dev/pts"
+mount -t proc proc "$TARGET/proc"
+mount -t sysfs sys "$TARGET/sys"
+mount --bind /run "$TARGET/run"
+
+if [ "$FILESYSTEM" = btrfs ]; then
+    mkdir -p "$TARGET/home"
+    btrfs subvolume list "$TARGET" >/dev/null 2>&1 || true
+fi
+
+GROUPS=""
+for group in sudo wheel video render input audio networkmanager lp scanner bluetooth; do
+    if chroot "$TARGET" getent group "$group" >/dev/null 2>&1; then
+        GROUPS="${GROUPS:+$GROUPS,}$group"
+    fi
+done
+SHELL_BIN=/bin/sh
+if [ -x "$TARGET/bin/bash" ]; then SHELL_BIN=/bin/bash; fi
+
+step "Creating user $USERNAME"
+if [ -n "$GROUPS" ]; then
+    chroot "$TARGET" useradd -m -s "$SHELL_BIN" -G "$GROUPS" -c "$FULL_NAME" "$USERNAME"
+else
+    chroot "$TARGET" useradd -m -s "$SHELL_BIN" -c "$FULL_NAME" "$USERNAME"
+fi
+printf '%s:%s\n' "$USERNAME" "$USER_PASSWORD" | chroot "$TARGET" chpasswd
+
+case "$ROOT_MODE" in
+    locked)
+        chroot "$TARGET" passwd -l root >/dev/null 2>&1 || true
+        ;;
+    same)
+        printf 'root:%s\n' "$USER_PASSWORD" | chroot "$TARGET" chpasswd
+        ;;
+    custom)
+        printf 'root:%s\n' "$ROOT_PASSWORD" | chroot "$TARGET" chpasswd
+        ;;
+esac
+
+USER_HOME="$TARGET/home/$USERNAME"
+mkdir -p "$USER_HOME/.config/luna" "$USER_HOME/.config/environment.d"
+language=${LOCALE%%_*}
+cat > "$USER_HOME/.config/luna/locale.conf" <<EOF
+language = $language
+EOF
+cat > "$USER_HOME/.config/luna/region.conf" <<EOF
+locale = $LOCALE
+timezone = $TIMEZONE
+EOF
+cat > "$USER_HOME/.config/environment.d/00-luna-region.conf" <<EOF
+LANG=$LOCALE
+LC_TIME=$LOCALE
+TZ=$TIMEZONE
+EOF
+chroot "$TARGET" chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/.config"
+
+if [ "$AUTOLOGIN" = "yes" ]; then
+    if [ -f "$TARGET/etc/greetd/config.toml" ]; then
+        step "Enabling automatic login for $USERNAME"
+        awk 'BEGIN { skip = 0 } /^\[initial_session\]/ { skip = 1; next } /^\[/ { skip = 0 } !skip { print }' \
+            "$TARGET/etc/greetd/config.toml" > "$TARGET/etc/greetd/config.toml.luna"
+        mv "$TARGET/etc/greetd/config.toml.luna" "$TARGET/etc/greetd/config.toml"
+        cat >> "$TARGET/etc/greetd/config.toml" <<EOF
+
+[initial_session]
+command = "luna-session"
+user = "$USERNAME"
+EOF
+    else
+        say "greetd config not found — skipping automatic login."
+    fi
+fi
+
+if command -v chroot >/dev/null 2>&1; then
+    chroot "$TARGET" sh -c 'command -v locale-gen >/dev/null 2>&1 && locale-gen' >/dev/null 2>&1 || true
+fi
+
+progress 70
+if [ "$UPDATE" = "yes" ]; then
+    step "Updating the installed system"
+    update_ok=0
+    if chroot "$TARGET" sh -c 'command -v pacman' >/dev/null 2>&1; then
+        chroot "$TARGET" env LC_ALL=C LANG=C pacman -Syu --noconfirm || update_ok=1
+    elif chroot "$TARGET" sh -c 'command -v pag' >/dev/null 2>&1; then
+        chroot "$TARGET" env LC_ALL=C LANG=C pag upgrade -y || update_ok=1
+    elif chroot "$TARGET" sh -c 'command -v apt-get' >/dev/null 2>&1; then
+        chroot "$TARGET" env LC_ALL=C LANG=C DEBIAN_FRONTEND=noninteractive apt-get update && \
+            chroot "$TARGET" env LC_ALL=C LANG=C DEBIAN_FRONTEND=noninteractive apt-get -y upgrade || update_ok=1
+    elif chroot "$TARGET" sh -c 'command -v dnf' >/dev/null 2>&1; then
+        chroot "$TARGET" env LC_ALL=C LANG=C dnf -y upgrade || update_ok=1
+    elif chroot "$TARGET" sh -c 'command -v emerge' >/dev/null 2>&1; then
+        chroot "$TARGET" env LC_ALL=C LANG=C emerge -uDN @world --quiet --color=n || update_ok=1
+    else
+        say "No supported package manager found — skipping update."
+    fi
+    [ "$update_ok" = 0 ] || say "Warning: the system update reported errors."
+fi
+
+progress 80
+if [ "$BOOTLOADER" = "grub" ]; then
+    step "Installing GRUB"
+    chroot "$TARGET" sh -c 'command -v grub-install' >/dev/null 2>&1 || die "grub-install is missing in the live system"
+    if [ "$EFI" = "1" ]; then
+        chroot "$TARGET" grub-install --target=x86_64-efi \
+            --efi-directory=/boot/efi --bootloader-id=Luna --recheck
+    else
+        chroot "$TARGET" grub-install --target=i386-pc --recheck "$DISK"
+    fi
+    chroot "$TARGET" sh -c 'command -v grub-mkconfig >/dev/null 2>&1 && grub-mkconfig -o /boot/grub/grub.cfg' || true
+else
+    step "Skipping the boot loader (requested)"
+fi
+
+progress 92
+step "Refreshing the initial ramdisk"
+if chroot "$TARGET" sh -c 'command -v update-initramfs' >/dev/null 2>&1; then
+    chroot "$TARGET" update-initramfs -u
+elif chroot "$TARGET" sh -c 'command -v mkinitcpio' >/dev/null 2>&1; then
+    chroot "$TARGET" mkinitcpio -P
+elif chroot "$TARGET" sh -c 'command -v dracut' >/dev/null 2>&1; then
+    chroot "$TARGET" dracut -f
+fi
+
+sync
+progress 100
+step "Cleaning up"
+cleanup
+trap - EXIT
+say "INSTALL-OK"

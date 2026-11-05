@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=Welcome
+Name[pl]=Powitanie
+Name[de]=Willkommen
+Comment=What's new in Luna and the installer for live images
+Comment[pl]=Co nowego w Lunie i instalator dla obrazów live
+Comment[de]=Neuigkeiten in Luna und der Installer für Live-Images
+Exec=luna-welcome
+Icon=help-about
+Terminal=false
+Categories=System;Settings;
+Keywords=welcome;news;whats new;install;live;
+Keywords[pl]=powitanie;nowości;co nowego;instalacja;live;
+Keywords[de]=Willkommen;Neuigkeiten;Installation;Live;

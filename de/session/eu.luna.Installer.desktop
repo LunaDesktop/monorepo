@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=Install Luna
+Name[pl]=Zainstaluj Lunę
+Name[de]=Luna installieren
+Comment=Install Luna on this computer from the live image
+Comment[pl]=Zainstaluj Lunę na tym komputerze z obrazu live
+Comment[de]=Luna von einem Live-Image auf diesem Computer installieren
+Exec=luna-installer
+Icon=system-software-install
+Terminal=false
+Categories=System;Settings;
+Keywords=install;installer;setup;live;
+Keywords[pl]=instalacja;instalator;konfiguracja;live;
+Keywords[de]=Installation;Installer;Einrichtung;Live;
