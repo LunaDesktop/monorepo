@@ -89,6 +89,8 @@ pub struct Plugin {
     pub interpreter: Option<String>,
     pub commands: Vec<PluginCommand>,
     pub settings: Vec<PluginSetting>,
+    /// Wtyczka obsługuje panel czatu (akcja [`CHAT_ACTION`]).
+    pub chat: bool,
 }
 
 impl Plugin {
@@ -140,6 +142,14 @@ impl Plugin {
 
 /// Akcja zarezerwowana: wtyczka wypisuje dostępne modele (jeden na linię).
 pub const LIST_MODELS_ACTION: &str = "__list_models__";
+
+/// Akcja zarezerwowana: rozmowa w panelu czatu.
+///
+/// Wtyczka dostaje na standardowe wejście JSON z historią rozmowy, listą plików
+/// projektu i kontekstem aktywnego pliku, a odpowiada JSON-em
+/// `{"text": "…", "tool_calls": [{"tool": "read_file", "path": "…"}]}`.
+/// Edytor wykonuje narzędzia i wywołuje wtyczkę ponownie (pętla agenta).
+pub const CHAT_ACTION: &str = "__chat__";
 
 /// Stan pracy w tle (instalacja, uruchomienie wtyczki, pobranie modeli).
 pub enum Job {
@@ -265,6 +275,7 @@ pub fn parse_manifest(dir: &Path, text: &str) -> Result<Plugin, String> {
     let mut interpreter = None;
     let mut commands = Vec::new();
     let mut settings = Vec::new();
+    let mut chat = false;
 
     for (number, line) in text.lines().enumerate() {
         let line = line.trim();
@@ -292,6 +303,7 @@ pub fn parse_manifest(dir: &Path, text: &str) -> Result<Plugin, String> {
             "command" => commands.push(
                 parse_command(&value).map_err(|error| format!("wiersz {}: {error}", number + 1))?,
             ),
+            "chat" => chat = matches!(value.to_lowercase().as_str(), "1" | "true" | "yes" | "on"),
             "setting" => settings.push(
                 parse_setting(&value).map_err(|error| format!("wiersz {}: {error}", number + 1))?,
             ),
@@ -308,8 +320,8 @@ pub fn parse_manifest(dir: &Path, text: &str) -> Result<Plugin, String> {
     if entry.is_empty() {
         return Err("manifest: brak `entry` (programu wtyczki)".to_owned());
     }
-    if commands.is_empty() {
-        return Err("manifest: wtyczka nie deklaruje żadnego `command`".to_owned());
+    if commands.is_empty() && !chat {
+        return Err("manifest: wtyczka nie deklaruje żadnego `command` ani `chat`".to_owned());
     }
     Ok(Plugin {
         dir: dir.to_path_buf(),
@@ -322,6 +334,7 @@ pub fn parse_manifest(dir: &Path, text: &str) -> Result<Plugin, String> {
         interpreter,
         commands,
         settings,
+        chat,
     })
 }
 
@@ -674,6 +687,33 @@ pub fn spawn_models(
     receiver
 }
 
+/// Uruchamia dowolną akcję wtyczki z podanym ładunkiem na stdin.
+///
+/// Używane przez panel czatu, który sam zarządza historią rozmowy i pętlą
+/// narzędzi.
+pub(crate) fn run_action(
+    plugin: &Plugin,
+    settings: &HashMap<String, String>,
+    action: &str,
+    payload: &str,
+) -> Result<String, String> {
+    run_blocking(RunRequest {
+        plugin: plugin.clone(),
+        command: PluginCommand {
+            id: action.to_owned(),
+            title: action.to_owned(),
+            prompt: false,
+            context: Context::None,
+            output: Output::Insert,
+        },
+        settings: settings.clone(),
+        instruction: String::new(),
+        path: None,
+        language: String::new(),
+        payload: payload.to_owned(),
+    })
+}
+
 fn run_blocking(request: RunRequest) -> Result<String, String> {
     let mut command = match &request.plugin.interpreter {
         Some(interpreter) => {
@@ -890,6 +930,7 @@ setting = api_key|Klucz|secret||
                 output: Output::Insert,
             }],
             settings: Vec::new(),
+            chat: false,
         };
         let receiver = spawn_models(plugin, HashMap::new());
         let models = receiver.recv().unwrap().unwrap();
@@ -921,6 +962,7 @@ setting = api_key|Klucz|secret||
                 output: Output::Insert,
             }],
             settings: Vec::new(),
+            chat: false,
         };
         let command = plugin.commands[0].clone();
         let receiver = spawn_run(RunRequest {

@@ -65,6 +65,12 @@ do `libluna-widgets` razem z tą aplikacją.
   jako osobne procesy — bez wbudowywania ich w Edytor. Pierwsza oficjalna
   wtyczka to **AI Writer** (Gemini, OpenAI, Claude, DeepSeek, OpenRouter,
   Mistral, Groq, Ollama).
+- **Panel czatu z asystentem AI** (`Ctrl+Shift+A`): pojawia się tylko wtedy, gdy
+  zainstalowana jest wtyczka deklarująca `chat = true`. Asystent widzi strukturę
+  projektu, treść małych plików i aktywny dokument, a w trakcie rozmowy może
+  czytać i zapisywać pliki (`read_file`, `list_dir`, `search`, `write_file`,
+  `create_file`, `delete_file`). Zmiany lądują na dysku, a czyste bufory
+  odświeżają się od razu; pliki z niezapisanymi zmianami są chronione.
 
 ## Wtyczki
 
@@ -83,6 +89,33 @@ Instalacja AI Writera:
 https://github.com/LunaDesktop/luna-editor-ai-writer
 ```
 
+## Czat z asystentem (agent)
+
+Gdy wtyczka AI jest zainstalowana, w nagłówku pojawia się ikona czatu
+(`Ctrl+Shift+A`). Panel pokazuje historię rozmowy, pole pytania i przycisk
+**Wyślij**. Rozmowa jest wielokrokowa: model może poprosić o przeczytanie pliku,
+przeszukanie projektu albo zapisanie zmian, a Edytor wykonuje te narzędzia
+i wraca do modelu z wynikiem (maksymalnie 6 kroków na turę).
+
+Co Edytor przekazuje wtyczce:
+
+- listę do 400 plików projektu (bez `target`, `node_modules` i katalogów ukrytych),
+- treść małych plików (do 24 kB każdy, łącznie 48 kB), by model nie musiał
+  dopytywać o wszystko,
+- aktywny dokument razem z zaznaczeniem,
+- całą historię rozmowy.
+
+Bezpieczeństwo: narzędzia widzą wyłącznie pliki **wewnątrz katalogu projektu**
+(ścieżki absolutne i `..` są odrzucane), a zapis do pliku otwartego
+i niezapisanego kończy się błędem narzędzia — nic nie ginie bez zapisu.
+Klucze API i ustawienia wtyczki są w
+`~/.config/luna/editor/plugins/<id>.conf` z prawami `0600`; rozmowa nie jest
+nigdzie wysyłana poza API wybranego dostawcy.
+
+Protokół (akcja `__chat__`, format JSON, lista narzędzi) jest opisany
+w [`docs/plugins.md`](plugins.md) — na tej podstawie można napisać własnego
+asystenta w dowolnym języku.
+
 ## Skróty
 
 | Skrót | Działanie |
@@ -92,6 +125,7 @@ https://github.com/LunaDesktop/luna-editor-ai-writer
 | `Ctrl+W` / `Ctrl+Tab` / `Ctrl+Shift+Tab` | zamknij kartę / następna / poprzednia |
 | `Ctrl+B` | pokaż/ukryj panel projektu |
 | `Ctrl+Shift+P` | menedżer wtyczek |
+| `Ctrl+Shift+A` | pokaż/ukryj panel czatu AI |
 | `Ctrl+,` | ustawienia programu |
 | `F2` / `Delete` | zmień nazwę / usuń zaznaczony element panelu projektu |
 | strzałki, `Home`/`End`, `Enter`, `Esc` | nawigacja po drzewie projektu (gdy ma fokus) |

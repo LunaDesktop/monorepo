@@ -12,6 +12,7 @@
 
 pub mod app;
 pub mod browser;
+pub mod chat;
 pub mod document;
 pub mod plugin_ui;
 pub mod plugins;

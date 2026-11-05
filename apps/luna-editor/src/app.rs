@@ -131,7 +131,7 @@ pub struct App {
     pub pending_delete: Option<(PathBuf, AlertDialog)>,
     pub settings_open: bool,
     pub prefs: Prefs,
-    prefs_dirty: bool,
+    pub prefs_dirty: bool,
     pub find: Option<FindState>,
     pub confirm: Option<Confirm>,
     pub overwrite: Option<(PathBuf, AlertDialog)>,
@@ -144,6 +144,8 @@ pub struct App {
     menu_map: Vec<Option<(usize, usize)>>,
     pub hover_control: Option<WindowControl>,
     pub hover_menu: bool,
+    /// Podświetlenie przycisku czatu AI w nagłówku.
+    pub hover_chat_toggle: bool,
     pub hover_workspace_toggle: bool,
     pub hover_workspace_row: Option<usize>,
     pub hover_workspace_open: bool,
@@ -161,6 +163,8 @@ pub struct App {
     pub plugins: plugins::PluginHost,
     /// Stan okien wtyczek (menedżer, ustawienia, pytanie o instrukcję).
     pub plugin_ui: PluginUi,
+    /// Panel czatu z wtyczką AI (widoczny tylko przy wtyczce z `chat = true`).
+    pub chat: crate::chat::Chat,
 }
 
 impl Default for App {
@@ -177,6 +181,7 @@ impl App {
     /// Tworzy aplikację z wczytanymi preferencjami (używane przez `run`).
     pub fn with_prefs(prefs: Prefs) -> Self {
         let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        let chat_open = prefs.chat_open;
         let docs = vec![Document::new()];
         let mut workspace = Workspace::new(root);
         workspace.configure(prefs.show_hidden, prefs.skip_build_dirs);
@@ -205,6 +210,7 @@ impl App {
             menu_map: Vec::new(),
             hover_control: None,
             hover_menu: false,
+            hover_chat_toggle: false,
             hover_workspace_toggle: false,
             hover_workspace_row: None,
             hover_workspace_open: false,
@@ -219,6 +225,7 @@ impl App {
             last_workspace_click: None,
             plugins: plugins::PluginHost::new(),
             plugin_ui: PluginUi::new(),
+            chat: crate::chat::Chat::new(chat_open),
         };
         app.docs[0].view.set_tab_width(app.prefs.tab_width);
         app.rebuild_menu();
@@ -1325,6 +1332,9 @@ impl App {
                     if self.plugin_ui.selected >= self.plugins.plugins.len() {
                         self.plugin_ui.selected = self.plugins.plugins.len().saturating_sub(1);
                     }
+                    if self.chat.visible && !crate::chat::available(self) {
+                        self.chat.visible = false;
+                    }
                 }
                 Ok(Err(error)) => {
                     self.plugin_ui.status = Some(error.clone());
@@ -1425,6 +1435,33 @@ impl App {
                     }
                 }
             },
+        }
+    }
+
+    /// Przeładowuje otwarty dokument po zmianie pliku przez asystenta.
+    ///
+    /// Bufory z niezapisanymi zmianami zostają nietknięte — narzędzia zapisu
+    /// i tak odrzucają takie pliki, więc tu chodzi tylko o świeży stan czystych
+    /// dokumentów.
+    pub fn reload_from_disk(&mut self, path: &Path) {
+        let mut changed = false;
+        for doc in &mut self.docs {
+            if doc.path.as_deref() != Some(path) || doc.dirty {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            if doc.view.text() == text {
+                continue;
+            }
+            doc.replace_all(&text);
+            doc.dirty = false;
+            changed = true;
+        }
+        if changed {
+            self.reveal_cursor = true;
+            self.sync_tabs();
         }
     }
 
@@ -1602,6 +1639,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         }
         app.apply_pending(frame);
         app.poll_plugins();
+        crate::chat::poll(&mut app);
         crate::plugin_ui::tick(&mut app, frame.size, &frame.theme);
         app.save_prefs_if_dirty();
         crate::ui::paint(&mut app, frame.scene, frame.size, &frame.theme, frame.text);
@@ -1992,6 +2030,7 @@ mod tests {
                 output: Output::Insert,
             }],
             settings: Vec::new(),
+            chat: false,
         }];
         app.start_plugin(0, 0, String::new());
         for _ in 0..300 {

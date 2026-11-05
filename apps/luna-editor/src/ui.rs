@@ -45,9 +45,26 @@ pub struct Layout {
     pub find_close: Rect,
     pub editor: Rect,
     pub status: Rect,
+    /// Panel czatu AI (pusty prostokąt, gdy panel jest schowany).
+    pub chat: Rect,
+    pub chat_header: Rect,
+    pub chat_messages: Rect,
+    pub chat_input: Rect,
+    pub chat_send: Rect,
+    pub chat_close: Rect,
+    pub chat_clear: Rect,
+    /// Przycisk czatu w nagłówku (0×0, gdy nie ma wtyczki AI).
+    pub chat_ai: Rect,
 }
 
-pub fn layout(size: Size, theme: &Theme, workspace_visible: bool, find_open: bool) -> Layout {
+pub fn layout(
+    size: Size,
+    theme: &Theme,
+    workspace_visible: bool,
+    find_open: bool,
+    chat_visible: bool,
+    chat_button: bool,
+) -> Layout {
     let header = Rect::from_xywh(0.0, 0.0, size.width, theme.metrics.headerbar.height);
     let pad = theme.spacing.md.min((size.width * 0.04).max(8.0));
     let status = Rect::from_xywh(0.0, size.height - STATUS_H, size.width, STATUS_H);
@@ -67,10 +84,20 @@ pub fn layout(size: Size, theme: &Theme, workspace_visible: bool, find_open: boo
         HEADER_BTN,
         HEADER_BTN,
     );
+    let chat_ai = if chat_button {
+        Rect::from_xywh(
+            menu.x() - 4.0 - HEADER_BTN,
+            menu.y(),
+            HEADER_BTN,
+            HEADER_BTN,
+        )
+    } else {
+        Rect::from_xywh(menu.x(), menu.y(), 0.0, 0.0)
+    };
     let tabs = Rect::from_xywh(
         workspace_toggle.right() + 6.0,
         header.center().y - theme.metrics.tabs.height / 2.0,
-        (menu.x() - 8.0 - (workspace_toggle.right() + 6.0)).max(40.0),
+        (chat_ai.x() - 4.0 - (workspace_toggle.right() + 6.0)).max(40.0),
         theme.metrics.tabs.height,
     );
 
@@ -115,10 +142,16 @@ pub fn layout(size: Size, theme: &Theme, workspace_visible: bool, find_open: boo
     } else {
         pad
     };
+    let chat_w = if chat_visible {
+        crate::chat::panel_width(size)
+    } else {
+        0.0
+    };
+    let content_right = size.width - pad - if chat_visible { chat_w + pad } else { 0.0 };
     let find_bar = Rect::from_xywh(
         editor_left,
         header.bottom() + pad,
-        (size.width - pad - editor_left).max(0.0),
+        (content_right - editor_left).max(0.0),
         if find_open { FIND_H } else { 0.0 },
     );
     let find_entry = Rect::from_xywh(
@@ -142,8 +175,43 @@ pub fn layout(size: Size, theme: &Theme, workspace_visible: bool, find_open: boo
     let editor = Rect::from_xywh(
         editor_left,
         editor_top,
-        (size.width - pad - editor_left).max(0.0),
+        (content_right - editor_left).max(0.0),
         (status.y() - pad - editor_top).max(0.0),
+    );
+
+    let chat = Rect::from_xywh(
+        size.width - chat_w,
+        header.bottom(),
+        chat_w,
+        (status.y() - header.bottom()).max(0.0),
+    );
+    let chat_pad = crate::chat::padding();
+    let chat_close = Rect::from_xywh(chat.right() - chat_pad - 26.0, chat.y() + 6.0, 26.0, 26.0);
+    let chat_clear = Rect::from_xywh(chat_close.x() - 6.0 - 58.0, chat.y() + 6.0, 58.0, 26.0);
+    let chat_header = Rect::from_xywh(
+        chat.x() + chat_pad,
+        chat.y() + 6.0,
+        (chat_clear.x() - 6.0 - (chat.x() + chat_pad)).max(0.0),
+        26.0,
+    );
+    let input_h = crate::chat::input_height();
+    let chat_send = Rect::from_xywh(
+        chat.right() - chat_pad - 74.0,
+        chat.bottom() - chat_pad - input_h,
+        74.0,
+        input_h,
+    );
+    let chat_input = Rect::from_xywh(
+        chat.x() + chat_pad,
+        chat_send.y(),
+        (chat_send.x() - 8.0 - (chat.x() + chat_pad)).max(0.0),
+        input_h,
+    );
+    let chat_messages = Rect::from_xywh(
+        chat.x(),
+        chat.y() + 38.0,
+        chat.width(),
+        (chat_input.y() - 26.0 - (chat.y() + 38.0)).max(0.0),
     );
 
     Layout {
@@ -161,11 +229,27 @@ pub fn layout(size: Size, theme: &Theme, workspace_visible: bool, find_open: boo
         find_close,
         editor,
         status,
+        chat,
+        chat_header,
+        chat_messages,
+        chat_input,
+        chat_send,
+        chat_close,
+        chat_clear,
+        chat_ai,
     }
 }
 
 pub fn paint(app: &mut App, scene: &mut Scene, size: Size, theme: &Theme, text: &TextEngine) {
-    let lay = layout(size, theme, app.workspace.visible, app.find.is_some());
+    let chat_button = crate::chat::available(app);
+    let lay = layout(
+        size,
+        theme,
+        app.workspace.visible,
+        app.find.is_some(),
+        app.chat.visible && chat_button,
+        chat_button,
+    );
     let mut ctx = PaintCtx::new(scene, theme, text);
     let colors = theme.colors;
     ctx.scene.fill_rect(Rect::from_size(size), colors.window_bg);
@@ -197,6 +281,25 @@ pub fn paint(app: &mut App, scene: &mut Scene, size: Size, theme: &Theme, text: 
         colors.text,
     );
 
+    if lay.chat_ai.width() > 0.0 {
+        paint_header_button(
+            &mut ctx,
+            lay.chat_ai,
+            app.hover_chat_toggle,
+            app.chat.visible,
+        );
+        paint_icon(
+            &mut ctx,
+            IconName::Chat,
+            lay.chat_ai.deflate(Insets::splat(7.0)),
+            if app.chat.visible {
+                colors.accent
+            } else {
+                colors.text
+            },
+        );
+    }
+
     if app.workspace.visible {
         paint_workspace(app, &mut ctx, &lay);
     }
@@ -205,6 +308,7 @@ pub fn paint(app: &mut App, scene: &mut Scene, size: Size, theme: &Theme, text: 
     }
     app.view_mut().paint(&mut ctx, lay.editor);
     paint_status(app, &mut ctx, &lay);
+    crate::chat::paint(app, &mut ctx, &lay);
 
     if app.menu_open {
         if let Some(panel) = menu_panel(app, &lay, size, theme, text) {
@@ -1293,7 +1397,14 @@ pub fn handle_events(
     theme: &Theme,
     text: &TextEngine,
 ) {
-    let lay = layout(size, theme, app.workspace.visible, app.find.is_some());
+    let lay = layout(
+        size,
+        theme,
+        app.workspace.visible,
+        app.find.is_some(),
+        app.chat.visible && crate::chat::available(app),
+        crate::chat::available(app),
+    );
     for event in events {
         match event {
             Event::PointerMotion { position, .. } => app.pointer = Some(*position),
@@ -1324,6 +1435,8 @@ pub fn handle_events(
             handle_goto(app, event, size, theme);
         } else if app.tree_menu.is_some() {
             handle_tree_menu(app, event, size, theme, text);
+        } else if crate::chat::handle_events(app, event, &lay, theme, text) {
+            // Zdarzenie obsłużone przez panel czatu.
         } else if app.menu_open {
             handle_menu(app, event, &lay, size, theme, text);
         } else {
@@ -1924,6 +2037,7 @@ fn handle_normal(
                 .controls(ControlsSide::Right)
                 .control_at(lay.header, theme, *position);
             app.hover_menu = lay.menu.contains(*position);
+            app.hover_chat_toggle = lay.chat_ai.width() > 0.0 && lay.chat_ai.contains(*position);
             app.hover_workspace_toggle = lay.workspace_toggle.contains(*position);
             app.hover_workspace_row =
                 if app.workspace.visible && lay.workspace_tree.contains(*position) {
@@ -1964,6 +2078,7 @@ fn handle_normal(
         Event::PointerLeave => {
             app.hover_control = None;
             app.hover_menu = false;
+            app.hover_chat_toggle = false;
             app.hover_workspace_toggle = false;
             app.hover_workspace_row = None;
             app.hover_workspace_open = false;
@@ -2053,6 +2168,10 @@ fn handle_click(
     if lay.menu.contains(point) {
         app.menu_open = true;
         app.menu.set_hovered(None);
+        return;
+    }
+    if lay.chat_ai.width() > 0.0 && lay.chat_ai.contains(point) {
+        crate::chat::toggle(app);
         return;
     }
     if lay.workspace_toggle.contains(point) {
@@ -2201,6 +2320,7 @@ fn handle_editor_key(app: &mut App, key: &KeyEvent, lay: &Layout, theme: &Theme)
             0x67 => app.open_goto_dialog(),
             0x2c => app.open_settings(),
             0x70 if shift => app.open_plugins(),
+            0x61 if shift => crate::chat::toggle(app),
             0x61 => {
                 app.view_mut().select_all();
                 app.focus_editor();
@@ -2486,7 +2606,7 @@ mod tests {
         app.select_tab(0);
         let theme = theme();
         let text = TextEngine::none();
-        let lay = layout(size(), &theme, app.workspace.visible, false);
+        let lay = layout(size(), &theme, app.workspace.visible, false, false, false);
         let segments = app.tabs.segments(lay.tabs, &text, &theme);
         assert_eq!(segments.len(), 2);
         click(&mut app, segments[1].center());
@@ -2499,7 +2619,7 @@ mod tests {
         let mut app = two_docs();
         let theme = theme();
         let text = TextEngine::none();
-        let lay = layout(size(), &theme, app.workspace.visible, false);
+        let lay = layout(size(), &theme, app.workspace.visible, false, false, false);
         let segments = app.tabs.segments(lay.tabs, &text, &theme);
         let metrics = theme.metrics.tabs;
         let seg = segments[1];
@@ -2517,7 +2637,7 @@ mod tests {
         let mut app = App::new();
         let theme = theme();
         let text = TextEngine::none();
-        let lay = layout(size(), &theme, true, false);
+        let lay = layout(size(), &theme, true, false, false, false);
         let seg = app.tabs.segments(lay.tabs, &text, &theme)[0];
         click(&mut app, seg.center());
         assert!(app.pending.begin_move);
@@ -2534,11 +2654,11 @@ mod tests {
     fn header_button_toggles_workspace() {
         let mut app = App::new();
         let theme = theme();
-        let lay = layout(size(), &theme, app.workspace.visible, false);
+        let lay = layout(size(), &theme, app.workspace.visible, false, false, false);
         assert!(app.workspace.visible);
         click(&mut app, lay.workspace_toggle.center());
         assert!(!app.workspace.visible);
-        let hidden = layout(size(), &theme, app.workspace.visible, false);
+        let hidden = layout(size(), &theme, app.workspace.visible, false, false, false);
         assert_eq!(hidden.workspace.width(), 0.0);
         let pad = theme.spacing.md.min((size().width * 0.04).max(8.0));
         assert_eq!(hidden.editor.x(), pad);
@@ -2553,7 +2673,7 @@ mod tests {
             for workspace_visible in [false, true] {
                 for find_open in [false, true] {
                     let theme = theme();
-                    let lay = layout(size, &theme, workspace_visible, find_open);
+                    let lay = layout(size, &theme, workspace_visible, find_open, false, false);
                     assert!(lay.header.bottom() <= lay.editor.y());
                     assert!(lay.editor.bottom() <= lay.status.y());
                     assert!(lay.status.bottom() <= size.height);
@@ -2596,7 +2716,7 @@ mod tests {
         let text = TextEngine::none();
         let mut app = App::new();
         app.workspace.set_root(dir.clone());
-        let lay = layout(size(), &theme, true, false);
+        let lay = layout(size(), &theme, true, false, false, false);
         let tree_point = Point::new(lay.workspace_tree.x() + 10.0, lay.workspace_tree.y() + 40.0);
         handle_events(
             &mut app,
@@ -2627,7 +2747,7 @@ mod tests {
         let long = "linia\n".repeat(200);
         let mut app = App::with_text(None, &long);
         app.reveal_cursor = false;
-        let lay = layout(size(), &theme, false, false);
+        let lay = layout(size(), &theme, false, false, false, false);
         handle_events(
             &mut app,
             &[Event::Scroll(ScrollEvent {
@@ -2697,7 +2817,7 @@ mod tests {
     fn right_click_on_a_tree_row_opens_the_context_menu() {
         let (dir, mut app) = tree_app();
         let theme = theme();
-        let lay = layout(size(), &theme, true, false);
+        let lay = layout(size(), &theme, true, false, false, false);
         let index = row_index(&app, "src");
         let anchor = workspace_row_anchor(&app, &lay, index).unwrap();
         right_click(&mut app, anchor.center());
@@ -2718,7 +2838,7 @@ mod tests {
     fn context_menu_new_file_starts_the_name_prompt() {
         let (dir, mut app) = tree_app();
         let theme = theme();
-        let lay = layout(size(), &theme, true, false);
+        let lay = layout(size(), &theme, true, false, false, false);
         let index = row_index(&app, "README.md");
         let anchor = workspace_row_anchor(&app, &lay, index).unwrap();
         right_click(&mut app, anchor.center());
@@ -2735,7 +2855,7 @@ mod tests {
         let (dir, mut app) = tree_app();
         let theme = theme();
         let text = TextEngine::none();
-        let lay = layout(size(), &theme, true, false);
+        let lay = layout(size(), &theme, true, false, false, false);
         let index = row_index(&app, "README.md");
         let anchor = workspace_row_anchor(&app, &lay, index).unwrap();
         right_click(&mut app, anchor.center());
@@ -2773,7 +2893,7 @@ mod tests {
         let (dir, mut app) = tree_app();
         let theme = theme();
         let text = TextEngine::none();
-        let lay = layout(size(), &theme, true, false);
+        let lay = layout(size(), &theme, true, false, false, false);
         let index = row_index(&app, "src");
         let anchor = workspace_row_anchor(&app, &lay, index).unwrap();
         app.open_tree_menu(index, anchor);

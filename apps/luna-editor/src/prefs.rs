@@ -23,6 +23,8 @@ pub struct Prefs {
     pub skip_build_dirs: bool,
     /// Pokazuj panel projektu przy starcie.
     pub show_workspace: bool,
+    /// Pokazuj panel czatu AI przy starcie (gdy wtyczka jest zainstalowana).
+    pub chat_open: bool,
 }
 
 impl Default for Prefs {
@@ -33,6 +35,7 @@ impl Default for Prefs {
             show_hidden: false,
             skip_build_dirs: true,
             show_workspace: true,
+            chat_open: false,
         }
     }
 }
@@ -87,6 +90,7 @@ impl Prefs {
                     prefs.skip_build_dirs = parse_bool(value, prefs.skip_build_dirs)
                 }
                 "show_workspace" => prefs.show_workspace = parse_bool(value, prefs.show_workspace),
+                "chat_open" => prefs.chat_open = parse_bool(value, prefs.chat_open),
                 _ => {}
             }
         }
@@ -98,12 +102,13 @@ impl Prefs {
             std::fs::create_dir_all(parent)?;
         }
         let text = format!(
-            "# luna-editor\ntab_width={}\nauto_indent={}\nshow_hidden={}\nskip_build_dirs={}\nshow_workspace={}\n",
+            "# luna-editor\ntab_width={}\nauto_indent={}\nshow_hidden={}\nskip_build_dirs={}\nshow_workspace={}\nchat_open={}\n",
             self.tab_width,
             u8::from(self.auto_indent),
             u8::from(self.show_hidden),
             u8::from(self.skip_build_dirs),
             u8::from(self.show_workspace),
+            u8::from(self.chat_open),
         );
         // Zapis przez plik tymczasowy: przerwany zapis nie zostawia pustej konfiguracji.
         let tmp = path.with_extension("conf.tmp");

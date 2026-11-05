@@ -184,7 +184,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let size = Size::new(1040.0, 740.0);
     if tree_menu {
-        let lay = ui::layout(size, &theme, app.workspace.visible, false);
+        let lay = ui::layout(size, &theme, app.workspace.visible, false, false, false);
         let index = app
             .workspace
             .selected_index()

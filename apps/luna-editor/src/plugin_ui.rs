@@ -1691,6 +1691,7 @@ mod tests {
                 output: Output::Insert,
             }],
             settings: Vec::new(),
+            chat: false,
         }
     }
 

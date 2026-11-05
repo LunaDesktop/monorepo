@@ -72,6 +72,7 @@ setting = api_key|Klucz API|secret||
 | `entry` | tak | Program względem katalogu wtyczki |
 | `interpreter` | nie | Np. `python3`, `node`, `sh`. Bez niego plik musi być wykonywalny |
 | `command` | tak (≥1) | Polecenie widoczne w UI |
+| `chat` | nie | `chat = true` — wtyczka obsługuje panel czatu (patrz niżej) |
 | `setting` | nie | Pole konfiguracji |
 
 ### `command = id|tytuł|prompt|kontekst|wyjście`
@@ -135,6 +136,106 @@ zostanie pokazana użytkownikowi w oknie alertu.
 
 Wtyczki działają z uprawnieniami użytkownika. Nie ma piaskownicy — instaluj
 tylko zaufane repozytoria.
+
+## Panel czatu (agent)
+
+Wtyczka deklarująca `chat = true` dostaje w edytorze **panel czatu** (przycisk
+ikonki czatu w nagłówku, skrót `Ctrl+Shift+A`). Panel pokazuje się tylko wtedy,
+gdy taka wtyczka jest zainstalowana.
+
+Rozmowa to akcja zarezerwowana `__chat__`. Edytor wywołuje wtyczkę wielokrotnie
+(pętla agenta, domyślnie do 6 kroków): po każdej odpowiedzi z `tool_calls`
+wykonuje narzędzia, dokłada ich wyniki do historii i wywołuje wtyczkę ponownie.
+
+### Co dostaje wtyczka (stdin, JSON)
+
+```json
+{
+  "version": 1,
+  "workspace": {
+    "name": "mojprojekt",
+    "root": "/home/ula/mojprojekt",
+    "files": [{ "path": "src/main.rs", "size": 812 }],
+    "contents": [{ "path": "src/main.rs", "text": "fn main() {}\n" }]
+  },
+  "file": {
+    "path": "src/main.rs",
+    "language": "Rust",
+    "content": "…",
+    "selection": "…"
+  },
+  "messages": [
+    { "role": "user", "content": "dodaj testy" },
+    { "role": "assistant", "content": "Sprawdzam pliki" },
+    { "role": "tool", "content": "[read_file src/main.rs]\nfn main() {}" }
+  ],
+  "tools": ["read_file", "list_dir", "search", "write_file", "create_file", "delete_file"]
+}
+```
+
+- `workspace.files` — do 400 plików projektu (bez `target`, `node_modules`
+  i katalogów ukrytych);
+- `workspace.contents` — treść małych plików (do 24 kB każdy, łącznie 48 kB),
+  żeby model widział projekt od razu, bez dodatkowych wywołań;
+- `file` — aktywny dokument wraz z zaznaczeniem;
+- `messages` — cała historia rozmowy z rolami `user`, `assistant`, `tool`.
+  Wiadomości roli `note` (komunikaty edytora) nie są wysyłane.
+
+### Co zwraca wtyczka (stdout, JSON)
+
+```json
+{
+  "text": "Dopisuję testy do src/main.rs",
+  "tool_calls": [
+    { "tool": "read_file", "path": "src/main.rs" },
+    { "tool": "write_file", "path": "src/main.rs", "content": "…pełna treść…" }
+  ]
+}
+```
+
+- `text` — pokazywane w panelu (może być puste przy samych narzędziach),
+- `tool_calls` — opcjonalne; gdy ich nie ma, odpowiedź jest finalna.
+
+Odpowiedź może być też czystym tekstem (bez JSON) — wtedy edytor traktuje ją
+jako odpowiedź końcową. Dlatego model można poprosić o JSON, ale zwykła
+odpowiedź nie psuje rozmowy.
+
+### Narzędzia
+
+| Narzędzie | Argumenty | Działanie |
+|---|---|---|
+| `read_file` | `path` | Treść pliku (do 48 kB) |
+| `list_dir` | `path` (puste = katalog projektu) | Lista wpisów katalogu |
+| `search` | `query`, `path` (opcjonalnie) | Do 20 trafień `ścieżka:linia: treść` |
+| `write_file` | `path`, `content` | Zapis całego pliku (tworzy katalogi) |
+| `create_file` | `path`, `content` | Jak wyżej, ale błąd gdy plik istnieje |
+| `delete_file` | `path` | Usuwa plik |
+
+Zasady bezpieczeństwa po stronie edytora:
+
+- ścieżki muszą być **względne** i nie mogą wyjść poza katalog projektu
+  (`..` i ścieżki absolutne są odrzucane),
+- zapis do pliku otwartego w edytorze z **niezapisanymi zmianami** jest
+  odrzucany (wynik narzędzia zwraca błąd, więc model może zareagować),
+- po udanym zapisie edytor przeładowuje czyste bufory i odświeża drzewo plików,
+- `write_file` wymaga pełnej treści pliku — nie ma operacji „wstaw fragment”.
+
+### Przykład minimalny (Python)
+
+```python
+import json, os, sys
+
+if os.environ.get("LUNA_PLUGIN_ACTION") == "__chat__":
+    request = json.load(sys.stdin)
+    last = request["messages"][-1]["content"]
+    if "[read_file" in last:
+        print(json.dumps({"text": "Gotowe."}))
+    else:
+        print(json.dumps({
+            "text": "Zagladam do README.",
+            "tool_calls": [{"tool": "read_file", "path": "README.md"}],
+        }))
+```
 
 ## Minimalny przykład (Python)
 
