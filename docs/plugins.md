@@ -143,6 +143,10 @@ Wtyczka deklarująca `chat = true` dostaje w edytorze **panel czatu** (przycisk
 ikonki czatu w nagłówku, skrót `Ctrl+Shift+A`). Panel pokazuje się tylko wtedy,
 gdy taka wtyczka jest zainstalowana.
 
+Panel ma własny **selektor modelu** (dla pola `setting = …|models|`) i zębatkę
+z ustawieniami wtyczki — konfiguracja jest dostępna bez menedżera Plugins….
+Lista modeli jest pobierana akcją `__list_models__` i filtrowana w popupie.
+
 Rozmowa to akcja zarezerwowana `__chat__`. Edytor wywołuje wtyczkę wielokrotnie
 (pętla agenta, domyślnie do 6 kroków): po każdej odpowiedzi z `tool_calls`
 wykonuje narzędzia, dokłada ich wyniki do historii i wywołuje wtyczkę ponownie.

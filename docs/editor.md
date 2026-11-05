@@ -93,7 +93,10 @@ https://github.com/LunaDesktop/luna-editor-ai-writer
 
 Gdy wtyczka AI jest zainstalowana, w nagłówku pojawia się ikona czatu
 (`Ctrl+Shift+A`). Panel pokazuje historię rozmowy, pole pytania i przycisk
-**Wyślij**. Rozmowa jest wielokrokowa: model może poprosić o przeczytanie pliku,
+**Wyślij**. Pod nagłówkiem jest **selektor modelu** (lista pobierana z API
+dostawcy, z wyszukiwaniem), a zębatka obok nazwy wtyczki otwiera jej
+ustawienia bez wychodzenia z czatu — nie trzeba szukać ich w menu głównym.
+Kursor w polu pytania miga (jak w edytorze), żeby było widać, że można pisać. Rozmowa jest wielokrokowa: model może poprosić o przeczytanie pliku,
 przeszukanie projektu albo zapisanie zmian, a Edytor wykonuje te narzędzia
 i wraca do modelu z wynikiem (maksymalnie 6 kroków na turę).
 

@@ -1614,6 +1614,15 @@ fn submit_prompt(app: &mut App) {
     app.start_plugin(prompt.plugin, prompt.command, instruction);
 }
 
+/// Otwiera formularz ustawień wskazanej wtyczki (np. z nagłówka panelu czatu).
+pub fn open_settings_for(app: &mut App, plugin: usize) {
+    if plugin >= app.plugins.plugins.len() {
+        return;
+    }
+    app.plugin_ui.selected = plugin;
+    open_form(app);
+}
+
 /// Uruchamia polecenie wtyczki (wywoływane też przez testy i menu).
 pub fn execute(app: &mut App, plugin: usize, command: usize, instruction: String) {
     app.start_plugin(plugin, command, instruction);

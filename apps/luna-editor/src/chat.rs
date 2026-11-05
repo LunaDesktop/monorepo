@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::time::Instant;
 
 use libluna_core::style::weight;
 use libluna_core::{ButtonState, Color, Event, KeyEvent, Point, PointerButton, Rect, Size, Theme};
@@ -93,12 +94,33 @@ pub struct Chat {
     pub hover_send: bool,
     pub hover_close: bool,
     pub hover_clear: bool,
+    pub hover_model: bool,
+    pub hover_gear: bool,
     pub pointer: Option<Point>,
     /// Maksymalne przewinięcie listy wiadomości (liczone przy rysowaniu).
     pub scroll_max: f64,
+    /// Popup wyboru modelu (jak w czacie Zed/VS Code).
+    pub picker: Option<Picker>,
+    /// Modele pobrane z API dostawcy.
+    pub models: Vec<String>,
+    pub models_loading: bool,
+    pub models_error: Option<String>,
+    /// Po pobraniu listy otwórz popup automatycznie.
+    models_sig: String,
+    models_job: Option<Receiver<Result<Vec<String>, String>>>,
+    /// Faza migania kursora w polu pytania (reset przy pisaniu).
+    caret_anchor: Instant,
+    caret_last: (usize, usize),
     /// Przewiń na koniec po dodaniu wiadomości.
     stick_to_bottom: bool,
     job: Option<Receiver<ChatEvent>>,
+}
+
+/// Popup wyboru modelu z filtrowaniem.
+pub struct Picker {
+    pub query: Entry,
+    pub scroll: f64,
+    pub hover: Option<usize>,
 }
 
 impl Default for Chat {
@@ -111,6 +133,7 @@ impl Chat {
     pub fn new(visible: bool) -> Self {
         let mut input = Entry::new(tr("Ask about the project…"));
         input.set_focused(false);
+        input.set_blinking(true);
         Self {
             visible,
             focused: false,
@@ -122,8 +145,18 @@ impl Chat {
             hover_send: false,
             hover_close: false,
             hover_clear: false,
+            hover_model: false,
+            hover_gear: false,
             pointer: None,
             scroll_max: 0.0,
+            picker: None,
+            models: Vec::new(),
+            models_loading: false,
+            models_error: None,
+            models_sig: String::new(),
+            models_job: None,
+            caret_anchor: Instant::now(),
+            caret_last: (0, 0),
             stick_to_bottom: true,
             job: None,
         }
@@ -165,6 +198,104 @@ pub fn plugin_name(app: &App) -> Option<String> {
     })
 }
 
+/// Klucz ustawienia typu `models` (np. `model`).
+fn models_key(plugin: &Plugin) -> Option<String> {
+    plugin
+        .settings
+        .iter()
+        .find(|setting| setting.kind == plugins::SettingKind::Models)
+        .map(|setting| setting.key.clone())
+}
+
+/// Aktualnie wybrany model (pusty, gdy wtyczka go nie deklaruje).
+pub fn current_model(app: &App) -> Option<String> {
+    let plugin = app.plugins.plugins.get(plugin_index(app)?)?;
+    let key = models_key(plugin)?;
+    plugin
+        .values()
+        .get(&key)
+        .cloned()
+        .filter(|value| !value.is_empty())
+}
+
+/// Sygnatura pozostałych ustawień — zmiana klucza/dostawcy wymusza odświeżenie listy.
+fn settings_signature(plugin: &Plugin) -> String {
+    let values = plugin.values();
+    let mut parts: Vec<String> = plugin
+        .settings
+        .iter()
+        .filter(|setting| setting.kind != plugins::SettingKind::Models)
+        .map(|setting| {
+            format!(
+                "{}={}",
+                setting.key,
+                values.get(&setting.key).cloned().unwrap_or_default()
+            )
+        })
+        .collect();
+    parts.sort();
+    parts.join("|")
+}
+
+/// Otwiera popup wyboru modelu (i pobiera listę, jeśli jej nie ma).
+pub fn open_model_picker(app: &mut App) {
+    let Some(index) = plugin_index(app) else {
+        return;
+    };
+    let plugin = app.plugins.plugins[index].clone();
+    if models_key(&plugin).is_none() {
+        return;
+    }
+    let signature = settings_signature(&plugin);
+    if app.chat.models_sig != signature {
+        app.chat.models.clear();
+        app.chat.models_error = None;
+        app.chat.models_sig = signature;
+    }
+    let mut query = Entry::new(tr("Search…"));
+    query.set_focused(true);
+    query.set_blinking(true);
+    app.chat.picker = Some(Picker {
+        query,
+        scroll: 0.0,
+        hover: None,
+    });
+    if app.chat.models.is_empty() && !app.chat.models_loading {
+        app.chat.models_loading = true;
+        app.chat.models_job = Some(plugins::spawn_models(plugin.clone(), plugin.values()));
+    }
+}
+
+fn filtered_models(models: &[String], query: &str) -> Vec<String> {
+    let needle = query.trim().to_lowercase();
+    models
+        .iter()
+        .filter(|model| needle.is_empty() || model.to_lowercase().contains(&needle))
+        .cloned()
+        .collect()
+}
+
+/// Zapisuje wybrany model w konfiguracji wtyczki.
+fn apply_model(app: &mut App, model: &str) {
+    let Some(index) = plugin_index(app) else {
+        return;
+    };
+    let plugin = app.plugins.plugins[index].clone();
+    let Some(key) = models_key(&plugin) else {
+        return;
+    };
+    let mut values = plugin.values();
+    values.insert(key, model.to_owned());
+    match plugin.save_values(&values) {
+        Ok(()) => {
+            app.chat.models_error = None;
+            app.chat.status = Some(format!("{}: {}", tr("Model"), model));
+        }
+        Err(error) => app.chat.models_error = Some(error),
+    }
+    app.chat.picker = None;
+}
+
 /// Włącza/wyłącza panel. Gdy nie ma wtyczki czatu, otwiera menedżer wtyczek.
 pub fn toggle(app: &mut App) {
     if !available(app) {
@@ -186,6 +317,7 @@ pub fn focus_input(app: &mut App) {
     app.chat.visible = true;
     app.chat.focused = true;
     app.chat.input.set_focused(true);
+    app.chat.caret_anchor = Instant::now();
 }
 
 fn blur(app: &mut App) {
@@ -233,6 +365,7 @@ pub fn send(app: &mut App) {
     }
 
     app.chat.input.clear();
+    app.chat.caret_anchor = Instant::now();
     app.chat.push(Role::User, text.clone());
     app.chat.status = Some(tr("The plugin is working…"));
     app.chat.busy = true;
@@ -258,6 +391,24 @@ pub fn send(app: &mut App) {
 
 /// Odbiera wynik pracy agenta i odświeża dokumenty zmienione przez wtyczkę.
 pub fn poll(app: &mut App) {
+    if let Some(job) = app.chat.models_job.take() {
+        match job.try_recv() {
+            Ok(Ok(models)) => {
+                app.chat.models_loading = false;
+                app.chat.models = models;
+                app.chat.models_error = None;
+            }
+            Ok(Err(error)) => {
+                app.chat.models_loading = false;
+                app.chat.models_error = Some(error);
+            }
+            Err(TryRecvError::Empty) => app.chat.models_job = Some(job),
+            Err(TryRecvError::Disconnected) => {
+                app.chat.models_loading = false;
+                app.chat.models_error = Some(tr("Models ended without a result"));
+            }
+        }
+    }
     let Some(receiver) = app.chat.job.take() else {
         return;
     };
@@ -946,7 +1097,7 @@ pub fn paint(app: &mut App, ctx: &mut PaintCtx, lay: &Layout) {
         &elide(
             ctx,
             &title,
-            lay.chat_header.width() - 110.0,
+            lay.chat_header.width(),
             theme.typography.body.size,
         ),
         theme.typography.body.size,
@@ -956,16 +1107,77 @@ pub fn paint(app: &mut App, ctx: &mut PaintCtx, lay: &Layout) {
     let pointer = app.chat.pointer;
     app.chat.hover_clear = pointer.is_some_and(|p| lay.chat_clear.contains(p));
     app.chat.hover_close = pointer.is_some_and(|p| lay.chat_close.contains(p));
+    app.chat.hover_gear = pointer.is_some_and(|p| lay.chat_gear.contains(p));
+    app.chat.hover_model = pointer.is_some_and(|p| lay.chat_model.contains(p));
     app.chat.hover_send = pointer.is_some_and(|p| lay.chat_send.contains(p));
 
     let mut clear = Button::new(tr("Clear"));
     clear.set_hovered(app.chat.hover_clear);
     clear.paint(ctx, lay.chat_clear);
+    // Zębatka — ustawienia wtyczki bez wychodzenia z czatu.
+    if app.chat.hover_gear {
+        ctx.scene
+            .fill_rounded_rect(lay.chat_gear, theme.radius.small, colors.shade);
+    }
+    libluna_widgets::paint_icon(
+        ctx,
+        libluna_widgets::IconName::Settings,
+        lay.chat_gear.deflate(libluna_core::Insets::splat(5.0)),
+        colors.text,
+    );
     let mut close = Button::new("×");
     close.set_hovered(app.chat.hover_close);
     close.paint(ctx, lay.chat_close);
 
+    // Selektor modelu (jak w czacie Zed/VS Code) — pełna szerokość pod nagłówkiem.
+    let model = current_model(app).unwrap_or_else(|| tr("Default model"));
+    let model_rect = lay.chat_model;
+    ctx.scene.fill_rounded_rect(
+        model_rect,
+        theme.radius.small,
+        if app.chat.hover_model {
+            colors.shade
+        } else {
+            colors.card_bg
+        },
+    );
+    ctx.scene
+        .stroke_rounded_rect(model_rect, theme.radius.small, 1.0, colors.border);
+    let label = format!("{}: {}", tr("Model"), model);
+    ctx.label_left(
+        model_rect.x() + 10.0,
+        model_rect.center().y,
+        &elide(
+            ctx,
+            &label,
+            model_rect.width() - 34.0,
+            theme.typography.caption.size,
+        ),
+        theme.typography.caption.size,
+        weight::NORMAL,
+        colors.text,
+    );
+    ctx.label_right(
+        model_rect.right() - 10.0,
+        model_rect.center().y,
+        "▾",
+        theme.typography.caption.size,
+        weight::NORMAL,
+        colors.dim_text,
+    );
+
     paint_messages(app, ctx, lay);
+
+    // Miganie kursora: nowy znak/pozycja resetuje fazę, więc kursor jest
+    // od razu widoczny po kliknięciu i po wpisaniu litery.
+    let state = (app.chat.input.text().len(), app.chat.input.cursor());
+    if state != app.chat.caret_last {
+        app.chat.caret_last = state;
+        app.chat.caret_anchor = Instant::now();
+    }
+    let elapsed = app.chat.caret_anchor.elapsed().as_millis() % 1100;
+    app.chat.input.set_blinking(true);
+    app.chat.input.set_caret_visible(elapsed < 550);
 
     let mut input = app.chat.input.clone();
     input.set_focused(app.chat.focused);
@@ -1018,6 +1230,10 @@ pub fn paint(app: &mut App, ctx: &mut PaintCtx, lay: &Layout) {
                 colors.dim_text,
             );
         }
+    }
+
+    if app.chat.picker.is_some() {
+        paint_picker(app, ctx, lay);
     }
 }
 
@@ -1156,6 +1372,266 @@ fn elide(ctx: &PaintCtx, text: &str, width: f64, size: f64) -> String {
     out
 }
 
+// ── Popup wyboru modelu ──────────────────────────────────────────────────────
+
+const PICKER_ROW_H: f64 = 26.0;
+
+fn picker_rect(lay: &Layout) -> Rect {
+    let anchor = lay.chat_model;
+    let height = 232.0f64.min((lay.chat.bottom() - anchor.bottom() - 12.0).max(96.0));
+    Rect::from_xywh(anchor.x(), anchor.bottom() + 4.0, anchor.width(), height)
+}
+
+fn picker_search(card: Rect) -> Rect {
+    Rect::from_xywh(
+        card.x() + 8.0,
+        card.y() + 8.0,
+        (card.width() - 16.0).max(0.0),
+        28.0,
+    )
+}
+
+fn picker_list(card: Rect) -> Rect {
+    let search = picker_search(card);
+    Rect::from_xywh(
+        card.x() + 4.0,
+        search.bottom() + 6.0,
+        (card.width() - 8.0).max(0.0),
+        (card.bottom() - 6.0 - (search.bottom() + 6.0)).max(0.0),
+    )
+}
+
+fn paint_picker(app: &mut App, ctx: &mut PaintCtx, lay: &Layout) {
+    let theme = *ctx.theme;
+    let colors = theme.colors;
+    let Some(picker) = app.chat.picker.as_ref() else {
+        return;
+    };
+    let card = picker_rect(lay);
+    ctx.scene
+        .fill_rounded_rect(card, theme.radius.medium, colors.card_bg);
+    ctx.scene
+        .stroke_rounded_rect(card, theme.radius.medium, 1.0, colors.border);
+
+    let search = picker_search(card);
+    let mut query = picker.query.clone();
+    query.set_focused(true);
+    query.paint(ctx, search);
+
+    let list = picker_list(card);
+    let models = filtered_models(&app.chat.models, picker.query.text());
+    let current = current_model(app);
+    ctx.scene.push_clip(list);
+    if app.chat.models_loading && app.chat.models.is_empty() {
+        ctx.label_left(
+            list.x() + 8.0,
+            list.y() + 18.0,
+            &tr("Loading models…"),
+            theme.typography.caption.size,
+            weight::NORMAL,
+            colors.dim_text,
+        );
+    } else if let Some(error) = app.chat.models_error.as_deref() {
+        let lines = wrap(
+            ctx,
+            error,
+            list.width() - 16.0,
+            theme.typography.caption.size,
+        );
+        for (index, line) in lines.iter().take(3).enumerate() {
+            ctx.label_left(
+                list.x() + 8.0,
+                list.y() + 18.0 + index as f64 * 16.0,
+                line,
+                theme.typography.caption.size,
+                weight::NORMAL,
+                colors.error,
+            );
+        }
+    } else if models.is_empty() {
+        ctx.label_left(
+            list.x() + 8.0,
+            list.y() + 18.0,
+            &tr("No models available"),
+            theme.typography.caption.size,
+            weight::NORMAL,
+            colors.dim_text,
+        );
+    } else {
+        let offset = picker.scroll;
+        for (index, model) in models.iter().enumerate() {
+            let y = list.y() + index as f64 * PICKER_ROW_H - offset;
+            if y + PICKER_ROW_H < list.y() || y > list.bottom() {
+                continue;
+            }
+            let row = Rect::from_xywh(list.x(), y, list.width(), PICKER_ROW_H);
+            let selected = current.as_deref() == Some(model.as_str());
+            if picker.hover == Some(index) {
+                ctx.scene
+                    .fill_rounded_rect(row, theme.radius.small, colors.shade);
+            } else if selected {
+                ctx.scene.fill_rounded_rect(
+                    row,
+                    theme.radius.small,
+                    colors.accent.scale_alpha(0.16),
+                );
+            }
+            ctx.label_left(
+                row.x() + 8.0,
+                row.center().y,
+                &elide(
+                    ctx,
+                    model,
+                    row.width() - 24.0,
+                    theme.typography.caption.size,
+                ),
+                theme.typography.caption.size,
+                weight::NORMAL,
+                if selected { colors.accent } else { colors.text },
+            );
+        }
+    }
+    ctx.scene.pop_clip();
+}
+
+/// Obsługa popupu modelu. Zwraca `true`, gdy zdarzenie zostało skonsumowane.
+fn handle_picker(app: &mut App, event: &Event, lay: &Layout, _theme: &Theme) -> bool {
+    let Some(picker) = app.chat.picker.as_ref() else {
+        return false;
+    };
+    let card = picker_rect(lay);
+    let list = picker_list(card);
+    let models = filtered_models(&app.chat.models, picker.query.text());
+    match event {
+        Event::PointerMotion { position, .. } => {
+            if list.contains(*position) {
+                let scroll = app.chat.picker.as_ref().map(|p| p.scroll).unwrap_or(0.0);
+                let row = ((position.y - list.y() + scroll) / PICKER_ROW_H).floor();
+                let index = if row.is_sign_negative() {
+                    None
+                } else {
+                    let index = row as usize;
+                    (index < models.len()).then_some(index)
+                };
+                if let Some(picker) = app.chat.picker.as_mut() {
+                    picker.hover = index;
+                }
+            } else if let Some(picker) = app.chat.picker.as_mut() {
+                picker.hover = None;
+            }
+            true
+        }
+        Event::PointerButton(button)
+            if button.button == PointerButton::Left && button.state == ButtonState::Pressed =>
+        {
+            let point = button.position;
+            if list.contains(point) {
+                let scroll = app.chat.picker.as_ref().map(|p| p.scroll).unwrap_or(0.0);
+                let index = ((point.y - list.y() + scroll) / PICKER_ROW_H).floor();
+                if !index.is_sign_negative() {
+                    let index = index as usize;
+                    if let Some(model) = models.get(index).cloned() {
+                        apply_model(app, &model);
+                    }
+                }
+                return true;
+            }
+            if !card.contains(point) && !lay.chat_model.contains(point) {
+                app.chat.picker = None;
+                // Klik poza popupem ma nadal działać (np. pole pytania).
+                return false;
+            }
+            true
+        }
+        Event::Scroll(scroll) => {
+            if card.contains(scroll.position) {
+                let max = (models.len() as f64 * PICKER_ROW_H - list.height()).max(0.0);
+                if let Some(picker) = app.chat.picker.as_mut() {
+                    picker.scroll = (picker.scroll + scroll.dy / 20.0 * 64.0).clamp(0.0, max);
+                }
+                return true;
+            }
+            false
+        }
+        Event::Key(key) if key.state == ButtonState::Pressed => {
+            if key.keysym == 0xff1b {
+                app.chat.picker = None;
+                return true;
+            }
+            if key.keysym == 0xff0d || key.keysym == 0xff8d {
+                let hover = app.chat.picker.as_ref().and_then(|p| p.hover);
+                if let Some(model) = hover.and_then(|index| models.get(index).cloned()) {
+                    apply_model(app, &model);
+                }
+                return true;
+            }
+            if key.keysym == 0xff54 || key.keysym == 0xff52 {
+                let count = models.len();
+                if count > 0 {
+                    if let Some(picker) = app.chat.picker.as_mut() {
+                        let next = match (picker.hover, key.keysym) {
+                            (None, 0xff54) => 0,
+                            (None, _) => count - 1,
+                            (Some(index), 0xff54) => (index + 1).min(count - 1),
+                            (Some(index), _) => index.saturating_sub(1),
+                        };
+                        picker.hover = Some(next);
+                        let visible = (list.height() / PICKER_ROW_H).floor().max(1.0);
+                        if (next as f64) < picker.scroll / PICKER_ROW_H {
+                            picker.scroll = next as f64 * PICKER_ROW_H;
+                        } else if next as f64 >= picker.scroll / PICKER_ROW_H + visible {
+                            picker.scroll = (next as f64 + 1.0 - visible) * PICKER_ROW_H;
+                        }
+                    }
+                }
+                return true;
+            }
+            let Some(picker) = app.chat.picker.as_mut() else {
+                return true;
+            };
+            let command = clipboard_command(&mut picker.query, key);
+            if let Some(command) = command {
+                match command {
+                    TextClipboardCommand::Copy(Some(value))
+                    | TextClipboardCommand::Cut(Some(value)) => app.clipboard_text = Some(value),
+                    TextClipboardCommand::Paste => app.paste_requested = true,
+                    _ => {}
+                }
+                return true;
+            }
+            match key.keysym {
+                0xff08 => picker.query.backspace(),
+                0xffff => picker.query.delete_forward(),
+                0xff51 => picker.query.move_left(),
+                0xff53 => picker.query.move_right(),
+                0xff50 => picker.query.home(),
+                0xff57 => picker.query.end(),
+                _ => insert_key_text(&mut picker.query, key),
+            }
+            picker.hover = None;
+            true
+        }
+        Event::Text(value) => {
+            if let Some(picker) = app.chat.picker.as_mut() {
+                let plain: String = value.chars().filter(|ch| !ch.is_control()).collect();
+                if !plain.is_empty() {
+                    picker.query.insert_str(&plain);
+                    picker.hover = None;
+                }
+            }
+            true
+        }
+        Event::Paste(value) => {
+            if let Some(picker) = app.chat.picker.as_mut() {
+                picker.query.insert_str(value);
+                picker.hover = None;
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
 // ── Obsługa wejścia ─────────────────────────────────────────────────────────
 
 /// Obsługuje zdarzenie, gdy panel czatu jest widoczny.
@@ -1165,11 +1641,14 @@ pub fn handle_events(
     app: &mut App,
     event: &Event,
     lay: &Layout,
-    _theme: &Theme,
+    theme: &Theme,
     _text: &TextEngine,
 ) -> bool {
     if !app.chat.visible || !available(app) {
         return false;
+    }
+    if app.chat.picker.is_some() && handle_picker(app, event, lay, theme) {
+        return true;
     }
     let panel = lay.chat;
     match event {
@@ -1210,6 +1689,12 @@ pub fn handle_events(
                 app.prefs_dirty = true;
             } else if lay.chat_clear.contains(button.position) {
                 app.chat.clear();
+            } else if lay.chat_gear.contains(button.position) {
+                if let Some(index) = plugin_index(app) {
+                    crate::plugin_ui::open_settings_for(app, index);
+                }
+            } else if lay.chat_model.contains(button.position) {
+                open_model_picker(app);
             } else if lay.chat_send.contains(button.position) {
                 send(app);
             } else if lay.chat_input.contains(button.position) {
@@ -1499,6 +1984,81 @@ esac
         assert!(root.join("OUT.txt").exists());
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn chat_plugin(dir: &Path) -> Plugin {
+        Plugin {
+            dir: dir.to_path_buf(),
+            id: "ai-test".into(),
+            name: "AI Test".into(),
+            version: "1".into(),
+            author: String::new(),
+            description: String::new(),
+            entry: "run.sh".into(),
+            interpreter: Some("sh".into()),
+            commands: Vec::new(),
+            settings: vec![
+                plugins::PluginSetting {
+                    key: "model".into(),
+                    label: "Model".into(),
+                    kind: plugins::SettingKind::Models,
+                    default: "m1".into(),
+                },
+                plugins::PluginSetting {
+                    key: "api_key".into(),
+                    label: "Klucz API".into(),
+                    kind: plugins::SettingKind::Secret,
+                    default: String::new(),
+                },
+            ],
+            chat: true,
+        }
+    }
+
+    #[test]
+    fn model_setting_and_filtering_work() {
+        let dir = std::env::temp_dir().join("luna-chat-model-plugin");
+        let plugin = chat_plugin(&dir);
+        assert_eq!(models_key(&plugin).as_deref(), Some("model"));
+        let models = vec![
+            "gpt-4o".to_owned(),
+            "gpt-4o-mini".to_owned(),
+            "claude-3".to_owned(),
+        ];
+        assert_eq!(filtered_models(&models, "").len(), 3);
+        assert_eq!(filtered_models(&models, "gpt").len(), 2);
+        assert_eq!(filtered_models(&models, "CLAUDE"), vec!["claude-3"]);
+        assert!(filtered_models(&models, "nic").is_empty());
+    }
+
+    #[test]
+    fn applying_a_model_writes_the_plugin_config() {
+        let base = std::env::temp_dir().join(format!(
+            "luna-chat-config-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let previous = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", &base);
+
+        let mut app = App::new();
+        app.plugins.plugins = vec![chat_plugin(&std::env::temp_dir().join("luna-chat-plugin-dir"))];
+        apply_model(&mut app, "model-2");
+        assert_eq!(
+            app.plugins.plugins[0].values().get("model"),
+            Some(&"model-2".to_string())
+        );
+        assert!(plugins::config_dir().join("ai-test.conf").exists());
+
+        match previous {
+            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

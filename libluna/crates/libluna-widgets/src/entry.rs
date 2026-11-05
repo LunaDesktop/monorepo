@@ -40,6 +40,10 @@ pub struct Entry {
     trailing: f64,
     /// Kotwica zaznaczenia (bajt); `None` = brak zaznaczenia.
     anchor: Option<usize>,
+    /// Miganie kursora włączone przez aplikację (np. pole czatu).
+    blink: bool,
+    /// Kursor ukryty w bieżącej fazie migania.
+    hide_caret: bool,
 }
 
 impl Entry {
@@ -118,6 +122,26 @@ impl Entry {
 
     pub fn set_focused(&mut self, focused: bool) {
         self.focused = focused;
+    }
+
+    /// Włącza miganie kursora. Aplikacja przełącza fazę przez
+    /// [`Entry::set_caret_visible`] — widget nie zna zegara.
+    pub fn set_blinking(&mut self, on: bool) {
+        self.blink = on;
+    }
+
+    pub fn is_blinking(&self) -> bool {
+        self.blink
+    }
+
+    /// Ustawia widoczność kursora w bieżącej fazie (ignorowane bez migania).
+    pub fn set_caret_visible(&mut self, visible: bool) {
+        self.hide_caret = !visible;
+    }
+
+    /// Czy kursor ma być widoczny w tej klatce.
+    pub fn caret_visible(&self) -> bool {
+        !self.blink || !self.hide_caret
     }
 
     pub fn set_placeholder(&mut self, placeholder: impl Into<String>) {
@@ -380,6 +404,13 @@ impl Entry {
                 weight::NORMAL,
                 colors.dim_text,
             );
+            // Pusty, ale aktywny: kursor przy placeholdzie, żeby było widać, że można pisać.
+            if self.focused && self.caret_visible() {
+                ctx.scene.fill_rect(
+                    Rect::from_xywh(text_x, rect.y() + 6.0, 1.5, (rect.height() - 12.0).max(0.0)),
+                    colors.text,
+                );
+            }
         } else {
             let clear_space = if self.clearable { m.icon + 8.0 } else { 0.0 };
             let text_right = rect.right() - m.pad_x - clear_space - self.trailing;
@@ -413,7 +444,7 @@ impl Entry {
                 weight::NORMAL,
                 colors.text,
             );
-            if self.focused {
+            if self.focused && self.caret_visible() {
                 let prefix = self.display_prefix();
                 let cx = text_x + ctx.measure(&prefix, theme.typography.body.size, weight::NORMAL);
                 ctx.scene.fill_rect(
@@ -656,5 +687,19 @@ mod tests {
         assert!(!e.has_selection());
         e.clear_selection();
         assert_eq!(e.selection(), None);
+    }
+
+    #[test]
+    fn blinking_caret_follows_the_phase() {
+        let mut e = Entry::new("pytanie");
+        e.set_focused(true);
+        assert!(e.caret_visible());
+        e.set_blinking(true);
+        assert!(e.caret_visible());
+        e.set_caret_visible(false);
+        assert!(!e.caret_visible());
+        e.set_caret_visible(true);
+        assert!(e.caret_visible());
+        assert!(e.is_blinking());
     }
 }
