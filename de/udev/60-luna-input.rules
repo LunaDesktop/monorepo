@@ -1,0 +1,15 @@
+# Luna / Selene — urządzenia wejściowe dla gier i Flatpaków.
+#
+# Steam (Flatpak i natywny) oraz Lutris potrzebują:
+#  * /dev/uinput — wirtualny kontroler / Steam Input. Domyślnie węzeł jest
+#    0600 root:root, więc sandbox Flatpaka nie może go otworzyć i Steam pokazuje
+#    „Missing permissions for input devices”.
+#  * kontrolerów Valve (USB 28de) — dostęp dla aktywnej sesji (TAG+=uaccess).
+#
+# Instalacja: sudo ./scripts/install-input-rules.sh
+# Po instalacji wyloguj się i zaloguj ponownie (albo uruchom `udevadm trigger`).
+
+KERNEL=="uinput", SUBSYSTEM=="misc", GROUP="input", MODE="0660", TAG+="uaccess", OPTIONS+="static_node=uinput"
+
+SUBSYSTEM=="usb", ATTR{idVendor}=="28de", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{idVendor}=="28de", MODE="0660", TAG+="uaccess"
