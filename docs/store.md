@@ -68,7 +68,7 @@ Format jest celowo prosty (INI/TOML-podobny):
 
 ```ini
 [store]
-refresh_minutes = 60
+refresh_minutes = 60   # co ile minut sprawdzać aktualizacje w tle
 privilege = auto          # auto | pkexec | sudo | none
 featured = firefox, gimp, vlc, steam
 
@@ -160,6 +160,11 @@ wymaga powłoki, użyj jawnie `sh -c '…'` — plik konfiguracji jest zaufany.
   `argv` ani dziennik). Błędne hasło wraca do formularza z komunikatem, bez
   zamykania okna. Jawny `privilege = pkexec` nie jest podmieniany po cichu —
   błąd trafia do dziennika na stronie „Status”.
+- Sklep cyklicznie — co `refresh_minutes` minut (domyślnie 60) — sprawdza
+  w tle aktualizacje: odpytuje status każdego aktywnego źródła, a katalogi
+  odświeża tylko wtedy, gdy cache jest starszy niż ten interwał. Sync jest
+  pomijany w trakcie instalacji/aktualizacji i gdy otwarte jest okno hasła.
+  Ręczne odświeżenie (przycisk w headerbarze) resetuje licznik.
 - Po instalacji/usunięciu/aktualizacji Sklep wysyła **powiadomienie systemowe**
   (`org.freedesktop.Notifications`, hint `desktop-entry = eu.luna.Store.desktop`).
   Błąd jest powiadomieniem trwałym. Gdy pojawią się nowe aktualizacje, przychodzi

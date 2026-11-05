@@ -20,6 +20,10 @@ każda rodzina ma własny, stały odcień, a kształt mówi, do czego ikona słu
   mogą „wystawać” poza rodzinę.
 - **Kontrolki zostają jednokolorowe.** Menu, lupka, strzałki, „×”, „−”, „□”,
   „✓” i „+” nie zmieniają odcienia, żeby nie rozstrajać paska i przycisków.
+- **Panele boczne są monochromatyczne.** Menu boczne aplikacji (Files, Sklep,
+  Ustawienia, Edytor, Media) rysuje ikony jako symbole w kolorze tekstu
+  (zaznaczenie akcentem) — niezależnie od wybranego zestawu. Nawigacja jest
+  dzięki temu spójna i nie konkuruje z kolorową treścią.
 - **Dwa style.** `Luna (pastel)` (domyślny) i `Monochrome`. Oba korzystają z tej
   samej siatki 24×24, marginesów i języka kształtów; monochromatyczny rysuje
   całość kolorem tekstu i **pomija kolorowe zestawy zewnętrzne**, żeby interfejs

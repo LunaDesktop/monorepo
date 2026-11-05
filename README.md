@@ -125,9 +125,11 @@ Plan dalszej pracy: [`docs/roadmap.md`](docs/roadmap.md).
 Zegar i kalendarz: [`docs/clock.md`](docs/clock.md).
 Centrum ustawień: [`docs/settings.md`](docs/settings.md).
 Sklep z oprogramowaniem: [`docs/store.md`](docs/store.md).
+Wtyczki Edytora i dokumentacja dla twórców: [`docs/plugins.md`](docs/plugins.md).
 Zestaw ikon: [`docs/icons.md`](docs/icons.md).
 Menedżer logowania: [`docs/greeter.md`](docs/greeter.md).
 Osobne repozytoria i aktualizacja pojedynczych pakietów: [`docs/repositories.md`](docs/repositories.md).
+Gry, Steam Flatpak, uprawnienia `uinput` i portal XDG: [`docs/steam.md`](docs/steam.md).
 
 Dokumentacja dla deweloperów: <https://luna.paganlinux.eu/docs/> — szybki start,
 [koncepcje](https://luna.paganlinux.eu/docs/concepts.html),

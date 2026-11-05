@@ -20,6 +20,8 @@ do `libluna-widgets` razem z tą aplikacją.
 
 ![Luna Editor — ustawienia programu](images/luna-editor-settings.png)
 
+![Luna Editor — menedżer wtyczek](images/luna-editor-plugins.png)
+
 ## Funkcje
 
 - **Podświetlanie składni**: Rust, TOML, JSON, Markdown, Shell, C, C++, Python,
@@ -59,6 +61,27 @@ do `libluna-widgets` razem z tą aplikacją.
   w `~/.config/luna/editor.conf`.
 - **Bezpieczeństwo**: pliki binarne, niepoprawne UTF-8 i pliki większe niż
   32 MiB są odrzucane z czytelnym komunikatem.
+- **Wtyczki**: instalowane z GitHuba (albo z archiwum `.tar.gz`), uruchamiane
+  jako osobne procesy — bez wbudowywania ich w Edytor. Pierwsza oficjalna
+  wtyczka to **AI Writer** (Gemini, OpenAI, Claude, DeepSeek, OpenRouter,
+  Mistral, Groq, Ollama).
+
+## Wtyczki
+
+Menu **☰ → Plugins…** (`Ctrl+Shift+P`) otwiera menedżer: instalacja z URL
+GitHuba, usuwanie, ustawienia i uruchamianie poleceń. Po instalacji polecenia
+wtyczki pojawiają się też bezpośrednio w menu głównym (sekcja z nazwą wtyczki),
+więc nie trzeba za każdym razem otwierać menedżera. Wtyczka to katalog
+z manifestem `plugin.conf` i dowolnym programem (Python, shell, Rust…),
+komunikującym się z Edytorem przez zmienne środowiskowe i standardowe
+wejście/wyjście. Pełny opis manifestu i protokołu:
+[`docs/plugins.md`](plugins.md).
+
+Instalacja AI Writera:
+
+```
+https://github.com/LunaDesktop/luna-editor-ai-writer
+```
 
 ## Skróty
 
@@ -68,6 +91,7 @@ do `libluna-widgets` razem z tą aplikacją.
 | `Ctrl+Shift+S` | zapisz jako |
 | `Ctrl+W` / `Ctrl+Tab` / `Ctrl+Shift+Tab` | zamknij kartę / następna / poprzednia |
 | `Ctrl+B` | pokaż/ukryj panel projektu |
+| `Ctrl+Shift+P` | menedżer wtyczek |
 | `Ctrl+,` | ustawienia programu |
 | `F2` / `Delete` | zmień nazwę / usuń zaznaczony element panelu projektu |
 | strzałki, `Home`/`End`, `Enter`, `Esc` | nawigacja po drzewie projektu (gdy ma fokus) |
@@ -88,9 +112,12 @@ apps/luna-editor/
   src/workspace.rs # drzewo projektu i podgląd plików
   src/browser.rs   # wbudowany manager plików (otwórz/zapisz/folder)
   src/prefs.rs     # preferencje programu (~/.config/luna/editor.conf)
+  src/plugins.rs   # manifest, instalacja z GitHuba, uruchamianie wtyczek
+  src/plugin_ui.rs # menedżer wtyczek, ustawienia i okno instrukcji
   src/app.rs       # zakładki, pliki, wyszukiwanie, dialogi
   src/ui.rs        # układ, rysowanie, klawiatura i mysz
   src/bin/editor-render.rs  # zrzuty PNG bez kompozytora
+  plugins/ai-writer/        # źródło pierwszej wtyczki (instalowana osobno)
 libluna/
   crates/libluna-widgets/src/code_view.rs  # CodeView, Span, TokenKind
   crates/libluna-widgets/src/tab_bar.rs    # zakładki w headerbarze
@@ -131,6 +158,7 @@ cargo run --bin editor-render -- --folder ../../apps/luna-editor/src --preview s
 cargo run --bin editor-render -- --no-workspace --browser open ../../docs/images/luna-editor-browser.png
 cargo run --bin editor-render -- --no-workspace --about ../../docs/images/luna-editor-about.png
 cargo run --bin editor-render -- --no-workspace --settings ../../docs/images/luna-editor-settings.png
+cargo run --bin editor-render -- --plugins ../../docs/images/luna-editor-plugins.png
 ```
 
 ## Licencja
