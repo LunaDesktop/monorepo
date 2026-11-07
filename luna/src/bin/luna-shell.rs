@@ -16,8 +16,10 @@ use std::error::Error;
 use std::process::Command;
 use std::time::Instant;
 
+use libluna_core::civil::CivilDate;
 use libluna_core::clock_state::{self, ClockActivity};
 use libluna_core::{ButtonState, Event, IconSettings, PointerButton, Rect, ThemePreference};
+use libluna_i18n::date_format::DateFormat;
 use libluna_platform::{run, AppConfig, Frame, InputRegion, LayerConfig};
 use libluna_widgets::{Hover, IconName, PaintCtx};
 use luna::calendar;
@@ -26,17 +28,15 @@ use luna::dbus_notifications::{Incoming, NotificationsBus};
 use luna::notifications::{load_placement, Notification, Notifications};
 use luna::osd::Osd;
 use luna::panel::{
-    self, ActivePopup, App, CalendarAction, Launcher, PanelState, Toggle, ToggleAction, WifiAction,
-    LAUNCHER_H, LAUNCHER_W, THICKNESS,
+    self, ActivePopup, App, CalendarAction, IndicatorKind, Launcher, LauncherCategory,
+    LauncherSidebarHit, PanelState, Toggle, ToggleAction, WifiAction, LAUNCHER_H, LAUNCHER_W,
+    THICKNESS,
 };
 use luna::theme_schedule::ThemeSchedule;
 
 /// Wysokość powierzchni „chrome” (pasek + launcher + OSD/powiadomienia).
 const CHROME_H: u32 = 680;
 
-/// Jednostka przewijania w `wl_pointer.axis`: jeden „ząbek” kółka = tyle pikseli
-/// powierzchni (patrz `selene::seat::WHEEL_STEP_PX`). Musi być z tym zgodna.
-const SCROLL_UNIT: f64 = 20.0;
 /// O ile pikseli przewijamy listę/siatkę launchera za jeden ząbek kółka.
 /// ~64 px to około jeden wiersz listy — jedno kliknięcie kółka = jeden wiersz.
 const LAUNCHER_SCROLL_PER_NOTCH: f64 = 64.0;
@@ -92,6 +92,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut animating_popup = ActivePopup::None;
     let mut anim_progress: f64 = 0.0;
     let mut target_progress: f64 = 0.0;
+    // Faza migania kursora w polu wyszukiwania launchera.
+    let mut caret_epoch = Instant::now();
     // Menu kontekstowe przycisku taskbara (PPM): zadanie, etykiety i akcje.
     let mut task_menu: Option<TaskMenuState> = None;
     let mut task_menu_hover: Option<usize> = None;
@@ -122,9 +124,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut theme_schedule = ThemeSchedule::load();
     let mut theme_schedule_stamp = ThemeSchedule::stamp();
 
+    // Data na pasku w formacie wybranym w Ustawieniach zegara (`clock.conf`).
+    let mut date_format = DateFormat::load();
+    let mut date_format_checked = Instant::now();
+
     // Dźwięk
     let mut volume_pct: u8 = 80;
     let mut volume_muted = false;
+    // Wyjścia audio — odświeżane przy otwarciu panelu dźwięku (wpctl potrafi trwać).
+    let mut sound_sources: Vec<luna::equalizer::Device> = Vec::new();
 
     // Wi-Fi (lista sieci pobierana w tle — `nmcli` potrafi trwać sekundy).
     let wifi_scan = luna::network::WifiScan::spawn();
@@ -149,7 +157,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let tray_ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut tray_started = false;
 
-    let mut brightness_pct: u8 = 0;
     let mut brightness_state: Option<u8> = None;
     let mut battery_state: Option<luna::system::BatteryStatus> = None;
     let mut bluetooth_state: Option<(bool, usize)> = None;
@@ -386,8 +393,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
 
-        // Zegar i data
-        let (clock, date, today_year, today_month, today_day) = now_clock_full();
+        // Zegar i data — format z Ustawień zegara (ten sam `clock.conf`).
+        if date_format_checked.elapsed() >= std::time::Duration::from_secs(2) {
+            date_format_checked = Instant::now();
+            date_format = DateFormat::load();
+        }
+        let (clock, date, today_year, today_month, today_day) = now_clock_full(&date_format);
         state.clock = clock;
         state.date = date;
 
@@ -480,7 +491,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         if let Ok(sys) = system.lock() {
             state.user = sys.user.clone();
             state.toggles = build_toggles(&sys);
-            brightness_pct = sys.brightness.unwrap_or(0);
             brightness_state = sys.brightness;
             battery_state = sys.battery;
             bluetooth_state = sys.bluetooth;
@@ -576,6 +586,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         if anim_progress == 0.0 {
             animating_popup = ActivePopup::None;
         }
+        state.active_indicator = match (animating_popup, target_progress > 0.0) {
+            (ActivePopup::Volume, true) => Some(IndicatorKind::Volume),
+            (ActivePopup::Wifi, true) => Some(IndicatorKind::Network),
+            (ActivePopup::Notifications, true) => Some(IndicatorKind::Notifications),
+            (ActivePopup::Quick, true) => Some(IndicatorKind::User),
+            _ => None,
+        };
+        launcher.caret_visible =
+            ((Instant::now().duration_since(caret_epoch).as_millis() / 530) % 2) == 0;
 
         let lw = LAUNCHER_W.min((size.width - 80.0).max(320.0));
         let larea = Rect::from_xywh((size.width - lw) / 2.0, THICKNESS + 24.0, lw, LAUNCHER_H);
@@ -676,13 +695,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                         0xff08 => {
                             // BackSpace — usuwa znak z pola wyszukiwania
                             launcher.search.pop();
+                            launcher.category = LauncherCategory::All;
                             launcher.scroll = 0.0;
                             launcher.selected = Some(0);
                             launcher.hover = None;
                         }
                         0xff52 | 0xff54 => {
                             let dy = if ke.keysym == 0xff52 { -1 } else { 1 };
-                            let count = launcher.filter_apps(&apps).len();
+                            let count = launcher.visible_apps(&apps).len();
                             launcher.navigate(count, 0, dy);
                             panel::ensure_selection_visible_count(
                                 count,
@@ -694,7 +714,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
                         0xff51 | 0xff53 => {
                             let dx = if ke.keysym == 0xff51 { -1 } else { 1 };
-                            let count = launcher.filter_apps(&apps).len();
+                            let count = launcher.visible_apps(&apps).len();
                             launcher.navigate(count, dx, 0);
                             panel::ensure_selection_visible_count(
                                 count,
@@ -705,7 +725,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             );
                         }
                         0xff0d | 0xff8d => {
-                            let filtered = launcher.filter_apps(&apps);
+                            let filtered = launcher.visible_apps(&apps);
                             if let Some(i) = launcher.selected_index(filtered.len()) {
                                 if let Some(app) = filtered.get(i) {
                                     launch_from_launcher(&mut launcher, app);
@@ -732,6 +752,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 typed = true;
                             }
                             if typed {
+                                launcher.category = LauncherCategory::All;
                                 launcher.scroll = 0.0;
                                 launcher.selected = Some(0);
                                 launcher.hover = None;
@@ -744,7 +765,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
 
                 // 1) Przewijanie listy lub kart w launcherze.
-                // `se.dy` jest w jednostkach powierzchni (jeden ząbek kółka = `SCROLL_UNIT`).
+                // `se.notches_y()` przelicza piksele z platformy na „ząbki” kółka.
                 // Lista/siatka przewija się płynnie w pikselach; karuzela skacze o kartę.
                 Event::Scroll(se) => {
                     // Modal zgody albo okno szczegółów blokuje przewijanie treści pod spodem.
@@ -757,12 +778,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                         app_menu = None;
                         app_menu_hover = None;
                     }
-                    let notches = se.dy / SCROLL_UNIT;
+                    let notches = se.notches_y();
                     let vertical = se.dy.abs() >= se.dx.abs();
                     let dir = if vertical { se.dy } else { se.dx };
                     if animating_popup == ActivePopup::Launcher && target_progress > 0.0 {
                         if larea.contains(se.position) {
-                            let filtered_len = launcher.filter_apps(&apps).len();
+                            let filtered_len = launcher.visible_apps(&apps).len();
                             if launcher.view == panel::LauncherView::Carousel {
                                 let steps = (notches.round() as i64).clamp(-3, 3);
                                 if steps != 0 {
@@ -893,9 +914,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
 
-                // Podświetlenie wiersza w centrum powiadomień (obok kalendarza).
+                // Podświetlenie wiersza w centrum powiadomień (dzwonek na pasku).
                 Event::PointerMotion { position, .. }
-                    if animating_popup == ActivePopup::Calendar && target_progress > 0.0 =>
+                    if animating_popup == ActivePopup::Notifications && target_progress > 0.0 =>
                 {
                     let nrect =
                         panel::notification_center_rect(bar, &frame.theme, notes.history_len());
@@ -1131,8 +1152,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     let is_burger = in_bar && pos.x >= bar.x() && pos.x <= burger.right() + 8.0;
                     let is_clock =
                         in_bar && pos.x >= clock_r.x() - 4.0 && pos.x <= clock_r.right() + 4.0;
-                    let is_quick =
-                        in_bar && panel::quick_button_rect(bar, theme, text, &state).contains(pos);
+                    let clicked_indicator = in_bar
+                        .then(|| panel::indicator_at(bar, theme, pos))
+                        .flatten();
                     let security_chip =
                         panel::security_chip_rect(bar, clock_r, theme, text, &state);
                     let is_security = in_bar && security_chip.is_some_and(|r| r.contains(pos));
@@ -1308,7 +1330,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                                             // Suwak jest aktywny tylko przy realnym podświetleniu.
                                             if brightness_state.is_some() {
                                                 luna::system::set_brightness(v);
-                                                brightness_pct = v;
                                                 brightness_state = Some(v);
                                             }
                                         }
@@ -1347,6 +1368,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                                         }
                                     }
                                     handled = true;
+                                } else if qrect.contains(pos) {
+                                    // Klik we wnętrze panelu nie zamyka go — dopiero klik poza.
+                                    handled = true;
                                 }
                             }
                             ActivePopup::Launcher => {
@@ -1377,6 +1401,28 @@ fn main() -> Result<(), Box<dyn Error>> {
                                         target_progress = 0.0;
                                     }
                                     handled = true;
+                                } else if let Some(hit) =
+                                    panel::launcher_sidebar_at(larea, &frame.theme, text, pos)
+                                {
+                                    match hit {
+                                        LauncherSidebarHit::Category(category) => {
+                                            launcher.category = category;
+                                            launcher.scroll = 0.0;
+                                            launcher.selected = Some(0);
+                                            launcher.hover = None;
+                                        }
+                                        LauncherSidebarHit::PowerOff => {
+                                            luna::power::perform(
+                                                luna::power::PowerAction::PowerOff,
+                                            );
+                                            target_progress = 0.0;
+                                        }
+                                        LauncherSidebarHit::Logout => {
+                                            luna::power::perform(luna::power::PowerAction::Logout);
+                                            target_progress = 0.0;
+                                        }
+                                    }
+                                    handled = true;
                                 } else if !launcher.search.is_empty()
                                     && panel::launcher_search_clear_at(
                                         larea,
@@ -1386,6 +1432,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     )
                                 {
                                     launcher.clear_search();
+                                    handled = true;
+                                } else if panel::launcher_rects(larea, &frame.theme, text)
+                                    .search
+                                    .contains(pos)
+                                {
+                                    // Klik w pole wyszukiwania tylko ustawia fokus —
+                                    // nigdy nie zamyka launchera; kursor mruga od nowa.
+                                    caret_epoch = Instant::now();
+                                    launcher.caret_visible = true;
                                     handled = true;
                                 } else if let Some(v) =
                                     panel::launcher_view_at(larea, &frame.theme, text, pos)
@@ -1472,6 +1527,49 @@ fn main() -> Result<(), Box<dyn Error>> {
                             }
                             ActivePopup::Calendar => {
                                 let crect = panel::calendar_popup_rect(bar, &frame.theme);
+                                if crect.contains(pos) {
+                                    if let Some(act) = panel::calendar_popup_hit(
+                                        crect,
+                                        &frame.theme,
+                                        pos,
+                                        cal_year,
+                                        cal_month,
+                                    ) {
+                                        match act {
+                                            CalendarAction::PrevMonth => {
+                                                if cal_month == 1 {
+                                                    cal_month = 12;
+                                                    cal_year -= 1;
+                                                } else {
+                                                    cal_month -= 1;
+                                                }
+                                            }
+                                            CalendarAction::NextMonth => {
+                                                if cal_month == 12 {
+                                                    cal_month = 1;
+                                                    cal_year += 1;
+                                                } else {
+                                                    cal_month += 1;
+                                                }
+                                            }
+                                            CalendarAction::SelectDay(d) => {
+                                                cal_selected = Some(d);
+                                            }
+                                            CalendarAction::OpenApp => {
+                                                let day = cal_selected.or_else(|| {
+                                                    (cal_year == today_year
+                                                        && cal_month == today_month)
+                                                        .then_some(today_day)
+                                                });
+                                                open_calendar_app(cal_year, cal_month, day);
+                                                target_progress = 0.0;
+                                            }
+                                        }
+                                    }
+                                    handled = true;
+                                }
+                            }
+                            ActivePopup::Notifications => {
                                 let nrect = panel::notification_center_rect(
                                     bar,
                                     &frame.theme,
@@ -1524,45 +1622,52 @@ fn main() -> Result<(), Box<dyn Error>> {
                                         None => {}
                                     }
                                     handled = true;
-                                } else if crect.contains(pos) {
-                                    if let Some(act) = panel::calendar_popup_hit(
-                                        crect,
-                                        &frame.theme,
-                                        pos,
-                                        cal_year,
-                                        cal_month,
-                                    ) {
-                                        match act {
-                                            CalendarAction::PrevMonth => {
-                                                if cal_month == 1 {
-                                                    cal_month = 12;
-                                                    cal_year -= 1;
-                                                } else {
-                                                    cal_month -= 1;
-                                                }
-                                            }
-                                            CalendarAction::NextMonth => {
-                                                if cal_month == 12 {
-                                                    cal_month = 1;
-                                                    cal_year += 1;
-                                                } else {
-                                                    cal_month += 1;
-                                                }
-                                            }
-                                            CalendarAction::SelectDay(d) => {
-                                                cal_selected = Some(d);
-                                            }
-                                            CalendarAction::OpenApp => {
-                                                let day = cal_selected.or_else(|| {
-                                                    (cal_year == today_year
-                                                        && cal_month == today_month)
-                                                        .then_some(today_day)
-                                                });
-                                                open_calendar_app(cal_year, cal_month, day);
-                                                target_progress = 0.0;
+                                }
+                            }
+                            ActivePopup::Volume => {
+                                let vrect = panel::volume_popup_rect(
+                                    bar,
+                                    &frame.theme,
+                                    sound_sources.len(),
+                                );
+                                if let Some(act) = panel::volume_popup_hit(
+                                    vrect,
+                                    &frame.theme,
+                                    pos,
+                                    sound_sources.len(),
+                                ) {
+                                    match act {
+                                        panel::VolumeAction::SetLevel(v) => {
+                                            luna::system::set_volume(v);
+                                            volume_pct = v;
+                                        }
+                                        panel::VolumeAction::StepDown => {
+                                            let v = volume_pct.saturating_sub(5);
+                                            luna::system::set_volume(v);
+                                            volume_pct = v;
+                                        }
+                                        panel::VolumeAction::StepUp => {
+                                            let v = (volume_pct + 5).min(100);
+                                            luna::system::set_volume(v);
+                                            volume_pct = v;
+                                        }
+                                        panel::VolumeAction::ToggleMute => {
+                                            luna::system::toggle_mute();
+                                            volume_muted = !volume_muted;
+                                        }
+                                        panel::VolumeAction::SelectSource(index) => {
+                                            if let Some(device) = sound_sources.get(index) {
+                                                luna::equalizer::set_default(device.id);
+                                                sound_sources = luna::equalizer::status()
+                                                    .hardware_sinks()
+                                                    .cloned()
+                                                    .collect();
                                             }
                                         }
                                     }
+                                    handled = true;
+                                } else if vrect.contains(pos) {
+                                    // Klik we wnętrze panelu (poza kontrolkami) go nie zamyka.
                                     handled = true;
                                 }
                             }
@@ -1579,6 +1684,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     target_progress = 0.0;
                                 } else {
                                     animating_popup = ActivePopup::Launcher;
+                                    caret_epoch = Instant::now();
                                     target_progress = 1.0;
                                 }
                             } else if is_clock {
@@ -1593,12 +1699,46 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     // Otwarcie centrum = powiadomienia uznane za obejrzane.
                                     unseen = 0;
                                 }
-                            } else if is_quick {
-                                if animating_popup == ActivePopup::Quick {
-                                    target_progress = 0.0;
-                                } else {
-                                    animating_popup = ActivePopup::Quick;
-                                    target_progress = 1.0;
+                            } else if let Some(kind) = clicked_indicator {
+                                match kind {
+                                    IndicatorKind::Volume => {
+                                        sound_sources = luna::equalizer::status()
+                                            .hardware_sinks()
+                                            .cloned()
+                                            .collect();
+                                        if animating_popup == ActivePopup::Volume {
+                                            target_progress = 0.0;
+                                        } else {
+                                            animating_popup = ActivePopup::Volume;
+                                            target_progress = 1.0;
+                                        }
+                                    }
+                                    IndicatorKind::Network => {
+                                        wifi_scan.refresh();
+                                        if animating_popup == ActivePopup::Wifi {
+                                            target_progress = 0.0;
+                                        } else {
+                                            animating_popup = ActivePopup::Wifi;
+                                            target_progress = 1.0;
+                                        }
+                                    }
+                                    IndicatorKind::Notifications => {
+                                        if animating_popup == ActivePopup::Notifications {
+                                            target_progress = 0.0;
+                                        } else {
+                                            animating_popup = ActivePopup::Notifications;
+                                            target_progress = 1.0;
+                                            unseen = 0;
+                                        }
+                                    }
+                                    IndicatorKind::User => {
+                                        if animating_popup == ActivePopup::Quick {
+                                            target_progress = 0.0;
+                                        } else {
+                                            animating_popup = ActivePopup::Quick;
+                                            target_progress = 1.0;
+                                        }
+                                    }
                                 }
                             } else if let Some(hit) =
                                 panel::tray_at(bar, &frame.theme, text, &state, pos)
@@ -1614,39 +1754,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                                                 bus.activate(&item, pos.x as i32, pos.y as i32)
                                             });
                                         }
-                                    }
-                                }
-                            } else if let Some(i) =
-                                panel::toggle_at(bar, &frame.theme, text, &state, pos)
-                            {
-                                match state.toggles[i].action {
-                                    ToggleAction::Wifi => {
-                                        wifi_scan.refresh();
-                                        animating_popup = ActivePopup::Wifi;
-                                        target_progress = 1.0;
-                                    }
-                                    ToggleAction::Volume => {
-                                        animating_popup = ActivePopup::Quick;
-                                        target_progress = 1.0;
-                                    }
-                                    ToggleAction::Brightness => {
-                                        let next =
-                                            luna::system::next_brightness_level(brightness_pct);
-                                        luna::system::set_brightness(next);
-                                        brightness_pct = next;
-                                        brightness_state = Some(next);
-                                        osd.icon = IconName::Brightness;
-                                        osd.show(
-                                            libluna_i18n::tr("Brightness"),
-                                            next as f64 / 100.0,
-                                        );
-                                        target_progress = 0.0;
-                                    }
-                                    // Bateria i inne wskaźniki statusu również otwierają
-                                    // wspólny panel sterowania.
-                                    ToggleAction::None => {
-                                        animating_popup = ActivePopup::Quick;
-                                        target_progress = 1.0;
                                     }
                                 }
                             } else if let Some(i) =
@@ -1682,6 +1789,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             );
                             launcher.scroll = launcher.scroll.clamp(0.0, max);
                             animating_popup = ActivePopup::Launcher;
+                            caret_epoch = Instant::now();
                             target_progress = 1.0;
                         } else if is_clock {
                             cal_year = today_year;
@@ -1690,9 +1798,31 @@ fn main() -> Result<(), Box<dyn Error>> {
                             animating_popup = ActivePopup::Calendar;
                             target_progress = 1.0;
                             unseen = 0;
-                        } else if is_quick {
-                            animating_popup = ActivePopup::Quick;
-                            target_progress = 1.0;
+                        } else if let Some(kind) = clicked_indicator {
+                            match kind {
+                                IndicatorKind::Volume => {
+                                    sound_sources = luna::equalizer::status()
+                                        .hardware_sinks()
+                                        .cloned()
+                                        .collect();
+                                    animating_popup = ActivePopup::Volume;
+                                    target_progress = 1.0;
+                                }
+                                IndicatorKind::Network => {
+                                    wifi_scan.refresh();
+                                    animating_popup = ActivePopup::Wifi;
+                                    target_progress = 1.0;
+                                }
+                                IndicatorKind::Notifications => {
+                                    animating_popup = ActivePopup::Notifications;
+                                    target_progress = 1.0;
+                                    unseen = 0;
+                                }
+                                IndicatorKind::User => {
+                                    animating_popup = ActivePopup::Quick;
+                                    target_progress = 1.0;
+                                }
+                            }
                         } else if let Some(hit) =
                             panel::tray_at(bar, &frame.theme, text, &state, pos)
                         {
@@ -1707,32 +1837,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                                             bus.activate(&item, pos.x as i32, pos.y as i32)
                                         });
                                     }
-                                }
-                            }
-                        } else if let Some(i) =
-                            panel::toggle_at(bar, &frame.theme, text, &state, pos)
-                        {
-                            match state.toggles[i].action {
-                                ToggleAction::Wifi => {
-                                    wifi_scan.refresh();
-                                    animating_popup = ActivePopup::Wifi;
-                                    target_progress = 1.0;
-                                }
-                                ToggleAction::Volume => {
-                                    animating_popup = ActivePopup::Quick;
-                                    target_progress = 1.0;
-                                }
-                                ToggleAction::Brightness => {
-                                    let next = luna::system::next_brightness_level(brightness_pct);
-                                    luna::system::set_brightness(next);
-                                    brightness_pct = next;
-                                    brightness_state = Some(next);
-                                    osd.icon = IconName::Brightness;
-                                    osd.show(libluna_i18n::tr("Brightness"), next as f64 / 100.0);
-                                }
-                                ToggleAction::None => {
-                                    animating_popup = ActivePopup::Quick;
-                                    target_progress = 1.0;
                                 }
                             }
                         } else if let Some(i) =
@@ -1986,10 +2090,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         let panel_hover = (
             hp.is_some_and(|p| burger.contains(p)),
             hp.is_some_and(|p| clock_r.contains(p)),
-            hp.is_some_and(|p| panel::quick_button_rect(bar, theme, text, &state).contains(p)),
+            hp.is_some_and(|p| panel::indicator_at(bar, theme, p).is_some()),
             hp.and_then(|p| panel::task_at(bar, theme, text, &state.tasks, p)),
             hp.and_then(|p| panel::workspace_at(bar, theme, text, &state, p)),
-            hp.and_then(|p| panel::toggle_at(bar, theme, text, &state, p)),
+            hp.and_then(|p| panel::indicator_at(bar, theme, p)),
             hp.and_then(|p| panel::tray_at(bar, theme, text, &state, p)),
         );
         let launcher_open = animating_popup == ActivePopup::Launcher && target_progress > 0.0;
@@ -2260,9 +2364,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                         holiday_country.unwrap_or(""),
                         true,
                     );
+                }
+                ActivePopup::Notifications => {
+                    let slide = (1.0 - anim_progress) * -10.0;
                     let nrect =
                         panel::notification_center_rect(bar, &frame.theme, notes.history_len());
-                    let cur_nrect = Rect::from_xywh(
+                    let cur = Rect::from_xywh(
                         nrect.x(),
                         nrect.y() + slide,
                         nrect.width(),
@@ -2270,10 +2377,34 @@ fn main() -> Result<(), Box<dyn Error>> {
                     );
                     panel::paint_notification_center(
                         &mut ctx,
-                        cur_nrect,
+                        cur,
                         notes.history(),
                         dnd,
                         notify_hover,
+                    );
+                }
+                ActivePopup::Volume => {
+                    let slide = (1.0 - anim_progress) * -10.0;
+                    let vrect = panel::volume_popup_rect(bar, &frame.theme, sound_sources.len());
+                    let cur = Rect::from_xywh(
+                        vrect.x(),
+                        vrect.y() + slide,
+                        vrect.width(),
+                        vrect.height(),
+                    );
+                    let names: Vec<String> = sound_sources
+                        .iter()
+                        .map(|d| d.description.clone())
+                        .collect();
+                    let active = sound_sources.iter().position(|d| d.is_default);
+                    panel::paint_volume_popup(
+                        &mut ctx,
+                        cur,
+                        volume_pct,
+                        volume_muted,
+                        &names,
+                        active,
+                        &hover,
                     );
                 }
                 ActivePopup::Quick => {
@@ -2490,8 +2621,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             std::time::Duration::from_millis(500)
         } else if startup.elapsed() < std::time::Duration::from_secs(8) {
             std::time::Duration::from_millis(500)
+        } else if animating_popup == ActivePopup::Launcher {
+            // Migający kursor wyszukiwania (faza 530 ms).
+            std::time::Duration::from_millis(250)
         } else if animating_popup != ActivePopup::None && target_progress > 0.0 {
-            // Otwarty launcher/menu: szybciej wykrywamy zmiany i odświeżamy podświetlenia.
+            // Otwarty panel/menu: szybciej wykrywamy zmiany i odświeżamy podświetlenia.
             std::time::Duration::from_millis(500)
         } else {
             // Instalacja pakietu ma pojawić się w launcherze bez restartu powłoki —
@@ -2580,6 +2714,12 @@ fn app_menu_rows(app: &App, pinned: bool) -> Vec<panel::AppMenuRow> {
             enabled: true,
             danger: false,
         },
+        AppMenuRow {
+            label: libluna_i18n::tr("Add to desktop"),
+            action: Some(AppMenuAction::AddToDesktop),
+            enabled: installed,
+            danger: false,
+        },
         AppMenuRow::separator(),
         AppMenuRow {
             label: libluna_i18n::tr("Open as administrator"),
@@ -2647,6 +2787,20 @@ fn perform_app_menu(
             luna::launcher_conf::save_from(launcher);
             AppMenuEffect::None
         }
+        A::AddToDesktop => {
+            if let Some(path) = &app.desktop_path {
+                // Pierwszy katalog z Ustawień, a gdy go brak — standardowy pulpit.
+                let settings = libluna_core::desktop::DesktopSettings::load();
+                let folder = settings
+                    .folders
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(libluna_core::desktop::desktop_dir);
+                let _ = libluna_core::desktop::add_shortcut_to(path, &folder);
+            }
+            // Launcher zostaje otwarty — użytkownik może dodać kolejne skróty.
+            AppMenuEffect::None
+        }
         A::OpenAsAdmin => {
             launch_app_as_admin(app);
             AppMenuEffect::CloseLauncher
@@ -2681,7 +2835,7 @@ fn reload_apps(apps: &mut Vec<App>, launcher: &mut Launcher, reset: bool) -> boo
         launcher.scroll = 0.0;
         launcher.carousel = 0;
     } else {
-        let len = launcher.filter_apps(apps).len();
+        let len = launcher.visible_apps(apps).len();
         launcher.selected = if len == 0 {
             None
         } else {
@@ -2916,8 +3070,9 @@ fn launch_from_launcher(launcher: &mut Launcher, app: &App) {
 /// polecenia nie ma, a komunikat ginie w `/dev/null`.
 fn launch_app(app: &App) {
     let Some(exec) = app.exec.clone() else { return };
-    // Aplikacje GPU (Zed, Electron, Chrome) nie utworzą powierzchni Wayland w Selene —
-    // kompozytor nie ma dmabuf/EGL. Uruchamiamy je przez Xwayland (X11), który działa.
+    // Aplikacje GPU (Zed, Electron, Chrome) potrzebują `zwp_linux_dmabuf_v1`.
+    // Z włączonym GPU Selene go ogłasza i aplikacje idą natywnie Waylandem;
+    // bez GPU uruchamiamy je przez Xwayland (X11), który zawsze działa.
     let force_x11 = needs_x11(app);
     // 1) `gio launch` — standardowa ścieżka dla wpisów `.desktop` (obsługuje `Path=`,
     //    kody pól, `DBusActivatable`). Uruchamiamy je w wątku, bo `gio` potrafi zwrócić
@@ -3056,13 +3211,30 @@ fn open_store_package(app: &App) {
     }
 }
 
+/// Czy kompozytor ogłasza klientom `zwp_linux_dmabuf_v1` (ścieżkę GPU).
+///
+/// Selene rejestruje ten global **tylko** przy `LUNA_GPU` i działającym EGL
+/// (zob. `selene/src/main.rs`). Powłoka dostaje tę samą zmienną z `luna-session`,
+/// więc to wiarygodny sygnał, czy aplikacja GPU może zostać na Waylandzie.
+fn wayland_gpu_available() -> bool {
+    std::env::var("LUNA_GPU")
+        .map(|v| !v.is_empty() && v != "0")
+        .unwrap_or(false)
+}
+
 /// Czy aplikacja wymaga XWaylanda (X11).
 ///
-/// Selene jest kompozytorem software'owym i nie oferuje `zwp_linux_dmabuf_v1`/EGL,
-/// więc aplikacje renderujące przez GPU nie mogą utworzyć powierzchni Wayland.
-/// Domyślnie obejmuje to Zeda, Electrona i Chrome; własne wpisy dodasz zmienną
-/// `LUNA_X11_APPS` (np. `LUNA_X11_APPS=moja-aplikacja,inna`).
+/// Aplikacje renderujące przez GPU (Zed, Electron, Chrome) potrzebują
+/// `zwp_linux_dmabuf_v1`. Gdy Selene go nie ogłasza (brak `LUNA_GPU` albo EGL),
+/// zostają na X11 — bez dmabuf nie utworzą powierzchni Wayland. Przy włączonym
+/// GPU idą **natywnie Waylandem**, a X11 jest już tylko fallbackiem.
+/// Własne wpisy wymusisz zmienną `LUNA_X11_APPS` (np. `LUNA_X11_APPS=moja-aplikacja,inna`).
 fn needs_x11(app: &App) -> bool {
+    needs_x11_with(app, wayland_gpu_available())
+}
+
+/// Wariant `needs_x11` z jawnym stanem GPU (testowalny bez modyfikowania env).
+fn needs_x11_with(app: &App, gpu: bool) -> bool {
     let mut hay =
         format!("{} {}", app.name, app.exec.as_deref().unwrap_or_default()).to_lowercase();
     if let Some(path) = &app.desktop_path {
@@ -3090,7 +3262,9 @@ fn needs_x11(app: &App) -> bool {
         "spotify",
     ];
     if X11_APPS.iter().any(|needle| hay.contains(needle)) {
-        return true;
+        // Z GPU/dmabuf aplikacja utworzy powierzchnię Wayland — nie spychamy jej
+        // na X11. Bez GPU zostaje dotychczasowe wymuszenie.
+        return !gpu;
     }
     // Aplikacje XFCE/GTK3 z tradycyjnym paskiem menu: GTK3 pod Waylandem **zawsze**
     // rysuje własne CSD (nie pyta kompozytora o tryb dekoracji), więc nie da się mu
@@ -3307,7 +3481,12 @@ fn apps_log() -> Option<std::fs::File> {
 fn log_apps(msg: &str) {
     use std::io::Write;
     if let Some(mut f) = apps_log() {
-        let _ = writeln!(f, "{} luna-shell: {}", now_clock_full().0, msg);
+        let _ = writeln!(
+            f,
+            "{} luna-shell: {}",
+            now_clock_full(&DateFormat::default()).0,
+            msg
+        );
     }
 }
 
@@ -3349,7 +3528,7 @@ fn open_calendar_app(year: i64, month: u32, day: Option<u32>) {
     }
 }
 
-fn now_clock_full() -> (String, String, i64, u32, u32) {
+fn now_clock_full(format: &DateFormat) -> (String, String, i64, u32, u32) {
     let t = unsafe { libc::time(std::ptr::null_mut()) };
     let mut tm = std::mem::MaybeUninit::<libc::tm>::uninit();
     let res = unsafe { libc::localtime_r(&t, tm.as_mut_ptr()) };
@@ -3362,7 +3541,7 @@ fn now_clock_full() -> (String, String, i64, u32, u32) {
         let d = tm.tm_mday as u32;
         (
             format!("{h:02}:{m:02}"),
-            format!("{d:02}.{mo:02}"),
+            format.full(CivilDate::from_ymd(y as i32, mo, d)),
             y,
             mo,
             d,
@@ -3375,7 +3554,7 @@ fn now_clock_full() -> (String, String, i64, u32, u32) {
         let (y, mo, d) = civil_from_days(days);
         (
             format!("{h:02}:{m:02}"),
-            format!("{d:02}.{mo:02}"),
+            format.full(CivilDate::from_ymd(y as i32, mo, d)),
             y,
             mo,
             d,
@@ -3464,6 +3643,7 @@ mod tests {
             theme_icon: None,
             name: name.to_owned(),
             category: String::new(),
+            categories: Vec::new(),
             exec: Some(exec.to_owned()),
             terminal: false,
             desktop_path: None,
@@ -3482,25 +3662,52 @@ mod tests {
     }
 
     #[test]
-    fn gpu_apps_use_xwayland() {
-        assert!(needs_x11(&app(
-            "Zed",
-            "/home/user/.local/zed.app/bin/zed %U"
-        )));
-        assert!(needs_x11(&app("Google Chrome", "google-chrome-stable %U")));
+    fn gpu_apps_use_xwayland_without_gpu() {
+        // Bez `zwp_linux_dmabuf_v1` aplikacja GPU nie utworzy powierzchni Wayland.
+        assert!(needs_x11_with(
+            &app("Zed", "/home/user/.local/zed.app/bin/zed %U"),
+            false
+        ));
+        assert!(needs_x11_with(
+            &app("Google Chrome", "google-chrome-stable %U"),
+            false
+        ));
+    }
+
+    #[test]
+    fn gpu_apps_stay_on_wayland_with_gpu() {
+        // Z GPU Selene ogłasza dmabuf, więc Zed/Chrome/Electron idą natywnie.
+        assert!(!needs_x11_with(
+            &app("Zed", "/home/user/.local/zed.app/bin/zed %U"),
+            true
+        ));
+        assert!(!needs_x11_with(
+            &app("Google Chrome", "google-chrome-stable %U"),
+            true
+        ));
+        assert!(!needs_x11_with(&app("Electron", "electron %U"), true));
     }
 
     #[test]
     fn xfce_apps_use_xwayland_for_our_decorations() {
         // GTK3 pod Waylandem zawsze rysuje własne CSD; przez X11 dostaje nasz pasek.
-        assert!(needs_x11(&app("Thunar", "thunar %U")));
-        assert!(needs_x11(&app("Terminal", "xfce4-terminal")));
-        assert!(needs_x11(&app("Mousepad", "mousepad %F")));
+        // To nie zależy od GPU — wymuszamy X11 w obu przypadkach.
+        assert!(needs_x11_with(&app("Thunar", "thunar %U"), false));
+        assert!(needs_x11_with(&app("Thunar", "thunar %U"), true));
+        assert!(needs_x11_with(&app("Terminal", "xfce4-terminal"), true));
+        assert!(needs_x11_with(&app("Mousepad", "mousepad %F"), true));
     }
 
     #[test]
     fn native_wayland_apps_stay_on_wayland() {
-        assert!(!needs_x11(&app("Luna — widgety", "luna-showcase")));
+        assert!(!needs_x11_with(
+            &app("Luna — widgety", "luna-showcase"),
+            false
+        ));
+        assert!(!needs_x11_with(
+            &app("Luna — widgety", "luna-showcase"),
+            true
+        ));
     }
 
     #[test]

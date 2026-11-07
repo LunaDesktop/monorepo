@@ -173,37 +173,6 @@ fn set_tz(zone: Option<&OsStr>) -> bool {
     ok
 }
 
-/// Nazwa miesiąca jako klucz i18n (`tr` zamieni ją na język interfejsu).
-pub fn month_name_key(month: u32) -> &'static str {
-    match month {
-        1 => "January",
-        2 => "February",
-        3 => "March",
-        4 => "April",
-        5 => "May",
-        6 => "June",
-        7 => "July",
-        8 => "August",
-        9 => "September",
-        10 => "October",
-        11 => "November",
-        _ => "December",
-    }
-}
-
-/// Nazwa dnia tygodnia jako klucz i18n (`0` = poniedziałek).
-pub fn weekday_name_key(weekday: u32) -> &'static str {
-    match weekday % 7 {
-        0 => "Monday",
-        1 => "Tuesday",
-        2 => "Wednesday",
-        3 => "Thursday",
-        4 => "Friday",
-        5 => "Saturday",
-        _ => "Sunday",
-    }
-}
-
 /// Skrót dnia tygodnia (kolumna kalendarza).
 pub fn weekday_short_key(weekday: u32) -> &'static str {
     match weekday % 7 {
@@ -217,9 +186,42 @@ pub fn weekday_short_key(weekday: u32) -> &'static str {
     }
 }
 
+pub use libluna_i18n::date_format::{
+    month_name_key, weekday_name_key, DateFields, DateFormat, DateOrder, DateSeparator, DateStyle,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn date_formats_follow_preferences() {
+        let date = CivilDate::from_ymd(2026, 10, 31);
+        let mut format = DateFormat::default();
+        assert_eq!(format.date(date), "31.10.2026");
+
+        format.fields = DateFields::DayMonth;
+        assert_eq!(format.date(date), "31.10");
+
+        format.style = DateStyle::Words;
+        let october = libluna_i18n::tr(month_name_key(10));
+        assert_eq!(format.date(date), format!("31 {october}"));
+
+        format.fields = DateFields::DayMonthYear;
+        format.order = DateOrder::MonthFirst;
+        assert_eq!(format.date(date), format!("{october} 31, 2026"));
+
+        format.style = DateStyle::Numeric;
+        format.separator = DateSeparator::Slash;
+        assert_eq!(format.date(date), "10/31/2026");
+        format.order = DateOrder::DayFirst;
+        assert_eq!(format.date(date), "31/10/2026");
+        format.separator = DateSeparator::Dash;
+        assert_eq!(format.date(date), "31-10-2026");
+
+        // Dzień tygodnia jest dodawany tylko w wariancie `full`.
+        assert!(format.full(date).starts_with(&libluna_i18n::tr("Saturday")));
+    }
 
     #[test]
     fn civil_roundtrips_for_known_dates() {

@@ -6,6 +6,7 @@
 //! `a{sa{sv}}` — nigdy przez `argv`.
 
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use zbus::blocking::Connection;
 use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Value};
@@ -358,17 +359,32 @@ pub fn connect_wifi(
         ));
     }
     let password = password.filter(|value| !value.is_empty());
-    if security.needs_password() && password.is_none() {
-        return Err("A password is required".to_owned());
-    }
     let conn = system()?;
     if let Some((path, uuid, id)) = find_wifi_connection(&conn, ssid) {
-        let settings = wifi_settings(ssid, security, password, hidden, Some((&uuid, &id)))?;
-        update_connection(&conn, path.as_str(), &settings)?;
-        activate_existing(&conn, path.as_str(), device_path)
+        // Zapisany profil ma już sekrety w keyrincie/settings. Nadpisujemy je
+        // **tylko**, gdy użytkownik naprawdę podał nowe hasło — wcześniej samo
+        // „Połącz” na zapisanej sieci wymuszało ponowne wpisanie i psuło profil.
+        if let Some(password) = password {
+            let settings =
+                wifi_settings(ssid, security, Some(password), hidden, Some((&uuid, &id)))?;
+            update_connection(&conn, path.as_str(), &settings)?;
+        }
+        let active = activate_path(&conn, path.as_str(), device_path)?;
+        wait_activated(&conn, &active, device_path)
     } else {
+        if security.needs_password() && password.is_none() {
+            return Err("A password is required".to_owned());
+        }
         let settings = wifi_settings(ssid, security, password, hidden, None)?;
-        add_and_activate(&conn, &settings, device_path)
+        let (profile, active) = add_and_activate_paths(&conn, &settings, device_path)?;
+        match wait_activated(&conn, &active, device_path) {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                // Nowo utworzony profil z odrzuconym hasłem nie może zostać zapisany.
+                let _ = delete_connection(&conn, profile.as_str());
+                Err(err)
+            }
+        }
     }
 }
 
@@ -814,43 +830,140 @@ fn update_connection(conn: &Connection, path: &str, settings: &Settings) -> Resu
 }
 
 fn activate_existing(conn: &Connection, path: &str, device: &str) -> Result<(), String> {
+    activate_path(conn, path, device).map(|_| ())
+}
+
+/// Aktywuje zapisany profil i zwraca ścieżkę `Connection.Active`.
+fn activate_path(conn: &Connection, path: &str, device: &str) -> Result<OwnedObjectPath, String> {
+    // Sygnatura D-Bus: `ActivateConnection(o connection, o device, o specific_object)`.
+    // Wcześniej w tym miejscu szły `&str`, więc NM dostawał `(sso)` i odrzucał
+    // **każde** połączenie z zapisanym profilem błędem `InvalidArgs`.
     let root = ObjectPath::from_static_str("/").expect("root path");
-    conn.call_method(
-        Some(NM_DEST),
-        NM_PATH,
-        Some(NM_IFACE),
-        "ActivateConnection",
-        &(path, device, root),
-    )
-    .map(|_| ())
-    .map_err(|err| format!("NetworkManager: {err}"))
+    let connection = ObjectPath::try_from(path)
+        .map_err(|err| format!("NetworkManager: invalid connection path: {err}"))?;
+    let device = ObjectPath::try_from(device)
+        .map_err(|err| format!("NetworkManager: invalid device path: {err}"))?;
+    let reply = conn
+        .call_method(
+            Some(NM_DEST),
+            NM_PATH,
+            Some(NM_IFACE),
+            "ActivateConnection",
+            &(&connection, &device, &root),
+        )
+        .map_err(|err| format!("NetworkManager: {err}"))?;
+    reply
+        .body()
+        .deserialize()
+        .map_err(|err| format!("NetworkManager: {err}"))
 }
 
 fn add_and_activate(conn: &Connection, settings: &Settings, device: &str) -> Result<(), String> {
-    add_and_activate_path(conn, settings, device).map(|_| ())
+    add_and_activate_paths(conn, settings, device).map(|_| ())
 }
 
 /// `AddAndActivateConnection` zwraca parę `(profil, aktywne połączenie)`.
-fn add_and_activate_path(
+fn add_and_activate_paths(
     conn: &Connection,
     settings: &Settings,
     device: &str,
-) -> Result<String, String> {
+) -> Result<(OwnedObjectPath, OwnedObjectPath), String> {
+    // Sygnatura: `AddAndActivateConnection(a{sa{sv}} connection, o device,
+    // o specific_object)`. Kolejność `(settings, device, root)` jest istotna —
+    // wcześniejsze `(settings, root, device)` wysyłało ścieżki w złej kolejności
+    // i jako stringi, więc tworzenie nowego połączenia zawsze kończyło się
+    // `InvalidArgs`.
     let root = ObjectPath::from_static_str("/").expect("root path");
+    let device = ObjectPath::try_from(device)
+        .map_err(|err| format!("NetworkManager: invalid device path: {err}"))?;
     let reply = conn
         .call_method(
             Some(NM_DEST),
             NM_PATH,
             Some(NM_IFACE),
             "AddAndActivateConnection",
-            &(settings, root, device),
+            &(settings, &device, &root),
         )
         .map_err(|err| format!("NetworkManager: {err}"))?;
-    let (path, _active): (OwnedObjectPath, OwnedObjectPath) = reply
+    reply
         .body()
         .deserialize()
-        .map_err(|err| format!("NetworkManager: {err}"))?;
-    Ok(path.to_string())
+        .map_err(|err| format!("NetworkManager: {err}"))
+}
+
+fn add_and_activate_path(
+    conn: &Connection,
+    settings: &Settings,
+    device: &str,
+) -> Result<String, String> {
+    add_and_activate_paths(conn, settings, device).map(|(profile, _)| profile.to_string())
+}
+
+/// Usuwa profil po nieudanej aktywacji (żeby nie zapisywać błędnego hasła).
+fn delete_connection(conn: &Connection, path: &str) -> Result<(), String> {
+    conn.call_method(Some(NM_DEST), path, Some(CONNECTION_IFACE), "Delete", &())
+        .map(|_| ())
+        .map_err(|err| format!("NetworkManager: {err}"))
+}
+
+/// Czeka, aż NetworkManager **naprawdę** aktywuje połączenie.
+///
+/// `ActivateConnection`/`AddAndActivateConnection` wracają natychmiast po
+/// zaakceptowaniu żądania — asocjacja i uwierzytelnienie WPA dzieją się w tle.
+/// Bez tego oczekiwania zły klucz kończył się komunikatem „połączono”, mimo że
+/// aktywacja zaraz potem padała.
+fn wait_activated(conn: &Connection, active: &OwnedObjectPath, device: &str) -> Result<(), String> {
+    const ACTIVATED: u32 = 2;
+    const DEACTIVATING: u32 = 3;
+    const DEACTIVATED: u32 = 4;
+
+    if active.as_str() == "/" {
+        return Err("NetworkManager: activation not started".to_owned());
+    }
+    let deadline = Instant::now() + Duration::from_secs(40);
+    loop {
+        match prop::<u32>(conn, active.as_str(), ACTIVE_IFACE, "State") {
+            Some(ACTIVATED) => return Ok(()),
+            Some(DEACTIVATING) | Some(DEACTIVATED) => return Err(activation_failure(conn, device)),
+            _ => {}
+        }
+        if Instant::now() >= deadline {
+            return Err("NetworkManager: connection timed out".to_owned());
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Czytelny powód nieudanej aktywacji (najczęściej zły klucz WPA).
+fn activation_failure(conn: &Connection, device: &str) -> String {
+    reason_message(state_reason(conn, device))
+}
+
+/// Tłumaczy `NMDeviceStateReason` na komunikat dla UI.
+fn reason_message(reason: Option<u32>) -> String {
+    match reason {
+        // NO_SECRETS / SUPPLICANT_DISCONNECT / CONFIG_FAILED / FAILED / TIMEOUT
+        Some(7..=11) => "secrets were required: the Wi-Fi password was rejected".to_owned(),
+        // SSID_NOT_FOUND — sieć zniknęła z zasięgu.
+        Some(53) => "NetworkManager: the Wi-Fi network was not found".to_owned(),
+        Some(code) => format!("NetworkManager: activation failed (reason {code})"),
+        None => "NetworkManager: activation failed".to_owned(),
+    }
+}
+
+/// `Device.StateReason` → `(stan, powód)`.
+fn state_reason(conn: &Connection, device: &str) -> Option<u32> {
+    let reply = conn
+        .call_method(
+            Some(NM_DEST),
+            device,
+            Some(PROPS),
+            "Get",
+            &(DEV_IFACE, "StateReason"),
+        )
+        .ok()?;
+    let (_state, reason): (u32, u32) = reply.body().deserialize().ok()?;
+    Some(reason)
 }
 
 /// UUID v4-podobny bez zależności (wystarczający dla profilu NM).
@@ -884,6 +997,36 @@ mod tests {
     fn value_bytes(map: &HashMap<String, Value<'_>>, key: &str) -> Option<Vec<u8>> {
         map.get(key)
             .and_then(|value| Vec::<u8>::try_from(value.clone()).ok())
+    }
+
+    /// Test integracyjny na żywym NetworkManagerze (nie w CI).
+    ///
+    /// Ponowna aktywacja **już połączonego** zapisanego profilu nie rozłącza
+    /// sieci, a przechodzi całą ścieżkę: `find_wifi_connection` →
+    /// `ActivateConnection` → `wait_activated`. Uruchom:
+    /// `cargo test --lib live_reactivating_saved_network -- --ignored`.
+    #[test]
+    #[ignore = "wymaga NetworkManagera i aktywnej zapisanej sieci Wi-Fi"]
+    fn live_reactivating_saved_network() {
+        let snap = snapshot();
+        let Some(active) = snap.active_wifi() else {
+            eprintln!("pominięto: brak aktywnej sieci Wi-Fi");
+            return;
+        };
+        assert!(active.known, "sieć musi mieć zapisany profil");
+        connect_wifi(&active.device, &active.ssid, active.security, None, false)
+            .expect("ponowna aktywacja zapisanego profilu");
+    }
+
+    #[test]
+    fn activation_reasons_map_to_friendly_errors() {
+        // Zły klucz WPA: brak sekretów albo błąd supplicanta → komunikat o haśle.
+        assert!(reason_message(Some(7)).contains("secrets"));
+        assert!(reason_message(Some(10)).contains("secrets"));
+        assert!(reason_message(Some(11)).contains("secrets"));
+        assert!(reason_message(Some(53)).contains("not found"));
+        assert!(reason_message(Some(42)).contains("reason 42"));
+        assert!(reason_message(None).contains("activation failed"));
     }
 
     #[test]

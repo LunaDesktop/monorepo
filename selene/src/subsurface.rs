@@ -135,6 +135,14 @@ impl Dispatch<wl_subsurface::WlSubsurface, SubsurfaceData> for State {
                 };
                 let mut guard = sd.subsurface.lock_or_recover();
                 if let Some(sub) = guard.as_mut() {
+                    // Diagnostyka: pozycja podpowierzchni to układ **klienta**.
+                    // Chrome rysuje tak swoje bąble (menu rozszerzeń, profil) i sam
+                    // robi hit-test na współrzędnych okna — jeśli rysujemy bąbel
+                    // gdzie indziej, niż klient go umieścił, podświetlenie wypada
+                    // na treści POD menu.
+                    if std::env::var_os("SELENE_STATS").is_some() && sub.position != (x, y) {
+                        eprintln!("selene/subsurface: pozycja ({x},{y})");
+                    }
                     if sub.sync {
                         sub.pending_position = Some((x, y));
                     } else {
@@ -251,29 +259,70 @@ pub fn commit(state: &mut State, data: &SurfaceData) {
             let _ = buffer.send_event(wayland_server::protocol::wl_buffer::Event::Release);
         }
     }
-    let (parent, repaint) = {
+    let (parent, repaint, info) = {
         let mut guard = data.subsurface.lock_or_recover();
         let Some(sub) = guard.as_mut() else {
             return;
         };
         let was_empty = sub.image.is_none();
+        let mut info = None;
         match image {
-            Some(img) if sub.sync => sub.pending = Some(img),
             Some(img) => {
-                if was_empty && std::env::var("SELENE_STATS").is_ok() {
-                    eprintln!(
-                        "selene/subsurface: pierwszy obraz desync {}x{}",
-                        img.width, img.height
-                    );
+                if std::env::var("SELENE_STATS").is_ok() {
+                    // Ile pikseli ma treść? Pusta powierzchnia (alfa 0) znaczy, że
+                    // klient nic nie narysował — nie jest to błąd kompozycji.
+                    let px = |i: usize| u32::from(img.rgba[i * 4 + 3]);
+                    let n = (img.width as usize * img.height as usize).max(1);
+                    let step = (n / 512).max(1);
+                    let mut seen = 0u32;
+                    let mut solid = 0u32;
+                    let mut i = 0usize;
+                    while i < n {
+                        seen += 1;
+                        if px(i) > 0 {
+                            solid += 1;
+                        }
+                        i += step;
+                    }
+                    info = Some((
+                        img.width,
+                        img.height,
+                        sub.position,
+                        solid * 100 / seen.max(1),
+                    ));
                 }
-                sub.image = Some(img);
+                if sub.sync {
+                    sub.pending = Some(img);
+                } else {
+                    if was_empty && std::env::var("SELENE_STATS").is_ok() {
+                        eprintln!(
+                            "selene/subsurface: pierwszy obraz desync {}x{} poz=({},{})",
+                            img.width, img.height, sub.position.0, sub.position.1
+                        );
+                    }
+                    sub.image = Some(img);
+                }
             }
             None => {}
         }
         // Zmiana pozycji/obrazu w trybie `desync` działa natychmiast.
         let repaint = !sub.sync;
-        (sub.parent.clone(), repaint)
+        (sub.parent.clone(), repaint, info)
     };
+    if let Some((w, h, (px, py), pct)) = info {
+        // Slot okna rodzica: `None` = powierzchnia rodzica nie jest oknem, więc
+        // jej dzieci nie mają gdzie trafić (i nic nie widać na ekranie).
+        let slot = parent
+            .data::<SurfaceData>()
+            .and_then(|pd| *pd.slot.lock_or_recover());
+        // Per-commit tylko na życzenie: powierzchnie potomne potrafią commitować
+        // każdą klatkę (wideo), a to zalewałoby log sesji.
+        if std::env::var_os("SELENE_TRACE_SUBSURFACE").is_some() {
+            eprintln!(
+                "selene/subsurface: obraz {w}x{h} poz=({px},{py}) piksele={pct}% rodzic_slot={slot:?}"
+            );
+        }
+    }
     if repaint {
         repaint_parent(state, &parent);
     }

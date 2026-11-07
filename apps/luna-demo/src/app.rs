@@ -120,7 +120,7 @@ fn run_docs() -> Result<(), Box<dyn Error>> {
                         &theme,
                         frame.text,
                         se.position,
-                        se.dy * 60.0,
+                        se.notches_y() * 60.0,
                     );
                 }
                 Event::Key(ke) => {

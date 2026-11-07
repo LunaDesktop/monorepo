@@ -5,29 +5,45 @@
 //! nasłuchu, deskryptorze backendu i magistrali wejścia. Wyjście (nested) i kompozycja
 //! idą przez `libluna-platform` + `libluna-render`.
 
+mod activation;
 mod compositor;
+mod content_type;
 mod control;
 mod cursor;
 mod data;
+mod data_control;
 mod decoration;
 mod dmabuf;
 mod drm;
 mod evdev;
 mod foreign_toplevel;
+mod fractional_scale;
+mod idle_inhibit;
 mod input;
+mod keyboard_shortcuts_inhibit;
 mod layer;
 mod monitors;
 mod output;
+mod pointer_constraints;
+mod pointer_ext;
+mod pointer_warp;
 mod popup;
+mod primary_selection;
+mod protocols;
 mod seat;
 mod shell;
 mod shm;
+mod single_pixel_buffer;
 mod state;
 mod subsurface;
 mod sync;
+mod tearing_control;
 mod test_input;
+mod text_input;
+mod viewporter;
 mod vt;
 mod workspace;
+mod xdg_output;
 mod xwayland;
 mod xwm;
 
@@ -37,11 +53,28 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
 use libluna_core::Event;
+use crate::protocols::input_method_v2::zwp_input_method_manager_v2::ZwpInputMethodManagerV2;
+use crate::protocols::virtual_keyboard_v1::zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1;
+use wayland_protocols::ext::data_control::v1::server::ext_data_control_manager_v1::ExtDataControlManagerV1;
 use wayland_protocols::ext::workspace::v1::server::ext_workspace_manager_v1::ExtWorkspaceManagerV1;
+use wayland_protocols::wp::content_type::v1::server::wp_content_type_manager_v1::WpContentTypeManagerV1;
 use wayland_protocols::wp::cursor_shape::v1::server::wp_cursor_shape_manager_v1::WpCursorShapeManagerV1;
+use wayland_protocols::wp::fractional_scale::v1::server::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1;
+use wayland_protocols::wp::idle_inhibit::zv1::server::zwp_idle_inhibit_manager_v1::ZwpIdleInhibitManagerV1;
+use wayland_protocols::wp::keyboard_shortcuts_inhibit::zv1::server::zwp_keyboard_shortcuts_inhibit_manager_v1::ZwpKeyboardShortcutsInhibitManagerV1;
 use wayland_protocols::wp::linux_dmabuf::zv1::server::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1;
+use wayland_protocols::wp::pointer_constraints::zv1::server::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1;
+use wayland_protocols::wp::pointer_warp::v1::server::wp_pointer_warp_v1::WpPointerWarpV1;
+use wayland_protocols::wp::primary_selection::zv1::server::zwp_primary_selection_device_manager_v1::ZwpPrimarySelectionDeviceManagerV1;
+use wayland_protocols::wp::relative_pointer::zv1::server::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1;
+use wayland_protocols::wp::single_pixel_buffer::v1::server::wp_single_pixel_buffer_manager_v1::WpSinglePixelBufferManagerV1;
+use wayland_protocols::wp::tearing_control::v1::server::wp_tearing_control_manager_v1::WpTearingControlManagerV1;
+use wayland_protocols::wp::text_input::zv3::server::zwp_text_input_manager_v3::ZwpTextInputManagerV3;
+use wayland_protocols::wp::viewporter::server::wp_viewporter::WpViewporter;
+use wayland_protocols::xdg::activation::v1::server::xdg_activation_v1::XdgActivationV1;
 use wayland_protocols::xdg::decoration::zv1::server::zxdg_decoration_manager_v1;
 use wayland_protocols::xdg::shell::server::xdg_wm_base;
+use wayland_protocols::xdg::xdg_output::zv1::server::zxdg_output_manager_v1::ZxdgOutputManagerV1;
 use wayland_protocols::xwayland::shell::v1::server::xwayland_shell_v1::XwaylandShellV1;
 use wayland_protocols_wlr::foreign_toplevel::v1::server::zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1;
 use wayland_protocols_wlr::layer_shell::v1::server::zwlr_layer_shell_v1;
@@ -130,7 +163,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(|v| !v.is_empty() && v != "0")
         .unwrap_or(false);
     if gpu_on && dmabuf::available() {
-        handle.create_global::<State, ZwpLinuxDmabufV1, ()>(3, ());
+        handle.create_global::<State, ZwpLinuxDmabufV1, ()>(4, ());
         dmabuf::enable();
         if std::env::var("SELENE_STATS").is_ok() {
             let formats = libluna_render::gpu::dmabuf_formats();
@@ -142,20 +175,57 @@ fn main() -> Result<(), Box<dyn Error>> {
         handle.create_global::<State, wl_output::WlOutput, usize>(4, index);
     }
     state.output_globals = output_count;
-    handle.create_global::<State, xdg_wm_base::XdgWmBase, ()>(1, ());
+    // Wersja 3: `xdg_popup.reposition` + `xdg_positioner.set_parent_size`
+    // (v3 obsługujemy w `shell.rs`; nieznane żądania są ignorowane). Niższa wersja
+    // odbiera klientom możliwość przestawiania menu bez zamykania ich.
+    handle.create_global::<State, xdg_wm_base::XdgWmBase, ()>(3, ());
     handle.create_global::<State, zxdg_decoration_manager_v1::ZxdgDecorationManagerV1, ()>(1, ());
     handle.create_global::<State, zwlr_layer_shell_v1::ZwlrLayerShellV1, ()>(4, ());
     handle.create_global::<State, wl_data_device_manager::WlDataDeviceManager, ()>(3, ());
+    // Menedżer schowka (historia, przetrwanie zamknięcia źródła).
+    handle.create_global::<State, ExtDataControlManagerV1, ()>(1, ());
+    // Aktywacja okien z portali/launcherów (tokeny jednorazowe).
+    handle.create_global::<State, XdgActivationV1, ()>(1, ());
+    // Selekcja pierwotna (środkowy przycisk) — osobny schowek od Ctrl+C/Ctrl+V.
+    handle.create_global::<State, ZwpPrimarySelectionDeviceManagerV1, ()>(1, ());
     // Wersja 4 to minimum dla `wl_keyboard.repeat_info`; wersja 1 kończyła klienta
     // twardym przerwaniem, gdy wysyłaliśmy zdarzenie ponad zadeklarowaną wersję obiektu.
     handle.create_global::<State, wl_seat::WlSeat, ()>(5, ());
     // Kształty kursora (`text`, `pointer`, `ew-resize`…): bez tego każda aplikacja
     // GTK/Qt pokazuje naszą strzałkę nawet nad polem tekstowym.
     handle.create_global::<State, WpCursorShapeManagerV1, ()>(2, ());
+    // Względny ruch kursora: gry i mouselook (także przez XWayland).
+    handle.create_global::<State, ZwpRelativePointerManagerV1, ()>(1, ());
+    // Blokada/zamknięcie kursora w regionie (mouselook, mapy, edytory).
+    handle.create_global::<State, ZwpPointerConstraintsV1, ()>(1, ());
+    // Wideo/prezentacje nie wygaszają ekranu.
+    handle.create_global::<State, ZwpIdleInhibitManagerV1, ()>(1, ());
+    // IME: pole tekstowe w aplikacji + input method (fcitx5/ibus/własna).
+    handle.create_global::<State, ZwpTextInputManagerV3, ()>(1, ());
+    handle.create_global::<State, ZwpInputMethodManagerV2, ()>(1, ());
+    handle.create_global::<State, ZwpVirtualKeyboardManagerV1, ()>(1, ());
+    // Skalowanie/kadrowanie buforów i preferowana skala ułamkowa.
+    handle.create_global::<State, WpViewporter, ()>(1, ());
+    handle.create_global::<State, WpFractionalScaleManagerV1, ()>(1, ());
     handle.create_global::<State, ZwlrForeignToplevelManagerV1, ()>(3, ());
     handle.create_global::<State, ExtWorkspaceManagerV1, ()>(1, ());
     // X11 (XWayland): bez tego globalu Xwayland nie przypisze okien X11 do powierzchni.
     handle.create_global::<State, XwaylandShellV1, ()>(1, ());
+    // Opis monitorów dla aplikacji (`xdg-output`): bez niego Qt ostrzega o nieznanym
+    // ekranie, a Java/AWT, OBS i część gier widzą tylko pierwszy monitor.
+    handle.create_global::<State, ZxdgOutputManagerV1, ()>(3, ());
+    // Inhibicja skrótów pulpitu: gry, emulatory i klienty zdalnego pulpitu muszą
+    // móc przechwycić Super/Alt+Tab, inaczej te klawisze nigdy do nich nie dotrą.
+    handle.create_global::<State, ZwpKeyboardShortcutsInhibitManagerV1, ()>(1, ());
+    // Rodzaj treści powierzchni (wideo/foto) — Chrome i Firefox zgłaszają go
+    // przed odtwarzaniem; bez globalu zgłaszają brak wsparcia.
+    handle.create_global::<State, WpContentTypeManagerV1, ()>(1, ());
+    // Bufory 1×1 (GTK4/Chromium): tło, maska albo świecący piksel bez pełnego bufora.
+    handle.create_global::<State, WpSinglePixelBufferManagerV1, ()>(1, ());
+    // Przenoszenie kursora: aplikacje X11 przez Xwaylanda, Java/AWT i Wine.
+    handle.create_global::<State, WpPointerWarpV1, ()>(1, ());
+    // Preferencja tearingu (gry) — przyjmujemy, ale prezentacja zostaje przy vblanku.
+    handle.create_global::<State, WpTearingControlManagerV1, ()>(1, ());
 
     // Gniazdo nasłuchu: `wayland-0`, `wayland-1`, …
     ensure_runtime_dir()?;
@@ -208,6 +278,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Wyjście: realne DRM/KMS (gdy `SELENE_BACKEND=drm`) lub nested na nadrzędnym kompozytorze.
     if std::env::var("SELENE_BACKEND").as_deref() == Ok("drm") {
+        state.drm_backend = true;
         // Konsola zostaje w trybie tekstowym, więc Ctrl+C z klawiatury wysyła SIGINT do
         // grupy procesów pierwszego planu VT — czyli do greetd i całej sesji. Przejmujemy
         // pierwszy plan, żeby sygnały z klawiatury trafiały wyłącznie do Selene.
@@ -274,6 +345,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut stats_report = std::time::Instant::now();
 
     loop {
+        // Most schowka Wayland → X11: uruchom pobranie i odbierz bajty, które
+        // już przyszły. `wl_data_source.send` musi iść z tego wątku (protokół),
+        // a rura jest dołączona do `poll` niżej — bez blokowania sesji.
+        crate::data::pump_clipboard();
+        // Kopia deskryptora na czas `poll` — menedżer schowka może zamknąć
+        // oryginał w trakcie `dispatch_clients`.
+        let clipboard_dup = crate::data::clipboard_fd().and_then(|fd| {
+            let fd = unsafe { BorrowedFd::borrow_raw(fd) };
+            rustix::io::dup(fd).ok()
+        });
         // Skryptowane wejście (testy izolowanej sesji).
         if let Some(script) = script_input.as_mut() {
             script.poll(&mut state, &handle);
@@ -305,14 +386,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         if let Some(fd) = &control_fd {
             fds.push(rustix::event::PollFd::new(fd, rustix::event::PollFlags::IN));
         }
+        // Rura mostka schowka (jeśli trwa pobieranie tekstu dla X11).
+        if let Some(fd) = &clipboard_dup {
+            fds.push(rustix::event::PollFd::new(fd, rustix::event::PollFlags::IN));
+        }
         // Budzimy się co ~16 ms przy skrypcie wejścia (dopisane polecenia) oraz gdy
         // kursor stoi w „gorącym rogu” — poświata musi rosnąć, a aktywacja nie może
         // zależeć od dalszego ruchu myszy. Bez tego budzimy się najpóźniej co sekundę,
         // gdy czeka jakikolwiek próg bezczynności (wygaszenie/blokada/usypianie).
         let corner_wait = state.ws_corner_hover.is_some() && !state.ws_corner_latch;
         let idle_wait = crate::seat::idle_wait_ms(&state);
+        // Czekając na dane schowka, nie możemy spać bez końca — deadline transferu
+        // (1,5 s) egzekwuje dopiero kolejne `pump_clipboard`.
+        let clipboard_waiting = crate::data::clipboard_pending();
         let poll_timeout = if script_input.is_some() || corner_wait {
             16
+        } else if clipboard_waiting {
+            20
         } else {
             idle_wait.map(|ms| ms.clamp(16, 1000) as i32).unwrap_or(-1)
         };
@@ -400,6 +490,16 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         // X11: tytuły okien i życzenia stanu od klientów (XWM działa w osobnym wątku).
         xwm::sync(&mut state);
+        // Most schowka X11 → Wayland: XWM publikuje migawkę tekstu, my rozsyłamy oferty.
+        crate::data::sync_x11_selection(&mut state, &handle);
+        // Nowe okno/popup pod **nieruchomym** kursorem musi dostać `wl_pointer.enter`.
+        // Bez tego menu przeglądarki nie podświetla pozycji, dopóki nie ruszysz myszą,
+        // a pierwszy klik bywa traktowany jak klik poza menu.
+        crate::seat::refresh_pointer_focus(&mut state);
+        // Klienci muszą wiedzieć, na którym wyjściu leży ich powierzchnia
+        // (`wl_surface.enter`) — bez tego Chromium nie traktuje swoich okien
+        // potomnych (bąble rysowane jako `wl_subsurface`) jako interaktywnych.
+        crate::output::sync_surface_outputs(&state);
         // Faktyczny modeset DRM mógł poprawić rozmiar/odświeżanie — wyślij klientom
         // świeże `wl_output` (inaczej panel i okna zostają przy wczesnym probe).
         monitors::refresh_bound(&mut state);

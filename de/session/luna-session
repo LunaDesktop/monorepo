@@ -46,12 +46,32 @@ if [ "$SELENE_BACKEND" = "drm" ]; then
     export SELENE_INPUT
 fi
 
+# GPU: **opt-in**. Domyślnie ścieżka wyjścia zostaje CPU — GPU w trybie DRM
+# nie jest jeszcze zweryfikowane na tyle, by włączać je z automatu (wahania
+# klatek, zachowanie przy zmianie trybu). Włączanie:
+#
+#   LUNA_GPU=1 luna-session        # albo wpis w środowisku sesji
+#
+# UWAGA: bez `LUNA_GPU=1` Selene nie ogłasza `zwp_linux_dmabuf_v1`, więc klienty
+# (GTK4, Chromium, Flatpak) zostają na `wl_shm`/softwarze — dokładnie tak, jak
+# przed dodaniem `feedback` dmabufa.
+if [ -n "${LUNA_GPU:-}" ]; then
+    export LUNA_GPU
+fi
+
 # Diagnostyka wydajności (fps DRM + tempo kursora w Selene, fps powłoki w luna-shell).
 # Domyślnie **włączona**, bo log sesji jest trwały i tylko wtedy da się po fakcie ustalić,
 # gdzie znikają klatki. Wyłącz jawnie wolnym zerem:  SELENE_STATS=0 LUNA_STATS=0 luna-session
 : "${SELENE_STATS:=1}"
 : "${LUNA_STATS:=1}"
 export SELENE_STATS LUNA_STATS
+
+# Binarki zainstalowane przez użytkownika (np. `install -m755 ... ~/.local/bin`)
+# mają pierwszeństwo przed systemowymi — pozwala to testować/aktualizować Lunę
+# bez roota, a sesja zawsze uruchamia najnowszą powłokę i kompozytor. Robimy to
+# **przed** logiem, żeby `command -v selene` pokazywał faktycznie uruchomiony plik
+# (wcześniej log twierdził `"/usr/bin/selene"`, a proces brał starszy z `~/.local/bin`).
+export PATH="$HOME/.local/bin:$PATH"
 
 # Trwały log sesji: LightDM trzyma tylko 2 pliki `.xsession-errors` i obraca je przy
 # każdym starcie sesji, przez co logi Luny przepadają. Piszemy do stałego pliku w
@@ -74,10 +94,6 @@ fi
 
 # Kompozytor w tle, a po nim powłoka Luna (panel/OSD).
 rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-# Binarki zainstalowane przez użytkownika (np. `install -m755 ... ~/.local/bin`)
-# mają pierwszeństwo przed systemowymi — pozwala to testować/aktualizować Lunę
-# bez roota, a sesja zawsze uruchamia najnowszą powłokę i kompozytor.
-export PATH="$HOME/.local/bin:$PATH"
 ts() { printf '%s luna-session: %s\n' "$(date +%H:%M:%S)" "$*"; }
 # `locale -a` wypisuje `pl_PL.utf8`, a my używamy tagów typu `pl_PL.UTF-8`.
 # Porównujemy po usunięciu myślników i wielkości liter.
@@ -242,12 +258,39 @@ export ELECTRON_OZONE_PLATFORM_HINT="auto"
 # aplikacji Javy (IDE, narzędzia AWT/Swing) potrafią się źle rysować albo nie pojawiać.
 export _JAVA_AWT_WM_NONREPARENTING=1
 
+# Motyw kursora dla X11/Xwayland. Xwayland bez motywu zgłasza wbudowany
+# `X_cursor` („X”) dla okien bez własnego kursora — a tak zachowuje się m.in.
+# Zed. Wybieramy pierwszy motyw, który **naprawdę** ma pliki kursorów
+# (`Pagan-Cursors` bywa pustym opakowaniem z samym `Inherits`), oraz ustawiamy
+# `XCURSOR_PATH`, bo libXcursor domyślnie nie zagląda do /usr/local/share/icons.
+if [ -z "${XCURSOR_PATH:-}" ]; then
+    XCURSOR_PATH="${HOME:-}/.icons:${HOME:-}/.local/share/icons:/usr/local/share/icons:/usr/share/icons:/usr/share/pixmaps"
+    export XCURSOR_PATH
+fi
+if [ -z "${XCURSOR_THEME:-}" ]; then
+    for theme in Pagan-Cursors Adwaita DMZ-Black DMZ-White; do
+        for dir in "${HOME:-}/.icons" "${HOME:-}/.local/share/icons" /usr/local/share/icons /usr/share/icons; do
+            if [ -d "$dir/$theme/cursors" ] && [ -n "$(ls -A "$dir/$theme/cursors" 2>/dev/null)" ]; then
+                XCURSOR_THEME="$theme"
+                break 2
+            fi
+        done
+    done
+    if [ -n "${XCURSOR_THEME:-}" ]; then
+        export XCURSOR_THEME
+    fi
+fi
+if [ -z "${XCURSOR_SIZE:-}" ]; then
+    XCURSOR_SIZE=24
+    export XCURSOR_SIZE
+fi
+
 # Aktualizacja środowiska aktywacji D-Bus i systemd (wymagane m.in. dla xdg-desktop-portal)
 if command -v dbus-update-activation-environment >/dev/null 2>&1; then
-    dbus-update-activation-environment --systemd WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_SESSION_DESKTOP MOZ_ENABLE_WAYLAND QT_QPA_PLATFORM GDK_BACKEND _JAVA_AWT_WM_NONREPARENTING 2>/dev/null || true
+    dbus-update-activation-environment --systemd WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_SESSION_DESKTOP MOZ_ENABLE_WAYLAND QT_QPA_PLATFORM GDK_BACKEND XCURSOR_THEME XCURSOR_SIZE XCURSOR_PATH _JAVA_AWT_WM_NONREPARENTING 2>/dev/null || true
 fi
 if command -v systemctl >/dev/null 2>&1; then
-    systemctl --user import-environment WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_SESSION_DESKTOP MOZ_ENABLE_WAYLAND QT_QPA_PLATFORM GDK_BACKEND _JAVA_AWT_WM_NONREPARENTING 2>/dev/null || true
+    systemctl --user import-environment WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_SESSION_DESKTOP MOZ_ENABLE_WAYLAND QT_QPA_PLATFORM GDK_BACKEND XCURSOR_THEME XCURSOR_SIZE XCURSOR_PATH _JAVA_AWT_WM_NONREPARENTING 2>/dev/null || true
 fi
 
 # Portal XDG (aplikacje GTK4/flatpak): startujemy jawnie, z poprawnym środowiskiem sesji.
@@ -278,6 +321,8 @@ if [ -z "$portal_bin" ]; then
 elif [ "$portal_backend_ok" = 0 ]; then
     ts "xdg-desktop-portal: backend GTK niekompletny ($missing) — pomijam portal"
     ts "  (napraw pakiet xdg-desktop-portal-gtk, aby włączyć portale; na razie GTK bez portali)"
+    ts "  Pagan: sudo pag install gnome-desktop-44.5   # libgnome-desktop-3.so.20"
+    ts "  Flatpak/Steam bez portalu nie uruchomi gier (timeout org.freedesktop.portal.Flatpak)"
     export GTK_USE_PORTAL=0
     if [ -n "${GDK_DEBUG:-}" ]; then
         export GDK_DEBUG="$GDK_DEBUG,no-portals"

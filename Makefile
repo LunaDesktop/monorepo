@@ -12,6 +12,8 @@
 #   make install-terminal   # aktualizacja tylko terminala
 #   make install-store      # aktualizacja tylko sklepu (systemowo)
 #   make install-store-user # sklep bez roota w ~/.local
+#   make install-welcome    # tylko powitanie
+#   make install-installer  # tylko instalator systemu
 #
 # Wspólny target/ sprawia, że `scripts/install.sh` widzi binarki z każdego
 # workspace'u; można go nadpisać: `make CARGO_TARGET_DIR=/tmp/t build`.
@@ -21,7 +23,7 @@ ROOT := $(CURDIR)
 CARGO_TARGET_DIR ?= $(ROOT)/target
 export CARGO_TARGET_DIR
 
-.PHONY: all build check test test-doc smoke smoke-x11 bench-render bench-gpu lock install install-terminal install-store install-store-user icons icons-png clean fmt \
+.PHONY: all build check test test-doc smoke smoke-x11 bench-render bench-gpu lock install install-terminal install-store install-store-user install-welcome install-installer icons icons-png clean fmt \
 	web-assets web-api web-docs
 
 all: build
@@ -64,6 +66,12 @@ install-store:
 
 install-store-user:
 	./scripts/install.sh --user --only store
+
+install-welcome:
+	./scripts/install.sh --only welcome
+
+install-installer:
+	./scripts/install.sh --only installer
 
 # Pastelowy pakiet freedesktop: PNG 16–512 px + skalowalne SVG z tego samego kodu.
 icons:

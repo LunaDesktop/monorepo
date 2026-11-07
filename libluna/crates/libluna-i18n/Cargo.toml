@@ -8,3 +8,4 @@ authors.workspace = true
 description = "Lekki system wielojęzyczny (i18n) dla libLuny — bez gettext."
 
 [dependencies]
+libluna-core.workspace = true

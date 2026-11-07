@@ -505,6 +505,8 @@ pub enum IconName {
     Home,
     User,
     Info,
+    /// Dzwonek — centrum powiadomień.
+    Bell,
     App,
     Brightness,
     // Ikony aplikacji (taskbar/launcher) — spójny zestaw wektorowy Luny.
@@ -540,7 +542,7 @@ pub enum IconName {
 
 impl IconName {
     /// Wszystkie ikony z pakietu (kolejność = kolejność w galerii).
-    pub const ALL: [IconName; 52] = [
+    pub const ALL: [IconName; 53] = [
         IconName::Menu,
         IconName::Search,
         IconName::Files,
@@ -568,6 +570,7 @@ impl IconName {
         IconName::Home,
         IconName::User,
         IconName::Info,
+        IconName::Bell,
         IconName::App,
         IconName::Brightness,
         IconName::Globe,
@@ -625,6 +628,7 @@ impl IconName {
             IconName::Home => "Home",
             IconName::User => "User",
             IconName::Info => "Info",
+            IconName::Bell => "Bell",
             IconName::App => "App",
             IconName::Brightness => "Brightness",
             IconName::Globe => "Globe",
@@ -742,6 +746,7 @@ fn external_names(name: IconName) -> &'static [&'static str] {
         IconName::Home => &["user-home", "folder-home"],
         IconName::User => &["system-users", "user-info"],
         IconName::Info => &["help-about", "dialog-information"],
+        IconName::Bell => &["preferences-system-notifications", "notifications"],
         IconName::Globe => &["applications-internet", "web-browser"],
         IconName::Mail => &["internet-mail", "mail-message-new"],
         IconName::Chat => &["internet-chat", "user-available"],
@@ -1493,6 +1498,26 @@ pub fn paint_icon_themed(
             scene.fill_circle(g.p(12.0, 7.8), g.d(1.3), color);
             scene.stroke_line(g.p(12.0, 11.0), g.p(12.0, 16.5), w, color);
         }
+        IconName::Bell => {
+            // Dzwonek: korpus z łukiem, dolna krawędź i serce.
+            scene.stroke_polyline(
+                &[
+                    g.p(6.5, 17.0),
+                    g.p(7.5, 14.5),
+                    g.p(7.5, 11.0),
+                    g.p(9.0, 8.0),
+                    g.p(12.0, 6.6),
+                    g.p(15.0, 8.0),
+                    g.p(16.5, 11.0),
+                    g.p(16.5, 14.5),
+                    g.p(17.5, 17.0),
+                ],
+                w,
+                color,
+            );
+            scene.stroke_line(g.p(6.5, 17.0), g.p(17.5, 17.0), w, color);
+            scene.fill_circle(g.p(12.0, 19.2), g.d(1.4), color);
+        }
         IconName::App => {
             // Ogólne okno aplikacji (pasek tytułu + kropki), a nie „kwadrat w kwadracie”.
             scene.stroke_rounded_rect(
@@ -2116,6 +2141,24 @@ fn paint_pastel(paint: &mut PaintCtx, name: IconName, g: &Grid) {
             p.circle(12.0, 12.0, 8.6, PASTEL_SKY.base);
             p.circle(12.0, 7.9, 1.35, PASTEL_PAPER.soft);
             p.rect(11.1, 10.6, 1.8, 6.2, 0.9, PASTEL_PAPER.soft);
+        }
+        IconName::Bell => {
+            p.poly(
+                &[
+                    (6.5, 17.0),
+                    (7.5, 14.5),
+                    (7.5, 11.0),
+                    (9.0, 8.0),
+                    (12.0, 6.6),
+                    (15.0, 8.0),
+                    (16.5, 11.0),
+                    (16.5, 14.5),
+                    (17.5, 17.0),
+                ],
+                PASTEL_BUTTER.base,
+            );
+            p.rect(6.4, 16.2, 11.2, 1.7, 0.8, PASTEL_BUTTER.ink);
+            p.circle(12.0, 19.0, 1.35, PASTEL_BUTTER.ink);
         }
         IconName::App => {
             // Pastelowe okno: liliowy pasek tytułu i jasna treść.

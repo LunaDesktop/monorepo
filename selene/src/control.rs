@@ -197,11 +197,43 @@ fn handle(state: &mut State, line: &str) {
                 crate::state::CursorImage::Custom { data, .. } => (data.width, data.height),
                 _ => (0, 0),
             };
+            let constraint = if crate::pointer_constraints::active_locked(state) {
+                "locked"
+            } else if crate::pointer_constraints::active_confined(state) {
+                "confined"
+            } else {
+                "none"
+            };
             eprintln!(
-                "selene/control: cursor image={image:?} surface={} size={w}x{h} pointers={} focus={:?}",
+                "selene/control: cursor image={image:?} surface={} size={w}x{h} pointers={} focus={:?} constraint={constraint} ime={} grab={}",
                 state.cursor_surface.is_some(),
                 state.pointers.len(),
-                state.pointer_focus.as_ref().map(|(slot, _)| *slot)
+                state.pointer_focus.as_ref().map(|(slot, _)| *slot),
+                state.ime.active_input.is_some(),
+                state.ime.input_method.as_ref().is_some_and(|im| im.grab.is_some())
+            );
+        }
+        // `clipboard` — stan schowka bez podglądania danych. Pozwala ustalić,
+        // czy po skopiowaniu w aplikacji źródło w ogóle dotarło do kompozytora
+        // (`kind=wayland` = klient Wayland, `control` = menedżer), a także czy
+        // Xwayland ma urządzenie danych (uczestniczy w moście X11 ↔ Wayland).
+        "clipboard" => {
+            let describe = |selection: &Option<crate::data::SelectionSource>| match selection {
+                Some(source) => format!(
+                    "kind={} source={:?} mimes={:?}",
+                    source.kind(),
+                    source.id().protocol_id(),
+                    source.mimes()
+                ),
+                None => "none".to_owned(),
+            };
+            eprintln!(
+                "selene/control: clipboard selection={} primary={} devices={} primary_devices={} control_devices={}",
+                describe(&state.selection),
+                describe(&state.primary_selection),
+                state.data_devices.len(),
+                state.primary_devices.len(),
+                state.control_devices.len()
             );
         }
         // `outputs` — geometria monitorów (testy sesji liczą z niej współrzędne).

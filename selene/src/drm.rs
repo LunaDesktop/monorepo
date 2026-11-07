@@ -9,13 +9,14 @@
 //! by Selene wiedział, ile i jakich monitorów ma użyć.
 
 use std::mem::MaybeUninit;
-use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::path::PathBuf;
 
 use rustix::fs::{Mode, OFlags};
 use rustix::mm::{mmap, munmap, MapFlags, ProtFlags};
 
 use libluna_core::{DisplaySettings, OutputMode};
+use libluna_render::gpu::ExportedFrame;
 
 use crate::monitors::{layout_horizontal, OutputInfo};
 
@@ -33,6 +34,10 @@ const DRM_IOCTL_MODE_DESTROY_DUMB: u32 = 0xC004_64B4;
 const DRM_IOCTL_MODE_ADDFB2: u32 = 0xC068_64B8;
 /// `drm_mode_rmfb` — usuwa framebuffer (przy zmianie trybu na żywo).
 const DRM_IOCTL_MODE_RMFB: u32 = 0xC004_64AF;
+/// `drm_prime_handle` — import `dmabuf` do GEM (`PRIME_FD_TO_HANDLE`).
+const DRM_IOCTL_PRIME_FD_TO_HANDLE: u32 = 0xC00C_642E;
+/// `drm_gem_close` — zwalnia uchwyt GEM zaimportowanego bufora.
+const DRM_IOCTL_GEM_CLOSE: u32 = 0x4008_6409;
 const DRM_IOCTL_MODE_PAGE_FLIP: u32 = 0xC018_64B0;
 /// `drm_mode_cursor` (`sizeof` = 28 = 0x1C).
 const DRM_IOCTL_MODE_CURSOR: u32 = 0xC01C_64A3;
@@ -202,6 +207,23 @@ struct ModeFbCmd2 {
     modifier: [u64; 4],
 }
 
+/// `struct drm_prime_handle` — fd `dmabuf` → uchwyt GEM.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct PrimeHandle {
+    handle: u32,
+    flags: u32,
+    fd: i32,
+}
+
+/// `struct drm_gem_close` — zwolnienie uchwytu GEM.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct GemClose {
+    handle: u32,
+    pad: u32,
+}
+
 /// `struct drm_mode_crtc_page_flip`.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -258,6 +280,37 @@ fn ioctl_rw<T: Copy, const OP: u32, F: AsFd>(fd: F, value: T) -> rustix::io::Res
     unsafe { rustix::ioctl::ioctl(fd, Rw::<T, OP>::new(value)) }
 }
 
+/// Opakowanie na ioctl typu „write-only” (np. `GEM_CLOSE`) — bez wyniku.
+struct W<T, const OP: u32>(T);
+
+impl<T, const OP: u32> W<T, OP> {
+    fn new(value: T) -> Self {
+        Self(value)
+    }
+}
+
+unsafe impl<T: Copy, const OP: u32> rustix::ioctl::Ioctl for W<T, OP> {
+    type Output = ();
+    const OPCODE: rustix::ioctl::Opcode =
+        rustix::ioctl::Opcode::old(OP as rustix::ioctl::RawOpcode);
+    const IS_MUTATING: bool = true;
+
+    fn as_ptr(&mut self) -> *mut core::ffi::c_void {
+        (&mut self.0 as *mut T).cast()
+    }
+
+    unsafe fn output_from_ptr(
+        _: rustix::ioctl::IoctlOutput,
+        _: *mut core::ffi::c_void,
+    ) -> rustix::io::Result<Self::Output> {
+        Ok(())
+    }
+}
+
+fn ioctl_w<T: Copy, const OP: u32, F: AsFd>(fd: F, value: T) -> rustix::io::Result<()> {
+    unsafe { rustix::ioctl::ioctl(fd, W::<T, OP>::new(value)) }
+}
+
 /// ioctl bez argumentu (np. `SET_MASTER`/`DROP_MASTER`).
 struct NoArg<const OP: u32>;
 
@@ -300,6 +353,48 @@ fn card_paths() -> Vec<PathBuf> {
     cards
 }
 
+/// Nazwa sterownika DRM dla karty (np. `qxl`, `virtio_gpu`, `i915`).
+fn driver_name(card: &PathBuf) -> Option<String> {
+    let name = card.file_name()?;
+    let link = std::fs::read_link(format!(
+        "/sys/class/drm/{}/device/driver",
+        name.to_string_lossy()
+    ))
+    .ok()?;
+    link.file_name()
+        .map(|name| name.to_string_lossy().to_string())
+}
+
+/// Czy sterownik jest wirtualny (QEMU/SPICE, virtio, VirtualBox, VKMS).
+///
+/// Takie karty nie obsługują `XBGR8888` na płaszczyźnie głównej — akceptują
+/// `ADDFB2`, ale obraz wychodzi z zamienionymi kanałami R/B. Dlatego od razu
+/// wybieramy `XRGB8888` i przepisujemy kanały przy prezentacji (koszt ~1–2 ms
+/// na klatkę 1080p, akceptowalny dla maszyny wirtualnej).
+fn is_virtual_driver(driver: Option<&str>) -> bool {
+    matches!(
+        driver,
+        Some(
+            "qxl"
+                | "virtio_gpu"
+                | "virtio-gpu"
+                | "bochs"
+                | "vboxvideo"
+                | "vkms"
+                | "cirrus"
+                | "mgag200"
+        )
+    )
+}
+
+/// Kolejność formatów bufora scanoutu (pierwszy, który zadziała).
+fn scanout_formats(driver: Option<&str>) -> &'static [u32] {
+    if is_virtual_driver(driver) {
+        &[DRM_FORMAT_XRGB8888]
+    } else {
+        &[DRM_FORMAT_XBGR8888, DRM_FORMAT_XRGB8888]
+    }
+}
 /// Szczegółowy raport wykrywania (`SELENE_DRM_PROBE=1`).
 ///
 /// Nie zmienia trybu i nie wymaga bycia DRM masterem — wypisuje wszystkie karty,
@@ -681,6 +776,10 @@ struct DrmOutput {
     swizzle: bool,
     /// Bufor obrazu kursora sprzętowego (tworzony leniwie).
     cursor: Option<DumbBuffer>,
+    /// Framebuffery z `dmabuf` (zero-copy), czekające na zwolnienie.
+    /// Trzymamy je do momentu, gdy flip je zastąpi — wcześniejsze zwolnienie
+    /// kazałoby kernelowi skanować zwolnioną pamięć.
+    dmabuf_fbs: std::collections::VecDeque<(u32, Vec<u32>)>,
 }
 
 /// Powód, dla którego nie udało się otworzyć wyjścia DRM (do diagnostyki).
@@ -698,6 +797,9 @@ pub enum DrmError {
 pub struct DrmBackend {
     fd: OwnedFd,
     outputs: Vec<DrmOutput>,
+    /// Nazwa sterownika karty (`qxl`, `virtio_gpu`, `i915`, …).
+    /// Sterowniki wirtualne nie obsługują `XBGR8888` — patrz [`scanout_formats`].
+    driver: Option<String>,
 }
 
 impl Drop for DrmBackend {
@@ -729,13 +831,26 @@ impl DrmBackend {
                 last = DrmError::Resources;
                 continue;
             };
+            let driver = driver_name(&card);
+            if std::env::var("SELENE_STATS").is_ok() {
+                eprintln!(
+                    "selene/drm: {} sterownik={:?}",
+                    card.display(),
+                    driver.as_deref().unwrap_or("?")
+                );
+            }
             let mut outputs = Vec::new();
             let mut used_crtcs = Vec::new();
             let mut skipped = 0usize;
             for &conn in &res.connectors {
-                if let Some(out) =
-                    setup_output(fd.as_fd(), conn, &res, &mut used_crtcs, preferences)
-                {
+                if let Some(out) = setup_output(
+                    fd.as_fd(),
+                    conn,
+                    &res,
+                    &mut used_crtcs,
+                    preferences,
+                    driver.as_deref(),
+                ) {
                     outputs.push(out);
                 } else {
                     skipped += 1;
@@ -754,7 +869,11 @@ impl DrmBackend {
                 last = DrmError::NoOutputs;
                 continue;
             }
-            return Ok(Self { fd, outputs });
+            return Ok(Self {
+                fd,
+                outputs,
+                driver,
+            });
         }
         Err(last)
     }
@@ -778,6 +897,37 @@ impl DrmBackend {
     /// Czy którykolwiek CRTC ma sprzętową tablicę gamma (night light).
     pub fn supports_night_light(&self) -> bool {
         self.outputs.iter().any(|o| o.gamma_size > 0)
+    }
+
+    /// Po powrocie z uśpienia: odzyskaj mastera DRM i odtwórz tryb na wyjściach.
+    ///
+    /// Jądro po suspend/resume może zgubić stan CRTC albo mastera DRM. Ponawiamy
+    /// `SET_MASTER` (na już-istniejącym masterze zwraca błąd — ignorujemy go)
+    /// i robimy modeset na bieżącym buforze każdego monitora.
+    ///
+    /// Zwraca `false`, gdy któryś CRTC odrzucił tryb — pętla wyjścia spróbuje
+    /// ponownie przy następnej klatce (np. gdy monitor jeszcze się budzi).
+    pub fn resume(&mut self) -> bool {
+        let fd = self.fd.as_fd();
+        let _ = ioctl_none::<DRM_IOCTL_SET_MASTER, _>(&fd);
+        let mut ok = true;
+        for out in &mut self.outputs {
+            let wanted = OutputMode::new(out.width as u16, out.height as u16, out.hz as u16);
+            let Some(mode) = pick_mode(&out.raw_modes, Some(wanted)).copied() else {
+                ok = false;
+                continue;
+            };
+            if !set_crtc(
+                fd,
+                out.crtc_id,
+                out.buffers[out.front].fb_id,
+                out.connector_id,
+                &mode,
+            ) {
+                ok = false;
+            }
+        }
+        ok
     }
 
     /// Zmienia tryb wyjścia **na żywo** (bez restartu sesji).
@@ -805,25 +955,30 @@ impl DrmBackend {
 
         let width = mode.hdisplay as u32;
         let height = mode.vdisplay as u32;
-        let mut swizzle = false;
         let make_pair = |format: u32| -> Option<(DumbBuffer, DumbBuffer)> {
             Some((
                 create_dumb(fd, width, height, format)?,
                 create_dumb(fd, width, height, format)?,
             ))
         };
-        let (b0, b1) = match make_pair(DRM_FORMAT_XBGR8888) {
-            Some(pair) => pair,
-            None => {
-                swizzle = true;
-                make_pair(DRM_FORMAT_XRGB8888)?
+        // Ta sama kolejność formatów co przy starcie: karty wirtualne (QXL)
+        // potrzebują `XRGB8888` z przepisaniem kanałów.
+        let mut chosen = None;
+        for &format in scanout_formats(self.driver.as_deref()) {
+            let Some((b0, b1)) = make_pair(format) else {
+                continue;
+            };
+            if set_crtc(fd, crtc_id, b0.fb_id, connector_id, &mode) {
+                chosen = Some((format, b0, b1));
+                break;
             }
-        };
-        if !set_crtc(fd, crtc_id, b0.fb_id, connector_id, &mode) {
             destroy_fb(fd, b0.fb_id);
             destroy_fb(fd, b1.fb_id);
-            return None;
+            destroy_dumb(fd, b0.handle);
+            destroy_dumb(fd, b1.handle);
         }
+        let (format, b0, b1) = chosen?;
+        let swizzle = format == DRM_FORMAT_XRGB8888;
 
         let out = &mut self.outputs[index];
         for old in &out.buffers {
@@ -835,6 +990,11 @@ impl DrmBackend {
         out.swizzle = swizzle;
         out.front = 0;
         out.buffers = [b0, b1];
+        // Bufory zero-copy sprzed zmiany trybu nie pasują już do nowego framebuffera.
+        for (fb, handles) in out.dmabuf_fbs.drain(..) {
+            destroy_fb(fd, fb);
+            release_gem(fd, &handles);
+        }
         // Bufor kursora zostanie utworzony na nowo przy następnym ruchu.
         out.cursor = None;
         Some(index)
@@ -861,27 +1021,42 @@ impl DrmBackend {
     /// Wypycha klatkę (RGBA, wymiary = rozmiar wyjścia) i kolejkuje page-flip.
     /// Po wywołaniu należy poczekać na [`DrmBackend::wait_flip`].
     pub fn present(&mut self, idx: usize, rgba: &[u8]) -> bool {
+        self.present_region(idx, rgba, None)
+    }
+
+    /// Jak [`DrmBackend::present`], ale kopiuje tylko `region` (piksele fizyczne).
+    ///
+    /// Przy podwójnym buforowaniu wołający musi podać sumę damage z **dwóch**
+    /// ostatnich klatek: bufor docelowy był ostatnio prezentowany dwa flipy temu.
+    /// `None` = cała klatka (bezpieczny fallback).
+    pub fn present_region(&mut self, idx: usize, rgba: &[u8], region: Option<PixelRect>) -> bool {
         let fd = &self.fd;
         let Some(out) = self.outputs.get_mut(idx) else {
             return false;
         };
         let back = (out.front + 1) & 1;
-        if out.swizzle {
-            swizzle_into(
-                out.buffers[back].ptr,
-                out.buffers[back].pitch,
-                rgba,
-                out.width as usize,
-                out.height as usize,
-            );
-        } else {
-            copy_rows_into(
-                out.buffers[back].ptr,
-                out.buffers[back].pitch,
-                rgba,
-                out.width as usize,
-                out.height as usize,
-            );
+        let (ptr, pitch) = (out.buffers[back].ptr, out.buffers[back].pitch);
+        let (w, h) = (out.width as usize, out.height as usize);
+        let copied = match (region, out.swizzle) {
+            (None, true) => swizzle_into(ptr, pitch, rgba, w, h),
+            (None, false) => copy_rows_into(ptr, pitch, rgba, w, h),
+            (Some(r), true) => swizzle_region_into(ptr, pitch, rgba, w, h, r),
+            (Some(r), false) => copy_region_into(ptr, pitch, rgba, w, h, r),
+        };
+        // Rozmiar klatki renderera musi zgadzać się z trybem wyjścia. Gdy się nie
+        // zgadza (np. renderer został z poprzedniego trybu), **nie wolno** robić
+        // page-flipu: pokazalibyśmy nieodświeżony bufor, czyli migotanie.
+        if !copied {
+            if std::env::var("SELENE_STATS").is_ok() {
+                eprintln!(
+                    "selene/drm: {} pominięty flip — klatka {} B, wyjście {}x{}",
+                    out.name,
+                    rgba.len(),
+                    out.width,
+                    out.height
+                );
+            }
+            return false;
         }
         let req = ModePageFlip {
             crtc_id: out.crtc_id,
@@ -897,8 +1072,109 @@ impl DrmBackend {
         true
     }
 
+    /// Prezentuje klatkę **bez kopiowania przez CPU** (zero-copy skanout).
+    ///
+    /// `dmabuf` z tekstury GPU → `PRIME_FD_TO_HANDLE` → `AddFB2WithModifiers` →
+    /// page-flip. Zamiast 8–13 MB `glReadPixels` + memcpy na klatkę mamy kilka
+    /// ioctlów. Zwraca `false`, gdy sterownik odrzucił bufor — wołający robi wtedy
+    /// zwykły readback (`present`), więc zero-copy nigdy nie psuje obrazu.
+    pub fn present_dmabuf(&mut self, idx: usize, frame: &ExportedFrame) -> bool {
+        let fd = self.fd.as_fd();
+        let Some(out) = self.outputs.get_mut(idx) else {
+            return false;
+        };
+        if frame.width != out.width
+            || frame.height != out.height
+            || frame.planes.is_empty()
+            || frame.planes.len() > 4
+        {
+            return false;
+        }
+        // Framebuffery z dwóch klatek wstecz są już po flipie (na flipy czekamy
+        // na początku iteracji), więc wolno je zwolnić.
+        while out.dmabuf_fbs.len() >= 2 {
+            if let Some((fb, handles)) = out.dmabuf_fbs.pop_front() {
+                destroy_fb(fd, fb);
+                for handle in handles {
+                    let _ = ioctl_w::<GemClose, DRM_IOCTL_GEM_CLOSE, _>(
+                        fd,
+                        GemClose { handle, pad: 0 },
+                    );
+                }
+            }
+        }
+
+        let mut handles: Vec<u32> = Vec::with_capacity(frame.planes.len());
+        for (plane_fd, _offset, _stride) in &frame.planes {
+            let request = PrimeHandle {
+                handle: 0,
+                flags: 0,
+                fd: plane_fd.as_raw_fd(),
+            };
+            match ioctl_rw::<PrimeHandle, DRM_IOCTL_PRIME_FD_TO_HANDLE, _>(fd, request) {
+                Ok(done) if done.handle != 0 => handles.push(done.handle),
+                _ => {
+                    release_gem(fd, &handles);
+                    return false;
+                }
+            }
+        }
+
+        let mut fb_desc = ModeFbCmd2 {
+            fb_id: 0,
+            width: out.width,
+            height: out.height,
+            pixel_format: frame.fourcc,
+            // `DRM_MODE_FB_MODIFIERS` — modyfikator jest istotny (tiling)
+            flags: 2,
+            ..ModeFbCmd2::default()
+        };
+        for (i, handle) in handles.iter().enumerate() {
+            fb_desc.handles[i] = *handle;
+        }
+        for (i, (_, offset, stride)) in frame.planes.iter().enumerate() {
+            fb_desc.pitches[i] = *stride;
+            fb_desc.offsets[i] = *offset;
+            fb_desc.modifier[i] = frame.modifier;
+        }
+        let Ok(added) = ioctl_rw::<ModeFbCmd2, DRM_IOCTL_MODE_ADDFB2, _>(fd, fb_desc) else {
+            release_gem(fd, &handles);
+            return false;
+        };
+        if added.fb_id == 0 {
+            release_gem(fd, &handles);
+            return false;
+        }
+
+        let req = ModePageFlip {
+            crtc_id: out.crtc_id,
+            fb_id: added.fb_id,
+            flags: DRM_MODE_PAGE_FLIP_EVENT,
+            reserved: 0,
+            user_data: idx as u64,
+        };
+        if ioctl_rw::<ModePageFlip, DRM_IOCTL_MODE_PAGE_FLIP, _>(fd, req).is_err() {
+            destroy_fb(fd, added.fb_id);
+            release_gem(fd, &handles);
+            return false;
+        }
+        out.dmabuf_fbs.push_back((added.fb_id, handles));
+        true
+    }
+
     /// Czeka na zakończenie page-flipu (zdarzenie z jądra).
+    ///
+    /// Po suspend/resume zdarzenie flipa potrafi nigdy nie przyjść — wcześniej
+    /// `read` na blokującym deskryptorze wisiał wtedy w nieskończoność i ekran
+    /// zostawał czarny. Dlatego czekamy przez `poll` z limitem czasu.
     pub fn wait_flip(&self) {
+        use rustix::event::{poll, PollFd, PollFlags};
+        let mut fds = [PollFd::new(&self.fd, PollFlags::IN)];
+        match poll(&mut fds, 200) {
+            Ok(0) => return,
+            Ok(_) => {}
+            Err(_) => return,
+        }
         let mut buf = [0u8; 32];
         loop {
             match rustix::io::read(&self.fd, &mut buf) {
@@ -997,6 +1273,7 @@ fn setup_output(
     res: &Resources,
     used_crtcs: &mut Vec<u32>,
     preferences: &DisplaySettings,
+    driver: Option<&str>,
 ) -> Option<DrmOutput> {
     let c = ioctl_rw::<ModeGetConnector, DRM_IOCTL_MODE_GETCONNECTOR, _>(
         fd,
@@ -1073,38 +1350,47 @@ fn setup_output(
 
     let width = mode.hdisplay as u32;
     let height = mode.vdisplay as u32;
-    // Preferujemy `XBGR8888`: pamięć to R,G,B,X, czyli dokładnie wyjście tiny-skia.
-    // `present` kopiuje wtedy wiersze bez przepisywania kanałów (oszczędność ~1–2 ms
-    // na klatkę 1080p). Gdy sterownik nie wspiera formatu — wracamy do `XRGB8888`.
-    let mut swizzle = false;
     let make_pair = |fmt: u32| -> Option<(DumbBuffer, DumbBuffer)> {
         Some((
             create_dumb(fd, width, height, fmt)?,
             create_dumb(fd, width, height, fmt)?,
         ))
     };
-    let (b0, b1) = match make_pair(DRM_FORMAT_XBGR8888) {
-        Some(pair) => pair,
-        None => {
-            swizzle = true;
-            make_pair(DRM_FORMAT_XRGB8888)?
-        }
-    };
 
-    let mut crtc_id = None;
-    for cand in candidates {
-        if used_crtcs.contains(&cand) {
+    // Preferujemy `XBGR8888`: pamięć to R,G,B,X, czyli dokładnie wyjście tiny-skia
+    // (`present` kopiuje wiersze bez przepisywania kanałów). Karty wirtualne
+    // (QXL/SPICE, virtio, VKMS) obsługują tylko `XRGB8888` — tam od razu
+    // wybieramy ten format i przepisujemy kanały. Gdy sterownik odrzuci
+    // `XBGR8888` przy `SETCRTC`, próbujemy kolejnego formatu.
+    let mut placed = None;
+    for &format in scanout_formats(driver) {
+        let Some((b0, b1)) = make_pair(format) else {
             continue;
+        };
+        let mut crtc_id = None;
+        for &cand in &candidates {
+            if used_crtcs.contains(&cand) {
+                continue;
+            }
+            if set_crtc(fd, cand, b0.fb_id, conn_id, &mode) {
+                crtc_id = Some(cand);
+                break;
+            }
+            if std::env::var("SELENE_STATS").is_ok() {
+                eprintln!("selene/drm: CRTC {cand} odrzucił tryb — próbuję następny");
+            }
         }
-        if set_crtc(fd, cand, b0.fb_id, conn_id, &mode) {
-            crtc_id = Some(cand);
+        if let Some(crtc_id) = crtc_id {
+            placed = Some((format, crtc_id, b0, b1));
             break;
         }
-        if std::env::var("SELENE_STATS").is_ok() {
-            eprintln!("selene/drm: CRTC {cand} zajęty — próbuję następny");
-        }
+        // Ten format nie zadziałał — zwolnij bufor i framebuffer, spróbuj następnego.
+        destroy_fb(fd, b0.fb_id);
+        destroy_fb(fd, b1.fb_id);
+        destroy_dumb(fd, b0.handle);
+        destroy_dumb(fd, b1.handle);
     }
-    let crtc_id = crtc_id?;
+    let (format, crtc_id, b0, b1) = placed?;
     // CRTC oznaczamy jako użyty **dopiero po udanym** `set_crtc`.
     used_crtcs.push(crtc_id);
     Some(DrmOutput {
@@ -1119,9 +1405,23 @@ fn setup_output(
         raw_modes: modes,
         buffers: [b0, b1],
         front: 0,
-        swizzle,
+        swizzle: format == DRM_FORMAT_XRGB8888,
         cursor: None,
+        dmabuf_fbs: std::collections::VecDeque::new(),
     })
+}
+
+/// Zwalnia uchwyty GEM zaimportowanych buforów (`dmabuf` → `PRIME_FD_TO_HANDLE`).
+fn release_gem(fd: BorrowedFd, handles: &[u32]) {
+    for handle in handles {
+        let _ = ioctl_w::<GemClose, DRM_IOCTL_GEM_CLOSE, _>(
+            fd,
+            GemClose {
+                handle: *handle,
+                pad: 0,
+            },
+        );
+    }
 }
 
 /// Usuwa framebuffer (po udanym modesecie na nowy obraz).
@@ -1295,10 +1595,81 @@ fn swizzle_argb_into(dst: *mut u8, pitch: usize, rgba: &[u8], width: usize, heig
     }
 }
 
-/// Przepisuje klatkę RGBA do bufora w formacie `XRGB8888` (kolejność B,G,R,X).
-fn swizzle_into(dst: *mut u8, pitch: usize, rgba: &[u8], width: usize, height: usize) {
+/// Prostokąt w pikselach fizycznych (współrzędne są przycinane do bufora).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PixelRect {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
+
+/// Przepisuje **wycinek** klatki RGBA do bufora `XRGB8888` (bez zamiany kanałów).
+fn copy_region_into(
+    dst: *mut u8,
+    pitch: usize,
+    rgba: &[u8],
+    width: usize,
+    height: usize,
+    r: PixelRect,
+) -> bool {
     if dst.is_null() || rgba.len() < width * height * 4 {
-        return;
+        return false;
+    }
+    let x0 = (r.x as usize).min(width);
+    let y0 = (r.y as usize).min(height);
+    let x1 = (r.x as usize).saturating_add(r.w as usize).min(width);
+    let y1 = (r.y as usize).saturating_add(r.h as usize).min(height);
+    if x0 >= x1 || y0 >= y1 {
+        return true;
+    }
+    let row_bytes = (x1 - x0) * 4;
+    unsafe {
+        for y in y0..y1 {
+            let src = rgba.as_ptr().add((y * width + x0) * 4);
+            std::ptr::copy_nonoverlapping(src, dst.add(y * pitch + x0 * 4), row_bytes);
+        }
+    }
+    true
+}
+
+/// Jak [`copy_region_into`], ale z zamianą R/B (`XRGB8888`).
+fn swizzle_region_into(
+    dst: *mut u8,
+    pitch: usize,
+    rgba: &[u8],
+    width: usize,
+    height: usize,
+    r: PixelRect,
+) -> bool {
+    if dst.is_null() || rgba.len() < width * height * 4 {
+        return false;
+    }
+    let x0 = (r.x as usize).min(width);
+    let y0 = (r.y as usize).min(height);
+    let x1 = (r.x as usize).saturating_add(r.w as usize).min(width);
+    let y1 = (r.y as usize).saturating_add(r.h as usize).min(height);
+    if x0 >= x1 || y0 >= y1 {
+        return true;
+    }
+    let count = x1 - x0;
+    unsafe {
+        for y in y0..y1 {
+            let src = &rgba[(y * width + x0) * 4..(y * width + x1) * 4];
+            let row_dst =
+                std::slice::from_raw_parts_mut(dst.add(y * pitch + x0 * 4) as *mut u32, count);
+            for (d, s) in row_dst.iter_mut().zip(src.chunks_exact(4)) {
+                *d = u32::from_ne_bytes([s[2], s[1], s[0], 0xff]);
+            }
+        }
+    }
+    true
+}
+
+/// Przepisuje klatkę RGBA do bufora w formacie `XRGB8888` (kolejność B,G,R,X).
+fn swizzle_into(dst: *mut u8, pitch: usize, rgba: &[u8], width: usize, height: usize) -> bool {
+    if dst.is_null() || rgba.len() < width * height * 4 {
+        return false;
     }
     unsafe {
         for y in 0..height {
@@ -1309,13 +1680,14 @@ fn swizzle_into(dst: *mut u8, pitch: usize, rgba: &[u8], width: usize, height: u
             }
         }
     }
+    true
 }
 
 /// Kopiuje klatkę RGBA do bufora `XBGR8888` (ta sama kolejność bajtów w pamięci)
 /// wiersz po wierszu. Gdy `pitch` zgadza się z szerokością, to jeden `memcpy`.
-fn copy_rows_into(dst: *mut u8, pitch: usize, rgba: &[u8], width: usize, height: usize) {
+fn copy_rows_into(dst: *mut u8, pitch: usize, rgba: &[u8], width: usize, height: usize) -> bool {
     if dst.is_null() || rgba.len() < width * height * 4 {
-        return;
+        return false;
     }
     let row_bytes = width * 4;
     unsafe {
@@ -1331,11 +1703,228 @@ fn copy_rows_into(dst: *mut u8, pitch: usize, rgba: &[u8], width: usize, height:
             }
         }
     }
+    true
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qxl_uses_xrgb_scanout() {
+        // QXL/SPICE nie obsługuje XBGR8888 — bufory muszą być XRGB8888
+        // (z przepisaniem kanałów przy prezentacji).
+        assert!(is_virtual_driver(Some("qxl")));
+        assert_eq!(scanout_formats(Some("qxl")), &[DRM_FORMAT_XRGB8888]);
+        assert_eq!(scanout_formats(Some("virtio_gpu")), &[DRM_FORMAT_XRGB8888]);
+    }
+
+    #[test]
+    fn real_gpu_prefers_xbgr_with_xrgb_fallback() {
+        assert!(!is_virtual_driver(Some("i915")));
+        assert_eq!(
+            scanout_formats(Some("i915")),
+            &[DRM_FORMAT_XBGR8888, DRM_FORMAT_XRGB8888]
+        );
+        // Brak informacji o sterowniku = zachowujemy dotychczasową kolejność.
+        assert_eq!(
+            scanout_formats(None),
+            &[DRM_FORMAT_XBGR8888, DRM_FORMAT_XRGB8888]
+        );
+    }
+
+    /// Damage w prezentacji DRM: kopiujemy **tylko** prostokąt, resztę bufora
+    /// zostawiamy nietkniętą (to jest cała oszczędność przy animacji panelu).
+    #[test]
+    fn present_region_copies_only_damage() {
+        let (w, h, pitch) = (4usize, 3usize, 4 * 4);
+        let mut dst = vec![0xAAu8; pitch * h];
+        let src = vec![0x11u8; w * h * 4];
+        assert!(copy_region_into(
+            dst.as_mut_ptr(),
+            pitch,
+            &src,
+            w,
+            h,
+            PixelRect {
+                x: 1,
+                y: 1,
+                w: 2,
+                h: 1
+            },
+        ));
+        for y in 0..h {
+            for x in 0..w {
+                let v = dst[y * pitch + x * 4];
+                let inside = y == 1 && (x == 1 || x == 2);
+                assert_eq!(v, if inside { 0x11 } else { 0xAA }, "piksel ({x},{y})");
+            }
+        }
+    }
+
+    /// Prostokąt wystający poza bufor musi zostać przycięty, a nie wyjść poza pamieć.
+    #[test]
+    fn present_region_clamps_to_buffer() {
+        let (w, h, pitch) = (2usize, 2usize, 2 * 4);
+        let mut dst = vec![0u8; pitch * h];
+        let src = vec![0x55u8; w * h * 4];
+        assert!(copy_region_into(
+            dst.as_mut_ptr(),
+            pitch,
+            &src,
+            w,
+            h,
+            PixelRect {
+                x: 1,
+                y: 1,
+                w: 100,
+                h: 100
+            },
+        ));
+        assert_eq!(dst[1 * pitch + 1 * 4], 0x55);
+        assert_eq!(dst[0], 0x00);
+    }
+
+    /// Zero-copy: klatka z GPU musi dać się zaimportować (`PRIME`) i zarejestrować
+    /// jako framebuffer (`AddFB2WithModifiers`). To dokładnie ta ścieżka, którą idzie
+    /// `present_dmabuf` — test łapie brak wsparcia sterownika **bez** przejmowania ekranu.
+    #[test]
+    fn exported_dmabuf_becomes_a_framebuffer() {
+        use libluna_render::{gpu::GpuRenderer, Renderer, Scene};
+
+        let Ok(card) = rustix::fs::open(
+            "/dev/dri/card1",
+            OFlags::RDWR | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) else {
+            eprintln!("pominięto: brak /dev/dri/card1");
+            return;
+        };
+        let fd = card.as_fd();
+
+        // Sprawdzamy kilka rozmiarów: mały (test), potem realny 1080p.
+        let mut any_ok = false;
+        for (w, h) in [(64u32, 48u32), (256, 256), (1920, 1080)] {
+            let Ok(mut gpu) = GpuRenderer::new(w, h) else {
+                eprintln!("pominięto: brak EGL/GPU");
+                return;
+            };
+            gpu.draw(
+                &Scene::new(),
+                1.0,
+                libluna_core::Color::from_rgba8(255, 0, 0, 255),
+            );
+            let Some(frame) = gpu.export_dmabuf() else {
+                eprintln!("pominięto: sterownik nie eksportuje dmabuf");
+                return;
+            };
+            let mut handles: Vec<u32> = Vec::new();
+            for (plane_fd, _, _) in &frame.planes {
+                let request = PrimeHandle {
+                    handle: 0,
+                    flags: 0,
+                    fd: plane_fd.as_raw_fd(),
+                };
+                match ioctl_rw::<PrimeHandle, DRM_IOCTL_PRIME_FD_TO_HANDLE, _>(fd, request) {
+                    Ok(done) if done.handle != 0 => handles.push(done.handle),
+                    _ => {
+                        release_gem(fd, &handles);
+                        eprintln!("pominięto: PRIME_FD_TO_HANDLE odrzucone (sterownik)");
+                        return;
+                    }
+                }
+            }
+            let mut desc = ModeFbCmd2 {
+                fb_id: 0,
+                width: frame.width,
+                height: frame.height,
+                pixel_format: frame.fourcc,
+                flags: 2, // DRM_MODE_FB_MODIFIERS
+                ..ModeFbCmd2::default()
+            };
+            for (i, handle) in handles.iter().enumerate() {
+                desc.handles[i] = *handle;
+            }
+            for (i, (_, offset, stride)) in frame.planes.iter().enumerate() {
+                desc.pitches[i] = *stride;
+                desc.offsets[i] = *offset;
+                desc.modifier[i] = frame.modifier;
+            }
+            let with_modifier = ioctl_rw::<ModeFbCmd2, DRM_IOCTL_MODE_ADDFB2, _>(fd, desc);
+            let added_ok = matches!(&with_modifier, Ok(added) if added.fb_id != 0);
+            if let Ok(added) = with_modifier {
+                if added.fb_id != 0 {
+                    destroy_fb(fd, added.fb_id);
+                }
+                any_ok |= added_ok;
+            }
+            // Druga próba: ten sam bufor jako **liniowy** (`flags=0`, modifier 0).
+            // EGL na NVIDIA potrafi zwrócić modyfikator block-linear, którego
+            // `nvidia-drm` nie przyjmie, a pamięć i tak jest liniowa (pitch = w*4).
+            desc.flags = 0;
+            desc.modifier = [0; 4];
+            let linear = ioctl_rw::<ModeFbCmd2, DRM_IOCTL_MODE_ADDFB2, _>(fd, desc);
+            let linear_ok = matches!(&linear, Ok(added) if added.fb_id != 0);
+            if let Ok(added) = linear {
+                if added.fb_id != 0 {
+                    destroy_fb(fd, added.fb_id);
+                }
+            }
+            eprintln!(
+                "selene/dmabuf: {w}x{h} fourcc=0x{:x} modifier=0x{:x} pitch={:?} → modyfikator: {}, liniowo: {}",
+                frame.fourcc,
+                frame.modifier,
+                frame.planes.iter().map(|(_, _, s)| *s).collect::<Vec<_>>(),
+                if added_ok {
+                    "OK".to_owned()
+                } else {
+                    format!("{:?}", added_err(&with_modifier))
+                },
+                if linear_ok { "OK".to_owned() } else { "odrzucone".to_owned() }
+            );
+            // Dowód, dlaczego **nie** wolno awaryjnie deklarować liniowości:
+            // import tego samego bufora z `modifier=0` daje zły obraz (pamięć jest
+            // kafelkowana), więc `AddFB2` bez modyfikatora przyjąłby bufor, ale na
+            // ekranie byłyby śmieci. Dlatego fallback idzie do readbacku, nie do „linear”.
+            if w == 64 {
+                if let Ok(mut check) = GpuRenderer::new(w, h) {
+                    let image = std::sync::Arc::new(libluna_render::DmabufImage {
+                        width: w,
+                        height: h,
+                        format: frame.fourcc,
+                        modifier: 0,
+                        planes: frame
+                            .planes
+                            .iter()
+                            .map(|(plane_fd, offset, stride)| libluna_render::DmabufPlane {
+                                fd: plane_fd.try_clone().expect("dup fd"),
+                                offset: *offset,
+                                stride: *stride,
+                            })
+                            .collect(),
+                    });
+                    let mut scene = Scene::new();
+                    scene.image_dmabuf(
+                        libluna_core::Rect::from_xywh(0.0, 0.0, w as f64, h as f64),
+                        image,
+                    );
+                    check.draw(&scene, 1.0, libluna_core::Color::from_rgba8(0, 0, 255, 255));
+                    eprintln!(
+                        "  import z modifier=0 (kontrola) → R,G,B,A = {:?}",
+                        &check.data()[..4]
+                    );
+                }
+            }
+            release_gem(fd, &handles);
+        }
+        // Zero-copy nie może **wywrócić** sesji: brak wsparcia = fallback do readbacku.
+        // Test pilnuje tylko, żeby ścieżka eksportu w ogóle działała (PRIME weszło).
+        let _ = any_ok;
+    }
+
+    fn added_err(r: &rustix::io::Result<ModeFbCmd2>) -> Option<std::io::ErrorKind> {
+        r.as_ref().err().map(|e| e.kind())
+    }
 
     #[test]
     fn connector_names_follow_wayland_convention() {

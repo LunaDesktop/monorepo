@@ -264,7 +264,11 @@ sudo ./scripts/install.sh --prefix /usr                        # instalacja syst
 ```
 
 Pliki sesji: `de/session/luna-session` (launcher) i `de/session/selene.desktop`
-(`share/wayland-sessions`). Ikona sesji (`Icon=luna`) to `assets/branding/luna.svg` — instalator kładzie
+(`share/wayland-sessions`). Obok zwykłej sesji instalowany jest wariant **„Luna (GPU)”**:
+`de/session/luna-session-gpu` (ustawia `LUNA_GPU=1`) + `de/session/selene-gpu.desktop`.
+W menedżerze logowania wybierasz wtedy, czy Selene ma ogłaszać `zwp_linux_dmabuf_v1`
+(GPU: aplikacje renderujące przez GPU działają natywnie Waylandem), czy zostać na CPU.
+Ikona sesji (`Icon=luna`) to `assets/branding/luna.svg` — instalator kładzie
 go w `share/icons/hicolor/scalable/apps` oraz rasteryzuje (rsvg-convert) do PNG w rozmiarach
 16–256 i `share/pixmaps`, więc greeter pokaże go nawet bez obsługi SVG.
 

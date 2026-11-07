@@ -788,13 +788,14 @@ impl App {
         }
         if self.panes.len() > 1 && lay.tabs.contains(scroll.position) {
             let mut bar = self.tab_bar(lay.tabs, text, theme);
-            if bar.on_scroll(scroll.dy * 40.0, lay.tabs, text, theme) {
+            if bar.on_scroll(scroll.notches_y() * 40.0, lay.tabs, text, theme) {
                 self.tab_scroll = bar.scroll();
             }
             return;
         }
         if lay.area.contains(scroll.position) {
-            let lines = (scroll.dy.abs().ceil() as usize).max(1) * 3;
+            let lines = (scroll.notches_y().abs() * 3.0).round() as usize;
+            let lines = lines.max(1);
             let pane = self.pane_mut();
             if scroll.dy > 0.0 {
                 pane.term.view_down(lines);

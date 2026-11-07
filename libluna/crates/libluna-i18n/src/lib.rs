@@ -26,6 +26,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{OnceLock, RwLock};
 
+pub mod date_format;
+
 /// Klucz z nazwą języka w danym katalogu (np. `Polski`).
 const NAME_KEY: &str = "__name__";
 

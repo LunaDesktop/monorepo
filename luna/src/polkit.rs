@@ -32,6 +32,13 @@ pub struct AuthRequest {
 /// Agent uwierzytelniania Polkit (interfejs D-Bus).
 pub struct PolkitAgent {
     pub pending: Arc<Mutex<Option<AuthRequest>>>,
+    /// Kanał zakończenia bieżącego żądania.
+    ///
+    /// `BeginAuthentication` **musi** trwać do sprawdzenia hasła i wysłania
+    /// odpowiedzi przez `polkit-agent-helper-1`. `polkitd` usuwa sesję
+    /// autoryzacji w chwili powrotu z tej metody, więc natychmiastowy `return`
+    /// kończył się błędem `No session for cookie` przy każdej próbie.
+    pub done: Arc<Mutex<Option<std::sync::mpsc::Sender<()>>>>,
 }
 
 #[zbus::interface(name = "org.freedesktop.PolicyKit1.AuthenticationAgent")]
@@ -65,12 +72,23 @@ impl PolkitAgent {
             user,
         };
 
-        // Zapisz żądanie i otwórz okno autoryzacji
+        // Zapisz kanał **przed** żądaniem — pętla UI bierze żądanie i po
+        // zamknięciu okna wysyła nim sygnał zakończenia.
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        *self.done.lock().unwrap() = Some(done_tx);
         *self.pending.lock().unwrap() = Some(req);
+
+        // Blokujemy metodę D-Bus do czasu zakończenia autoryzacji. Dzięki temu
+        // `polkitd` nie skasuje sesji, zanim helper wyśle `AuthenticationAgentResponse`.
+        let _ = done_rx.recv();
     }
 
     fn cancel_authentication(&self, _cookie: String) {
         *self.pending.lock().unwrap() = None;
+        // Nie blokujemy `BeginAuthentication` na zawsze, gdy żądanie zostało anulowane.
+        if let Some(done) = self.done.lock().unwrap().take() {
+            let _ = done.send(());
+        }
     }
 }
 
@@ -490,6 +508,45 @@ mod tests {
         if let Some(path) = agent_helper_path() {
             assert!(path.is_absolute());
         }
+    }
+
+    #[test]
+    fn begin_authentication_waits_for_dialog_completion() {
+        let pending: Arc<Mutex<Option<AuthRequest>>> = Arc::new(Mutex::new(None));
+        let done: Arc<Mutex<Option<std::sync::mpsc::Sender<()>>>> = Arc::new(Mutex::new(None));
+        let agent = PolkitAgent {
+            pending: Arc::clone(&pending),
+            done: Arc::clone(&done),
+        };
+
+        let handle = std::thread::spawn(move || {
+            agent.begin_authentication(
+                "org.example.test".to_owned(),
+                String::new(),
+                String::new(),
+                HashMap::new(),
+                "cookie".to_owned(),
+                Vec::new(),
+            )
+        });
+
+        // `polkitd` usuwa sesję, gdy ta metoda wróci — musi więc czekać na UI.
+        for _ in 0..200 {
+            if pending.lock().unwrap().is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(pending.lock().unwrap().is_some(), "żądanie czeka na UI");
+        assert!(
+            !handle.is_finished(),
+            "BeginAuthentication nie może wrócić przed autoryzacją"
+        );
+
+        // Symulacja zamknięcia okna przez pętlę UI.
+        pending.lock().unwrap().take();
+        done.lock().unwrap().take().unwrap().send(()).unwrap();
+        handle.join().unwrap();
     }
 
     #[test]

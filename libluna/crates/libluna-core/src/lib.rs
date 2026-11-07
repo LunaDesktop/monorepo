@@ -20,6 +20,7 @@ pub mod civil;
 pub mod clock_state;
 pub mod color;
 pub mod config;
+pub mod desktop;
 pub mod display;
 pub mod equalizer;
 pub mod event;
@@ -43,9 +44,11 @@ pub mod workspaces;
 pub use accessibility::{AccessibilitySettings, TEXT_SCALE_CHOICES};
 pub use appearance::{Accent, ThemePreference, ThemeSettings};
 pub use color::Color;
+pub use desktop::{DesktopEntry, DesktopItemKind, DesktopSettings};
 pub use display::{DisplaySettings, OutputMode, OutputPreference};
 pub use event::{
     ButtonState, Event, KeyEvent, Modifiers, PointerButton, PointerEvent, ScrollEvent, WindowEvent,
+    SCROLL_NOTCH_PX, SCROLL_WHEEL_AXIS_PX,
 };
 pub use geometry::{Insets, Point, Rect, Size};
 pub use greeter::GreeterSettings;

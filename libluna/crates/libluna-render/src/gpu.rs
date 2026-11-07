@@ -19,7 +19,7 @@
 
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_void, CStr};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::ptr;
 use std::sync::Arc;
 
@@ -64,8 +64,6 @@ const EGL_DMA_BUF_PLANE2_PITCH_EXT: u32 = 0x327A;
 const EGL_DMA_BUF_PLANE3_FD_EXT: u32 = 0x3440;
 const EGL_DMA_BUF_PLANE3_OFFSET_EXT: u32 = 0x3441;
 const EGL_DMA_BUF_PLANE3_PITCH_EXT: u32 = 0x3442;
-const EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT: u32 = 0x3443;
-const EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT: u32 = 0x3444;
 const EGL_NO_CONTEXT: *mut c_void = ptr::null_mut();
 
 // ── Stałe GLES2 ─────────────────────────────────────────────────────────────
@@ -94,6 +92,8 @@ const GL_COMPILE_STATUS: u32 = 0x8B81;
 const GL_LINK_STATUS: u32 = 0x8B82;
 const GL_TEXTURE0: u32 = 0x84C0;
 const GL_TRIANGLE_STRIP: u32 = 0x0005;
+const GL_TRIANGLES: u32 = 0x0004;
+const GL_STREAM_DRAW: u32 = 0x88E0;
 const GL_UNPACK_ALIGNMENT: u32 = 0x0CF5;
 const GL_RENDERER: u32 = 0x1F01;
 const GL_VERSION: u32 = 0x1F02;
@@ -185,6 +185,7 @@ type GlVertexAttribPointer = unsafe extern "C" fn(Gluint, i32, u32, Glboolean, i
 type GlEnableVertexAttribArray = unsafe extern "C" fn(Gluint);
 type GlDrawArrays = unsafe extern "C" fn(u32, i32, i32);
 type GlReadPixels = unsafe extern "C" fn(i32, i32, i32, i32, u32, u32, *mut c_void);
+type GlFinish = unsafe extern "C" fn();
 
 /// Informacje o kontekście GPU (diagnostyka, `gpu_probe`, log przy starcie).
 #[derive(Debug, Clone)]
@@ -213,6 +214,14 @@ struct Gl {
     /// Trzymane tylko po to, żeby kontekst żył przez cały czas życia renderera.
     dpy: *mut c_void,
     _ctx: *mut c_void,
+    /// Przełączenie kontekstu z powrotem na ten renderer.
+    ///
+    /// Każdy `GpuRenderer` tworzy **własny** kontekst, a `eglMakeCurrent` działa
+    /// na wątek — po utworzeniu drugiego renderera (drugi monitor) aktywny jest
+    /// kontekst ostatniego z nich. Bez ponownego `eglMakeCurrent` pierwszy monitor
+    /// rysowałby obiekty z obcego kontekstu: śmieci, migotanie i treść w złym
+    /// rozmiarze. Przy jednym wyjściu (nested) problem nie występował.
+    make_current: EglMakeCurrent,
     get_error: EglGetError,
     /// Import `dmabuf` (EGL 1.5 / `EGL_KHR_image_base`).
     create_image: Option<EglCreateImage>,
@@ -269,6 +278,8 @@ struct Gl {
     enable_vertex_attrib_array: GlEnableVertexAttribArray,
     draw_arrays: GlDrawArrays,
     read_pixels: GlReadPixels,
+    /// Czeka na zakończenie pracy GPU — wymagane przed eksportem `dmabuf` do skanoutu.
+    finish: GlFinish,
 }
 
 impl Gl {
@@ -379,6 +390,7 @@ impl Gl {
                 Self {
                     dpy,
                     _ctx: ctx,
+                    make_current,
                     get_error,
                     create_image: load_proc(get_proc, "eglCreateImageKHR"),
                     destroy_image: load_proc(get_proc, "eglDestroyImage")
@@ -431,6 +443,7 @@ impl Gl {
                     enable_vertex_attrib_array: glfn!("glEnableVertexAttribArray"),
                     draw_arrays: glfn!("glDrawArrays"),
                     read_pixels: glfn!("glReadPixels"),
+                    finish: glfn!("glFinish"),
                 },
                 info,
             ))
@@ -597,7 +610,7 @@ struct TexProgram {
     tex: Glint,
 }
 
-/// Shader kształtów (prostokąty, zaokrąglenia, obwódki, okręgi) przez SDF.
+/// Shader kształtów (prostokąty, zaokrąglenia, obwódki, okręgi, odcinki) przez SDF.
 struct ShapeProgram {
     id: Gluint,
     pos: Gluint,
@@ -607,6 +620,7 @@ struct ShapeProgram {
     mode: Glint,
     radius: Glint,
     width: Glint,
+    line: Glint,
     clip: Glint,
     round: Glint,
     round_r: Glint,
@@ -659,6 +673,8 @@ uniform vec4 color;
 uniform vec4 clip;
 uniform vec4 round;
 uniform float round_r;
+// Odcinek (mode 5): xy = początek, zw = koniec (współrzędne fizyczne).
+uniform vec4 line;
 uniform float radius;
 uniform int mode;
 uniform float border;
@@ -666,6 +682,11 @@ float sd_round(vec2 p, vec2 size, float r) {
     r = min(r, min(size.x, size.y) * 0.5);
     vec2 q = abs(p - size * 0.5) - (size * 0.5 - vec2(r));
     return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+float sd_segment(vec2 p, vec2 a, vec2 b) {
+    vec2 pa = p - a, ba = b - a;
+    float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);
+    return length(pa - ba * h);
 }
 void main() {
     if (local.x < clip.x || local.y < clip.y ||
@@ -678,6 +699,9 @@ void main() {
         d = sd_round(local - rect.xy, rect.zw, radius);
     } else if (mode == 2) {
         d = abs(sd_round(local - rect.xy, rect.zw, radius) + border * 0.5) - border * 0.5;
+    } else if (mode == 5) {
+        // Odcinek z zaokrąglonymi końcami: radius = połowa grubości.
+        d = sd_segment(local, line.xy, line.zw) - radius;
     } else {
         // Okrąg: rect.xy = środek, radius = promień (mode 3/4).
         float dd = length(local - rect.xy) - radius;
@@ -723,6 +747,58 @@ void main() {
     gl_FragColor = color * a;
 }";
 
+/// Shader wypełnionych wielokątów: pozycje bezwzględne + do trzech płaszczyzn
+/// krawędzi obrysu (`xy` = normalna, `z` = przesunięcie). Krawędzie wewnętrzne
+/// triangulacji dostają płaszczyznę „nieskończenie daleko”, więc nie tworzą szwów.
+const VS_TRI: &str = "\
+attribute vec2 pos;
+attribute vec3 e1;
+attribute vec3 e2;
+attribute vec3 e3;
+uniform vec2 screen;
+varying vec2 local;
+varying vec3 edge1;
+varying vec3 edge2;
+varying vec3 edge3;
+void main() {
+    local = pos;
+    edge1 = e1;
+    edge2 = e2;
+    edge3 = e3;
+    gl_Position = vec4(pos.x / screen.x * 2.0 - 1.0, pos.y / screen.y * 2.0 - 1.0, 0.0, 1.0);
+}";
+
+const FS_TRI: &str = "\
+precision mediump float;
+varying vec2 local;
+varying vec3 edge1;
+varying vec3 edge2;
+varying vec3 edge3;
+uniform vec4 color;
+uniform vec4 clip;
+uniform vec4 round;
+uniform float round_r;
+float sd_round(vec2 p, vec2 size, float r) {
+    r = min(r, min(size.x, size.y) * 0.5);
+    vec2 q = abs(p - size * 0.5) - (size * 0.5 - vec2(r));
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+void main() {
+    if (local.x < clip.x || local.y < clip.y ||
+        local.x > clip.x + clip.z || local.y > clip.y + clip.w) discard;
+    // Odległość do najbliższej krawędzi OBRYSU (wewnątrz < 0) — 1 px AA
+    // tylko na brzegu wielokąta, bez szwów na wewnętrznych przekątnych.
+    float d = max(max(dot(edge1.xy, local) + edge1.z,
+                      dot(edge2.xy, local) + edge2.z),
+                      dot(edge3.xy, local) + edge3.z);
+    float a = clamp(0.5 - d, 0.0, 1.0);
+    if (round.z > 0.0 && round.w > 0.0 && round_r > 0.0) {
+        float rd = sd_round(local - round.xy, round.zw, round_r);
+        a *= clamp(0.5 - rd, 0.0, 1.0);
+    }
+    gl_FragColor = color * a;
+}";
+
 struct Tex {
     id: Gluint,
     w: u32,
@@ -747,6 +823,50 @@ struct GlyphProgram {
     tex: Glint,
 }
 
+/// Program trójkątów wypełnionych wielokątów (wierzchołki dynamiczne).
+struct TriProgram {
+    id: Gluint,
+    pos: Gluint,
+    e1: Gluint,
+    e2: Gluint,
+    e3: Gluint,
+    screen: Glint,
+    color: Glint,
+    clip: Glint,
+    round: Glint,
+    round_r: Glint,
+}
+
+impl Gl {
+    /// Ustawia ten kontekst jako bieżący w danym wątku.
+    ///
+    /// Wywoływane przed każdą operacją GL renderera: kilku monitorów nie da się
+    /// obsłużyć jednym kontekstem (każdy `GpuRenderer` ma własny), a wątek ma
+    /// tylko jeden aktywny kontekst — bez tego drugi monitor rysował w obiekty
+    /// pierwszego (migotanie, zła treść/rozdzielczość).
+    fn bind(&self) {
+        // SAFETY: `dpy` i `_ctx` żyją tyle, co `Gl`; brak powierzchni jest
+        // dozwolony dla kontekstu bez okna (`EGL_NO_SURFACE`).
+        unsafe {
+            (self.make_current)(self.dpy, ptr::null_mut(), ptr::null_mut(), self._ctx);
+        }
+    }
+}
+
+/// Klatka wyeksportowana z GPU jako `dmabuf` — wejście do zero-copy skanoutu.
+///
+/// `fd`-y należą do wołającego: muszą żyć tak długo, jak framebuffer używany
+/// przez `AddFB2WithModifiers` do skanowania.
+pub struct ExportedFrame {
+    pub width: u32,
+    pub height: u32,
+    /// Kod `DRM_FORMAT_*` zwrócony przez EGL (np. `ABGR8888`).
+    pub fourcc: u32,
+    pub modifier: u64,
+    /// `(fd, offset, stride)` kolejnych planów.
+    pub planes: Vec<(OwnedFd, u32, u32)>,
+}
+
 /// Backend GPU: EGL surfaceless + GLES2, wyjście przez readback.
 pub struct GpuRenderer {
     gl: Gl,
@@ -754,10 +874,21 @@ pub struct GpuRenderer {
     height: u32,
     fbo: Gluint,
     out_tex: Gluint,
+    /// Drugi komplet (FBO + tekstura) — ping-pong dla zero-copy skanoutu.
+    fbo2: Gluint,
+    out_tex2: Gluint,
     vbo: Gluint,
+    /// Dynamiczny bufor trójkątów wielokątów (11 f32 na wierzchołek).
+    tri_vbo: Gluint,
+    /// Bufor pomocniczy: gotowe wierzchołki dla `TriProgram`.
+    tri_verts: Vec<f32>,
     tex_prog: TexProgram,
     shape_prog: ShapeProgram,
     glyph_prog: GlyphProgram,
+    tri_prog: TriProgram,
+    /// Ścieżki (`StrokeLine`/`StrokePolyline`/`FillPolygon`) natywnie na GPU.
+    /// `LUNA_GPU_CPU_PATHS=1` wymusza dawną warstwę CPU (diagnostyka/fallback).
+    native_paths: bool,
     text: TextEngine,
     /// Atlas glifów (krycie w kanale alfa) i cache glifów per (znak, rozmiar).
     atlas: Atlas,
@@ -771,6 +902,10 @@ pub struct GpuRenderer {
     pixels: Vec<u8>,
     /// Bufor pomocniczy na odczyt fragmentu klatki (bez odstępu wierszy).
     scratch: Vec<u8>,
+    /// Gdy `true`, `draw` **nie** robi readbacku — klatka zostaje w teksturze i idzie
+    /// do skanoutu jako `dmabuf` (zero-copy). `data()` jest wtedy nieaktualne;
+    /// zrzuty ekranu wołają `readback_full()`.
+    scanout_only: bool,
     /// Damage podany przez `draw_damage` (piksele logiczne), czeka na `finish`.
     next_damage: Option<Rect>,
     /// Region faktycznie odczytany z GPU w ostatniej klatce (piksele fizyczne).
@@ -799,6 +934,7 @@ impl GpuRenderer {
         let tex_prog = TexProgram::new(&gl)?;
         let shape_prog = ShapeProgram::new(&gl)?;
         let glyph_prog = GlyphProgram::new(&gl)?;
+        let tri_prog = TriProgram::new(&gl)?;
         let vbo = unsafe {
             let mut vbo = 0;
             (gl.gen_buffers)(1, &mut vbo);
@@ -812,16 +948,29 @@ impl GpuRenderer {
             );
             vbo
         };
+        let tri_vbo = unsafe {
+            let mut b = 0;
+            (gl.gen_buffers)(1, &mut b);
+            b
+        };
         let mut renderer = Self {
             gl,
             width: width.max(1),
             height: height.max(1),
             fbo: 0,
             out_tex: 0,
+            fbo2: 0,
+            out_tex2: 0,
             vbo,
+            tri_vbo,
+            tri_verts: Vec::new(),
             tex_prog,
             shape_prog,
             glyph_prog,
+            tri_prog,
+            native_paths: std::env::var("LUNA_GPU_CPU_PATHS")
+                .map(|v| v.is_empty() || v == "0")
+                .unwrap_or(true),
             text,
             layer: if mono {
                 SoftwareRenderer::new_mono(1, 1)
@@ -834,6 +983,7 @@ impl GpuRenderer {
             frame: 0,
             pixels: Vec::new(),
             scratch: Vec::new(),
+            scanout_only: false,
             next_damage: None,
             last_readback: None,
             readback_ms: 0.0,
@@ -842,7 +992,112 @@ impl GpuRenderer {
         Ok(renderer)
     }
 
+    /// Włącza tryb skanoutu bez readbacku (klatka zostaje w teksturze GPU).
+    pub fn set_scanout_only(&mut self, on: bool) {
+        self.scanout_only = on;
+    }
+
+    /// Odczytuje całą klatkę z GPU do `data()` — potrzebne np. do zrzutu ekranu,
+    /// gdy renderer pracuje w trybie skanoutu (bez readbacku w `draw`).
+    pub fn readback_full(&mut self) {
+        self.gl.bind();
+        let (w, h) = (self.width, self.height);
+        if w == 0 || h == 0 {
+            return;
+        }
+        self.gl.bind();
+        unsafe {
+            (self.gl.bind_framebuffer)(GL_FRAMEBUFFER, self.fbo);
+            (self.gl.read_pixels)(
+                0,
+                0,
+                w as i32,
+                h as i32,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                self.pixels.as_mut_ptr() as *mut c_void,
+            );
+            (self.gl.finish)();
+        }
+        self.last_readback = Some(Rect::from_xywh(0.0, 0.0, f64::from(w), f64::from(h)));
+    }
+
+    /// Eksportuje **ostatnio narysowaną** klatkę jako `dmabuf` (zero-copy skanout).
+    ///
+    /// Ścieżka: tekstura celu → `EGLImage` (`EGL_KHR_gl_texture_2D_image`) →
+    /// `EGL_MESA_image_dma_buf_export`. `glFinish` przed eksportem gwarantuje, że
+    /// kernel nie zacznie skanować bufora, zanim GPU skończy go pisać.
+    ///
+    /// `None` = sterownik tego nie potrafi (wtedy wołający zostaje przy readbacku).
+    /// Zwrócone `fd`-y należą do wołającego.
+    pub fn export_dmabuf(&mut self) -> Option<ExportedFrame> {
+        let (Some(create), Some(query), Some(export), Some(destroy)) = (
+            self.gl.create_image,
+            self.gl.export_query,
+            self.gl.export_image,
+            self.gl.destroy_image,
+        ) else {
+            return None;
+        };
+        let (w, h, tex) = (self.width, self.height, self.out_tex);
+        if w == 0 || h == 0 || tex == 0 {
+            return None;
+        }
+        self.gl.bind();
+        const EGL_GL_TEXTURE_2D_KHR: u32 = 0x30B1;
+        const EGL_GL_TEXTURE_LEVEL_KHR: u32 = 0x30BC;
+        unsafe {
+            (self.gl.finish)();
+            let attrs: [i32; 3] = [EGL_GL_TEXTURE_LEVEL_KHR as i32, 0, EGL_NONE as i32];
+            let egl_image = create(
+                self.gl.dpy,
+                self.gl._ctx,
+                EGL_GL_TEXTURE_2D_KHR,
+                tex as *mut c_void,
+                attrs.as_ptr(),
+            );
+            if egl_image.is_null() {
+                return None;
+            }
+            let (mut fourcc, mut planes, mut modifier) = (0i32, 1i32, 0u64);
+            let ok = query(
+                self.gl.dpy,
+                egl_image,
+                &mut fourcc,
+                &mut planes,
+                &mut modifier,
+            );
+            if ok == 0 || !(1..=4).contains(&planes) {
+                destroy(self.gl.dpy, egl_image);
+                return None;
+            }
+            let mut out = Vec::with_capacity(planes as usize);
+            for _ in 0..planes {
+                let (mut fd, mut stride, mut offset) = (0i32, 0i32, 0i32);
+                if export(self.gl.dpy, egl_image, &mut fd, &mut stride, &mut offset) == 0 || fd < 0
+                {
+                    destroy(self.gl.dpy, egl_image);
+                    return None;
+                }
+                out.push((
+                    OwnedFd::from_raw_fd(fd),
+                    offset.max(0) as u32,
+                    stride.max(0) as u32,
+                ));
+            }
+            destroy(self.gl.dpy, egl_image);
+            Some(ExportedFrame {
+                width: w,
+                height: h,
+                fourcc: fourcc.max(0) as u32,
+                modifier,
+                planes: out,
+            })
+        }
+    }
+
     fn create_targets(&mut self) {
+        self.gl.bind();
         let (w, h) = (self.width, self.height);
         unsafe {
             if self.out_tex != 0 {
@@ -851,34 +1106,47 @@ impl GpuRenderer {
             if self.fbo != 0 {
                 (self.gl.delete_framebuffers)(1, &self.fbo);
             }
-            let mut tex = 0;
-            (self.gl.gen_textures)(1, &mut tex);
-            (self.gl.bind_texture)(GL_TEXTURE_2D, tex);
-            (self.gl.tex_image_2d)(
-                GL_TEXTURE_2D,
-                0,
-                GL_RGBA as i32,
-                w as i32,
-                h as i32,
-                0,
-                GL_RGBA,
-                GL_UNSIGNED_BYTE,
-                ptr::null(),
-            );
-            (self.gl.tex_parameteri)(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR as i32);
-            (self.gl.tex_parameteri)(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as i32);
-            let mut fbo = 0;
-            (self.gl.gen_framebuffers)(1, &mut fbo);
-            (self.gl.bind_framebuffer)(GL_FRAMEBUFFER, fbo);
-            (self.gl.framebuffer_texture_2d)(
-                GL_FRAMEBUFFER,
-                GL_COLOR_ATTACHMENT0,
-                GL_TEXTURE_2D,
-                tex,
-                0,
-            );
+            if self.out_tex2 != 0 {
+                (self.gl.delete_textures)(1, &self.out_tex2);
+            }
+            if self.fbo2 != 0 {
+                (self.gl.delete_framebuffers)(1, &self.fbo2);
+            }
+            let make = |gl: &Gl| -> (Gluint, Gluint) {
+                let mut tex = 0;
+                (gl.gen_textures)(1, &mut tex);
+                (gl.bind_texture)(GL_TEXTURE_2D, tex);
+                (gl.tex_image_2d)(
+                    GL_TEXTURE_2D,
+                    0,
+                    GL_RGBA as i32,
+                    w as i32,
+                    h as i32,
+                    0,
+                    GL_RGBA,
+                    GL_UNSIGNED_BYTE,
+                    ptr::null(),
+                );
+                (gl.tex_parameteri)(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR as i32);
+                (gl.tex_parameteri)(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as i32);
+                let mut fbo = 0;
+                (gl.gen_framebuffers)(1, &mut fbo);
+                (gl.bind_framebuffer)(GL_FRAMEBUFFER, fbo);
+                (gl.framebuffer_texture_2d)(
+                    GL_FRAMEBUFFER,
+                    GL_COLOR_ATTACHMENT0,
+                    GL_TEXTURE_2D,
+                    tex,
+                    0,
+                );
+                (tex, fbo)
+            };
+            let (tex, fbo) = make(&self.gl);
+            let (tex2, fbo2) = make(&self.gl);
             self.out_tex = tex;
             self.fbo = fbo;
+            self.out_tex2 = tex2;
+            self.fbo2 = fbo2;
         }
         self.pixels = vec![0; (w * h * 4) as usize];
     }
@@ -964,6 +1232,21 @@ impl GpuRenderer {
         clip: Rect,
         round: Option<(Rect, f64)>,
     ) {
+        self.draw_shape_ext(rect, color, mode, radius, border, clip, round, [0.0; 4]);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_shape_ext(
+        &self,
+        rect: Rect,
+        color: Color,
+        mode: i32,
+        radius: f64,
+        border: f64,
+        clip: Rect,
+        round: Option<(Rect, f64)>,
+        line: [f32; 4],
+    ) {
         let p = &self.shape_prog;
         let [r, g, b, a] = color.to_rgba8();
         let af = f32::from(a) / 255.0;
@@ -991,6 +1274,7 @@ impl GpuRenderer {
             (self.gl.uniform_1i)(p.mode, mode);
             (self.gl.uniform_1f)(p.radius, radius as f32);
             (self.gl.uniform_1f)(p.width, border as f32);
+            (self.gl.uniform_4f)(p.line, line[0], line[1], line[2], line[3]);
             (self.gl.uniform_4f)(
                 p.clip,
                 clip.x() as f32,
@@ -1015,6 +1299,119 @@ impl GpuRenderer {
                 }
             }
             (self.gl.draw_arrays)(GL_TRIANGLE_STRIP, 0, 4);
+        }
+    }
+
+    /// Rysuje odcinek o zaokrąglonych końcach (kapsułkę) natywnie na GPU.
+    ///
+    /// `from`/`to`/`width` są w koordynatach logicznych, `k` to skala wyjścia.
+    /// Kształt liczy SDF w fragment shaderze, więc krawędzie są wygładzone bez
+    /// warstwy CPU (wcześniej cały `StrokeLine` szedł do `tiny-skia`).
+    #[allow(clippy::too_many_arguments)]
+    fn draw_capsule(
+        &self,
+        from: Point,
+        to: Point,
+        width: f64,
+        color: Color,
+        k: f64,
+        clip: Rect,
+        round: Option<(Rect, f64)>,
+    ) {
+        let half = width * k * 0.5;
+        if half <= 0.0 || color.a <= 0.0 {
+            return;
+        }
+        let (ax, ay) = (from.x * k, from.y * k);
+        let (bx, by) = (to.x * k, to.y * k);
+        let pad = half + 1.0;
+        let x0 = ax.min(bx) - pad;
+        let y0 = ay.min(by) - pad;
+        let x1 = ax.max(bx) + pad;
+        let y1 = ay.max(by) + pad;
+        self.draw_shape_ext(
+            Rect::from_xywh(x0, y0, x1 - x0, y1 - y0),
+            color,
+            5,
+            half,
+            0.0,
+            clip,
+            round,
+            [ax as f32, ay as f32, bx as f32, by as f32],
+        );
+    }
+
+    /// Trianguluje wielokąt do `self.tri_verts`; `false` = oddaj polecenie CPU.
+    fn build_triangles(&mut self, points: &[Point], k: f64) -> bool {
+        let mut out = std::mem::take(&mut self.tri_verts);
+        out.clear();
+        let ok = tessellate_polygon(points, k, &mut out);
+        self.tri_verts = out;
+        ok
+    }
+
+    /// Rysuje przygotowane w `build_triangles` trójkąty (11 f32 na wierzchołek:
+    /// `x, y`, potem trzy płaszczyzny krawędzi `nx, ny, c`).
+    fn draw_triangles(&self, color: Color, clip: Rect, round: Option<(Rect, f64)>) {
+        const STRIDE: usize = 11;
+        let verts = &self.tri_verts;
+        if verts.is_empty() || verts.len() % (STRIDE * 3) != 0 {
+            return;
+        }
+        let p = &self.tri_prog;
+        let [r, g, b, a] = color.to_rgba8();
+        let af = f32::from(a) / 255.0;
+        let stride = (STRIDE * std::mem::size_of::<f32>()) as i32;
+        let f = std::mem::size_of::<f32>();
+        unsafe {
+            (self.gl.use_program)(p.id);
+            (self.gl.bind_buffer)(GL_ARRAY_BUFFER, self.tri_vbo);
+            (self.gl.buffer_data)(
+                GL_ARRAY_BUFFER,
+                (verts.len() * f) as isize,
+                verts.as_ptr() as *const c_void,
+                GL_STREAM_DRAW,
+            );
+            (self.gl.enable_vertex_attrib_array)(p.pos);
+            (self.gl.vertex_attrib_pointer)(p.pos, 2, GL_FLOAT, 0, stride, ptr::null());
+            (self.gl.enable_vertex_attrib_array)(p.e1);
+            (self.gl.vertex_attrib_pointer)(p.e1, 3, GL_FLOAT, 0, stride, (2 * f) as *const c_void);
+            (self.gl.enable_vertex_attrib_array)(p.e2);
+            (self.gl.vertex_attrib_pointer)(p.e2, 3, GL_FLOAT, 0, stride, (5 * f) as *const c_void);
+            (self.gl.enable_vertex_attrib_array)(p.e3);
+            (self.gl.vertex_attrib_pointer)(p.e3, 3, GL_FLOAT, 0, stride, (8 * f) as *const c_void);
+            (self.gl.uniform_2f)(p.screen, self.width as f32, self.height as f32);
+            (self.gl.uniform_4f)(
+                p.color,
+                f32::from(r) / 255.0 * af,
+                f32::from(g) / 255.0 * af,
+                f32::from(b) / 255.0 * af,
+                af,
+            );
+            (self.gl.uniform_4f)(
+                p.clip,
+                clip.x() as f32,
+                clip.y() as f32,
+                clip.width() as f32,
+                clip.height() as f32,
+            );
+            match round {
+                Some((rr, radius)) => {
+                    (self.gl.uniform_4f)(
+                        p.round,
+                        rr.x() as f32,
+                        rr.y() as f32,
+                        rr.width() as f32,
+                        rr.height() as f32,
+                    );
+                    (self.gl.uniform_1f)(p.round_r, radius as f32);
+                }
+                None => {
+                    (self.gl.uniform_4f)(p.round, 0.0, 0.0, 0.0, 0.0);
+                    (self.gl.uniform_1f)(p.round_r, 0.0);
+                }
+            }
+            (self.gl.draw_arrays)(GL_TRIANGLES, 0, (verts.len() / STRIDE) as i32);
         }
     }
 
@@ -1098,14 +1495,20 @@ impl GpuRenderer {
                 plane.stride as i32,
             ]);
         }
-        // Modyfikator tylko dla planu 0 (protokół wymaga wspólnego modyfikatora).
+        // Modyfikator dla każdego planu (protokół wymaga wspólnego modyfikatora).
+        // EGL wymaga pary lo/hi także dla planów 1–3, inaczej przyjmuje modyfikator
+        // tylko dla płaszczyzny Y — obrazy YUV z tilingiem były importowane błędnie.
+        const MOD_LO: [u32; 4] = [0x3443, 0x3445, 0x3447, 0x3449];
+        const MOD_HI: [u32; 4] = [0x3444, 0x3446, 0x3448, 0x344A];
         if data.modifier != u64::MAX {
-            attribs.extend_from_slice(&[
-                EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT as i32,
-                (data.modifier & 0xffff_ffff) as i32,
-                EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT as i32,
-                (data.modifier >> 32) as i32,
-            ]);
+            for i in 0..data.planes.len().min(4) {
+                attribs.extend_from_slice(&[
+                    MOD_LO[i] as i32,
+                    (data.modifier & 0xffff_ffff) as i32,
+                    MOD_HI[i] as i32,
+                    (data.modifier >> 32) as i32,
+                ]);
+            }
         }
         attribs.push(EGL_NONE as i32);
         let egl_image = unsafe {
@@ -1154,6 +1557,59 @@ impl GpuRenderer {
             );
         }
         id
+    }
+
+    /// Importuje `dmabuf` i odczytuje go jako premultiplied RGBA.
+    ///
+    /// Używane dla kursora klienta: GPUI/Zed i część toolkitów ustawia kursor
+    /// buforem GPU, a nie `wl_shm`. Kursor musi mieć piksele na CPU (płaszczyzna
+    /// sprzętowa DRM i rysowanie w scenie), więc renderujemy go przez GPU do FBO
+    /// i robimy readback. Brak EGL → `None` (zostaje poprzedni obraz kursora).
+    /// Odczytuje bufor `dmabuf` (np. kursor GPU) do RGBA.
+    ///
+    /// Kontekst EGL jest **cache'owany per wątek**: wcześniej każde wywołanie
+    /// tworzyło nowy `GpuRenderer` (nowy kontekst surfaceless), a dzieje się to
+    /// synchronicznie w wątku protokołu przy każdej zmianie kształtu kursora.
+    /// Kliknięcie zmienia kursor (strzałka ↔ I-beam), więc tworzenie kontekstu
+    /// na każde kliknięcie potrafiło zamrozić całą sesję na kilkadziesiąt ms.
+    /// Renderer rośnie tylko wtedy, gdy trafi się większy obraz.
+    pub fn dmabuf_to_rgba(data: &Arc<DmabufImage>) -> Option<Vec<u8>> {
+        use std::cell::RefCell;
+        thread_local! {
+            static CURSOR_GPU: RefCell<Option<Box<GpuRenderer>>> = const { RefCell::new(None) };
+        }
+        let (w, h) = (data.width.max(1), data.height.max(1));
+        CURSOR_GPU.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            let need_new = slot
+                .as_ref()
+                .map(|r| r.width < w || r.height < h)
+                .unwrap_or(true);
+            if need_new {
+                *slot = Some(Box::new(GpuRenderer::new(w, h).ok()?));
+            }
+            let renderer = slot.as_mut()?;
+            let mut scene = Scene::new();
+            scene.image_dmabuf(
+                Rect::from_xywh(0.0, 0.0, f64::from(w), f64::from(h)),
+                Arc::clone(data),
+            );
+            renderer.draw(&scene, 1.0, Color::rgba(0.0, 0.0, 0.0, 0.0));
+            let (rw, rh) = (renderer.width, renderer.height);
+            if rw == w && rh == h {
+                return Some(renderer.data().to_vec());
+            }
+            // Cache bywa większy od kursora — wycinamy lewy-górny prostokąt
+            // (wiersze mają `rw * 4` bajtów, a kursor tylko `w * 4`).
+            let src = renderer.data();
+            let mut out = Vec::with_capacity((w as usize) * (h as usize) * 4);
+            for y in 0..h {
+                let start = (y as usize) * (rw as usize) * 4;
+                let end = start + (w as usize) * 4;
+                out.extend_from_slice(&src[start..end]);
+            }
+            Some(out)
+        })
     }
 
     fn evict_textures(&mut self) {
@@ -1525,6 +1981,9 @@ impl Renderer for GpuRenderer {
     }
 
     fn draw(&mut self, scene: &Scene, scale: f64, background: Color) {
+        // Kontekst EGL jest per wątek: przy kilku monitorach trzeba go przełączyć
+        // na własny, inaczej rysujemy w obiekty innego renderera.
+        self.gl.bind();
         let damage = self.next_damage.take();
         self.last_readback = None;
         unsafe { (self.gl.bind_framebuffer)(GL_FRAMEBUFFER, self.fbo) };
@@ -1567,11 +2026,49 @@ impl Renderer for GpuRenderer {
                     self.flush_run(&mut run, &mut run_bounds, k, &clip_stack);
                     self.draw_text(text_run, k, &clip_stack);
                 }
-                DrawCommand::StrokeLine { .. }
-                | DrawCommand::StrokePolyline { .. }
-                | DrawCommand::FillPolygon { .. } => {
-                    extend(&mut run_bounds, crate::scene::command_area(cmd, &self.text));
-                    run.push(cmd.clone());
+                DrawCommand::StrokeLine {
+                    from,
+                    to,
+                    width,
+                    color,
+                } => {
+                    if self.native_paths {
+                        self.flush_run(&mut run, &mut run_bounds, k, &clip_stack);
+                        let (clip, round) = clip_for(&clip_stack, screen);
+                        self.draw_capsule(*from, *to, *width, *color, k, clip, round);
+                    } else {
+                        extend(&mut run_bounds, crate::scene::command_area(cmd, &self.text));
+                        run.push(cmd.clone());
+                    }
+                }
+                DrawCommand::StrokePolyline {
+                    points,
+                    width,
+                    color,
+                } => {
+                    if self.native_paths && points.len() >= 2 {
+                        self.flush_run(&mut run, &mut run_bounds, k, &clip_stack);
+                        let (clip, round) = clip_for(&clip_stack, screen);
+                        // Każdy segment jako kapsułka: zaokrąglone końce dają
+                        // dokładnie round-join, tak jak `tiny-skia`.
+                        for seg in points.windows(2) {
+                            self.draw_capsule(seg[0], seg[1], *width, *color, k, clip, round);
+                        }
+                    } else {
+                        extend(&mut run_bounds, crate::scene::command_area(cmd, &self.text));
+                        run.push(cmd.clone());
+                    }
+                }
+                DrawCommand::FillPolygon { points, color } => {
+                    if self.native_paths && self.build_triangles(points, k) {
+                        self.flush_run(&mut run, &mut run_bounds, k, &clip_stack);
+                        let (clip, round) = clip_for(&clip_stack, screen);
+                        self.draw_triangles(*color, clip, round);
+                    } else {
+                        // Niejednoznaczny wielokąt → dotychczasowa warstwa CPU.
+                        extend(&mut run_bounds, crate::scene::command_area(cmd, &self.text));
+                        run.push(cmd.clone());
+                    }
                 }
                 // Reszta idzie na GPU; bieżący bieg CPU musi być najpierw wstawiony.
                 DrawCommand::Background { data } => {
@@ -1697,7 +2194,9 @@ impl Renderer for GpuRenderer {
             }
         }
         self.flush_run(&mut run, &mut run_bounds, k, &clip_stack);
-        self.finish(damage, k);
+        if !self.scanout_only {
+            self.finish(damage, k);
+        }
         self.evict_textures();
         if self.gl.error() != 0 {
             // Błąd GL nie może zatrzymać sesji — raportujemy raz na klatkę w `LUNA_GPU_STATS`.
@@ -1705,6 +2204,11 @@ impl Renderer for GpuRenderer {
                 eprintln!("libluna-render: GL error 0x{:x}", self.gl.error());
             }
         }
+        // Podwójne buforowanie celów renderu: kolejna klatka idzie do drugiej
+        // tekstury, więc bufor wyeksportowany do skanoutu (`export_dmabuf`) nie jest
+        // nadpisywany, zanim kernel skończy go wyświetlać.
+        std::mem::swap(&mut self.fbo, &mut self.fbo2);
+        std::mem::swap(&mut self.out_tex, &mut self.out_tex2);
     }
 
     fn encode_png(&self) -> Option<Vec<u8>> {
@@ -1804,6 +2308,170 @@ fn upload_texture(gl: &Gl, w: u32, h: u32, rgba: &[u8]) -> Gluint {
         (gl.tex_parameteri)(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE as i32);
         tex
     }
+}
+
+/// Dwa razy pole ze znakiem (dodatnie = obrót CCW w układzie ekranowym).
+fn signed_area2(pts: &[(f64, f64)]) -> f64 {
+    let mut a = 0.0;
+    for i in 0..pts.len() {
+        let (x0, y0) = pts[i];
+        let (x1, y1) = pts[(i + 1) % pts.len()];
+        a += x0 * y1 - x1 * y0;
+    }
+    a
+}
+
+fn cross3(a: (f64, f64), b: (f64, f64), c: (f64, f64)) -> f64 {
+    (b.0 - a.0) * (c.1 - b.1) - (b.1 - a.1) * (c.0 - b.0)
+}
+
+/// Czy punkt leży **ściśle** wewnątrz trójkąta (krawędzie nie blokują ucha).
+fn point_in_tri(p: (f64, f64), a: (f64, f64), b: (f64, f64), c: (f64, f64)) -> bool {
+    let eps = 1e-9;
+    let d1 = (b.0 - a.0) * (p.1 - a.1) - (b.1 - a.1) * (p.0 - a.0);
+    let d2 = (c.0 - b.0) * (p.1 - b.1) - (c.1 - b.1) * (p.0 - b.0);
+    let d3 = (a.0 - c.0) * (p.1 - c.1) - (a.1 - c.1) * (p.0 - c.0);
+    d1 > eps && d2 > eps && d3 > eps
+}
+
+/// Trianguluje prosty wielokąt (ear clipping) i zwraca wierzchołki shadera:
+/// 11 `f32` na wierzchołek — `x, y` oraz trzy płaszczyzny krawędzi obrysu.
+///
+/// Płaszczyzny dotyczą tylko krawędzi **obrysu** (przekątne triangulacji dostają
+/// `(0, 0, -1e6)`), więc fragment shader robi 1-px AA wyłącznie na brzegu
+/// wielokąta — bez jasnych szwów na wewnętrznych podziałach.
+/// `false` = kształt zdegenerowany/niejednoznaczny; wywołujący zostawia CPU.
+fn tessellate_polygon(points: &[Point], k: f64, out: &mut Vec<f32>) -> bool {
+    let mut pts: Vec<(f64, f64)> = Vec::with_capacity(points.len());
+    for p in points {
+        let q = (p.x * k, p.y * k);
+        if !q.0.is_finite() || !q.1.is_finite() {
+            return false;
+        }
+        match pts.last() {
+            Some(l) if (l.0 - q.0).abs() <= 1e-6 && (l.1 - q.1).abs() <= 1e-6 => {}
+            _ => pts.push(q),
+        }
+    }
+    while pts.len() > 1 {
+        let (f, l) = (pts[0], *pts.last().unwrap());
+        if (f.0 - l.0).abs() <= 1e-6 && (f.1 - l.1).abs() <= 1e-6 {
+            pts.pop();
+        } else {
+            break;
+        }
+    }
+    let n = pts.len();
+    if n < 3 {
+        return false;
+    }
+    let area = signed_area2(&pts);
+    if area.abs() < 1e-9 {
+        return false;
+    }
+    if area < 0.0 {
+        pts.reverse();
+    }
+
+    // Krawędzie obrysu (po ewentualnym odwróceniu kolejności).
+    let mut boundary: Vec<(usize, usize)> = (0..n)
+        .map(|i| {
+            let j = (i + 1) % n;
+            (i.min(j), i.max(j))
+        })
+        .collect();
+    boundary.sort_unstable();
+    let is_boundary = |a: usize, b: usize| {
+        let key = (a.min(b), a.max(b));
+        boundary.binary_search(&key).is_ok()
+    };
+
+    let mut idx: Vec<usize> = (0..n).collect();
+    let mut tris: Vec<[usize; 3]> = Vec::with_capacity(n - 2);
+    let mut guard = 0usize;
+    while idx.len() > 3 {
+        guard += 1;
+        if guard > n * n {
+            return false;
+        }
+        let m = idx.len();
+        let mut ear = None;
+        for i in 0..m {
+            let ia = idx[(i + m - 1) % m];
+            let ib = idx[i];
+            let ic = idx[(i + 1) % m];
+            let (a, b, c) = (pts[ia], pts[ib], pts[ic]);
+            if cross3(a, b, c) <= 1e-9 {
+                continue;
+            }
+            let mut blocks = false;
+            for &j in &idx {
+                if j == ia || j == ib || j == ic {
+                    continue;
+                }
+                if point_in_tri(pts[j], a, b, c) {
+                    blocks = true;
+                    break;
+                }
+            }
+            if blocks {
+                continue;
+            }
+            ear = Some((i, [ia, ib, ic]));
+            break;
+        }
+        let Some((i, tri)) = ear else {
+            return false;
+        };
+        tris.push(tri);
+        idx.remove(i);
+    }
+    tris.push([idx[0], idx[1], idx[2]]);
+
+    // `-1e6` = krawędź wewnętrzna: `max` w shaderze ją zignoruje (dodatnia
+    // odległość znaczyłaby „na zewnątrz” i wyzerowała krycie).
+    let far = -1.0e6f64;
+    out.reserve(tris.len() * 3 * 11);
+    for tri in &tris {
+        let mut planes = [(0.0f64, 0.0f64, far); 3];
+        for e in 0..3 {
+            let i = tri[e];
+            let j = tri[(e + 1) % 3];
+            if !is_boundary(i, j) {
+                continue;
+            }
+            let a = pts[i];
+            let b = pts[j];
+            let (mut nx, mut ny) = (b.1 - a.1, -(b.0 - a.0));
+            let len = (nx * nx + ny * ny).sqrt();
+            if len < 1e-9 {
+                continue;
+            }
+            nx /= len;
+            ny /= len;
+            let mut c = -(nx * a.0 + ny * a.1);
+            // Normalna ma wskazywać na zewnątrz: wierzchołek naprzeciwko
+            // (wewnątrz trójkąta) musi wypaść po stronie ujemnej.
+            let opp = pts[tri[(e + 2) % 3]];
+            if nx * opp.0 + ny * opp.1 + c > 0.0 {
+                nx = -nx;
+                ny = -ny;
+                c = -c;
+            }
+            planes[e] = (nx, ny, c);
+        }
+        for &vi in tri {
+            let (x, y) = pts[vi];
+            out.push(x as f32);
+            out.push(y as f32);
+            for &(nx, ny, c) in &planes {
+                out.push(nx as f32);
+                out.push(ny as f32);
+                out.push(c as f32);
+            }
+        }
+    }
+    true
 }
 
 fn clip_for(stack: &[(Rect, f64)], screen: Rect) -> (Rect, Option<(Rect, f64)>) {
@@ -1963,6 +2631,7 @@ impl ShapeProgram {
                 mode: (gl.get_uniform_location)(id, b"mode\0".as_ptr() as *const Glchar),
                 radius: (gl.get_uniform_location)(id, b"radius\0".as_ptr() as *const Glchar),
                 width: (gl.get_uniform_location)(id, b"width\0".as_ptr() as *const Glchar),
+                line: (gl.get_uniform_location)(id, b"line\0".as_ptr() as *const Glchar),
                 clip: (gl.get_uniform_location)(id, b"clip\0".as_ptr() as *const Glchar),
                 round: (gl.get_uniform_location)(id, b"round\0".as_ptr() as *const Glchar),
                 round_r: (gl.get_uniform_location)(id, b"round_r\0".as_ptr() as *const Glchar),
@@ -1987,6 +2656,27 @@ impl GlyphProgram {
                 round: (gl.get_uniform_location)(id, b"round\0".as_ptr() as *const Glchar),
                 round_r: (gl.get_uniform_location)(id, b"round_r\0".as_ptr() as *const Glchar),
                 tex: (gl.get_uniform_location)(id, b"tex\0".as_ptr() as *const Glchar),
+            })
+        }
+    }
+}
+
+impl TriProgram {
+    fn new(gl: &Gl) -> Result<Self, String> {
+        let id = link(gl, VS_TRI, FS_TRI)?;
+        unsafe {
+            (gl.use_program)(id);
+            Ok(Self {
+                id,
+                pos: (gl.get_attrib_location)(id, b"pos\0".as_ptr() as *const Glchar) as Gluint,
+                e1: (gl.get_attrib_location)(id, b"e1\0".as_ptr() as *const Glchar) as Gluint,
+                e2: (gl.get_attrib_location)(id, b"e2\0".as_ptr() as *const Glchar) as Gluint,
+                e3: (gl.get_attrib_location)(id, b"e3\0".as_ptr() as *const Glchar) as Gluint,
+                screen: (gl.get_uniform_location)(id, b"screen\0".as_ptr() as *const Glchar),
+                color: (gl.get_uniform_location)(id, b"color\0".as_ptr() as *const Glchar),
+                clip: (gl.get_uniform_location)(id, b"clip\0".as_ptr() as *const Glchar),
+                round: (gl.get_uniform_location)(id, b"round\0".as_ptr() as *const Glchar),
+                round_r: (gl.get_uniform_location)(id, b"round_r\0".as_ptr() as *const Glchar),
             })
         }
     }
@@ -2118,6 +2808,40 @@ mod tests {
     use super::*;
     use crate::scene::DmabufPlane;
     use libluna_core::Color;
+
+    /// Dwa renderery (jak dwa monitory) muszą rysować **własne** klatki.
+    ///
+    /// Regresja: każdy `GpuRenderer` tworzy własny kontekst EGL, a `eglMakeCurrent`
+    /// działa na wątek — bez przełączania kontekstu w `draw` drugi renderer rysował
+    /// w obiekty pierwszego (migotanie i treść w złym rozmiarze na drugim monitorze).
+    #[test]
+    fn two_renderers_keep_their_own_context() {
+        if !available() {
+            eprintln!("pominięto: brak EGL/GPU");
+            return;
+        }
+        let Ok(mut a) = GpuRenderer::new(64, 32) else {
+            eprintln!("pominięto: brak kontekstu EGL");
+            return;
+        };
+        let Ok(mut b) = GpuRenderer::new(32, 64) else {
+            eprintln!("pominięto: brak kontekstu EGL");
+            return;
+        };
+        let red = Color::from_rgba8(255, 0, 0, 255);
+        let blue = Color::from_rgba8(0, 0, 255, 255);
+        a.draw(&Scene::new(), 1.0, red);
+        b.draw(&Scene::new(), 1.0, blue);
+        // Ponowny rysunek na `a` nie może zmienić klatki `b` ani na odwrót.
+        a.draw(&Scene::new(), 1.0, red);
+
+        assert_eq!((a.width(), a.height()), (64, 32));
+        assert_eq!((b.width(), b.height()), (32, 64));
+        assert_eq!(a.data().len(), 64 * 32 * 4);
+        assert_eq!(b.data().len(), 32 * 64 * 4);
+        assert_eq!(&a.data()[0..4], &[255, 0, 0, 255]);
+        assert_eq!(&b.data()[0..4], &[0, 0, 255, 255]);
+    }
 
     /// Renderer GPU musi dać dokładnie `width*height*4` bajtów i rysować obraz
     /// w tym samym miejscu co CPU (z tolerancją na antyaliasing).
@@ -2394,5 +3118,118 @@ mod tests {
         if let Some(destroy) = gpu.gl.destroy_image {
             unsafe { destroy(gpu.gl.dpy, egl_image) };
         }
+    }
+
+    /// Kwadrat → 2 trójkąty; każdy wierzchołek ma 11 f32 (pozycja + 3 płaszczyzny).
+    /// Płaszczyzny obrysu są skończone, przekątna triangulacji — nie.
+    #[test]
+    fn tessellate_square_is_two_triangles() {
+        let p = [
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0),
+            Point::new(10.0, 10.0),
+            Point::new(0.0, 10.0),
+        ];
+        let mut out = Vec::new();
+        assert!(tessellate_polygon(&p, 1.0, &mut out));
+        assert_eq!(out.len(), 2 * 3 * 11);
+        let finite = out
+            .chunks_exact(11)
+            .flat_map(|v| [(v[2], v[3], v[4]), (v[5], v[6], v[7]), (v[8], v[9], v[10])])
+            .filter(|&(_, _, c)| c > -1e5)
+            .count();
+        assert_eq!(finite, 4 * 3, "4 krawędzie obrysu × 3 wierzchołki");
+    }
+
+    /// Wielokąt wklęsły (litera L) musi dać n-2 trójkątów — inaczej kształt
+    /// wyszedłby zły (ear clipping nie może zgubić wcięcia).
+    #[test]
+    fn tessellate_concave_polygon() {
+        let p = [
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0),
+            Point::new(10.0, 4.0),
+            Point::new(4.0, 4.0),
+            Point::new(4.0, 10.0),
+            Point::new(0.0, 10.0),
+        ];
+        let mut out = Vec::new();
+        assert!(tessellate_polygon(&p, 1.0, &mut out));
+        assert_eq!(out.len(), (p.len() - 2) * 3 * 11);
+    }
+
+    #[test]
+    fn tessellate_rejects_degenerate() {
+        let p = [
+            Point::new(0.0, 0.0),
+            Point::new(4.0, 0.0),
+            Point::new(8.0, 0.0),
+        ];
+        let mut out = Vec::new();
+        assert!(!tessellate_polygon(&p, 1.0, &mut out));
+    }
+
+    /// Wypełniony wielokąt rysuje się natywnie (bez warstwy CPU) i nie wychodzi
+    /// poza obrys.
+    #[test]
+    fn gpu_draws_filled_polygon() {
+        if !available() {
+            eprintln!("pominięto: brak EGL/GPU");
+            return;
+        }
+        let mut gpu = match GpuRenderer::new(64, 64) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("pominięto: {e}");
+                return;
+            }
+        };
+        let mut scene = Scene::new();
+        scene.fill_polygon(
+            &[
+                Point::new(16.0, 8.0),
+                Point::new(48.0, 16.0),
+                Point::new(40.0, 56.0),
+                Point::new(12.0, 40.0),
+            ],
+            Color::from_rgba8(0xff, 0x40, 0x20, 0xff),
+        );
+        gpu.draw(&scene, 1.0, Color::from_rgba8(0x10, 0x20, 0x30, 0xff));
+        let px = |x: usize, y: usize| {
+            let i = (y * 64 + x) * 4;
+            (gpu.data()[i], gpu.data()[i + 1], gpu.data()[i + 2])
+        };
+        assert_eq!(px(30, 30), (0xff, 0x40, 0x20), "wnętrze wielokąta");
+        assert_eq!(px(0, 0), (0x10, 0x20, 0x30), "tło poza wielokątem");
+    }
+
+    /// Odcinek idzie SDF-em (kapsułka): środek w kolorze linii, daleko — tło.
+    #[test]
+    fn gpu_draws_stroke_line() {
+        if !available() {
+            eprintln!("pominięto: brak EGL/GPU");
+            return;
+        }
+        let mut gpu = match GpuRenderer::new(64, 64) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("pominięto: {e}");
+                return;
+            }
+        };
+        let mut scene = Scene::new();
+        scene.stroke_line(
+            Point::new(8.0, 32.0),
+            Point::new(56.0, 32.0),
+            6.0,
+            Color::from_rgba8(0xff, 0x40, 0x20, 0xff),
+        );
+        gpu.draw(&scene, 1.0, Color::from_rgba8(0x10, 0x20, 0x30, 0xff));
+        let px = |x: usize, y: usize| {
+            let i = (y * 64 + x) * 4;
+            (gpu.data()[i], gpu.data()[i + 1], gpu.data()[i + 2])
+        };
+        assert_eq!(px(32, 32), (0xff, 0x40, 0x20), "środek linii");
+        assert_eq!(px(32, 8), (0x10, 0x20, 0x30), "poza grubością linii");
     }
 }

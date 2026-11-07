@@ -18,8 +18,8 @@ use libluna_widgets::{
 };
 
 use crate::app::{
-    App, ContextMenu, DragState, DropTarget, EditState, ExternalDrag, HoverTip, MenuCmd, MenuTarget,
-    Pane, SideAction, TextPasteTarget, SPLIT_GAP,
+    App, ContextMenu, DragState, DropTarget, EditState, ExternalDrag, HoverTip, MenuCmd,
+    MenuTarget, Pane, SideAction, TextPasteTarget, SPLIT_GAP,
 };
 use crate::archive;
 use crate::list;
@@ -1452,7 +1452,7 @@ fn on_open_with_events(
                     OpenWithAct::Hover(ow.index_at(lay.list, *position))
                 }
                 Event::Scroll(se) if lay.list.contains(se.position) => {
-                    OpenWithAct::Scroll(se.dy, lay.list)
+                    OpenWithAct::Scroll(se.notches_y() * OPEN_ROW_H, lay.list)
                 }
                 Event::Key(ke) if ke.state == ButtonState::Pressed => match ke.keysym {
                     0xff1b => OpenWithAct::Close,
@@ -1869,7 +1869,7 @@ pub fn handle_events(
                     let step = theme.metrics.itemview.row_h;
                     let pane = &mut app.panes[i];
                     let max = pane.view.max_scroll(rows, theme);
-                    let next = (pane.view.scroll() + se.dy * step).clamp(0.0, max);
+                    let next = (pane.view.scroll() + se.notches_y() * step).clamp(0.0, max);
                     pane.view.set_scroll(next);
                     pane.scroll.set_offset(next, rows);
                     break;
@@ -3219,6 +3219,50 @@ mod tests {
 
     fn app() -> App {
         App::new(std::env::temp_dir())
+    }
+
+    #[test]
+    fn wheel_scrolls_exactly_one_row_per_notch() {
+        let dir = std::env::temp_dir().join(format!(
+            "luna-files-scroll-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..120 {
+            std::fs::write(dir.join(format!("plik-{i:03}.txt")), "x").unwrap();
+        }
+
+        let mut app = App::new(dir.clone());
+        let theme = Theme::light();
+        let text = TextEngine::system();
+        let size = Size::new(1120.0, 720.0);
+        let lay = layout(&app, size, &theme, &text);
+        let rows = pane_rects(&app, &lay, 0, &theme).items;
+        let before = app.panes[0].view.scroll();
+
+        handle_events(
+            &mut app,
+            &[Event::Scroll(libluna_core::ScrollEvent {
+                position: rows.center(),
+                dx: 0.0,
+                dy: libluna_core::SCROLL_NOTCH_PX,
+            })],
+            size,
+            &theme,
+            &text,
+        );
+
+        // Jeden ząbek = jeden wiersz. Wcześniej `dy * row_h` dawało ~20 wierszy
+        // na obrót kółka, przez co lista „przeskakiwała” i pomijała pliki.
+        let moved = app.panes[0].view.scroll() - before;
+        let row = theme.metrics.itemview.row_h;
+        assert!(
+            (moved - row).abs() < 1e-6,
+            "przewinięto {moved} px zamiast {row} px"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

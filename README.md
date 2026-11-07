@@ -107,6 +107,8 @@ luna/                        # meta-repozytorium (dev + integracja)
     luna-clock/              # zegar, minutnik, stoper, strefy i prywatny kalendarz
     luna-settings/          # centrum ustawień środowiska i systemu
     luna-store/              # sklep: pacman/pag/apt/dnf/emerge/Flatpak + aktualizacje
+    luna-welcome/            # powitanie, nowości i skrót do instalatora (live ISO)
+    luna-installer/          # kreator instalacji systemu z obrazu live
     luna-terminal/           # terminal: PTY + VT100/xterm, font monospace, kolory ANSI
   de/                        # integracja sesji (wspólna dla pakietów)
     README.md                # opis środowiska, Selene i nazewnictwo
@@ -125,6 +127,7 @@ Plan dalszej pracy: [`docs/roadmap.md`](docs/roadmap.md).
 Zegar i kalendarz: [`docs/clock.md`](docs/clock.md).
 Centrum ustawień: [`docs/settings.md`](docs/settings.md).
 Sklep z oprogramowaniem: [`docs/store.md`](docs/store.md).
+Powitanie i instalacja: [`docs/welcome.md`](docs/welcome.md), [`docs/installer.md`](docs/installer.md).
 Wtyczki Edytora i dokumentacja dla twórców: [`docs/plugins.md`](docs/plugins.md).
 Zestaw ikon: [`docs/icons.md`](docs/icons.md).
 Menedżer logowania: [`docs/greeter.md`](docs/greeter.md).

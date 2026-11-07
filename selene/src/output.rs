@@ -11,10 +11,12 @@ use std::time::Duration;
 use libluna_core::{Color, Point, Rect, Size, Theme, ThemeSettings};
 use libluna_platform::{run, AppConfig, Frame};
 use libluna_render::gpu::GpuRenderer;
-use libluna_render::{ImageData, Renderer, Scene, SoftwareRenderer, TextEngine, TextRun};
+use libluna_render::{
+    DrawCommand, ImageData, Renderer, Scene, SoftwareRenderer, TextEngine, TextRun,
+};
 use libluna_widgets::{ControlsSide, HeaderBar, PaintCtx};
 
-use crate::drm::{DrmBackend, DrmError};
+use crate::drm::{DrmBackend, DrmError, PixelRect};
 use crate::input::{self, Events};
 use crate::monitors::{layout_horizontal, OutputInfo, Outputs};
 use crate::state::{
@@ -22,6 +24,95 @@ use crate::state::{
     WindowModel, WorkspaceCountModel, WorkspaceModel,
 };
 use crate::sync::LockExt;
+use wayland_server::protocol::{wl_output::WlOutput, wl_surface::WlSurface};
+use wayland_server::Resource;
+
+/// Informuje klientów, na których wyjściach leżą ich powierzchnie (`wl_surface.enter`).
+///
+/// Protokół wymaga tego od kompozytora: klient dobiera na tej podstawie skalę
+/// i stan „widoczności” okna. Brak tych zdarzeń nie przeszkadza w rysowaniu, ale
+/// **Chromium trzyma na nich stan okien potomnych** — bez `enter` bąble rysowane
+/// jako `wl_subsurface` (menu rozszerzeń, menu profilu) nie przyjmują wskaźnika:
+/// podświetlenie zostaje na treści pod bąblem, a klik jest traktowany jak klik
+/// poza menu (menu się zamyka).
+///
+/// Zdarzenia wysyłamy **tylko przy zmianie** zbioru wyjść, więc koszt w pętli
+/// głównej to porównanie kilku liczb na okno.
+pub fn sync_surface_outputs(state: &crate::state::State) {
+    let outs: Vec<(usize, f64, f64, f64, f64)> = state
+        .outputs
+        .lock_or_recover()
+        .iter()
+        .enumerate()
+        .map(|(i, o)| (i, o.x as f64, o.y as f64, o.width as f64, o.height as f64))
+        .collect();
+    if outs.is_empty() {
+        return;
+    }
+    let windows = state.windows.lock_or_recover();
+    for (slot, w) in windows.iter().enumerate() {
+        let Some(surface) = state.slots.get(slot) else {
+            continue;
+        };
+        let hits: Vec<usize> = if w.mapped && !w.minimized {
+            let r = w.outer().union(&w.buffer_rect());
+            outs.iter()
+                .filter(|(_, x, y, ow, oh)| {
+                    r.right() > *x && r.x() < x + ow && r.bottom() > *y && r.y() < y + oh
+                })
+                .map(|(i, ..)| *i)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        apply_entered(state, surface, &hits);
+        // Powierzchnie potomne leżą wewnątrz rodzica — dostają ten sam zbiór.
+        if let Some(pd) = surface.data::<crate::compositor::SurfaceData>() {
+            for child in pd.children.lock_or_recover().clone() {
+                apply_entered(state, &child, &hits);
+            }
+        }
+    }
+}
+
+/// Wysyła różnicę `enter`/`leave` dla jednej powierzchni.
+fn apply_entered(state: &crate::state::State, surface: &WlSurface, hits: &[usize]) {
+    let Some(sd) = surface.data::<crate::compositor::SurfaceData>() else {
+        return;
+    };
+    let client = surface.client();
+    let mut entered = sd.entered_outputs.lock_or_recover();
+    for idx in entered.iter() {
+        if !hits.contains(idx) {
+            if let Some(out) = output_res(state, client.as_ref(), *idx) {
+                let _ = surface
+                    .send_event(wayland_server::protocol::wl_surface::Event::Leave { output: out });
+            }
+        }
+    }
+    for idx in hits {
+        if !entered.contains(idx) {
+            if let Some(out) = output_res(state, client.as_ref(), *idx) {
+                let _ = surface
+                    .send_event(wayland_server::protocol::wl_surface::Event::Enter { output: out });
+            }
+        }
+    }
+    *entered = hits.to_vec();
+}
+
+/// Zasób `wl_output` danego klienta dla monitora `idx`.
+fn output_res(
+    state: &crate::state::State,
+    client: Option<&wayland_server::Client>,
+    idx: usize,
+) -> Option<WlOutput> {
+    state
+        .bound_outputs
+        .iter()
+        .find(|(i, r)| *i == idx && r.is_alive() && r.client().as_ref() == client)
+        .map(|(_, r)| r.clone())
+}
 
 /// Uruchamia wątek wyjścia (nested Wayland) o zadanym rozmiarze.
 pub fn spawn(
@@ -324,6 +415,17 @@ pub fn spawn_drm(
                 hz
             );
         }
+        // Kursor widoczny od pierwszego kadru. Model pozycji startuje jako `None`
+        // i zapełnia się dopiero pierwszym ruchem myszy — do tego czasu scena
+        // (i płaszczyzna sprzętowa) nie miały czego narysować, więc użytkownik
+        // widział „brak kursora” aż do ruchu. Startujemy na środku pierwszego
+        // monitora: wskaźnik jest od razu, a ruch go tylko przenosi.
+        if cursor.lock_or_recover().is_none() {
+            if let (Some(&(w, h)), Some(&(ox, oy))) = (sizes.first(), origins.first()) {
+                *cursor.lock_or_recover() =
+                    Some(Point::new(ox + f64::from(w) / 2.0, oy + f64::from(h) / 2.0));
+            }
+        }
         let mut renderers: Vec<SoftwareRenderer> = sizes
             .iter()
             .map(|(w, h)| SoftwareRenderer::new(*w, *h))
@@ -361,6 +463,35 @@ pub fn spawn_drm(
         };
         if use_gpu && std::env::var("SELENE_STATS").is_ok() {
             eprintln!("selene/drm: backend gpu");
+        }
+        // Zero-copy skanout (GPU → `dmabuf` → `AddFB2`): domyślnie włączone przy GPU,
+        // wyłączenie przez `SELENE_ZEROCOPY=0`. Każde wyjście osobno może spaść do
+        // readbacku, gdy sterownik odrzuci bufor — więc to nigdy nie psuje obrazu.
+        let zerocopy_requested = gpu_requested()
+            && std::env::var("SELENE_ZEROCOPY")
+                .map(|v| !v.is_empty() && v != "0")
+                .unwrap_or(true);
+        let mut zerocopy: Vec<bool> = if use_gpu && zerocopy_requested {
+            vec![true; sizes.len()]
+        } else {
+            vec![false; sizes.len()]
+        };
+        if use_gpu {
+            for (i, on) in zerocopy.iter().enumerate() {
+                if let Some(renderer) = gpu_renderers.get_mut(i) {
+                    renderer.set_scanout_only(*on);
+                }
+            }
+            if std::env::var("SELENE_STATS").is_ok() {
+                eprintln!(
+                    "selene/drm: zero-copy {}",
+                    if zerocopy_requested { "tak" } else { "nie" }
+                );
+                eprintln!(
+                    "selene/drm: GBM (zero-copy NVIDIA): {}",
+                    libluna_render::gbm::describe()
+                );
+            }
         }
         let bg = Color::from_rgba8(0x1e, 0x20, 0x28, 0xff);
         // Motyw i silnik tekstu dla dekoracji (widget `HeaderBar` z libLuny).
@@ -411,10 +542,72 @@ pub fn spawn_drm(
         let mut report = std::time::Instant::now();
         let mut last_sigs: Vec<Option<u64>> = vec![None; sizes.len()];
         let mut last_cur: Option<Point> = None;
+        // Damage (tylko GPU): poprzednia scena per wyjście i prostokąt skopiowany
+        // w poprzedniej klatce. Bufory są podwójne, więc do prezentacji idzie
+        // suma dwóch ostatnich klatek (back był ostatnio pokazany dwa flipy temu).
+        let mut prev_scene: Vec<Option<Scene>> = vec![None; sizes.len()];
+        let mut prev_damage: Vec<Option<Rect>> = vec![None; sizes.len()];
         let mut applied_night: Option<u8> = None;
         let mut applied_power = false;
         let mut last_present = std::time::Instant::now();
+        // Flipy zakolejkowane w poprzedniej iteracji, na które jeszcze nie czekaliśmy.
+        let mut pending_flips = 0usize;
+        // Wykrywanie powrotu z uśpienia: pętla po suspendzie wznawia się po
+        // wielosekundowej przerwie. Jądro mogło zgubić stan CRTC, a zdarzenia
+        // flipów sprzed snu nie dotyczą już nowych klatek.
+        let mut last_loop = std::time::Instant::now();
         loop {
+            let now = std::time::Instant::now();
+            if now.duration_since(last_loop) > Duration::from_secs(2) {
+                eprintln!(
+                    "selene/drm: powrót z uśpienia ({:.1}s) — odtwarzam tryb",
+                    now.duration_since(last_loop).as_secs_f64()
+                );
+                if !backend.resume() {
+                    eprintln!("selene/drm: modeset po wybudzeniu nie powiódł się — próbuję dalej");
+                }
+                pending_flips = 0;
+                last_sigs = vec![None; sizes.len()];
+                prev_scene = vec![None; sizes.len()];
+                prev_damage = vec![None; sizes.len()];
+                cursor_shown = vec![false; sizes.len()];
+                applied_night = None;
+                applied_power = false;
+                flip_error_logged = false;
+                // Płaszczyzna kursora też została zresetowana przez resume.
+                hw_cursor = crate::cursor::fits_hardware(&cursor_gfx);
+                for i in 0..sizes.len() {
+                    if !hw_cursor
+                        || !backend.set_cursor_image(
+                            i,
+                            &cursor_gfx.rgba,
+                            cursor_gfx.width,
+                            cursor_gfx.height,
+                            0,
+                            0,
+                        )
+                        || !backend.hide_cursor(i)
+                    {
+                        hw_cursor = false;
+                    }
+                }
+                last_present = now;
+            }
+            last_loop = now;
+            // Flipy **poprzedniej** klatki zbieramy dopiero teraz: dopiero po nich
+            // wolno pisać do bufora, który był skanowany. Dzięki temu render i
+            // readback bieżącej klatki nakładają się na vblank poprzedniej.
+            // Wcześniej `present` i czekanie stały obok siebie, więc każda klatka
+            // płaciła pełny vblank, a przy dwóch monitorach (75 Hz + 60 Hz) gubiła
+            // terminy — stąd spadki do kilkunastu klatek na sekundę.
+            if pending_flips > 0 {
+                let t = std::time::Instant::now();
+                for _ in 0..pending_flips {
+                    backend.wait_flip();
+                }
+                ms_wait += t.elapsed().as_secs_f64() * 1000.0;
+                pending_flips = 0;
+            }
             // Motyw użytkownika mógł się zmienić (demo/Ustawienia) — odśwież, gdy inny.
             if theme_checked.elapsed() >= Duration::from_secs(2) {
                 theme_checked = std::time::Instant::now();
@@ -449,6 +642,13 @@ pub fn spawn_drm(
                             }
                             if failure.is_none() && gpu.len() == sizes.len() {
                                 gpu_renderers = gpu;
+                                // Nowe renderery startują z domyślnym readbackiem —
+                                // przywracamy dla nich tryb skanoutu.
+                                for (i, on) in zerocopy.iter().enumerate() {
+                                    if let Some(renderer) = gpu_renderers.get_mut(i) {
+                                        renderer.set_scanout_only(*on);
+                                    }
+                                }
                             } else {
                                 eprintln!(
                                     "selene/drm: GPU po zmianie trybu niedostępne ({}) — przechodzę na CPU",
@@ -456,6 +656,9 @@ pub fn spawn_drm(
                                 );
                                 use_gpu = false;
                                 gpu_renderers.clear();
+                                for active in zerocopy.iter_mut() {
+                                    *active = false;
+                                }
                                 renderers = sizes
                                     .iter()
                                     .map(|(w, h)| SoftwareRenderer::new(*w, *h))
@@ -486,7 +689,13 @@ pub fn spawn_drm(
                         }
                         cursor_shown = vec![false; sizes.len()];
                         last_sigs = vec![None; sizes.len()];
+                        // Nowe renderery/bufory: następna klatka musi być pełna.
+                        prev_scene = vec![None; sizes.len()];
+                        prev_damage = vec![None; sizes.len()];
                         last_present = std::time::Instant::now();
+                        // Modeset odtworzył bufory — zdarzenia flipów sprzed zmiany
+                        // trybu nie dotyczą już nowych framebufferów.
+                        pending_flips = 0;
                         // Modeset zeruje LUT gamma — night light trzeba wgrać ponownie.
                         applied_night = None;
 
@@ -576,6 +785,13 @@ pub fn spawn_drm(
             if screenshot.swap(false, std::sync::atomic::Ordering::Relaxed) {
                 // Zrzut z aktywnego backendu — z GPU widać też okna `dmabuf`.
                 if use_gpu {
+                    // W trybie zero-copy klatka siedzi wyłącznie w teksturze GPU —
+                    // bez readbacku zrzut ekranu byłby nieaktualny.
+                    for (i, renderer) in gpu_renderers.iter_mut().enumerate() {
+                        if zerocopy.get(i).copied().unwrap_or(false) {
+                            renderer.readback_full();
+                        }
+                    }
                     let refs: Vec<&dyn Renderer> =
                         gpu_renderers.iter().map(|r| r as &dyn Renderer).collect();
                     save_screenshots(&refs, &infos);
@@ -698,6 +914,9 @@ pub fn spawn_drm(
                 // jednej. Sekwencyjny render dwóch monitorów zjadał cały budżet klatki
                 // (7–10 ms każdy) i powłoka „zwalniała” do ~20 FPS.
                 let t_render = std::time::Instant::now();
+                // Damage bieżącej klatki (None = pełna klatka). Wypełniane tylko
+                // w ścieżce GPU; CPU rysuje i czyta całość.
+                let mut frame_damage: Vec<Option<Rect>> = vec![None; sizes.len()];
                 if use_gpu {
                     // Sekwencyjnie: kontekst EGL jest przypięty do wątku tworzącego,
                     // a i tak jest znacznie szybszy od równoległego CPU.
@@ -723,7 +942,19 @@ pub fn spawn_drm(
                             &theme,
                             &text_engine,
                         );
-                        gpu_renderers[i].draw(&scene, 1.0, bg);
+                        let damage = match prev_scene[i].as_ref() {
+                            // `Scene` porównuje obrazy po wskaźniku `Arc`. Dla
+                            // `dmabuf` klient może narysować nową treść do tego
+                            // samego bufora, więc różnica scen byłaby fałszywie
+                            // zerowa — wtedy czytamy i kopiujemy całą klatkę.
+                            Some(prev) if !scene_has_visible_dmabuf(&scene, w as f64, h as f64) => {
+                                prev.damage_bounds(&scene, gpu_renderers[i].text_engine())
+                            }
+                            _ => None,
+                        };
+                        gpu_renderers[i].draw_damage(&scene, 1.0, bg, damage);
+                        frame_damage[i] = damage;
+                        prev_scene[i] = Some(scene);
                     }
                 } else {
                     let theme = &theme;
@@ -766,12 +997,44 @@ pub fn spawn_drm(
                         continue;
                     }
                     let t = std::time::Instant::now();
-                    let pixels = if use_gpu {
-                        gpu_renderers[i].data()
-                    } else {
-                        renderers[i].data()
-                    };
-                    let flipped = backend.present(i, pixels);
+                    // Prezentacja na GPU: najpierw próba zero-copy (tekstura → dmabuf),
+                    // dopiero potem readback. Po odrzuceniu przez sterownik zostajemy
+                    // przy readbacku do końca życia tego wyjścia.
+                    let mut flipped = false;
+                    if use_gpu && zerocopy[i] {
+                        if let Some(frame) = gpu_renderers[i].export_dmabuf() {
+                            flipped = backend.present_dmabuf(i, &frame);
+                        }
+                        if !flipped {
+                            zerocopy[i] = false;
+                            gpu_renderers[i].set_scanout_only(false);
+                            gpu_renderers[i].readback_full();
+                            // Cała klatka jest świeża — następna prezentacja musi
+                            // skopiować wszystko (bufory mogły się rozjechać).
+                            prev_damage[i] = None;
+                            eprintln!(
+                                "selene/drm: zero-copy odrzucone na wyjściu {i} — czytam przez CPU"
+                            );
+                        }
+                    }
+                    if !flipped {
+                        let pixels = if use_gpu {
+                            gpu_renderers[i].data()
+                        } else {
+                            renderers[i].data()
+                        };
+                        // Podwójny bufor: kopiujemy sumę damage z bieżącej i
+                        // poprzedniej klatki — back był prezentowany dwa flipy temu.
+                        let region = match (prev_damage[i], frame_damage[i]) {
+                            (Some(a), Some(b)) => pixel_rect(a.union(&b), sizes[i].0, sizes[i].1),
+                            _ => None,
+                        };
+                        flipped = match region {
+                            Some(r) => backend.present_region(i, pixels, Some(r)),
+                            None => backend.present(i, pixels),
+                        };
+                        prev_damage[i] = frame_damage[i];
+                    }
                     if !flipped && !flip_error_logged {
                         eprintln!(
                             "{}",
@@ -786,12 +1049,9 @@ pub fn spawn_drm(
                     }
                 }
 
-                // Czekamy równolegle na flipy zakolejkowane na monitorach
-                for _ in 0..num_flips {
-                    let t = std::time::Instant::now();
-                    backend.wait_flip();
-                    ms_wait += t.elapsed().as_secs_f64() * 1000.0;
-                }
+                // Czekanie na flipy przenosimy na początek następnej iteracji
+                // (patrz `pending_flips` wyżej) — tutaj tylko je zapamiętujemy.
+                pending_flips = num_flips;
 
                 frames += 1;
                 if stats && report.elapsed().as_secs_f64() >= 2.0 {
@@ -938,6 +1198,44 @@ fn apply_hw_cursor(
 }
 
 /// Sygnatura sceny dla konkretnego monitora — pozwala pominąć render monitora, na którym nic się nie zmieniło.
+/// Czy na tym wyjściu jest widoczny bufor GPU klienta.
+///
+/// `Scene::damage_bounds` porównuje `Arc<DmabufImage>` po wskaźniku, a klient
+/// może narysować nową treść do tego samego bufora — wtedy różnica scen byłaby
+/// fałszywie zerowa. W takiej sytuacji bierzemy pełną klatkę.
+fn scene_has_visible_dmabuf(scene: &Scene, w: f64, h: f64) -> bool {
+    let screen = Rect::from_xywh(0.0, 0.0, w, h);
+    scene
+        .commands()
+        .iter()
+        .any(|c| matches!(c, DrawCommand::ImageDmabuf { rect, .. } if rect.intersects(&screen)))
+}
+
+/// Prostokąt damage (logiczny; w DRM skala 1.0) → piksele fizyczne.
+///
+/// Prostokąt zerowy też dostaje `Some`: `present_region` nic wtedy nie kopiuje,
+/// ale page-flip jest potrzebny, jeśli zmiana wypadła poza tym wyjściem.
+fn pixel_rect(r: Rect, w: u32, h: u32) -> Option<PixelRect> {
+    let x0 = r.x().floor().max(0.0);
+    let y0 = r.y().floor().max(0.0);
+    let x1 = (r.x() + r.width()).ceil().min(f64::from(w));
+    let y1 = (r.y() + r.height()).ceil().min(f64::from(h));
+    if x1 <= x0 || y1 <= y0 {
+        return Some(PixelRect {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+        });
+    }
+    Some(PixelRect {
+        x: x0 as u32,
+        y: y0 as u32,
+        w: (x1 - x0) as u32,
+        h: (y1 - y0) as u32,
+    })
+}
+
 fn output_signature(
     model: &WindowModel,
     current_ws: usize,
@@ -1454,6 +1752,20 @@ mod tests {
     use super::*;
     use libluna_render::SoftwareRenderer;
 
+    /// Damage z `Scene` (f64) musi trafić w piksele fizyczne: podłoga na
+    /// początku, sufit na końcu, przycięcie do bufora.
+    #[test]
+    fn pixel_rect_clamps_and_rounds() {
+        let r = pixel_rect(Rect::from_xywh(10.2, 20.7, 30.6, 5.1), 100, 100).unwrap();
+        assert_eq!((r.x, r.y, r.w, r.h), (10, 20, 31, 6));
+        // Całkowicie poza ekranem → pusty prostokąt (sam flip, bez kopiowania).
+        let z = pixel_rect(Rect::from_xywh(200.0, 200.0, 10.0, 10.0), 100, 100).unwrap();
+        assert_eq!((z.w, z.h), (0, 0));
+        // Wystający poza prawą/dolną krawędź zostaje przycięty.
+        let c = pixel_rect(Rect::from_xywh(90.0, 90.0, 50.0, 50.0), 100, 100).unwrap();
+        assert_eq!((c.x, c.y, c.w, c.h), (90, 90, 10, 10));
+    }
+
     #[test]
     fn corner_glow_paints_the_corner() {
         let theme = Theme::dark();
@@ -1604,6 +1916,7 @@ mod tests {
             fullscreen: false,
             ssd: false,
             saved: None,
+            image_size_override: None,
             dmabuf: None,
             data: Arc::new(ImageData::new(100, 80, rgba)),
         }]));
@@ -1695,6 +2008,7 @@ mod tests {
             fullscreen: false,
             ssd: false,
             saved: None,
+            image_size_override: None,
             dmabuf: None,
             data: data.clone(),
         };
@@ -1755,6 +2069,7 @@ mod tests {
             fullscreen: false,
             ssd: true,
             saved: None,
+            image_size_override: None,
             dmabuf: None,
             data,
         }];
@@ -1844,6 +2159,7 @@ mod tests {
             fullscreen: false,
             ssd: true,
             saved: None,
+            image_size_override: None,
             dmabuf: None,
             data: Arc::new(ImageData::new(w, h, rgba)),
         }]));
@@ -1939,6 +2255,7 @@ mod tests {
             fullscreen: false,
             ssd: true,
             saved: None,
+            image_size_override: None,
             dmabuf: None,
             data,
         }];
@@ -2012,6 +2329,7 @@ mod tests {
             fullscreen: false,
             ssd: true,
             saved: None,
+            image_size_override: None,
             dmabuf: None,
             data,
         }];

@@ -24,7 +24,7 @@ use crate::tray::{TrayIcon, TrayItem, TrayMenuRow, TrayStatus};
 /// Wysokość panelu (piksele logiczne).
 pub const THICKNESS: f64 = 40.0;
 /// Domyślna szerokość karty launchera.
-pub const LAUNCHER_W: f64 = 720.0;
+pub const LAUNCHER_W: f64 = 900.0;
 /// Domyślna wysokość karty launchera.
 pub const LAUNCHER_H: f64 = 600.0;
 /// Bok przycisku zasilania w pasku.
@@ -94,6 +94,8 @@ pub struct PanelState {
     pub tray: Vec<TrayItem>,
     /// Wskaźniki bezpieczeństwa (mikrofon/kamera/sieć).
     pub security: SecurityIndicators,
+    /// Wskaźnik, którego panel jest aktualnie otwarty (podświetlenie akcentem).
+    pub active_indicator: Option<IndicatorKind>,
 }
 
 /// Aktywne wskaźniki prywatności rysowane na pasku.
@@ -252,6 +254,7 @@ impl PanelState {
             unseen: 0,
             tray: Vec::new(),
             security: SecurityIndicators::default(),
+            active_indicator: None,
         }
     }
 }
@@ -285,12 +288,172 @@ impl LauncherView {
         }
     }
 
+    /// Ikona w przełączniku widoku (zamiast etykiety tekstowej).
+    pub fn icon(self) -> IconName {
+        match self {
+            LauncherView::List => IconName::List,
+            LauncherView::Grid => IconName::Grid,
+            LauncherView::Carousel => IconName::Carousel,
+        }
+    }
+
     /// Następny widok (cyklicznie).
     pub fn next(self) -> Self {
         match self {
             LauncherView::List => LauncherView::Grid,
             LauncherView::Grid => LauncherView::Carousel,
             LauncherView::Carousel => LauncherView::List,
+        }
+    }
+}
+
+/// Kategoria w bocznym pasku launchera (układ jak w dashboardzie, ale płaski).
+///
+/// Dopasowanie idzie po kategoriach freedesktop z pliku `.desktop`
+/// ([`App::categories`]) — a gdy ich brak, po zlokalizowanej [`App::category`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LauncherCategory {
+    /// Tylko aplikacje przypięte (klucz din launchera).
+    Favorites,
+    /// Wszystkie aplikacje (bez filtra kategorii).
+    #[default]
+    All,
+    Multimedia,
+    Graphics,
+    Tools,
+    Internet,
+    Office,
+    Games,
+    System,
+    /// Aplikacje, które nie trafiły do żadnej z powyższych grup.
+    Other,
+}
+
+impl LauncherCategory {
+    /// Kolejność pozycji w bocznym pasku.
+    pub const ALL: [LauncherCategory; 10] = [
+        LauncherCategory::Favorites,
+        LauncherCategory::All,
+        LauncherCategory::Multimedia,
+        LauncherCategory::Graphics,
+        LauncherCategory::Tools,
+        LauncherCategory::Internet,
+        LauncherCategory::Office,
+        LauncherCategory::Games,
+        LauncherCategory::System,
+        LauncherCategory::Other,
+    ];
+
+    /// Etykieta w języku interfejsu.
+    pub fn label(self) -> String {
+        match self {
+            LauncherCategory::Favorites => tr("Favorites"),
+            LauncherCategory::All => tr("All"),
+            LauncherCategory::Multimedia => tr("Multimedia"),
+            LauncherCategory::Graphics => tr("Graphics"),
+            LauncherCategory::Tools => tr("Tools"),
+            LauncherCategory::Internet => tr("Internet"),
+            LauncherCategory::Office => tr("Office"),
+            LauncherCategory::Games => tr("Games"),
+            LauncherCategory::System => tr("System"),
+            LauncherCategory::Other => tr("Other"),
+        }
+    }
+
+    /// Ikona pozycji w bocznym pasku.
+    pub fn icon(self) -> IconName {
+        match self {
+            LauncherCategory::Favorites => IconName::Star,
+            LauncherCategory::All => IconName::Grid,
+            LauncherCategory::Multimedia => IconName::Music,
+            LauncherCategory::Graphics => IconName::Image,
+            LauncherCategory::Tools => IconName::Sliders,
+            LauncherCategory::Internet => IconName::Globe,
+            LauncherCategory::Office => IconName::Document,
+            LauncherCategory::Games => IconName::Game,
+            LauncherCategory::System => IconName::Settings,
+            LauncherCategory::Other => IconName::Archive,
+        }
+    }
+
+    /// Czy aplikacja należy do tej kategorii.
+    ///
+    /// Sprawdzamy zarówno pełne kategorie freedesktop (`AudioVideo`, `WebBrowser`…),
+    /// jak i pojedynczą kategorię wyświetlaną w widoku listy.
+    pub fn matches(self, app: &App) -> bool {
+        let hit = |needles: &[&str]| {
+            app.categories
+                .iter()
+                .chain(std::iter::once(&app.category))
+                .any(|c| {
+                    let c = c.to_lowercase();
+                    needles.iter().any(|n| c.contains(n))
+                })
+        };
+        match self {
+            LauncherCategory::All => true,
+            // Ulubione sprawdza [`Launcher::is_pinned`] — tutaj nie mamy klucza.
+            LauncherCategory::Favorites => true,
+            LauncherCategory::Multimedia => hit(&[
+                "audiovideo",
+                "audio",
+                "video",
+                "player",
+                "music",
+                "multimedia",
+            ]),
+            LauncherCategory::Graphics => hit(&[
+                "graphics",
+                "photography",
+                "2dgraphics",
+                "vectorgraphics",
+                "rastergraphics",
+                "grafika",
+            ]),
+            LauncherCategory::Tools => hit(&[
+                "utility",
+                "texteditor",
+                "development",
+                "ide",
+                "calculator",
+                "filetools",
+                "narz",
+            ]),
+            LauncherCategory::Internet => hit(&[
+                "network",
+                "webbrowser",
+                "email",
+                "chat",
+                "instantmessaging",
+                "feed",
+                "filetransfer",
+                "p2p",
+            ]),
+            LauncherCategory::Office => hit(&[
+                "office",
+                "spreadsheet",
+                "wordprocessor",
+                "presentation",
+                "calendar",
+                "projectmanagement",
+                "biuro",
+            ]),
+            LauncherCategory::Games => hit(&["game", "gry"]),
+            LauncherCategory::System => hit(&[
+                "system",
+                "settings",
+                "packagemanager",
+                "monitor",
+                "security",
+                "filemanager",
+                "terminal",
+            ]),
+            LauncherCategory::Other => !LauncherCategory::ALL.iter().any(|c| {
+                !matches!(
+                    c,
+                    LauncherCategory::Favorites | LauncherCategory::All | LauncherCategory::Other
+                ) && c.matches(app)
+            }),
         }
     }
 }
@@ -304,7 +467,13 @@ pub struct Launcher {
     pub scroll: f64,
     /// Fraza wyszukiwania aplikacji.
     pub search: String,
+    /// Wybrana kategoria bocznego paska.
+    pub category: LauncherCategory,
+    /// Czy kursor pola wyszukiwania jest widoczny w tej klatce (miganie).
+    pub caret_visible: bool,
     /// Pozycja pod kursorem — podświetlenie niezależne od zaznaczenia klawiatury.
+    /// To indeks w **pełnej** liście `apps` (tak zwraca [`launcher_app_at`]),
+    /// a nie w liście po [`Launcher::filter_apps`].
     pub hover: Option<usize>,
     /// Klucze aplikacji przypiętych do góry listy (w kolejności przypinania).
     pub pinned: Vec<String>,
@@ -363,6 +532,25 @@ impl Launcher {
     /// Czy aplikacja jest przypięta do góry listy.
     pub fn is_pinned(&self, app: &App) -> bool {
         self.pinned.contains(&app.key())
+    }
+
+    /// Aplikacje widoczne w launcherze: filtr tekstowy + wybrana kategoria.
+    ///
+    /// To **jedno źródło prawdy** dla rysowania, trafień myszą i nawigacji
+    /// klawiaturą — indeksy muszą się zgadzać.
+    pub fn visible_apps<'a>(&self, apps: &'a [App]) -> Vec<&'a App> {
+        let filtered = self.filter_apps(apps);
+        match self.category {
+            LauncherCategory::All => filtered,
+            LauncherCategory::Favorites => filtered
+                .into_iter()
+                .filter(|app| self.is_pinned(app))
+                .collect(),
+            category => filtered
+                .into_iter()
+                .filter(|app| category.matches(app))
+                .collect(),
+        }
     }
 
     /// Przypina lub odpina aplikację. Zwraca `true`, gdy po zmianie jest przypięta.
@@ -459,6 +647,8 @@ pub struct App {
     pub name: String,
     /// Krótki opis/kategoria (widok listy).
     pub category: String,
+    /// Pełne kategorie freedesktop z pliku `.desktop` (np. `AudioVideo`, `WebBrowser`).
+    pub categories: Vec<String>,
     /// Polecenie uruchamiające (dla prawdziwych aplikacji z plików `.desktop`).
     pub exec: Option<String>,
     /// Czy aplikacja wymaga uruchomienia w terminalu.
@@ -506,6 +696,7 @@ impl App {
                 theme_icon: None,
                 name: tr(n),
                 category: tr(c),
+                categories: vec![(*c).to_owned()],
                 exec: None,
                 terminal: *n == "Terminal",
                 desktop_path: None,
@@ -521,6 +712,7 @@ impl App {
                 theme_icon: d.icon.clone(),
                 name: d.name.clone(),
                 category: d.categories.first().cloned().unwrap_or_default(),
+                categories: d.categories.clone(),
                 exec: Some(d.exec.clone()),
                 terminal: d.terminal,
                 desktop_path: d.desktop_path.clone(),
@@ -545,6 +737,84 @@ pub fn power_rect(bar: Rect, theme: &Theme) -> Rect {
         POWER_BTN,
         POWER_BTN,
     )
+}
+
+/// Wskaźnik na prawym końcu paska — każdy otwiera własny panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndicatorKind {
+    /// Głośność + wybór źródła wyjścia.
+    Volume,
+    /// Sieć / Wi-Fi.
+    Network,
+    /// Centrum powiadomień.
+    Notifications,
+    /// Awatar użytkownika — otwiera główny Quick Panel.
+    User,
+}
+
+impl IndicatorKind {
+    /// Kolejność od lewej do prawej.
+    pub const ALL: [IndicatorKind; 4] = [
+        IndicatorKind::Volume,
+        IndicatorKind::Network,
+        IndicatorKind::Notifications,
+        IndicatorKind::User,
+    ];
+
+    /// Ikona wskaźnika (awatar użytkownika rysujemy osobno).
+    pub fn icon(self) -> Option<IconName> {
+        match self {
+            IndicatorKind::Volume => Some(IconName::Volume),
+            IndicatorKind::Network => Some(IconName::Wifi),
+            IndicatorKind::Notifications => Some(IconName::Bell),
+            IndicatorKind::User => None,
+        }
+    }
+}
+
+/// Bok przycisku wskaźnika.
+pub const INDICATOR_SIZE: f64 = 28.0;
+
+/// Prostokąty wskaźników (kolejność [`IndicatorKind::ALL`]).
+///
+/// Układane od prawej: awatar, powiadomienia, sieć, głośność. Kropki
+/// przestrzeni i tray leżą na lewo od tej grupy.
+pub fn indicator_rects(bar: Rect, theme: &Theme) -> [Rect; 4] {
+    let cy = bar.center().y;
+    let pad = theme.spacing.md;
+    let gap = theme.spacing.xs;
+    let mut rects = [Rect::ZERO; 4];
+    let mut right = bar.right() - pad;
+    for index in (0..IndicatorKind::ALL.len()).rev() {
+        rects[index] = Rect::from_xywh(
+            right - INDICATOR_SIZE,
+            cy - INDICATOR_SIZE / 2.0,
+            INDICATOR_SIZE,
+            INDICATOR_SIZE,
+        );
+        right = rects[index].x() - gap;
+    }
+    rects
+}
+
+/// Wskaźnik pod punktem `p`.
+pub fn indicator_at(bar: Rect, theme: &Theme, p: Point) -> Option<IndicatorKind> {
+    if p.y < bar.y() || p.y > bar.bottom() {
+        return None;
+    }
+    indicator_rects(bar, theme)
+        .iter()
+        .position(|r| r.contains(p))
+        .map(|i| IndicatorKind::ALL[i])
+}
+
+/// Prostokąt wskaźnika o danym rodzaju.
+pub fn indicator_rect(bar: Rect, theme: &Theme, kind: IndicatorKind) -> Rect {
+    let index = IndicatorKind::ALL
+        .iter()
+        .position(|k| *k == kind)
+        .unwrap_or(0);
+    indicator_rects(bar, theme)[index]
 }
 
 /// Prostokąty pigułek przełączników (spójne z `paint_panel`), w kolejności `state.toggles`.
@@ -592,19 +862,14 @@ pub fn toggle_at(
 pub fn workspace_rects(
     bar: Rect,
     theme: &Theme,
-    text: &TextEngine,
+    _text: &TextEngine,
     state: &PanelState,
 ) -> Vec<Rect> {
     let t = theme;
     let cy = bar.center().y;
     let d = 7.0;
-    let toggles = toggle_rects(bar, t, text, state);
-    // Kropki leżą **na lewo** od całej grupy przełączników — przełączniki są układane
-    // od prawej, więc pierwszy z nich (`first()`) jest skrajnie lewy.
-    let mut right = toggles
-        .first()
-        .map(|r| r.x() - t.spacing.xs)
-        .unwrap_or(bar.right() - t.spacing.md);
+    // Kropki leżą **na lewo** od grupy wskaźników (głośność, sieć, powiadomienia, awatar).
+    let mut right = indicator_rects(bar, t)[0].x() - t.spacing.sm;
     let mut rects = vec![Rect::ZERO; state.workspaces];
     for i in (0..state.workspaces).rev() {
         let dot = Rect::from_xywh(right - d, cy - d / 2.0, d, d);
@@ -636,8 +901,12 @@ pub enum ActivePopup {
     #[default]
     None,
     Launcher,
-    /// Lista sieci Wi-Fi — jedyne miejsce wyboru sieci (otwierane z Quick Panela).
+    /// Lista sieci Wi-Fi — jedyne miejsce wyboru sieci (otwierane z paska).
     Wifi,
+    /// Panel głośności z wyborem źródła wyjścia.
+    Volume,
+    /// Centrum powiadomień (dzwonek na pasku).
+    Notifications,
     Calendar,
     /// Menu kontekstowe przycisku okna w taskbarze (PPM).
     TaskMenu,
@@ -859,9 +1128,10 @@ fn tray_hidden_from(total: usize) -> usize {
     }
 }
 
-/// Ikony tray’a leżą bezpośrednio na lewo od przycisku Quick.
+/// Ikony tray’a leżą bezpośrednio na lewo od grupy wskaźników.
 pub fn tray_layout(bar: Rect, theme: &Theme, text: &TextEngine, state: &PanelState) -> TrayLayout {
-    let right = quick_button_rect(bar, theme, text, state).x() - theme.spacing.md;
+    let _ = text;
+    let right = indicator_rects(bar, theme)[0].x() - theme.spacing.md;
     let cy = bar.center().y;
     let total = state.tray.len();
     let overflow = total > TRAY_VISIBLE_MAX;
@@ -2047,28 +2317,55 @@ pub enum VolumeAction {
     StepDown,
     StepUp,
     ToggleMute,
+    /// Wybór źródła wyjścia (indeks na liście `hardware_sinks`).
+    SelectSource(usize),
 }
 
-pub fn volume_popup_rect(bar: Rect, theme: &Theme, text: &TextEngine, state: &PanelState) -> Rect {
-    let w = 280.0;
-    let h = 160.0;
+/// Prostokąt panelu dźwięku — pod wskaźnikiem głośności.
+///
+/// `sources` to liczba dostępnych wyjść; każde dostaje własny wiersz, więc panel
+/// rośnie razem z listą urządzeń.
+pub fn volume_popup_rect(bar: Rect, theme: &Theme, sources: usize) -> Rect {
+    let w = 300.0;
+    let h = 170.0 + sources as f64 * VOLUME_SOURCE_ROW_H;
     let pad = 6.0;
-    let toggles = toggle_rects(bar, theme, text, state);
-    let vol_idx = state
-        .toggles
-        .iter()
-        .position(|t| t.action == ToggleAction::Volume);
-    let right = match vol_idx.and_then(|i| toggles.get(i)) {
-        Some(r) => r.right(),
-        None => bar.right() - 80.0,
-    };
+    let right = indicator_rect(bar, theme, IndicatorKind::Volume).right();
     let x = (right - w).clamp(10.0, (bar.right() - w - 10.0).max(10.0));
     Rect::from_xywh(x, bar.bottom() + pad, w, h)
 }
 
-pub fn paint_volume_popup(ctx: &mut PaintCtx, rect: Rect, pct: u8, muted: bool, hover: &Hover) {
+/// Wysokość wiersza wyjścia audio w panelu dźwięku.
+const VOLUME_SOURCE_ROW_H: f64 = 36.0;
+
+/// Prostokąty listy wyjść audio (pod przyciskami głośności).
+pub fn volume_source_rects(rect: Rect, theme: &Theme, count: usize) -> Vec<Rect> {
+    let pad = theme.spacing.lg;
+    let top = rect.bottom() - theme.spacing.md - count as f64 * VOLUME_SOURCE_ROW_H;
+    (0..count)
+        .map(|i| {
+            Rect::from_xywh(
+                rect.x() + pad,
+                top + i as f64 * VOLUME_SOURCE_ROW_H,
+                (rect.width() - 2.0 * pad).max(0.0),
+                30.0,
+            )
+        })
+        .collect()
+}
+
+pub fn paint_volume_popup(
+    ctx: &mut PaintCtx,
+    rect: Rect,
+    pct: u8,
+    muted: bool,
+    sources: &[String],
+    active_source: Option<usize>,
+    hover: &Hover,
+) {
     let t = ctx.theme;
-    let hit = hover.position().and_then(|p| volume_popup_hit(rect, t, p));
+    let hit = hover
+        .position()
+        .and_then(|p| volume_popup_hit(rect, t, p, sources.len()));
     ctx.scene
         .fill_rounded_rect(rect, t.radius.large, t.colors.card_bg);
     ctx.scene
@@ -2217,9 +2514,69 @@ pub fn paint_volume_popup(ctx: &mut PaintCtx, rect: Rect, pct: u8, muted: bool, 
         weight::MEDIUM,
         mfg,
     );
+
+    // Lista wyjść audio — pozwala przełączyć źródło bez otwierania Ustawień.
+    if !sources.is_empty() {
+        let rows = volume_source_rects(rect, t, sources.len());
+        if let Some(first) = rows.first() {
+            ctx.label_left(
+                first.x(),
+                first.y() - t.spacing.md,
+                &tr("Output"),
+                t.typography.caption.size,
+                weight::MEDIUM,
+                t.colors.dim_text,
+            );
+        }
+        for (i, (row, name)) in rows.iter().zip(sources.iter()).enumerate() {
+            let active = active_source == Some(i);
+            ctx.scene.fill_rounded_rect(
+                *row,
+                t.radius.small,
+                if active {
+                    t.colors.accent
+                } else {
+                    t.colors.view_bg
+                },
+            );
+            if hover.is_hovered(*row) && !active {
+                ctx.scene
+                    .fill_rounded_rect(*row, t.radius.small, libluna_widgets::hover_fill(t));
+            }
+            let fg = if active {
+                t.colors.accent_fg
+            } else {
+                t.colors.text
+            };
+            let label = ellipsize(
+                name,
+                (row.width() - 3.0 * t.spacing.md).max(0.0),
+                t.typography.caption.size,
+                weight::MEDIUM,
+                ctx.text,
+            );
+            ctx.label_left(
+                row.x() + t.spacing.md,
+                row.center().y,
+                &label,
+                t.typography.caption.size,
+                weight::MEDIUM,
+                fg,
+            );
+            if active {
+                let check = Rect::from_xywh(row.right() - 24.0, row.center().y - 7.0, 14.0, 14.0);
+                panel_icon(ctx, IconName::Check, check, fg);
+            }
+        }
+    }
 }
 
-pub fn volume_popup_hit(rect: Rect, theme: &Theme, p: Point) -> Option<VolumeAction> {
+pub fn volume_popup_hit(
+    rect: Rect,
+    theme: &Theme,
+    p: Point,
+    sources: usize,
+) -> Option<VolumeAction> {
     if !rect.contains(p) {
         return None;
     }
@@ -2255,6 +2612,13 @@ pub fn volume_popup_hit(rect: Rect, theme: &Theme, p: Point) -> Option<VolumeAct
         return Some(VolumeAction::ToggleMute);
     }
 
+    if let Some(index) = volume_source_rects(rect, theme, sources)
+        .iter()
+        .position(|r| r.contains(p))
+    {
+        return Some(VolumeAction::SelectSource(index));
+    }
+
     None
 }
 
@@ -2266,19 +2630,11 @@ pub enum WifiAction {
     SelectNetwork(String),
 }
 
-pub fn wifi_popup_rect(bar: Rect, theme: &Theme, text: &TextEngine, state: &PanelState) -> Rect {
+pub fn wifi_popup_rect(bar: Rect, theme: &Theme, _text: &TextEngine, _state: &PanelState) -> Rect {
     let w = 290.0;
     let h = 270.0;
     let pad = 6.0;
-    let toggles = toggle_rects(bar, theme, text, state);
-    let wifi_idx = state
-        .toggles
-        .iter()
-        .position(|t| t.action == ToggleAction::Wifi);
-    let right = match wifi_idx.and_then(|i| toggles.get(i)) {
-        Some(r) => r.right(),
-        None => bar.right() - 140.0,
-    };
+    let right = indicator_rect(bar, theme, IndicatorKind::Network).right();
     let x = (right - w).clamp(10.0, (bar.right() - w - 10.0).max(10.0));
     Rect::from_xywh(x, bar.bottom() + pad, w, h)
 }
@@ -2997,27 +3353,26 @@ const NOTIFY_ROW_H: f64 = 56.0;
 /// Szerokość przycisku „Wyczyść”.
 const NOTIFY_CLEAR_W: f64 = 74.0;
 
-/// Prostokąt centrum powiadomień — obok kalendarza, po stronie z wolnym miejscem.
+/// Prostokąt centrum powiadomień — **po lewej** stronie kalendarza.
 ///
 /// Karta rośnie z liczbą powiadomień (do [`NOTIFICATIONS_H`]), więc pusty stan
-/// nie zajmuje pół ekranu.
+/// nie zajmuje pół ekranu. Gdy po lewej brakuje miejsca (wąski ekran), karta
+/// przeskakuje na prawo, żeby nie wyjechać za krawędź.
+/// Prostokąt centrum powiadomień — pod dzwonkiem na pasku.
+///
+/// Karta rośnie z liczbą powiadomień (do [`NOTIFICATIONS_H`]), więc pusty stan
+/// nie zajmuje pół ekranu. Jest niezależna od kalendarza — kalendarz otwiera zegar.
 pub fn notification_center_rect(bar: Rect, theme: &Theme, count: usize) -> Rect {
-    let cal = calendar_popup_rect(bar, theme);
-    let right_x = cal.right() + 8.0;
-    let x = if right_x + NOTIFICATIONS_W <= bar.right() - 10.0 {
-        right_x
-    } else if cal.x() - 8.0 - NOTIFICATIONS_W >= 10.0 {
-        cal.x() - 8.0 - NOTIFICATIONS_W
-    } else {
-        (bar.right() - NOTIFICATIONS_W - 10.0).max(10.0)
-    };
+    let bell = indicator_rect(bar, theme, IndicatorKind::Notifications);
+    let x = (bell.right() - NOTIFICATIONS_W)
+        .clamp(10.0, (bar.right() - NOTIFICATIONS_W - 10.0).max(10.0));
     let max_rows = ((NOTIFICATIONS_H - NOTIFY_HEADER_H - theme.spacing.md) / NOTIFY_ROW_H)
         .floor()
         .max(0.0) as usize;
     let visible = count.min(max_rows);
     let h = (NOTIFY_HEADER_H + visible as f64 * NOTIFY_ROW_H + theme.spacing.md)
         .clamp(NOTIFICATIONS_MIN_H, NOTIFICATIONS_H);
-    Rect::from_xywh(x, cal.y(), NOTIFICATIONS_W, h)
+    Rect::from_xywh(x, bar.bottom() + 6.0, NOTIFICATIONS_W, h)
 }
 
 /// Rozmieszczenie elementów centrum powiadomień.
@@ -3241,13 +3596,11 @@ pub fn popup_bounding_rect(
         ActivePopup::None => None,
         ActivePopup::Launcher => Some(larea),
         ActivePopup::Wifi => Some(wifi_popup_rect(bar, theme, text, state)),
-        ActivePopup::Calendar => Some(
-            calendar_popup_rect(bar, theme).union(&notification_center_rect(
-                bar,
-                theme,
-                state.notifications,
-            )),
-        ),
+        ActivePopup::Volume => Some(volume_popup_rect(bar, theme, 0)),
+        ActivePopup::Notifications => {
+            Some(notification_center_rect(bar, theme, state.notifications))
+        }
+        ActivePopup::Calendar => Some(calendar_popup_rect(bar, theme)),
         ActivePopup::TaskMenu => None,
         ActivePopup::Quick => Some(quick_panel_rect(bar, theme)),
         ActivePopup::Tray => Some(tray_menu_rect(bar, theme, text, state)),
@@ -3267,18 +3620,15 @@ pub fn popup_trigger_rect(
     match popup {
         ActivePopup::None => None,
         ActivePopup::Launcher => Some(burger_rect(bar, theme)),
-        ActivePopup::Wifi => {
-            let toggles = toggle_rects(bar, theme, text, state);
-            let idx = state
-                .toggles
-                .iter()
-                .position(|t| t.action == ToggleAction::Wifi)?;
-            toggles.get(idx).copied()
+        ActivePopup::Wifi => Some(indicator_rect(bar, theme, IndicatorKind::Network)),
+        ActivePopup::Volume => Some(indicator_rect(bar, theme, IndicatorKind::Volume)),
+        ActivePopup::Notifications => {
+            Some(indicator_rect(bar, theme, IndicatorKind::Notifications))
         }
         ActivePopup::Calendar => Some(clock_rect(bar, theme, text, state)),
         // Menu taskbara ma własny prostokąt (zależny od klikniętego przycisku).
         ActivePopup::TaskMenu => None,
-        ActivePopup::Quick => Some(quick_button_rect(bar, theme, text, state)),
+        ActivePopup::Quick => Some(indicator_rect(bar, theme, IndicatorKind::User)),
         ActivePopup::Tray => tray_layout(bar, theme, text, state).overflow.or_else(|| {
             tray_layout(bar, theme, text, state)
                 .icons
@@ -3463,6 +3813,8 @@ pub enum AppMenuAction {
     Launch,
     /// Dodaj do ulubionych / usuń z ulubionych.
     ToggleFavorite,
+    /// Umieść skrót `.desktop` na pulpicie.
+    AddToDesktop,
     /// Uruchom z uprawnieniami administratora (`pkexec` → agent polkit Luny).
     OpenAsAdmin,
     /// Skopiuj polecenie uruchamiające do schowka.
@@ -3582,6 +3934,7 @@ pub fn paint_app_menu(ctx: &mut PaintCtx, rect: Rect, rows: &[AppMenuRow], hover
         let icon = match action {
             AppMenuAction::Launch => IconName::Play,
             AppMenuAction::ToggleFavorite => IconName::Star,
+            AppMenuAction::AddToDesktop => IconName::Plus,
             AppMenuAction::OpenAsAdmin => IconName::User,
             AppMenuAction::CopyCommand => IconName::Edit,
             AppMenuAction::Uninstall => IconName::Close,
@@ -3829,23 +4182,28 @@ fn paint_task_icon(ctx: &mut PaintCtx, task: &Task, rect: Rect, color: Color) {
     paint_icon(ctx, task_icon(task), rect, color);
 }
 
-/// Rysuje przycisk okna w taskbarze (aktywny — akcent).
+/// Rysuje przycisk okna w taskbarze — **płasko**: bez wypełnienia i obwódki,
+/// aktywne okno ma tylko akcentową kreskę pod spodem, a tło pojawia się przy hoverze.
 fn paint_task_button(ctx: &mut PaintCtx, rect: Rect, task: &Task, icon_only: bool, hovered: bool) {
-    let t = ctx.theme;
+    let t = *ctx.theme;
     let cap = t.typography.caption.size;
-    let (bg, fg) = if task.active {
-        (t.colors.accent, t.colors.accent_fg)
+    let fg = if task.active {
+        t.colors.accent
     } else {
-        (t.colors.card_bg, t.colors.text)
+        t.colors.text
     };
-    ctx.scene.fill_rounded_rect(rect, rect.height() / 2.0, bg);
     if hovered {
         ctx.scene
-            .fill_rounded_rect(rect, rect.height() / 2.0, libluna_widgets::hover_fill(t));
+            .fill_rounded_rect(rect, t.radius.small, libluna_widgets::hover_fill(&t));
     }
-    if !task.active {
-        ctx.scene
-            .stroke_rounded_rect(rect, rect.height() / 2.0, 1.0, t.colors.border);
+    if task.active {
+        let underline = Rect::from_xywh(
+            rect.x() + t.spacing.sm,
+            rect.bottom() - 3.0,
+            (rect.width() - 2.0 * t.spacing.sm).max(0.0),
+            2.0,
+        );
+        ctx.scene.fill_rounded_rect(underline, 1.0, t.colors.accent);
     }
     let isz = 20.0;
     if icon_only {
@@ -3938,12 +4296,7 @@ pub fn paint_panel(panel: &PanelState, hover: &Hover, ctx: &mut PaintCtx, rect: 
         weight::MEDIUM,
         t.colors.text,
     );
-    // Kropka „są nowe powiadomienia” — klik w zegar otwiera kalendarz z centrum.
-    // Znika po otwarciu centrum (jak w GNOME), a nie dopiero po wyczyszczeniu historii.
-    if panel.unseen > 0 {
-        let dot = Rect::from_xywh(clock_r.right() - 9.0, cy - 3.0, 6.0, 6.0);
-        ctx.scene.fill_rounded_rect(dot, 3.0, t.colors.accent);
-    }
+    // Kropka „są nowe powiadomienia” jest teraz przy dzwonku (wskaźnik powiadomień).
 
     if panel.security.any() {
         let chip_hover = security_chip_rect(rect, clock_r, t, ctx.text, panel)
@@ -3951,32 +4304,10 @@ pub fn paint_panel(panel: &PanelState, hover: &Hover, ctx: &mut PaintCtx, rect: 
         paint_security_indicators(ctx, rect, clock_r, panel, chip_hover);
     }
 
-    // ── Prawa grupa (od prawej): przełączniki statusu i przestrzenie ──
-    // Użytkownik i akcje sesji są w Quick Panelu — pasek nie powtarza ich etykiet.
+    // ── Prawa grupa: tray, kropki przestrzeni i cztery wskaźniki ──
+    // Każdy wskaźnik otwiera własny panel; awatar — główny Quick Panel.
 
-    // Przełączniki szybkiego dostępu (pigułki).
-    let toggles = toggle_rects(rect, t, ctx.text, panel);
-    for (r, toggle) in toggles.iter().zip(panel.toggles.iter()) {
-        paint_toggle_pill(ctx, *r, toggle, hover.is_hovered_within(*r, 4.0));
-    }
-
-    // Kropki przestrzeni roboczych (spójne z `workspace_rects`).
-    for (i, dot) in workspace_rects(rect, t, ctx.text, panel).iter().enumerate() {
-        if hover.is_hovered_within(*dot, 4.0) {
-            let bubble =
-                Rect::from_xywh(dot.x() - 4.0, dot.center().y - 7.0, dot.width() + 8.0, 14.0);
-            ctx.scene
-                .fill_rounded_rect(bubble, 7.0, libluna_widgets::hover_fill(t));
-        }
-        let color = if i == panel.current_ws {
-            t.colors.accent
-        } else {
-            t.colors.dim_text
-        };
-        ctx.scene.fill_rounded_rect(*dot, dot.height() / 2.0, color);
-    }
-
-    // Ikony tray’a (SNI) — na lewo od przycisku Quick.
+    // Ikony tray’a (SNI) — na lewo od kropek i wskaźników.
     let tray = tray_layout(rect, t, ctx.text, panel);
     for (r, i) in &tray.icons {
         if let Some(item) = panel.tray.get(*i) {
@@ -3996,19 +4327,86 @@ pub fn paint_panel(panel: &PanelState, hover: &Hover, ctx: &mut PaintCtx, rect: 
         panel_icon(ctx, IconName::ChevronRight, r, t.colors.text);
     }
 
-    // Przycisk Quick Panelu (motyw, Wi-Fi, dźwięk, jasność) — flat: bez wysepki,
-    // tło pojawia się tylko pod kursorem.
-    let qb = quick_button_rect(rect, t, ctx.text, panel);
-    if hover.is_hovered(qb) {
-        ctx.scene
-            .fill_rounded_rect(qb, t.radius.small, libluna_widgets::hover_fill(t));
+    // Kropki przestrzeni roboczych (spójne z `workspace_rects`).
+    for (i, dot) in workspace_rects(rect, t, ctx.text, panel).iter().enumerate() {
+        if hover.is_hovered_within(*dot, 4.0) {
+            let bubble =
+                Rect::from_xywh(dot.x() - 4.0, dot.center().y - 7.0, dot.width() + 8.0, 14.0);
+            ctx.scene
+                .fill_rounded_rect(bubble, 7.0, libluna_widgets::hover_fill(t));
+        }
+        let color = if i == panel.current_ws {
+            t.colors.accent
+        } else {
+            t.colors.dim_text
+        };
+        ctx.scene.fill_rounded_rect(*dot, dot.height() / 2.0, color);
     }
-    panel_icon(
-        ctx,
-        IconName::Sliders,
-        Rect::from_xywh(qb.center().x - 7.5, qb.center().y - 7.5, 15.0, 15.0),
-        t.colors.text,
-    );
+
+    // Wskaźniki — bez pigułek; aktywne mają akcent, hover lekkie tło.
+    for (kind, r) in IndicatorKind::ALL.iter().zip(indicator_rects(rect, t)) {
+        let active = panel.active_indicator == Some(*kind);
+        let hovered = hover.is_hovered_within(r, 2.0);
+        if active || hovered {
+            ctx.scene.fill_rounded_rect(
+                r,
+                t.radius.small,
+                if active {
+                    t.colors.shade
+                } else {
+                    libluna_widgets::hover_fill(t)
+                },
+            );
+        }
+        let fg = if active {
+            t.colors.accent
+        } else {
+            t.colors.text
+        };
+        if let Some(icon) = kind.icon() {
+            let isz = 16.0;
+            panel_icon(
+                ctx,
+                icon,
+                Rect::from_xywh(r.center().x - isz / 2.0, r.center().y - isz / 2.0, isz, isz),
+                fg,
+            );
+        } else {
+            // Awatar użytkownika: okrąg z inicjałem; aktywny — akcent.
+            let avatar = Rect::from_xywh(r.center().x - 10.0, r.center().y - 10.0, 20.0, 20.0);
+            ctx.scene.fill_rounded_rect(
+                avatar,
+                10.0,
+                if active {
+                    t.colors.accent
+                } else {
+                    t.colors.shade
+                },
+            );
+            let initial = panel
+                .user
+                .chars()
+                .next()
+                .map(|c| c.to_uppercase().to_string())
+                .unwrap_or_else(|| "?".to_owned());
+            ctx.label_center(
+                avatar.center().x,
+                avatar.center().y,
+                &initial,
+                t.typography.caption.size,
+                weight::BOLD,
+                if active {
+                    t.colors.accent_fg
+                } else {
+                    t.colors.text
+                },
+            );
+        }
+        if *kind == IndicatorKind::Notifications && panel.unseen > 0 {
+            let dot = Rect::from_xywh(r.right() - 9.0, r.y() + 3.0, 6.0, 6.0);
+            ctx.scene.fill_rounded_rect(dot, 3.0, t.colors.accent);
+        }
+    }
 }
 
 /// Wskaźniki prywatności na pasku: mikrofon, kamera, alert sieciowy.
@@ -4039,10 +4437,10 @@ pub fn security_chip_rect(
     let gap = 6.0;
     let pad = 6.0;
     let width = 2.0 * pad + count as f64 * SECURITY_ICON + (count.saturating_sub(1) as f64) * gap;
-    let right_limit = toggle_rects(bar, theme, text, state)
+    let right_limit = workspace_rects(bar, theme, text, state)
         .first()
         .map(|r| r.x())
-        .unwrap_or(bar.right() - 120.0);
+        .unwrap_or_else(|| indicator_rects(bar, theme)[0].x());
     let x = clock_r.right() + theme.spacing.lg;
     (x + width <= right_limit - 8.0).then(|| Rect::from_xywh(x, bar.center().y - 13.0, width, 26.0))
 }
@@ -4396,80 +4794,15 @@ fn paint_security_button(
     );
 }
 
-/// Przełącznik statusu w pasku: sama ikona (opcjonalnie krótka wartość), bez pigułki.
-fn paint_toggle_pill(ctx: &mut PaintCtx, rect: Rect, toggle: &Toggle, hovered: bool) {
-    let t = ctx.theme;
-    if hovered {
-        ctx.scene
-            .fill_rounded_rect(rect, t.radius.small, libluna_widgets::hover_fill(t));
-    }
-    let fg = if toggle.active {
-        t.colors.accent
-    } else {
-        t.colors.dim_text
-    };
-    let isz = 15.0;
-    let ix = rect.x() + t.spacing.xs;
-    panel_icon(
-        ctx,
-        toggle.icon,
-        Rect::from_xywh(ix, rect.center().y - isz / 2.0, isz, isz),
-        fg,
-    );
-    if let Some(value) = &toggle.value {
-        ctx.label_left(
-            ix + isz + t.spacing.xs,
-            rect.center().y,
-            value,
-            t.typography.caption.size,
-            weight::MEDIUM,
-            fg,
-        );
-    }
-}
-
-/// Pigułka segmentu (np. przełącznik widoku launchera).
-fn paint_pill(ctx: &mut PaintCtx, rect: Rect, label: &str, active: bool, hovered: bool) {
-    let t = ctx.theme;
-    let bg = if active {
-        t.colors.accent
-    } else if hovered {
-        libluna_widgets::hover_fill(t)
-    } else {
-        t.colors.card_bg
-    };
-    let fg = if active {
-        t.colors.accent_fg
-    } else {
-        t.colors.text
-    };
-    ctx.scene.fill_rounded_rect(rect, rect.height() / 2.0, bg);
-    if active && hovered {
-        // Aktywny segment ma już tło akcentu — hover zaznaczamy jaśniejszą obwódką.
-        ctx.scene.stroke_rounded_rect(
-            rect,
-            rect.height() / 2.0,
-            2.0,
-            t.colors.accent_fg.scale_alpha(0.65),
-        );
-    }
-    if !active {
-        ctx.scene
-            .stroke_rounded_rect(rect, rect.height() / 2.0, 1.0, t.colors.border);
-    }
-    ctx.label_center(
-        rect.center().x,
-        rect.center().y,
-        label,
-        t.typography.caption.size,
-        weight::MEDIUM,
-        fg,
-    );
-}
-
 /// Rozmieszczenie elementów launchera.
 #[derive(Debug, Clone)]
 pub struct LauncherRects {
+    /// Boczny pasek z kategoriami (po lewej).
+    pub sidebar: Rect,
+    /// Pozycje kategorii w kolejności [`LauncherCategory::ALL`].
+    pub categories: [(LauncherCategory, Rect); 10],
+    /// Przyciski zasilania na dole paska: „Wyłącz” i „Wyloguj”.
+    pub power: [Rect; 2],
     pub header: Rect,
     pub search: Rect,
     /// Przycisk „×” czyszczący frazę (po prawej w polu wyszukiwania).
@@ -4482,39 +4815,74 @@ pub struct LauncherRects {
     pub content: Rect,
 }
 
+/// Szerokość bocznego paska kategorii.
+pub const LAUNCHER_SIDEBAR_W: f64 = 196.0;
+/// Wysokość pozycji kategorii.
+const SIDEBAR_ROW_H: f64 = 34.0;
+/// Odstęp między pozycjami paska.
+const SIDEBAR_ROW_GAP: f64 = 2.0;
+
 /// Liczy rozmieszczenie launchera w obszarze `area`.
-pub fn launcher_rects(area: Rect, theme: &Theme, text: &TextEngine) -> LauncherRects {
+pub fn launcher_rects(area: Rect, theme: &Theme, _text: &TextEngine) -> LauncherRects {
     let pad = theme.spacing.lg;
-    let header_h = 30.0;
-    let header = Rect::from_xywh(
+
+    // Boczny pasek kategorii — pełna wysokość karty, power na dole.
+    let sidebar = Rect::from_xywh(
         area.x() + pad,
         area.y() + pad,
-        area.width() - 2.0 * pad,
-        header_h,
+        LAUNCHER_SIDEBAR_W,
+        (area.height() - 2.0 * pad).max(0.0),
     );
+    let mut categories = [(LauncherCategory::All, Rect::ZERO); 10];
+    let rows_y = sidebar.y() + 6.0;
+    for (i, category) in LauncherCategory::ALL.iter().enumerate() {
+        categories[i] = (
+            *category,
+            Rect::from_xywh(
+                sidebar.x() + 6.0,
+                rows_y + i as f64 * (SIDEBAR_ROW_H + SIDEBAR_ROW_GAP),
+                (sidebar.width() - 12.0).max(0.0),
+                SIDEBAR_ROW_H,
+            ),
+        );
+    }
+    let power_h = 34.0;
+    let power_gap = 6.0;
+    let power_y = sidebar.bottom() - 6.0 - power_h * 2.0 - power_gap;
+    let power = [
+        Rect::from_xywh(
+            sidebar.x() + 6.0,
+            power_y,
+            (sidebar.width() - 12.0).max(0.0),
+            power_h,
+        ),
+        Rect::from_xywh(
+            sidebar.x() + 6.0,
+            power_y + power_h + power_gap,
+            (sidebar.width() - 12.0).max(0.0),
+            power_h,
+        ),
+    ];
 
-    // Przełącznik widoku po prawej nagłówka.
-    let cap = theme.typography.caption.size;
+    // Główna kolumna (nagłówek, wyszukiwanie, zawartość) na prawo od paska.
+    let main_x = sidebar.right() + pad;
+    let main_w = (area.right() - pad - main_x).max(0.0);
+    let header_h = 30.0;
+    let header = Rect::from_xywh(main_x, area.y() + pad, main_w, header_h);
+
+    // Przełącznik widoku po prawej nagłówka — same ikony (lista/siatka/karuzela).
     let gap = theme.spacing.xs;
-    let widths: Vec<f64> = LauncherView::ALL
-        .iter()
-        .map(|v| text.measure(&v.label(), cap, weight::MEDIUM).width + 2.0 * theme.spacing.md)
-        .collect();
-    let total: f64 = widths.iter().sum::<f64>() + gap * 2.0;
+    let button = 26.0;
+    let total = button * 3.0 + gap * 2.0;
     let mut views = [Rect::ZERO; 3];
     let mut x = header.right() - total;
-    for (i, w) in widths.iter().enumerate() {
-        views[i] = Rect::from_xywh(x, header.y() + (header_h - 26.0) / 2.0, *w, 26.0);
-        x += w + gap;
+    for rect in views.iter_mut() {
+        *rect = Rect::from_xywh(x, header.y() + (header_h - button) / 2.0, button, button);
+        x += button + gap;
     }
-    let switcher = Rect::from_xywh(header.right() - total, header.y(), total, 26.0);
+    let switcher = Rect::from_xywh(header.right() - total, header.y(), total, button);
 
-    let search = Rect::from_xywh(
-        area.x() + pad,
-        header.bottom() + theme.spacing.sm,
-        area.width() - 2.0 * pad,
-        32.0,
-    );
+    let search = Rect::from_xywh(main_x, header.bottom() + theme.spacing.sm, main_w, 32.0);
     let clear_sz = 20.0;
     let search_clear = Rect::from_xywh(
         search.right() - theme.spacing.sm - clear_sz,
@@ -4524,13 +4892,16 @@ pub fn launcher_rects(area: Rect, theme: &Theme, text: &TextEngine) -> LauncherR
     );
     let content_y = search.bottom() + theme.spacing.lg;
     let content = Rect::from_xywh(
-        area.x() + pad,
+        main_x,
         content_y,
-        area.width() - 2.0 * pad,
+        main_w,
         (area.bottom() - pad - content_y).max(0.0),
     );
 
     LauncherRects {
+        sidebar,
+        categories,
+        power,
         header,
         search,
         search_clear,
@@ -4538,6 +4909,42 @@ pub fn launcher_rects(area: Rect, theme: &Theme, text: &TextEngine) -> LauncherR
         views,
         content,
     }
+}
+
+/// Trafienie w boczny pasek launchera.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LauncherSidebarHit {
+    /// Wybór kategorii.
+    Category(LauncherCategory),
+    /// „Wyłącz” (zamknij system).
+    PowerOff,
+    /// „Wyloguj” (zakończ sesję).
+    Logout,
+}
+
+/// Co znajduje się pod punktem `p` w bocznym pasku launchera.
+pub fn launcher_sidebar_at(
+    area: Rect,
+    theme: &Theme,
+    text: &TextEngine,
+    p: Point,
+) -> Option<LauncherSidebarHit> {
+    let r = launcher_rects(area, theme, text);
+    if let Some((category, _)) = r
+        .categories
+        .iter()
+        .find(|(_, rect)| rect.contains(p))
+        .copied()
+    {
+        return Some(LauncherSidebarHit::Category(category));
+    }
+    if r.power[0].contains(p) {
+        return Some(LauncherSidebarHit::PowerOff);
+    }
+    if r.power[1].contains(p) {
+        return Some(LauncherSidebarHit::Logout);
+    }
+    None
 }
 
 /// Widok odpowiadający kliknięciu w przełącznik (jeśli trafiono).
@@ -4571,7 +4978,7 @@ pub fn launcher_app_at(
     text: &TextEngine,
     p: Point,
 ) -> Option<usize> {
-    let filtered = launcher.filter_apps(apps);
+    let filtered = launcher.visible_apps(apps);
     let content = launcher_rects(area, theme, text).content;
     let sy = launcher.scroll;
     let filtered_idx = match launcher.view {
@@ -4604,7 +5011,7 @@ pub fn launcher_app_rect(
     index: usize,
 ) -> Option<Rect> {
     let target = apps.get(index)?;
-    let filtered = launcher.filter_apps(apps);
+    let filtered = launcher.visible_apps(apps);
     let pos = filtered.iter().position(|app| std::ptr::eq(*app, target))?;
     let content = launcher_rects(area, theme, text).content;
     let sy = launcher.scroll;
@@ -4663,7 +5070,7 @@ pub fn launcher_scroll_max(
     theme: &Theme,
     text: &TextEngine,
 ) -> f64 {
-    let filtered_len = launcher.filter_apps(apps).len();
+    let filtered_len = launcher.visible_apps(apps).len();
     let content = launcher_rects(area, theme, text).content;
     let gap_list = 8.0;
     let gap_grid = 12.0;
@@ -4686,7 +5093,7 @@ pub fn ensure_selection_visible(
     theme: &Theme,
     text: &TextEngine,
 ) {
-    let filtered_len = launcher.filter_apps(apps).len();
+    let filtered_len = launcher.visible_apps(apps).len();
     ensure_selection_visible_count(filtered_len, launcher, area, theme, text);
 }
 
@@ -4749,6 +5156,95 @@ pub fn launcher_scroll_max_count(
 }
 
 /// Rysuje launcher w zadanym prostokącie.
+/// Rysuje boczny pasek launchera: kategorie i akcje zasilania.
+///
+/// Tło jest **w pełni kryjące** (`sidebar_bg`) — launcher nie
+/// prześwituje przez pulpit, w przeciwieństwie do „szklanych” dashboardów.
+fn paint_launcher_sidebar(
+    ctx: &mut PaintCtx,
+    launcher: &Launcher,
+    r: &LauncherRects,
+    hover: &Hover,
+) {
+    let t = *ctx.theme;
+    ctx.scene
+        .fill_rounded_rect(r.sidebar, t.radius.medium, t.colors.sidebar_bg);
+
+    let icon_sz = 18.0;
+    for (category, rect) in &r.categories {
+        let active = launcher.category == *category;
+        let hovered = hover.is_hovered(*rect);
+        let fg = if active {
+            t.colors.accent_fg
+        } else {
+            t.colors.text
+        };
+        if active {
+            ctx.scene
+                .fill_rounded_rect(*rect, t.radius.small, t.colors.accent);
+        } else if hovered {
+            ctx.scene
+                .fill_rounded_rect(*rect, t.radius.small, libluna_widgets::hover_fill(&t));
+        }
+        let icon = Rect::from_xywh(
+            rect.x() + t.spacing.sm,
+            rect.center().y - icon_sz / 2.0,
+            icon_sz,
+            icon_sz,
+        );
+        panel_icon(ctx, category.icon(), icon, fg);
+        ctx.label_left(
+            icon.right() + t.spacing.sm,
+            rect.center().y,
+            &category.label(),
+            t.typography.body.size,
+            if active { weight::BOLD } else { weight::NORMAL },
+            fg,
+        );
+    }
+
+    // Linia rozdzielająca i akcje zasilania na dole paska.
+    let sep = Rect::from_xywh(
+        r.sidebar.x() + t.spacing.sm,
+        r.power[0].y() - t.spacing.md / 2.0,
+        (r.sidebar.width() - 2.0 * t.spacing.sm).max(0.0),
+        1.0,
+    );
+    ctx.scene.fill_rect(sep, t.colors.border);
+
+    for (rect, label, icon) in [
+        (r.power[0], tr("Power off"), IconName::Power),
+        (r.power[1], tr("Log out"), IconName::User),
+    ] {
+        ctx.scene.fill_rounded_rect(
+            rect,
+            t.radius.small,
+            if hover.is_hovered(rect) {
+                libluna_widgets::hover_fill(&t)
+            } else {
+                t.colors.card_bg
+            },
+        );
+        ctx.scene
+            .stroke_rounded_rect(rect, t.radius.small, 1.0, t.colors.border);
+        let icon_rect = Rect::from_xywh(
+            rect.x() + t.spacing.sm,
+            rect.center().y - icon_sz / 2.0,
+            icon_sz,
+            icon_sz,
+        );
+        panel_icon(ctx, icon, icon_rect, t.colors.text);
+        ctx.label_left(
+            icon_rect.right() + t.spacing.sm,
+            rect.center().y,
+            &label,
+            t.typography.body.size,
+            weight::NORMAL,
+            t.colors.text,
+        );
+    }
+}
+
 pub fn paint_launcher(
     apps: &[App],
     launcher: &Launcher,
@@ -4764,6 +5260,8 @@ pub fn paint_launcher(
         .fill_rounded_rect(area, t.radius.large, t.colors.card_bg);
     ctx.scene
         .stroke_rounded_rect(area, t.radius.large, 1.0, t.colors.border);
+
+    paint_launcher_sidebar(ctx, launcher, &r, hover);
 
     let title = tr("Applications");
     ctx.label_left(
@@ -4797,14 +5295,33 @@ pub fn paint_launcher(
         );
     }
 
-    // Przełącznik widoku.
+    // Przełącznik widoku — same ikony.
     for (i, view) in LauncherView::ALL.iter().enumerate() {
-        paint_pill(
+        let rect = r.views[i];
+        let active = *view == launcher.view;
+        let hovered = hover.is_hovered(rect);
+        if active {
+            ctx.scene
+                .fill_rounded_rect(rect, t.radius.small, t.colors.accent);
+        } else if hovered {
+            ctx.scene
+                .fill_rounded_rect(rect, t.radius.small, libluna_widgets::hover_fill(&t));
+        }
+        let isz = 16.0;
+        panel_icon(
             ctx,
-            r.views[i],
-            &view.label(),
-            *view == launcher.view,
-            hover.is_hovered(r.views[i]),
+            view.icon(),
+            Rect::from_xywh(
+                rect.center().x - isz / 2.0,
+                rect.center().y - isz / 2.0,
+                isz,
+                isz,
+            ),
+            if active {
+                t.colors.accent_fg
+            } else {
+                t.colors.text
+            },
         );
     }
 
@@ -4825,8 +5342,15 @@ pub fn paint_launcher(
 
     let search_x = s_icon_rect.right() + t.spacing.sm;
     if launcher.search.is_empty() {
+        // Migający kursor także w pustym polu — od razu widać, że można pisać.
+        if launcher.caret_visible {
+            ctx.scene.fill_rect(
+                Rect::from_xywh(search_x, r.search.center().y - 8.0, 2.0, 16.0),
+                t.colors.accent,
+            );
+        }
         ctx.label_left(
-            search_x,
+            search_x + 6.0,
             r.search.center().y,
             &tr("Search applications…"),
             t.typography.body.size,
@@ -4876,14 +5400,20 @@ pub fn paint_launcher(
         );
         let tw = ctx.measure(&shown, t.typography.body.size, weight::NORMAL);
         let cursor_x = (search_x + tw + 2.0).min(text_max + search_x);
-        ctx.scene.fill_rect(
-            Rect::from_xywh(cursor_x, r.search.center().y - 8.0, 2.0, 16.0),
-            t.colors.accent,
-        );
+        if launcher.caret_visible {
+            ctx.scene.fill_rect(
+                Rect::from_xywh(cursor_x, r.search.center().y - 8.0, 2.0, 16.0),
+                t.colors.accent,
+            );
+        }
     }
 
-    // Filtrowana lista aplikacji
-    let filtered = launcher.filter_apps(apps);
+    // Filtrowana lista aplikacji. `hover` jest indeksem w pełnej liście `apps`,
+    // a poniższe pętle iterują po liście po filtrze (przypięte/ostatnio używane
+    // idą na górę) — porównujemy więc aplikacje, nie indeksy. Wcześniej porównanie
+    // `hover == Some(i)` podświetlało inny kafelek niż ten pod kursorem.
+    let filtered = launcher.visible_apps(apps);
+    let hover = launcher.hover;
     let scroll = launcher.scroll;
     ctx.scene.push_clip(r.content);
 
@@ -4905,7 +5435,7 @@ pub fn paint_launcher(
                     paint_grid_tile(
                         app,
                         launcher.selected_index(filtered.len()) == Some(i),
-                        launcher.hover == Some(i),
+                        launcher_app_hovered(apps, hover, app),
                         launcher.is_pinned(app),
                         icon_theme,
                         ctx,
@@ -4920,7 +5450,7 @@ pub fn paint_launcher(
                     paint_list_row(
                         app,
                         launcher.selected_index(filtered.len()) == Some(i),
-                        launcher.hover == Some(i),
+                        launcher_app_hovered(apps, hover, app),
                         launcher.is_pinned(app),
                         icon_theme,
                         ctx,
@@ -4933,7 +5463,7 @@ pub fn paint_launcher(
                     paint_carousel_card(
                         app,
                         i == launcher.carousel,
-                        launcher.hover == Some(i),
+                        launcher_app_hovered(apps, hover, app),
                         launcher.is_pinned(app),
                         icon_theme,
                         ctx,
@@ -4944,6 +5474,17 @@ pub fn paint_launcher(
         }
     }
     ctx.scene.pop_clip();
+}
+
+/// Czy aplikacja `app` jest pod kursorem.
+///
+/// `hover` to indeks w pełnej liście `apps` (kontrakt [`launcher_app_at`]), a rysowanie
+/// iteruje po liście po [`Launcher::filter_apps`] — porównujemy aplikacje, bo indeksy
+/// obu list różnią się, gdy coś jest przypięte lub ostatnio używane.
+fn launcher_app_hovered(apps: &[App], hover: Option<usize>, app: &App) -> bool {
+    hover
+        .and_then(|index| apps.get(index))
+        .is_some_and(|hovered| std::ptr::eq(hovered, app))
 }
 
 /// Kafelek siatki: ikona + nazwa; zaznaczony wyróżniony akcentem.
@@ -5813,6 +6354,52 @@ mod tests {
     }
 
     #[test]
+    fn launcher_sidebar_hit_tests_categories_and_power() {
+        let theme = Theme::dark();
+        let text = TextEngine::none();
+        let area = area();
+        let r = launcher_rects(area, &theme, &text);
+        assert!(r.sidebar.width() >= 180.0);
+        for (category, rect) in r.categories {
+            assert_eq!(
+                launcher_sidebar_at(area, &theme, &text, rect.center()),
+                Some(LauncherSidebarHit::Category(category))
+            );
+            // Pasek nie może nachodzić na siatkę aplikacji.
+            assert!(rect.right() <= r.content.x());
+        }
+        assert_eq!(
+            launcher_sidebar_at(area, &theme, &text, r.power[0].center()),
+            Some(LauncherSidebarHit::PowerOff)
+        );
+        assert_eq!(
+            launcher_sidebar_at(area, &theme, &text, r.power[1].center()),
+            Some(LauncherSidebarHit::Logout)
+        );
+        // Klik w pole wyszukiwania nie jest trafieniem w pasek (nie zamyka launchera).
+        assert!(launcher_sidebar_at(area, &theme, &text, r.search.center()).is_none());
+    }
+
+    #[test]
+    fn category_filter_narrows_the_app_list() {
+        let apps = App::sample();
+        let mut launcher = Launcher::new();
+
+        launcher.category = LauncherCategory::Multimedia;
+        let visible = launcher.visible_apps(&apps);
+        assert!(!visible.is_empty());
+        assert!(visible.iter().all(|a| a.name == tr("Player")));
+
+        launcher.category = LauncherCategory::System;
+        assert!(launcher.visible_apps(&apps).len() > 4);
+
+        launcher.category = LauncherCategory::Other;
+        let other = launcher.visible_apps(&apps);
+        assert!(!other.is_empty());
+        assert!(other.iter().all(|a| LauncherCategory::Other.matches(a)));
+    }
+
+    #[test]
     fn launcher_search_clear_button_hit_test() {
         let theme = Theme::dark();
         let text = TextEngine::none();
@@ -5844,6 +6431,40 @@ mod tests {
         assert!(launcher.search.is_empty());
         assert_eq!(launcher.scroll, 0.0);
         assert_eq!(launcher.selected, Some(0));
+    }
+
+    #[test]
+    fn hover_highlights_the_tile_under_the_cursor_even_when_pinned() {
+        let theme = Theme::light();
+        let text = TextEngine::none();
+        let apps = App::sample();
+        let mut launcher = Launcher {
+            view: LauncherView::Grid,
+            ..Launcher::default()
+        };
+        let terminal = apps.iter().find(|a| a.name == "Terminal").unwrap();
+        launcher.toggle_pin(terminal);
+
+        // Przypięcie przenosi Terminal na początek listy filtrowanej, więc indeks
+        // w pełnej liście `apps` i indeks w liście filtrowanej się rozjeżdżają.
+        let filtered = launcher.filter_apps(&apps);
+        let hovered_app = filtered[0];
+        assert_eq!(hovered_app.name, "Terminal");
+        let hover = apps
+            .iter()
+            .position(|a| std::ptr::eq(a, hovered_app))
+            .unwrap();
+        assert_ne!(hover, 0, "indeks w pełnej liście musi różnić się od 0");
+
+        // Kafel pod kursorem (lewy górny) to właśnie Terminal…
+        let r = launcher_rects(area(), &theme, &text);
+        let p = Point::new(r.content.x() + 5.0, r.content.y() + 5.0);
+        let hit = launcher_app_at(&apps, &launcher, area(), &theme, &text, p).unwrap();
+        assert_eq!(hit, hover);
+
+        // …i tylko on jest podświetlony — nie kafel o tym samym indeksie po filtrze.
+        assert!(launcher_app_hovered(&apps, Some(hover), hovered_app));
+        assert!(!launcher_app_hovered(&apps, Some(hover), &apps[0]));
     }
 
     #[test]
@@ -5980,14 +6601,22 @@ mod tests {
         let bar = Rect::from_xywh(0.0, 0.0, 1280.0, THICKNESS);
         let st = PanelState::sample();
 
-        let vrect = volume_popup_rect(bar, &theme, &text, &st);
+        let vrect = volume_popup_rect(bar, &theme, 3);
         assert!(vrect.width() > 100.0);
         let vhit = volume_popup_hit(
             vrect,
             &theme,
             Point::new(vrect.center().x, vrect.y() + 56.0),
+            3,
         );
         assert!(matches!(vhit, Some(VolumeAction::SetLevel(_))));
+        // Lista wyjść audio jest klikalna (wybór źródła).
+        let sources = volume_source_rects(vrect, &theme, 3);
+        assert_eq!(sources.len(), 3);
+        assert_eq!(
+            volume_popup_hit(vrect, &theme, sources[1].center(), 3),
+            Some(VolumeAction::SelectSource(1))
+        );
 
         let wrect = wifi_popup_rect(bar, &theme, &text, &st);
         assert!(wrect.width() > 100.0);
@@ -6080,15 +6709,13 @@ mod tests {
     fn notification_center_hit_tests_match_layout() {
         let theme = Theme::dark();
         let bar = Rect::from_xywh(0.0, 0.0, 1280.0, THICKNESS);
-        let cal = calendar_popup_rect(bar, &theme);
+        let bell = indicator_rect(bar, &theme, IndicatorKind::Notifications);
         let rect = notification_center_rect(bar, &theme, 2);
         assert!(rect.y() >= bar.bottom());
-        // Na 1280 px karta mieści się obok kalendarza, bez nakładania.
-        assert!(
-            rect.x() >= cal.right(),
-            "centrum nie może zasłaniać kalendarza"
-        );
+        // Centrum jest zakotwiczone pod dzwonkiem i nie zasłania kalendarza.
         assert!(rect.right() <= bar.right());
+        assert!(rect.right() >= bell.right());
+        assert!(rect.x() < bell.center().x);
 
         let l = notification_layout(rect, &theme, 2);
         assert_eq!(l.rows.len(), 2);

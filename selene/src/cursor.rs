@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use libluna_core::{Color, Point, Rect};
-use libluna_render::{ImageData, Scene, SoftwareRenderer};
+use libluna_render::{gpu, ImageData, Scene, SoftwareRenderer};
 use wayland_server::Resource;
 
 use crate::state::{CursorImage, State};
@@ -74,16 +74,23 @@ pub fn surface_destroyed(state: &mut State) {
 
 /// Odczytuje bufor powierzchni kursora jako `ImageData` (premultiplied RGBA).
 ///
-/// Bufory `dmabuf` są na razie pomijane (kursor GPU trafi później razem
-/// z importem tekstur dla powierzchni bez roli) — zostajemy przy poprzednim obrazie.
+/// Obsługuje `wl_shm` oraz `dmabuf` (Zed/GPUI i inne klienty GPU ustawiają
+/// kursor buforem GPU). Dla `dmabuf` robimy import EGL i readback — kursor
+/// musi być dostępny dla płaszczyzny sprzętowej i rysowania w scenie.
 fn copy_buffer(data: &crate::compositor::SurfaceData, hotspot: (i32, i32)) -> Option<CursorImage> {
     let buffer = data.buffer.lock_or_recover().clone()?;
     let buf_data = buffer.data::<crate::shm::BufferData>()?;
-    let rgba = buf_data.to_rgba()?;
     if buf_data.width <= 0 || buf_data.height <= 0 {
         return None;
     }
-    let image = libluna_render::ImageData::new(buf_data.width as u32, buf_data.height as u32, rgba);
+    let (width, height, rgba) = if let Some(dmabuf) = buf_data.dmabuf.clone() {
+        let rgba = gpu::GpuRenderer::dmabuf_to_rgba(&dmabuf)?;
+        (dmabuf.width, dmabuf.height, rgba)
+    } else {
+        let rgba = buf_data.to_rgba()?;
+        (buf_data.width as u32, buf_data.height as u32, rgba)
+    };
+    let image = libluna_render::ImageData::new(width, height, rgba);
     // Piksele mamy w pamięci — bufor można oddać od razu (klient czeka na `release`).
     if data.take_release() {
         let _ = buffer.send_event(wayland_server::protocol::wl_buffer::Event::Release);
@@ -207,23 +214,73 @@ fn shape(name: &str) -> Option<(Arc<ImageData>, (i32, i32))> {
 
 fn load_shape(name: &str) -> Option<(Arc<ImageData>, (i32, i32))> {
     let theme = theme()?;
-    // Nazwy CSS (`pointer`, `ew-resize`) nie zawsze istnieją w motywie;
-    // wtedy bierzemy strzałkę, żeby kursor w ogóle był widoczny.
-    let path = theme
-        .load_icon(name)
-        .or_else(|| theme.load_icon("left_ptr"))
-        .or_else(|| theme.load_icon("default"))?;
-    let bytes = std::fs::read(&path).ok()?;
-    let images = xcursor::parser::parse_xcursor(&bytes)?;
-    let best = images.iter().min_by_key(|image| {
-        let size = i64::from(image.size.max(image.width).max(image.height));
-        (size - i64::from(PREFERRED_SIZE)).abs()
-    })?;
-    if best.width == 0 || best.height == 0 {
-        return None;
+    // Kolejność prób: nazwa z protokołu (Adwaita ma nazwy CSS), nazwa X11
+    // (starsze motywy znają tylko `hand2`/`xterm`), uniwersalna strzałka.
+    // Uszkodzony plik nie może schować kursora — próbujemy dalej.
+    let alias = xcursor_alias(name);
+    let candidates = [
+        Some(name),
+        (alias != name).then_some(alias),
+        Some("left_ptr"),
+        Some("default"),
+    ];
+    for candidate in candidates.into_iter().flatten() {
+        let Some(path) = theme.load_icon(candidate) else {
+            continue;
+        };
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Some(images) = xcursor::parser::parse_xcursor(&bytes) else {
+            continue;
+        };
+        let Some(best) = images.iter().min_by_key(|image| {
+            let size = i64::from(image.size.max(image.width).max(image.height));
+            (size - i64::from(PREFERRED_SIZE)).abs()
+        }) else {
+            continue;
+        };
+        if best.width == 0 || best.height == 0 {
+            continue;
+        }
+        let image = Arc::new(xcursor_to_image(best));
+        return Some((image, (best.xhot as i32, best.yhot as i32)));
     }
-    let image = Arc::new(xcursor_to_image(best));
-    Some((image, (best.xhot as i32, best.yhot as i32)))
+    None
+}
+
+/// Nazwa kształtu CSS (`cursor-shape-v1`) → nazwa pliku w motywach X11.
+///
+/// Adwaita dostarcza oba zestawy nazw, ale DMZ i starsze motywy tylko X11 —
+/// bez tego mapowania `pointer`/`text`/`ew-resize` spadałyby do strzałki.
+fn xcursor_alias(name: &str) -> &str {
+    match name {
+        "default" | "arrow" | "context-menu" | "dnd-ask" | "zoom-in" | "zoom-out" => "left_ptr",
+        "pointer" => "hand2",
+        "text" | "vertical-text" => "xterm",
+        "crosshair" | "cell" => "crosshair",
+        "move" | "all-scroll" | "all-resize" => "fleur",
+        "help" => "question_arrow",
+        "wait" => "watch",
+        "progress" => "left_ptr_watch",
+        "grab" => "hand1",
+        "grabbing" => "hand1",
+        "not-allowed" | "no-drop" => "crossed_circle",
+        "alias" => "link",
+        "e-resize" => "sb_right_arrow",
+        "w-resize" => "sb_left_arrow",
+        "n-resize" => "sb_up_arrow",
+        "s-resize" => "sb_down_arrow",
+        "ew-resize" | "col-resize" => "sb_h_double_arrow",
+        "ns-resize" | "row-resize" => "sb_v_double_arrow",
+        "ne-resize" => "top_right_corner",
+        "nw-resize" => "top_left_corner",
+        "se-resize" => "bottom_right_corner",
+        "sw-resize" => "bottom_left_corner",
+        "nesw-resize" => "bd_double_arrow",
+        "nwse-resize" => "fd_double_arrow",
+        other => other,
+    }
 }
 
 /// Konwersja obrazu XCursor → premultiplied RGBA (format `ImageData`).
@@ -267,14 +324,15 @@ fn theme_candidates() -> Vec<String> {
     let mut names = Vec::new();
     for var in ["SELENE_CURSOR_THEME", "XCURSOR_THEME"] {
         if let Ok(value) = std::env::var(var) {
-            let value = value.trim();
-            if !value.is_empty() {
-                names.push(value.to_owned());
+            for name in value.split([',', ';']) {
+                push_theme(&mut names, name, 0);
             }
         }
     }
     if let Some(gtk) = gtk_cursor_theme() {
-        names.push(gtk);
+        for name in gtk.split([',', ';']) {
+            push_theme(&mut names, name, 0);
+        }
     }
     // Kolejność: motyw dystrybucji, potem klasyki. Motyw bez plików kursorów
     // (np. pusty `cursors/`) jest pomijany przez sprawdzenie `left_ptr`.
@@ -285,9 +343,70 @@ fn theme_candidates() -> Vec<String> {
         "DMZ-White",
         "default",
     ] {
-        names.push(name.to_owned());
+        push_theme(&mut names, name, 0);
     }
     names
+}
+
+/// Dodaje motyw i — rekurencyjnie — motywy z jego `Inherits`.
+///
+/// Crate `xcursor` traktuje `Inherits` jako **jedną** nazwę, więc lista
+/// `Inherits=xcursor-dmz,Adwaita` (tak ma `Pagan-Cursors`) nie prowadzi do
+/// żadnego motywu. Rozbijamy ją sami, inaczej pusty motyw zostaje wybrany
+/// i kursor spada do wbudowanej strzałki.
+fn push_theme(names: &mut Vec<String>, name: &str, depth: usize) {
+    let name = name.trim();
+    if name.is_empty() || depth > 8 || names.iter().any(|existing| existing == name) {
+        return;
+    }
+    names.push(name.to_owned());
+    for parent in inherited_themes(name) {
+        push_theme(names, &parent, depth + 1);
+    }
+}
+
+/// Katalogi z motywami XCursor, w kolejności przeszukiwania.
+fn icon_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        roots.push(home.join(".local/share/icons"));
+        roots.push(home.join(".icons"));
+    }
+    if let Some(dirs) = std::env::var_os("XDG_DATA_DIRS") {
+        for dir in std::env::split_paths(&dirs) {
+            roots.push(dir.join("icons"));
+        }
+    } else {
+        roots.push(PathBuf::from("/usr/local/share/icons"));
+        roots.push(PathBuf::from("/usr/share/icons"));
+    }
+    roots
+}
+
+/// Nazwy z `Inherits` motywu (lista rozdzielana przecinkami, średnikami lub spacjami).
+fn inherited_themes(name: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for root in icon_roots() {
+        let Ok(text) = std::fs::read_to_string(root.join(name).join("index.theme")) else {
+            continue;
+        };
+        for line in text.lines() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            if !key.trim().eq_ignore_ascii_case("Inherits") {
+                continue;
+            }
+            for part in value.split([',', ';', ' ', '\t']) {
+                let part = part.trim();
+                if !part.is_empty() && !out.iter().any(|existing| existing == part) {
+                    out.push(part.to_owned());
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Motyw wybrany w GTK (`gtk-cursor-theme-name`), jeśli użytkownik go ustawił.
@@ -358,6 +477,15 @@ mod tests {
         assert_eq!((image.width, image.height), (FALLBACK_SIZE, FALLBACK_SIZE));
         assert!(image.rgba.chunks_exact(4).any(|px| px[3] > 0));
         assert!(hotspot.0 >= 0 && hotspot.1 >= 0);
+    }
+
+    #[test]
+    fn css_shape_names_map_to_x11() {
+        // Adwaita zna oba zestawy, ale DMZ tylko X11 — mapowanie ratuje I-beam/hand.
+        assert_eq!(xcursor_alias("pointer"), "hand2");
+        assert_eq!(xcursor_alias("text"), "xterm");
+        assert_eq!(xcursor_alias("ew-resize"), "sb_h_double_arrow");
+        assert_eq!(xcursor_alias("left_ptr"), "left_ptr");
     }
 
     #[test]

@@ -6,6 +6,9 @@
 #   bin/luna-greeter, bin/luna-greeter-config, bin/luna-greeter-session (ekran logowania dla greetd)
 #   bin/luna-settings (centrum ustawień; zapis ekranu logowania przez pkexec)
 #   bin/luna-store (sklep: pacman/pag/apt/dnf/emerge/Flatpak + aktualizacje)
+#   bin/luna-welcome (powitanie, nowości, skrót do instalatora na live ISO)
+#   bin/luna-installer (kreator instalacji systemu Luna z obrazu live)
+#   libexec/luna/luna-install-backend (referencyjny backend instalacji, pkexec)
 #   bin/luna-eq, lib/luna/libluna-eq.so (korektor graficzny: CLI + wtyczka LADSPA)
 #   bin/luna-accounts (pomocnik roota: dodawanie kont i zmiana haseł przez sudo)
 #   bin/luna-security (monitor prywatności: mikrofon/kamera/sieć + zgody aplikacji)
@@ -47,6 +50,7 @@ do_build=1
 dry_run=0
 uninstall=0
 keep_old=0
+purge_stale=0
 only=""
 
 # Znajduje cargo: $CARGO → PATH → typowe lokalizacje rustup/systemowe.
@@ -79,9 +83,12 @@ Użycie: $prog [opcje]
   --uninstall      usuń zainstalowane pliki
   --keep-old       nie usuwaj starej wersji przed instalacją
                    (domyślnie: czysta instalacja — najpierw \`rm\`, potem nowe pliki)
+  --purge-stale    usuń z PATH inne kopie selene/luna-* (np. stare /usr/bin/selene),
+                   które sesja mogłaby uruchomić zamiast nowej instalacji
   --user           instalacja bez roota do ~/.local (bin, share, aplikacje)
   --only NAME      tylko jeden komponent: base, selene, luna, greeter,
-                   demo, settings, files, media, clock, store, editor, terminal, icons
+                   demo, settings, files, media, clock, store, welcome,
+                   installer, editor, terminal, icons
   -h, --help       ta pomoc
 
 Zmienne: CARGO (domyślnie: cargo), PREFIX, DESTDIR,
@@ -99,6 +106,7 @@ while [ $# -gt 0 ]; do
         --dry-run) dry_run=1; shift ;;
         --uninstall) uninstall=1; shift ;;
         --keep-old) keep_old=1; shift ;;
+        --purge-stale) purge_stale=1; shift ;;
         --user) prefix="${HOME:?brak HOME}/.local"; shift ;;
         --only) only="$2"; shift 2 ;;
         --only=*) only="${1#*=}"; shift ;;
@@ -108,11 +116,20 @@ while [ $# -gt 0 ]; do
 done
 
 case "$only" in
-    ""|base|selene|luna|greeter|demo|settings|files|media|clock|store|editor|terminal|icons) ;;
-    *) echo "nieznany komponent: $only (dozwolone: base, selene, luna, greeter, demo, settings, files, media, clock, store, editor, terminal, icons)" >&2; exit 2 ;;
+    ""|base|selene|luna|greeter|demo|settings|files|media|clock|store|welcome|installer|editor|terminal|icons) ;;
+    *) echo "nieznany komponent: $only (dozwolone: base, selene, luna, greeter, demo, settings, files, media, clock, store, welcome, installer, editor, terminal, icons)" >&2; exit 2 ;;
 esac
 
 dest="${destdir}${prefix}"
+
+# Katalog domowy **użytkownika**, który uruchomił instalator. Pod `sudo` `HOME`
+# bywa `/root` — a stare binarki testowe leżą zwykle w `~użytkownik/.local/bin`
+# i mają pierwszeństwo przed systemowymi (sesja Luny dodaje ten katalog do PATH).
+user_home="${HOME:-}"
+if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+    sudo_home="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6)"
+    [ -n "$sudo_home" ] && user_home="$sudo_home"
+fi
 
 # Wszystkie niezależne workspace'y budują do wspólnego target/, dzięki czemu
 # instalator i `make build` widzą te same binarki. Można nadpisać CARGO_TARGET_DIR.
@@ -172,7 +189,9 @@ files() {
     }
     emit "selene"   "$lib/selene"          "$dest/bin/selene"          "755"
     emit "selene"   "$root/de/session/selene.desktop" "$dest/share/wayland-sessions/selene.desktop" "644"
+    emit "selene"   "$root/de/session/selene-gpu.desktop" "$dest/share/wayland-sessions/selene-gpu.desktop" "644"
     emit "luna"     "$lib/luna-shell"      "$dest/bin/luna-shell"      "755"
+    emit "luna"     "$lib/luna-desktop"    "$dest/bin/luna-desktop"    "755"
     emit "luna"     "$lib/luna-keyring"    "$dest/bin/luna-keyring"    "755"
     emit "luna"     "$lib/luna-polkit"     "$dest/bin/luna-polkit"     "755"
     emit "luna"     "$lib/luna-lock"       "$dest/bin/luna-lock"       "755"
@@ -222,6 +241,18 @@ files() {
         emit "store" "$root/de/session/eu.luna.Store.desktop" "$dest/share/applications/eu.luna.Store.desktop" "644"
         emit "store" "$root/apps/luna-store/data/repositories.conf" "$dest/share/luna/store/repositories.conf" "644"
     fi
+    # Powitanie: nowości i (na obrazie live) przejście do instalatora.
+    if [ "$all" = "all" ] || [ -f "$lib/luna-welcome" ]; then
+        emit "welcome" "$lib/luna-welcome" "$dest/bin/luna-welcome" "755"
+        emit "welcome" "$root/de/session/eu.luna.Welcome.desktop" "$dest/share/applications/eu.luna.Welcome.desktop" "644"
+        emit "welcome" "$root/apps/luna-welcome/data/news.md" "$dest/share/luna/welcome/news.md" "644"
+    fi
+    # Instalator systemu + referencyjny backend (uruchamiany przez pkexec).
+    if [ "$all" = "all" ] || [ -f "$lib/luna-installer" ]; then
+        emit "installer" "$lib/luna-installer" "$dest/bin/luna-installer" "755"
+        emit "installer" "$root/de/session/eu.luna.Installer.desktop" "$dest/share/applications/eu.luna.Installer.desktop" "644"
+        emit "installer" "$root/apps/luna-installer/data/luna-install-backend" "$dest/libexec/luna/luna-install-backend" "755"
+    fi
     if [ "$all" = "all" ] || [ -f "$lib/gallery" ]; then
         emit "demo" "$lib/gallery" "$dest/bin/luna-gallery" "755"
     fi
@@ -231,6 +262,8 @@ files() {
         emit "demo" "$root/de/session/luna-showcase.desktop" "$dest/share/applications/luna-showcase.desktop" "644"
     fi
     emit "base"     "$root/de/session/luna-session" "$dest/bin/luna-session" "755"
+    # Wariant sesji z GPU (LUNA_GPU=1) — wybór „Luna (GPU)” w menedżerze logowania.
+    emit "base"     "$root/de/session/luna-session-gpu" "$dest/bin/luna-session-gpu" "755"
     # Backend portali XDG dla Luny — bez tego `xdg-desktop-portal` nie wybiera backendu
     # (aplikacje flatpak/żądania portalu kończą się timeoutem).
     emit "base"     "$root/de/session/luna-portals.conf" "$dest/share/xdg-desktop-portal/luna-portals.conf" "644"
@@ -281,6 +314,13 @@ remove_installed() {
         for s in $icon_sizes; do
             do_cmd rmdir "$dest/share/icons/hicolor/${s}x${s}/apps" 2>/dev/null || true
         done
+        # Domyślny motyw kursora utworzony przez instalator — usuwamy TYLKO
+        # nasz plik (dystrybucja może mieć tam własny wybór).
+        if [ -f "$dest/share/icons/default/index.theme" ] \
+            && grep -qx 'Inherits=Adwaita' "$dest/share/icons/default/index.theme" 2>/dev/null; then
+            do_cmd rm -f "$dest/share/icons/default/index.theme"
+            do_cmd rmdir "$dest/share/icons/default" 2>/dev/null || true
+        fi
     fi
     # Pastelowy pakiet ikon (freedesktop) instalowany jako całe drzewo.
     if [ -z "$only" ] || [ "$only" = "base" ] || [ "$only" = "icons" ]; then
@@ -329,6 +369,8 @@ EOF
             media)    build_dir "$root/apps/luna-media" ;;
             clock)    build_dir "$root/apps/luna-clock" ;;
             store)    build_dir "$root/apps/luna-store" ;;
+            welcome)  build_dir "$root/apps/luna-welcome" ;;
+            installer) build_dir "$root/apps/luna-installer" ;;
             editor)   build_dir "$root/apps/luna-editor" ;;
             terminal) build_dir "$root/apps/luna-terminal" ;;
             base)     : ;;
@@ -340,7 +382,7 @@ EOF
     if [ -n "$only" ]; then
         build_component "$only"
     else
-        for c in selene luna greeter demo settings files media clock store editor terminal; do
+        for c in selene luna greeter demo settings files media clock store welcome installer editor terminal; do
             build_component "$c"
         done
     fi
@@ -375,7 +417,7 @@ if [ -f "$lib/selene" ]; then
     # sprawdzamy `luna-shell`, żeby nie zgłaszać fałszywych alarmów o keyring/lock/polkit.
     check_stale "$lib/luna-shell" "$root/luna/src"
     check_stale "$lib/luna-greeter" "$root/luna-greeter/src"
-    for app in demo files media settings store editor terminal; do
+    for app in demo files media settings store editor terminal clock welcome installer; do
         check_stale "$lib/luna-$app" "$root/apps/luna-$app/src"
     done
 fi
@@ -444,6 +486,23 @@ if [ -z "$only" ] || [ "$only" = "settings" ]; then
     fi
 fi
 
+# Domyślny motyw kursora dla X11/Xwayland. libXcursor bez motywu „default”
+# cofa się do wbudowanego `X_cursor` (litera „X”) — dlatego aplikacje X11
+# (m.in. Zed) pokazywały X zamiast strzałki. Nie nadpisujemy istniejącego pliku:
+# dystrybucja albo użytkownik mogą mieć własny wybór. Sesja Luny dodaje
+# `<prefix>/share/icons` do `XCURSOR_PATH`, więc prefiks inny niż /usr też działa.
+if [ -z "$only" ] || [ "$only" = "base" ]; then
+    default_theme="$dest/share/icons/default/index.theme"
+    if [ ! -e "$default_theme" ]; then
+        do_cmd install -d "$dest/share/icons/default"
+        if [ "$dry_run" = 1 ]; then
+            say "  [dry-run] $default_theme (Inherits=Adwaita)"
+        else
+            printf '%s\n' '[Icon Theme]' 'Name=Default' 'Inherits=Adwaita' >"$default_theme"
+        fi
+    fi
+fi
+
 # Aktywacja D-Bus usługi sekretów. Bez tego pliku D-Bus nie potrafi „wskrzesić”
 # `luna-keyring`, gdy ten padnie albo zostanie uruchomiony później niż aplikacja,
 # która pyta o hasła — objawia się to jako „keyring nie działa”.
@@ -490,11 +549,46 @@ if [ "$destdir" = "" ] && [ "$(id -u)" -eq 0 ]; then
     done
 fi
 
+managed_bins="selene luna-shell luna-desktop luna-lock luna-keyring luna-polkit luna-eq luna-accounts luna-security luna-greeter luna-greeter-config luna-demo luna-settings luna-files luna-media luna-clock luna-store luna-welcome luna-installer luna-editor luna-terminal luna-session luna-session-gpu"
+
+# ── Inne kopie naszych binarek w PATH ────────────────────────────────────────
+# Typowa pułapka: w /usr/bin leży stary `selene` z poprzedniej instalacji,
+# a sesja uruchamia go zamiast świeżego z /usr/local/bin. Wykrywamy każdą
+# inną kopię i ostrzegamy; `--purge-stale` usuwa je (poza celem instalacji).
+stale_found=""
+declare -A seen_dirs=()
+for dir in /usr/local/bin /usr/bin /bin /usr/local/sbin /usr/sbin /sbin "$user_home/.local/bin"; do
+    [ -d "$dir" ] || continue
+    # /bin → /usr/bin, /sbin → /usr/bin itd. — bez tego te same pliki były
+    # raportowane trzy razy.
+    real_dir="$(cd "$dir" && pwd -P)"
+    [ -z "${seen_dirs[$real_dir]:-}" ] || continue
+    seen_dirs[$real_dir]=1
+    for name in $managed_bins; do
+        candidate="$dir/$name"
+        [ -f "$candidate" ] && [ -x "$candidate" ] || continue
+        [ "$candidate" -ef "$dest/bin/$name" ] && continue
+        stale_found="$stale_found $candidate"
+    done
+done
+if [ -n "$stale_found" ]; then
+    say ""
+    say "UWAGA: poza instalacją leżą INNE kopie binarek Luny:"
+    for f in $stale_found; do say "  $f"; done
+    say "  Zależnie od PATH sesja może uruchomić jedną z nich zamiast $dest/bin."
+    if [ "$purge_stale" = 1 ]; then
+        step "Usuwanie starych kopii (--purge-stale)"
+        for f in $stale_found; do do_cmd rm -f "$f"; done
+    else
+        say "  Usuń je ręcznie albo uruchom instalator z --purge-stale."
+    fi
+fi
+
 # Podsumowanie: co **naprawdę** leży teraz w prefiksie i skąd. Bez tego łatwo
 # pomyśleć, że „instalacja nic nie zrobiła”, a problemem jest stary build albo
 # nierestrygowana sesja (podmiana pliku nie restartuje działającego `selene`).
 step "Zainstalowane binarki"
-for name in selene luna-shell luna-lock luna-keyring luna-polkit luna-eq luna-accounts luna-security luna-greeter luna-greeter-config luna-demo luna-settings luna-files luna-media luna-clock luna-store luna-editor luna-terminal luna-session; do
+for name in $managed_bins; do
     s="$lib/$name"
     [ -f "$s" ] || s="$root/de/session/$name"
     d="$dest/bin/$name"
@@ -502,6 +596,15 @@ for name in selene luna-shell luna-lock luna-keyring luna-polkit luna-eq luna-ac
     say "  $name"
     say "    źródło:     $(stat -c %y "$s" 2>/dev/null | cut -d. -f1)  ($s)"
     say "    zainstal.:  $(stat -c %y "$d" 2>/dev/null | cut -d. -f1)  ($d)"
+    if command -v sha256sum >/dev/null 2>&1; then
+        src_sum="$(sha256sum "$s" 2>/dev/null | cut -d' ' -f1)"
+        dst_sum="$(sha256sum "$d" 2>/dev/null | cut -d' ' -f1)"
+        if [ -n "$src_sum" ] && [ "$src_sum" = "$dst_sum" ]; then
+            say "    sha256:     $(printf '%s' "$dst_sum" | cut -c1-12) (zgodne ze źródłem)"
+        else
+            say "    sha256:     RÓŻNE od źródła — plik nie został podmieniony!"
+        fi
+    fi
 done
 say ""
 say "Uwaga: działająca sesja ma w pamięci STARE procesy — wyloguj się i zaloguj ponownie,"

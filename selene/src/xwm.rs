@@ -13,9 +13,10 @@
 //! (`xwayland_surface_v1.set_serial`). Dlatego trzymamy mapę `serial → okno X11`.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use wayland_server::Resource;
 
@@ -23,7 +24,8 @@ use x11rb::connection::Connection;
 use x11rb::protocol::composite::{ConnectionExt as CompositeExt, Redirect};
 use x11rb::protocol::xproto::{
     Atom, AtomEnum, ChangeWindowAttributesAux, ClientMessageEvent, ConfigWindow,
-    ConfigureWindowAux, ConnectionExt, EventMask, InputFocus, PropMode, Window,
+    ConfigureWindowAux, ConnectionExt, Cursor, EventMask, Font, InputFocus, PropMode,
+    SelectionNotifyEvent, SelectionRequestEvent, Window, SELECTION_NOTIFY_EVENT,
 };
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
@@ -125,6 +127,70 @@ pub enum XwmCommand {
         window: Window,
         on: bool,
     },
+    /// Nowa treść schowka Wayland → X11 (tekst UTF-8). XWM przejmuje `CLIPBOARD`
+    /// i serwuje te dane klientom X11 (Xwayland tego nie robi — most należy
+    /// do kompozytora).
+    ClipboardSet(Vec<u8>),
+    /// Wayland nie ma już selekcji — zwolnij `CLIPBOARD`, jeśli wciąż jest nasz.
+    ClipboardClear,
+}
+
+/// Migawka schowka X11 (tekst) opublikowana dla wątku Waylanda.
+///
+/// X11 nie powiadamia o zmianie **treści** przy tym samym właścicielu, więc XWM
+/// odświeża dane co ~0,5 s i publikuje tylko wtedy, gdy tekst naprawdę się zmienił
+/// (inaczej stara zawartość nadpisywałaby świeży schowek Waylanda).
+pub struct X11Clipboard {
+    pub generation: u64,
+    /// `SystemTime` w ms — pozwala Waylandowi odrzucić starszą migawkę.
+    pub created_at: u64,
+    pub mimes: Vec<String>,
+    pub data: Arc<Vec<u8>>,
+}
+
+static X11_CLIP: Mutex<Option<Arc<X11Clipboard>>> = Mutex::new(None);
+static X11_CLIP_GEN: AtomicU64 = AtomicU64::new(0);
+
+/// Bieżąca migawka schowka X11 (jeśli jest jakiś właściciel i tekst).
+pub fn x11_clipboard() -> Option<Arc<X11Clipboard>> {
+    X11_CLIP.lock_or_recover().clone()
+}
+
+/// Czas monotoniczny w ms (do porównywania kolejności zdarzeń między wątkami).
+pub(crate) fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Publikuje (lub czyści) schowek X11 dla wątku Waylanda.
+fn publish_x11_clipboard(text: Option<&[u8]>) {
+    let generation = X11_CLIP_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    let clip = match text {
+        Some(bytes) if !bytes.is_empty() => X11Clipboard {
+            generation,
+            created_at: now_ms(),
+            mimes: vec![
+                "text/plain;charset=utf-8".to_owned(),
+                "text/plain".to_owned(),
+                "UTF8_STRING".to_owned(),
+                "STRING".to_owned(),
+                "TEXT".to_owned(),
+            ],
+            data: Arc::new(bytes.to_vec()),
+        },
+        _ => X11Clipboard {
+            generation,
+            created_at: now_ms(),
+            mimes: Vec::new(),
+            data: Arc::new(Vec::new()),
+        },
+    };
+    if std::env::var_os("SELENE_DEBUG_CLIPBOARD").is_some() {
+        eprintln!("selene/xwm: schowek X11 → Wayland: {} B", clip.data.len());
+    }
+    *X11_CLIP.lock_or_recover() = Some(Arc::new(clip));
 }
 
 /// Współdzielony stan XWM (czytany przez kompozytor).
@@ -144,6 +210,27 @@ pub struct XwmState {
     pub is_wm: bool,
     /// Numer ekranu X11 (`DISPLAY=:N`); 0 przed połączeniem.
     pub display: u32,
+    /// Ukryte okno X11, na którym XWM jest właścicielem `CLIPBOARD`.
+    clip_window: Option<Window>,
+    /// Tekst schowka Wayland → X11 (już pobrany od źródła Wayland).
+    clipboard: Option<Vec<u8>>,
+    /// Ostatnio widziany właściciel `CLIPBOARD` (aplikacja X11).
+    clip_owner: Option<Window>,
+    /// Wybrany target X11 tekstu (np. `UTF8_STRING`) dla bieżącego właściciela.
+    clip_target: Option<Atom>,
+    /// Oczekujące żądanie X11 (TARGETS albo dane) z czasem startu.
+    clip_pending: Option<ClipPending>,
+    /// Ostatnio opublikowany tekst — pozwala nie nadpisywać schowka Waylanda.
+    clip_last_data: Option<Vec<u8>>,
+    /// Kiedy ostatnio odświeżaliśmy treść schowka X11.
+    clip_last_fetch: Option<Instant>,
+}
+
+/// Rodzaj oczekującego żądania schowka X11.
+#[derive(Clone, Copy)]
+enum ClipPending {
+    Targets(Instant),
+    Data(Instant),
 }
 
 /// Stan X11 do diagnostyki (`luna-control x11`, testy sesji).
@@ -259,6 +346,16 @@ impl Xwm {
         let _ = self.tx.send(cmd);
     }
 
+    /// Udostępnia klientom X11 tekst skopiowany w aplikacji Wayland.
+    pub fn set_clipboard(&self, text: Vec<u8>) {
+        self.send(XwmCommand::ClipboardSet(text));
+    }
+
+    /// Czyści most, gdy Wayland nie ma już selekcji.
+    pub fn clear_clipboard(&self) {
+        self.send(XwmCommand::ClipboardClear);
+    }
+
     pub fn close(&self, window: Window) {
         self.send(XwmCommand::Close(window));
     }
@@ -317,11 +414,23 @@ pub fn spawn(display: u32) {
         // (wcześniej gniazdo bywało martwe i aplikacje nie mogły się połączyć).
         crate::xwayland::write_display_marker(display);
         let root = conn.setup().roots[screen].root;
+        // Xwayland bez motywu XCursor zgłasza dla okien bez własnego kursora
+        // wbudowany `X_cursor` („X”). Niektóre aplikacje (m.in. Zed) polegają
+        // na kursorze roota, więc ustawiamy klasyczną strzałkę z fontu „cursor”.
+        install_root_cursor(&conn, root);
         let Ok(mut atoms) = Atoms::new(&conn) else {
             return;
         };
         let is_wm = become_wm(&conn, root, &mut atoms).unwrap_or(false);
         st.lock_or_recover().is_wm = is_wm;
+        // Most schowka: Xwayland **nie** implementuje `wl_data_device` (to zadanie
+        // kompozytora — tak robią KWin i Mutter). Bez własnego okna-właściciela
+        // X11 nie widzi schowka Waylanda i odwrotnie.
+        if let Some(win) = create_clipboard_window(&conn, root) {
+            st.lock_or_recover().clip_window = Some(win);
+        } else if std::env::var("SELENE_STATS").is_ok() {
+            eprintln!("selene/xwm: nie udało się utworzyć okna schowka X11");
+        }
         if std::env::var("SELENE_STATS").is_ok() {
             eprintln!(
                 "selene/xwm: X11 gotowy (ekran :{display}), menedżer okien: {}",
@@ -336,6 +445,44 @@ pub fn spawn(display: u32) {
         });
         run(conn, root, atoms, rx, st);
     });
+}
+
+/// Ustawia kursor okna głównego X11 na klasyczną strzałkę (`XC_left_ptr`).
+///
+/// Okna potomne bez własnego atrybutu kursora dziedziczą go z roota — bez tego
+/// Xwayland pokazuje `X_cursor` (literę „X”) zamiast wskaźnika. Kursor z fontu
+/// jądra X działa niezależnie od tego, czy w systemie jest motyw XCursor.
+fn install_root_cursor(conn: &RustConnection, root: Window) {
+    // Para glifów w foncie „cursor”: `XC_left_ptr` to 68 (0x44), maska 69.
+    const XC_LEFT_PTR: u16 = 68;
+    let install = || -> Option<()> {
+        let font: Font = conn.generate_id().ok()?;
+        let cursor: Cursor = conn.generate_id().ok()?;
+        conn.open_font(font, b"cursor").ok()?;
+        conn.create_glyph_cursor(
+            cursor,
+            font,
+            font,
+            XC_LEFT_PTR,
+            XC_LEFT_PTR + 1,
+            0,
+            0,
+            0,
+            0xffff,
+            0xffff,
+            0xffff,
+        )
+        .ok()?;
+        conn.change_window_attributes(root, &ChangeWindowAttributesAux::new().cursor(cursor))
+            .ok()?;
+        // Font był potrzebny tylko do utworzenia kursora; serwer zachowuje obraz.
+        let _ = conn.close_font(font);
+        conn.flush().ok()?;
+        Some(())
+    };
+    if install().is_none() {
+        eprintln!("selene/xwm: nie udało się ustawić kursora roota (font 'cursor')");
+    }
 }
 
 /// Łączy się z X11, ponawiając próbę aż do `timeout`.
@@ -366,6 +513,7 @@ fn run(
     rx: Receiver<XwmCommand>,
     state: Arc<Mutex<XwmState>>,
 ) {
+    let mut clip_poll = Instant::now();
     loop {
         // 1) Polecenia od kompozytora.
         while let Ok(cmd) = rx.try_recv() {
@@ -376,6 +524,12 @@ fn run(
         while let Ok(Some(event)) = conn.poll_for_event() {
             handled = true;
             handle_event(&conn, root, &atoms, &state, event);
+        }
+        // 3) Schowek X11 → Wayland: właściciel i (okresowo) treść.
+        if clip_poll.elapsed() >= Duration::from_millis(250) {
+            clip_poll = Instant::now();
+            poll_x11_clipboard(&conn, &atoms, &state);
+            expire_clip_request(&state);
         }
         let _ = conn.flush();
         if !handled {
@@ -776,6 +930,28 @@ fn handle_event(
             st.by_serial.retain(|_, w| *w != e.window);
             st.ewmh.remove(&e.window);
         }
+        Event::SelectionRequest(e) => handle_selection_request(conn, atoms, state, e),
+        Event::SelectionClear(e) => {
+            // `SelectionClear` dostajemy także po **własnym** `set_selection_owner(None)`
+            // oraz ze zdarzeń sprzed chwili. Wcześniej kasowaliśmy tu `clipboard`,
+            // przez co stare zdarzenie potrafiło usunąć dane świeżo ustawione
+            // przez `ClipboardSet` (Chrome ustawia selekcję wielokrotnie) —
+            // X11 dostawał wtedy odmowę, mimo że to my byliśmy właścicielem.
+            // Cache zostawiamy: jest używany tylko gdy jesteśmy właścicielem,
+            // a kolejny `ClipboardSet` i tak go nadpisze.
+            if e.selection == atoms.clipboard {
+                let mut st = state.lock_or_recover();
+                st.clip_owner = None;
+                st.clip_pending = None;
+                if std::env::var_os("SELENE_DEBUG_CLIPBOARD").is_some() {
+                    eprintln!(
+                        "selene/xwm: SelectionClear (dane zachowane: {})",
+                        st.clipboard.as_ref().map(|v| v.len()).unwrap_or(0)
+                    );
+                }
+            }
+        }
+        Event::SelectionNotify(e) => handle_selection_notify(conn, atoms, state, e),
         _ => {}
     }
 }
@@ -788,6 +964,43 @@ fn apply_command(
     cmd: XwmCommand,
 ) {
     match cmd {
+        XwmCommand::ClipboardSet(text) => {
+            let window = {
+                let mut st = state.lock_or_recover();
+                st.clipboard = Some(text);
+                st.clip_window
+            };
+            if let Some(window) = window {
+                let _ = conn.set_selection_owner(window, atoms.clipboard, x11rb::CURRENT_TIME);
+                let _ = conn.flush();
+                if std::env::var_os("SELENE_STATS").is_some() {
+                    let len = state
+                        .lock_or_recover()
+                        .clipboard
+                        .as_ref()
+                        .map(Vec::len)
+                        .unwrap_or(0);
+                    eprintln!("selene/xwm: CLIPBOARD ← Wayland ({len} B)");
+                }
+            }
+        }
+        XwmCommand::ClipboardClear => {
+            let window = state.lock_or_recover().clip_window;
+            if let Some(window) = window {
+                // Oddajemy selekcję tylko wtedy, gdy wciąż jesteśmy właścicielem —
+                // X11 może już mieć nowszego właściciela (skopiowano w Zed).
+                let owner = conn
+                    .get_selection_owner(atoms.clipboard)
+                    .ok()
+                    .and_then(|c| c.reply().ok())
+                    .map(|r| r.owner);
+                if owner == Some(window) {
+                    let _ = conn.set_selection_owner(0u32, atoms.clipboard, x11rb::CURRENT_TIME);
+                    let _ = conn.flush();
+                }
+            }
+            state.lock_or_recover().clipboard = None;
+        }
         XwmCommand::Close(win) => request_close(conn, win),
         XwmCommand::SetGeometry { window, x, y, w, h } => {
             let aux = ConfigureWindowAux::new().x(x).y(y).width(w).height(h);
@@ -1080,6 +1293,333 @@ fn set_prop_str(conn: &RustConnection, window: Window, property: Atom, text: &st
     );
 }
 
+/// Ukryte okno X11, na którym XWM może być właścicielem `CLIPBOARD`.
+/// Okno nie jest mapowane — służy wyłącznie jako właściciel selekcji.
+fn create_clipboard_window(conn: &RustConnection, root: Window) -> Option<Window> {
+    let window = conn.generate_id().ok()?;
+    conn.create_window(
+        x11rb::COPY_FROM_PARENT as u8,
+        window,
+        root,
+        0,
+        0,
+        1,
+        1,
+        0,
+        x11rb::protocol::xproto::WindowClass::INPUT_OUTPUT,
+        x11rb::COPY_FROM_PARENT as u32,
+        &Default::default(),
+    )
+    .ok()?;
+    conn.flush().ok()?;
+    Some(window)
+}
+
+/// Obsługuje żądanie danych z X11, gdy to my jesteśmy właścicielem `CLIPBOARD`.
+///
+/// Dane są już pobrane od źródła Wayland przy `set_selection` (most jest
+/// „eager”, jak w menedżerach schowka) — tutaj tylko je udostępniamy.
+fn handle_selection_request(
+    conn: &RustConnection,
+    atoms: &Atoms,
+    state: &Arc<Mutex<XwmState>>,
+    req: SelectionRequestEvent,
+) {
+    let property = if req.property == 0 {
+        req.target
+    } else {
+        req.property
+    };
+    let clipboard = state.lock_or_recover().clipboard.clone();
+    let served = match clipboard {
+        Some(text) if req.selection == atoms.clipboard => {
+            if req.target == atoms.targets {
+                let list = [
+                    atoms.targets,
+                    atoms.utf8_string,
+                    AtomEnum::STRING.into(),
+                    atoms.text,
+                    atoms.text_plain,
+                    atoms.text_plain_utf8,
+                ];
+                set_prop32(conn, req.requestor, property, AtomEnum::ATOM.into(), &list);
+                Some(property)
+            } else if let Some(type_) = text_target(req.target, atoms) {
+                let _ = conn.change_property(
+                    PropMode::REPLACE,
+                    req.requestor,
+                    property,
+                    type_,
+                    8,
+                    text.len() as u32,
+                    &text,
+                );
+                Some(property)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+    let event = SelectionNotifyEvent {
+        response_type: SELECTION_NOTIFY_EVENT,
+        sequence: 0,
+        time: req.time,
+        requestor: req.requestor,
+        selection: req.selection,
+        target: req.target,
+        property: served.unwrap_or(0),
+    };
+    let _ = conn.send_event(false, req.requestor, EventMask::NO_EVENT, event);
+    let _ = conn.flush();
+}
+
+/// Górny limit tekstu pobieranego ze schowka X11 (ochrona przed OOM).
+const MAX_X11_CLIP_BYTES: usize = 8 * 1024 * 1024;
+
+/// Wykrywa właściciela `CLIPBOARD` w X11 i pobiera jego treść (tekst).
+///
+/// X11 nie powiadamia o zmianie treści przy tym samym właścicielu (np. Zed
+/// używa jednego ukrytego okna), więc dopóki schowek należy do aplikacji X11,
+/// odświeżamy go co ~0,5 s i publikujemy tylko **zmieniony** tekst.
+fn poll_x11_clipboard(conn: &RustConnection, atoms: &Atoms, state: &Arc<Mutex<XwmState>>) {
+    let (clip_window, previous, pending, last_fetch) = {
+        let st = state.lock_or_recover();
+        (
+            st.clip_window,
+            st.clip_owner,
+            st.clip_pending.is_some(),
+            st.clip_last_fetch,
+        )
+    };
+    let Some(clip_window) = clip_window else {
+        return;
+    };
+    let owner = conn
+        .get_selection_owner(atoms.clipboard)
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .map(|reply| reply.owner)
+        .filter(|window| *window != 0);
+    // To nasze okno mostka Wayland → X11 — nie odsyłamy selekcji z powrotem.
+    if owner == Some(clip_window) {
+        let mut st = state.lock_or_recover();
+        st.clip_owner = owner;
+        st.clip_target = None;
+        st.clip_pending = None;
+        return;
+    }
+    if owner.is_none() {
+        let had_clip = {
+            let st = state.lock_or_recover();
+            st.clip_owner.is_some() || st.clip_last_data.is_some()
+        };
+        {
+            let mut st = state.lock_or_recover();
+            st.clip_owner = None;
+            st.clip_target = None;
+            st.clip_pending = None;
+            st.clip_last_data = None;
+            st.clip_last_fetch = Some(Instant::now());
+        }
+        if had_clip {
+            publish_x11_clipboard(None);
+        }
+        return;
+    }
+    let owner = owner.expect("owner checked");
+    let changed = previous != Some(owner);
+    let refresh_due = changed
+        || last_fetch
+            .map(|when| when.elapsed() >= Duration::from_millis(500))
+            .unwrap_or(true);
+    if pending || !refresh_due {
+        return;
+    }
+    let mut st = state.lock_or_recover();
+    st.clip_owner = Some(owner);
+    if changed {
+        st.clip_target = None;
+    }
+    let target = st.clip_target;
+    let kind = match target {
+        Some(target) => {
+            let _ = conn.convert_selection(
+                clip_window,
+                atoms.clipboard,
+                target,
+                atoms.selene_clip_data,
+                x11rb::CURRENT_TIME,
+            );
+            ClipPending::Data(Instant::now())
+        }
+        None => {
+            let _ = conn.convert_selection(
+                clip_window,
+                atoms.clipboard,
+                atoms.targets,
+                atoms.selene_clip_targets,
+                x11rb::CURRENT_TIME,
+            );
+            ClipPending::Targets(Instant::now())
+        }
+    };
+    st.clip_pending = Some(kind);
+    drop(st);
+    let _ = conn.flush();
+}
+
+/// Porzuca żądanie, które nie doczekało się odpowiedzi (np. aplikacja nie zna TARGETS).
+fn expire_clip_request(state: &Arc<Mutex<XwmState>>) {
+    let mut st = state.lock_or_recover();
+    let expired = match st.clip_pending {
+        Some(ClipPending::Targets(start)) | Some(ClipPending::Data(start)) => {
+            start.elapsed() >= Duration::from_millis(700)
+        }
+        None => false,
+    };
+    if expired {
+        st.clip_pending = None;
+        st.clip_last_fetch = Some(Instant::now());
+    }
+}
+
+/// Odpowiedź na nasze `convert_selection` (TARGETS albo dane tekstu).
+fn handle_selection_notify(
+    conn: &RustConnection,
+    atoms: &Atoms,
+    state: &Arc<Mutex<XwmState>>,
+    event: SelectionNotifyEvent,
+) {
+    let clip_window = state.lock_or_recover().clip_window;
+    if Some(event.requestor) != clip_window {
+        return;
+    }
+    if event.property == 0 {
+        let mut st = state.lock_or_recover();
+        st.clip_pending = None;
+        st.clip_last_fetch = Some(Instant::now());
+        return;
+    }
+    if event.property == atoms.selene_clip_targets {
+        let targets = conn
+            .get_property(
+                true,
+                event.requestor,
+                event.property,
+                AtomEnum::ATOM,
+                0,
+                256,
+            )
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .and_then(|reply| reply.value32().map(|values| values.collect::<Vec<Atom>>()))
+            .unwrap_or_default();
+        let target = pick_x11_text_target(&targets, atoms);
+        match target {
+            Some(target) => {
+                let mut st = state.lock_or_recover();
+                st.clip_target = Some(target);
+                st.clip_pending = Some(ClipPending::Data(Instant::now()));
+                drop(st);
+                let _ = conn.convert_selection(
+                    event.requestor,
+                    atoms.clipboard,
+                    target,
+                    atoms.selene_clip_data,
+                    x11rb::CURRENT_TIME,
+                );
+                let _ = conn.flush();
+            }
+            None => {
+                let mut st = state.lock_or_recover();
+                st.clip_pending = None;
+                st.clip_target = None;
+                st.clip_last_data = None;
+                st.clip_last_fetch = Some(Instant::now());
+                drop(st);
+                publish_x11_clipboard(None);
+            }
+        }
+        return;
+    }
+    if event.property != atoms.selene_clip_data {
+        return;
+    }
+    let reply = conn
+        .get_property(
+            true,
+            event.requestor,
+            event.property,
+            AtomEnum::ANY,
+            0,
+            (MAX_X11_CLIP_BYTES / 4) as u32,
+        )
+        .ok()
+        .and_then(|cookie| cookie.reply().ok());
+    let bytes = reply.and_then(|reply| {
+        if reply.format != 8 {
+            return None;
+        }
+        let mut value = reply.value;
+        while value.last() == Some(&0) {
+            value.pop();
+        }
+        Some(value)
+    });
+    let (changed, owner_is_some) = {
+        let mut st = state.lock_or_recover();
+        st.clip_pending = None;
+        st.clip_last_fetch = Some(Instant::now());
+        let changed = match (&bytes, &st.clip_last_data) {
+            (Some(new), Some(old)) => new != old,
+            (None, None) => false,
+            _ => true,
+        };
+        if changed {
+            st.clip_last_data = bytes.clone();
+        }
+        (changed, st.clip_owner.is_some())
+    };
+    if changed {
+        match bytes {
+            Some(text) if !text.is_empty() => publish_x11_clipboard(Some(&text)),
+            _ if owner_is_some => publish_x11_clipboard(None),
+            _ => {}
+        }
+    }
+}
+
+/// Preferowany target tekstu wśród `TARGETS` właściciela X11.
+fn pick_x11_text_target(targets: &[Atom], atoms: &Atoms) -> Option<Atom> {
+    [
+        atoms.utf8_string,
+        atoms.text_plain_utf8,
+        atoms.text_plain,
+        AtomEnum::STRING.into(),
+        atoms.text,
+    ]
+    .into_iter()
+    .find(|target| targets.contains(target))
+}
+
+/// Typ, pod którym oddajemy tekst dla danego targetu X11 (`None` = nieobsługiwany).
+fn text_target(target: Atom, atoms: &Atoms) -> Option<Atom> {
+    if target == atoms.utf8_string
+        || target == atoms.text
+        || target == atoms.text_plain
+        || target == atoms.text_plain_utf8
+    {
+        Some(atoms.utf8_string)
+    } else if target == AtomEnum::STRING.into() {
+        // Historyczny `STRING` jest Latin-1, ale nowoczesne klienty czytają UTF-8;
+        // konwersja znaków diakrytycznych byłaby stratna.
+        Some(AtomEnum::STRING.into())
+    } else {
+        None
+    }
+}
+
 /// Internowane atomy, których używamy (internowanie to jedno zapytanie do X).
 struct Atoms {
     net_supported: Atom,
@@ -1106,6 +1646,14 @@ struct Atoms {
     wl_surface_serial: Atom,
     wm_change_state: Atom,
     net_wm_moveresize: Atom,
+    clipboard: Atom,
+    targets: Atom,
+    utf8_string: Atom,
+    text: Atom,
+    text_plain: Atom,
+    text_plain_utf8: Atom,
+    selene_clip_targets: Atom,
+    selene_clip_data: Atom,
 }
 
 impl Atoms {
@@ -1135,6 +1683,14 @@ impl Atoms {
             wl_surface_serial: atom(conn, "WL_SURFACE_SERIAL")?,
             wm_change_state: atom(conn, "WM_CHANGE_STATE")?,
             net_wm_moveresize: atom(conn, "_NET_WM_MOVERESIZE")?,
+            clipboard: atom(conn, "CLIPBOARD")?,
+            targets: atom(conn, "TARGETS")?,
+            utf8_string: atom(conn, "UTF8_STRING")?,
+            text: atom(conn, "TEXT")?,
+            text_plain: atom(conn, "text/plain")?,
+            text_plain_utf8: atom(conn, "text/plain;charset=utf-8")?,
+            selene_clip_targets: atom(conn, "SELENE_CLIP_TARGETS")?,
+            selene_clip_data: atom(conn, "SELENE_CLIP_DATA")?,
         })
     }
 }

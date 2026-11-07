@@ -21,7 +21,6 @@ use crate::syntax::Language;
 const HEADER_BTN: f64 = 30.0;
 const STATUS_H: f64 = 26.0;
 const FIND_H: f64 = 40.0;
-const SCROLL_UNIT: f64 = 20.0;
 const SCROLL_STEP: f64 = 64.0;
 const WORKSPACE_W: f64 = 236.0;
 const WORKSPACE_ROW_H: f64 = 26.0;
@@ -1900,7 +1899,8 @@ fn handle_browser(app: &mut App, event: &Event, size: Size) {
             if let Some(browser) = app.browser.as_mut() {
                 let max =
                     (browser.entries.len() as f64 * BROWSER_ROW_H - lay.list.height()).max(0.0);
-                browser.scroll = (browser.scroll + scroll.dy / SCROLL_UNIT * 28.0).clamp(0.0, max);
+                browser.scroll =
+                    (browser.scroll + scroll.notches_y() * BROWSER_ROW_H).clamp(0.0, max);
             }
         }
         Event::Key(key) if key.state == ButtonState::Pressed => {
@@ -2118,17 +2118,17 @@ fn handle_normal(
         Event::Scroll(scroll) => {
             if lay.tabs.contains(scroll.position) {
                 app.tabs
-                    .on_scroll(scroll.dx / SCROLL_UNIT * SCROLL_STEP, lay.tabs, text, theme);
+                    .on_scroll(scroll.notches_x() * SCROLL_STEP, lay.tabs, text, theme);
             } else if app.workspace.visible && lay.workspace_tree.contains(scroll.position) {
                 let max = (app.workspace.rows.len() as f64 * WORKSPACE_ROW_H
                     - lay.workspace_tree.height())
                 .max(0.0);
                 app.workspace.scroll =
-                    (app.workspace.scroll + scroll.dy / SCROLL_UNIT * SCROLL_STEP).clamp(0.0, max);
+                    (app.workspace.scroll + scroll.notches_y() * SCROLL_STEP).clamp(0.0, max);
             } else if lay.editor.contains(scroll.position) {
                 app.view_mut().scroll(
-                    scroll.dx / SCROLL_UNIT * SCROLL_STEP,
-                    scroll.dy / SCROLL_UNIT * SCROLL_STEP,
+                    scroll.notches_x() * SCROLL_STEP,
+                    scroll.notches_y() * SCROLL_STEP,
                     lay.editor,
                     theme,
                     text,

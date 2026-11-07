@@ -4,15 +4,20 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use libluna_core::idle::IdleSettings;
-use libluna_core::{Modifiers, Point, Rect};
+use libluna_core::{Modifiers, Point, PointerButton, Rect};
 use libluna_render::ImageData;
+use wayland_protocols::ext::data_control::v1::server::ext_data_control_device_v1::ExtDataControlDeviceV1;
 use wayland_protocols::ext::workspace::v1::server::{
     ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1,
     ext_workspace_handle_v1::ExtWorkspaceHandleV1, ext_workspace_manager_v1::ExtWorkspaceManagerV1,
 };
+use wayland_protocols::wp::idle_inhibit::zv1::server::zwp_idle_inhibitor_v1::ZwpIdleInhibitorV1;
+use wayland_protocols::wp::keyboard_shortcuts_inhibit::zv1::server::zwp_keyboard_shortcuts_inhibitor_v1::ZwpKeyboardShortcutsInhibitorV1;
+use wayland_protocols::wp::primary_selection::zv1::server::zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1;
+use wayland_protocols::wp::relative_pointer::zv1::server::zwp_relative_pointer_v1::ZwpRelativePointerV1;
 use wayland_protocols_wlr::foreign_toplevel::v1::server::zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1;
+use wayland_protocols::xdg::xdg_output::zv1::server::zxdg_output_v1::ZxdgOutputV1;
 use wayland_server::protocol::wl_data_device::WlDataDevice;
-use wayland_server::protocol::wl_data_source::WlDataSource;
 use wayland_server::protocol::wl_keyboard::WlKeyboard;
 use wayland_server::protocol::wl_output::WlOutput;
 use wayland_server::protocol::wl_pointer::WlPointer;
@@ -20,9 +25,12 @@ use wayland_server::protocol::wl_surface::WlSurface;
 use wayland_server::DisplayHandle;
 use wayland_server::Resource;
 
-use crate::data::DndState;
+use crate::activation::ActivationToken;
+use crate::data::{DndState, SelectionSource};
 use crate::monitors::{OutputInfo, Outputs};
+use crate::pointer_constraints::PointerConstraint;
 use crate::sync::LockExt;
+use crate::text_input::ImeState;
 
 /// Wysokość paska tytułu dekoracji (SSD), w pikselach logicznych.
 /// Wysokość naszego paska tytułu (SSD). Musi być równa
@@ -92,6 +100,9 @@ pub struct Window {
     pub saved: Option<SavedGeom>,
     /// Piksele (premultiplied RGBA8) ostatnio zacommitowanego bufora.
     pub data: Arc<ImageData>,
+    /// Rozmiar logiczny obrazu narzucony przez `wp_viewporter`
+    /// (`None` = rozmiar bufora). Bufor jest skalowany do tego rozmiaru.
+    pub image_size_override: Option<(u32, u32)>,
     /// Bufor GPU klienta (`zwp_linux_dmabuf_v1`); import robi backend rysujący.
     /// Gdy jest ustawiony, `data` to pusta atrapa 1×1 (bez kopii pikseli na CPU).
     pub dmabuf: Option<Arc<libluna_render::DmabufImage>>,
@@ -145,6 +156,9 @@ impl Window {
 
     /// Rozmiar obrazu klienta: `dmabuf` albo bufor shm.
     pub fn image_size(&self) -> (u32, u32) {
+        if let Some(size) = self.image_size_override {
+            return size;
+        }
         match &self.dmabuf {
             Some(d) => (d.width, d.height),
             None => (self.data.width, self.data.height),
@@ -233,6 +247,15 @@ impl Window {
 
 /// Współdzielony model okien (pisany przez wątek protokołu, czytany przez wyjście).
 pub type WindowModel = Arc<Mutex<Vec<Window>>>;
+
+/// Stan `wp_viewport` dla powierzchni: wycinek źródłowy i rozmiar docelowy.
+#[derive(Debug, Clone, Default)]
+pub struct ViewportState {
+    /// `(x, y, width, height)` w pikselach bufora; `None` = cały bufor.
+    pub source: Option<(f64, f64, f64, f64)>,
+    /// Rozmiar logiczny, w którym bufor ma być narysowany.
+    pub destination: Option<(i32, i32)>,
+}
 
 /// Żądanie zrzutu ekranu (`Super+F12`).
 ///
@@ -427,6 +450,22 @@ pub fn overview_ws_chips(count: usize, size: (f64, f64)) -> Vec<Rect> {
         .collect()
 }
 
+/// Klient, który dostał wciśnięcie przycisku. Zgodnie z Waylandem („implicit grab”)
+/// dostaje też ruch i zwolnienie, nawet jeśli kursor opuści jego powierzchnię.
+#[derive(Debug, Clone)]
+pub struct ButtonGrab {
+    pub button: PointerButton,
+    pub slot: usize,
+    pub surface: WlSurface,
+}
+
+/// Obiekt `zwp_relative_pointer_v1` — surowe przesunięcia dla gier/mouselooku.
+#[derive(Debug, Clone)]
+pub struct RelativePointer {
+    pub pointer: WlPointer,
+    pub resource: ZwpRelativePointerV1,
+}
+
 /// Trwające przeciąganie okna.
 #[derive(Debug, Clone, Copy)]
 pub struct DragState {
@@ -461,6 +500,9 @@ pub struct ResizeState {
 pub struct State {
     /// Start pracy kompozytora — do znaczników czasu (frame callbacks).
     pub start: Instant,
+    /// Czy sesja działa bezpośrednio na DRM/KMS (`SELENE_BACKEND=drm`).
+    /// Wejście evdev podaje wtedy rolkę w ząbkach, a wątek nested — w pikselach.
+    pub drm_backend: bool,
     /// Licznik seriali (dla `xdg_surface.configure` itp.).
     serial: u32,
     /// Liczniki diagnostyczne.
@@ -548,16 +590,37 @@ pub struct State {
     pub idle_lock_fired: bool,
     /// Usypianie z powodu bezczynności już wystartowało (zapadka).
     pub idle_suspend_fired: bool,
+    /// Chwila zgłoszenia uśpienia — czekamy z `systemctl suspend` aż ekran blokady
+    /// zdąży się pokazać (albo minie limit, gdy locker jest niedostępny).
+    pub idle_suspend_request: Option<Instant>,
     /// Sesja zablokowana przez `luna-lock` (overlay + klawiatura wyłączna).
     /// Blokujemy wtedy globalne skróty kompozytora i podgląd okien.
     pub locked: bool,
     /// Bieżąca selekcja (schowek): źródło danych.
-    pub selection: Option<WlDataSource>,
+    pub selection: Option<SelectionSource>,
+    /// Urządzenia menedżera schowka (`ext_data_control_v1`).
+    pub control_devices: Vec<ExtDataControlDeviceV1>,
+    /// Tokeny `xdg_activation_v1` (jednorazowe, krótkożyjące).
+    pub activation_tokens: Vec<ActivationToken>,
+    /// Aktywacja czekająca na pierwszy commit powierzchni.
+    pub pending_activation: Option<WlSurface>,
+    /// Stan IME (`zwp_text_input_v3` + `zwp_input_method_v2`).
+    pub ime: ImeState,
+    /// Inhibitory bezczynności (`zwp_idle_inhibit_v1`) — wideo/prezentacje.
+    pub idle_inhibitors: Vec<ZwpIdleInhibitorV1>,
+    /// Bieżąca selekcja pierwotna (`zwp_primary_selection_v1`) — środkowy przycisk.
+    pub primary_selection: Option<SelectionSource>,
+    /// Urządzenia selekcji pierwotnej zarejestrowane przez klientów.
+    pub primary_devices: Vec<ZwpPrimarySelectionDeviceV1>,
     /// Urządzenia schowka zarejestrowane przez klientów (do rozsyłania selekcji).
     pub data_devices: Vec<WlDataDevice>,
     /// Zasoby `wl_output` związane przez klientów. Trzymamy je, żeby po faktycznym
     /// modesecie DRM wysłać poprawione `geometry`/`mode`/`scale`.
     pub bound_outputs: Vec<(usize, WlOutput)>,
+    /// Zasoby `zxdg_output_v1` (pozycja i nazwa monitora dla aplikacji).
+    pub xdg_outputs: Vec<ZxdgOutputV1>,
+    /// Inhibitory skrótów pulpitu (`zwp_keyboard_shortcuts_inhibit_v1`).
+    pub shortcuts_inhibitors: Vec<ZwpKeyboardShortcutsInhibitorV1>,
     /// Sygnatura listy monitorów ostatnio rozesłanej klientom.
     pub outputs_sig: u64,
     /// Ile globali `wl_output` już utworzono (może się zwiększyć po faktycznym
@@ -567,6 +630,20 @@ pub struct State {
     pub dnd: Option<DndState>,
     /// Ostatnia pozycja wskaźnika (współrzędne globalne).
     pub pointer_pos: (f64, f64),
+    /// Czy wskaźnik był już w ogóle widziany. `pointer_pos` startuje w (0,0),
+    /// więc bez tej flagi „popup pod nieruchomym kursorem” trafiałby na starcie
+    /// w lewy górny róg ekranu (panel) zamiast w faktyczne położenie kursora.
+    pub pointer_seen: bool,
+    /// Ostatnia **fizyczna** pozycja wskaźnika, przed ograniczeniami kursora.
+    /// Różnica z tą wartością daje prawdziwe przesunięcie dla `relative_pointer`
+    /// nawet wtedy, gdy kursor jest zablokowany w miejscu.
+    pub pointer_raw_pos: (f64, f64),
+    /// Ograniczenia kursora (`zwp_pointer_constraints_v1`).
+    pub pointer_constraints: Vec<PointerConstraint>,
+    /// Wciśnięte przyciski, których zwolnienie musi trafić do tego samego klienta.
+    pub button_grabs: Vec<ButtonGrab>,
+    /// Obiekty względnego ruchu wskaźnika (gry, mouselook).
+    pub relative_pointers: Vec<RelativePointer>,
     /// Czy lewy przycisk wskaźnika jest wciśnięty. Potrzebne, bo `xdg_toplevel.move`
     /// przychodzi od klienta **asynchronicznie** — przy bardzo szybkim kliknięciu
     /// docierał już po zwolnieniu przycisku i zostawiał „przyklejone” przeciąganie.
@@ -594,6 +671,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             start: Instant::now(),
+            drm_backend: false,
             serial: 0,
             clients: 0,
             surfaces: 0,
@@ -622,6 +700,8 @@ impl Default for State {
             ws_groups: Vec::new(),
             ws_handles: Vec::new(),
             display_handle: None,
+            xdg_outputs: Vec::new(),
+            shortcuts_inhibitors: Vec::new(),
             pointers: Vec::new(),
             keyboards: Vec::new(),
             pointer_focus: None,
@@ -634,12 +714,24 @@ impl Default for State {
             natural_scroll: false,
             locked: false,
             selection: None,
+            control_devices: Vec::new(),
+            activation_tokens: Vec::new(),
+            pending_activation: None,
+            ime: ImeState::default(),
+            idle_inhibitors: Vec::new(),
+            primary_selection: None,
+            primary_devices: Vec::new(),
             data_devices: Vec::new(),
             bound_outputs: Vec::new(),
             outputs_sig: 0,
             output_globals: 0,
             dnd: None,
             pointer_pos: (0.0, 0.0),
+            pointer_seen: false,
+            pointer_raw_pos: (0.0, 0.0),
+            pointer_constraints: Vec::new(),
+            button_grabs: Vec::new(),
+            relative_pointers: Vec::new(),
             left_down: false,
             top_insets: std::collections::HashMap::new(),
             last_title_click: None,
@@ -654,6 +746,7 @@ impl Default for State {
             idle_last_input: Instant::now(),
             idle_lock_fired: false,
             idle_suspend_fired: false,
+            idle_suspend_request: None,
         }
     }
 }
@@ -784,6 +877,8 @@ impl State {
     pub fn note_activity(&mut self) {
         self.idle_last_input = Instant::now();
         self.idle_suspend_fired = false;
+        // Ruch/klawisz anuluje oczekujące uśpienie, zanim zdążyło wystartować.
+        self.idle_suspend_request = None;
         if !self.locked {
             self.idle_lock_fired = false;
         }
@@ -889,6 +984,7 @@ mod tests {
             fullscreen: false,
             ssd: true,
             saved: None,
+            image_size_override: None,
             dmabuf: None,
             data: std::sync::Arc::new(libluna_render::ImageData::empty(1, 1)),
         }

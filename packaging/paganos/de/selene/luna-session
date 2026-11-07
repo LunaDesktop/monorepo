@@ -376,6 +376,15 @@ else
     ts "brak luna-shell w PATH"
 fi
 
+# Ikony pulpitu (pliki, foldery, skróty `.desktop`). Osobny proces, bo jest
+# powierzchnią warstwową pod oknami — restart pulpitu nie restartuje paska.
+if command -v luna-desktop >/dev/null 2>&1; then
+    ts "uruchamiam luna-desktop"
+    luna-desktop >/dev/null 2>&1 &
+else
+    ts "brak luna-desktop w PATH"
+fi
+
 # Sesja żyje, dopóki działa kompozytor.
 status=0
 wait "$selene_pid" || status=$?

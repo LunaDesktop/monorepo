@@ -4,6 +4,7 @@ use std::sync::Mutex;
 
 use libluna_core::Rect;
 use libluna_render::ImageData;
+use wayland_protocols::wp::fractional_scale::v1::server::wp_fractional_scale_v1::WpFractionalScaleV1;
 use wayland_protocols::xdg::shell::server::{xdg_popup, xdg_surface, xdg_toplevel};
 use wayland_protocols_wlr::layer_shell::v1::server::zwlr_layer_surface_v1;
 use wayland_server::{
@@ -14,7 +15,7 @@ use wayland_server::{
 use crate::layer::LayerData;
 use crate::shell::{XdgSurfaceData, XdgToplevelData};
 use crate::shm::BufferData;
-use crate::state::{State, Window};
+use crate::state::{State, ViewportState, Window};
 use crate::sync::LockExt;
 
 /// Dane powierzchni (`wl_surface`).
@@ -61,6 +62,26 @@ pub struct SurfaceData {
     /// na całe życie powierzchni, żeby po maksymalizacji (cienie znikają) nie
     /// wrócił podwójny pasek tytułu.
     pub csd: Mutex<bool>,
+    /// Powierzchnia popupu IME (`zwp_input_popup_surface_v2`) — rysowana nad
+    /// treścią przy polu tekstowym, bez dekoracji i bez fokusu klawiatury.
+    pub ime_popup: Mutex<bool>,
+    /// Stan `wp_viewport` (skalowanie/kadrowanie bufora).
+    pub viewport: Mutex<Option<ViewportState>>,
+    /// Obiekt `wp_fractional_scale_v1` powierzchni (jeśli klient go utworzył).
+    pub fractional_scale: Mutex<Option<WpFractionalScaleV1>>,
+    /// Indeksy monitorów, którym wysłano `wl_surface.enter` (a nie `leave`).
+    /// Protokół wymaga informowania klienta, na którym wyjściu leży powierzchnia —
+    /// bez tego klient nie wie, jaka jest skala i czy powierzchnia jest w ogóle
+    /// widoczna (Chromium trzyma na tym stan swoich okien potomnych).
+    pub entered_outputs: Mutex<Vec<usize>>,
+    /// Rodzaj treści zgłoszony przez klienta (`wp_content_type_v1`): `none`,
+    /// `photo` albo `video`. Na razie tylko zapisywany — wejście dla przyszłych
+    /// decyzji o skanoucie/tearingu dla wideo.
+    pub content_type: Mutex<crate::content_type::ContentType>,
+    /// Preferencja prezentacji (`wp_tearing_control_v1`). Prezentacja zawsze idzie
+    /// do vblanku, ale wartość jest zapisana, gdyby warstwa wyjścia dostała kiedyś
+    /// plane z tearingiem.
+    pub tearing: Mutex<crate::tearing_control::PresentationHint>,
 }
 
 impl SurfaceData {
@@ -81,6 +102,12 @@ impl SurfaceData {
             children: Mutex::new(Vec::new()),
             base_image: Mutex::new(None),
             csd: Mutex::new(false),
+            ime_popup: Mutex::new(false),
+            viewport: Mutex::new(None),
+            fractional_scale: Mutex::new(None),
+            entered_outputs: Mutex::new(Vec::new()),
+            content_type: Mutex::new(crate::content_type::ContentType::None),
+            tearing: Mutex::new(crate::tearing_control::PresentationHint::Vsync),
         }
     }
 
@@ -226,9 +253,24 @@ impl Dispatch<wl_surface::WlSurface, SurfaceData> for State {
             }
             wl_surface::Request::SetInputRegion { region } => {
                 // `None` = cała powierzchnia; inaczej migawka prostokątów regionu.
-                *data.input.lock_or_recover() = region
+                let rects = region
                     .as_ref()
                     .and_then(|r| r.data::<RegionRects>().map(|m| m.lock_or_recover().clone()));
+                if std::env::var_os("SELENE_STATS").is_some() {
+                    let b = rects.as_ref().map(|v| v.len());
+                    eprintln!(
+                        "selene/input-region: powierzchnia sub={} popup={} region={:?}",
+                        data.subsurface.lock_or_recover().is_some(),
+                        data.xdg_surface
+                            .lock_or_recover()
+                            .as_ref()
+                            .and_then(|xs| xs.data::<crate::shell::XdgSurfaceData>())
+                            .map(|d| *d.is_popup.lock_or_recover())
+                            .unwrap_or(false),
+                        b
+                    );
+                }
+                *data.input.lock_or_recover() = rects;
             }
             wl_surface::Request::Commit => {
                 // Wywołaj oczekujące frame-callbacki.
@@ -358,6 +400,9 @@ impl Dispatch<wl_surface::WlSurface, SurfaceData> for State {
 /// działało też dla okien startujących od razu zmaksymalizowanych (bez cieni CSD).
 fn known_csd_client(app_id: &str, title: &str) -> bool {
     let id = app_id.to_ascii_lowercase();
+    if id == "steam" || id == "steamwebhelper" {
+        return true;
+    }
     const IDS: &[&str] = &[
         "google-chrome",
         "chromium",
@@ -366,6 +411,10 @@ fn known_csd_client(app_id: &str, title: &str) -> bool {
         "brave-browser",
         "vivaldi",
         "opera",
+        "firefox",
+        "librewolf",
+        "thunderbird",
+        "lutris",
     ];
     if IDS.iter().any(|needle| id.contains(needle)) {
         return true;
@@ -377,6 +426,10 @@ fn known_csd_client(app_id: &str, title: &str) -> bool {
         "microsoft edge",
         "brave browser",
         "vivaldi",
+        "mozilla firefox",
+        "librewolf",
+        "thunderbird",
+        "lutris",
     ]
     .iter()
     .any(|needle| title.contains(needle))
@@ -405,6 +458,12 @@ fn composite(
     data: &SurfaceData,
     handle: &DisplayHandle,
 ) {
+    // Powierzchnia popupu IME (kandydaci fcitx5/ibus) — bez roli okna i bez
+    // dekoracji, rysowana nad aktywnym polem tekstowym.
+    if *data.ime_popup.lock_or_recover() {
+        composite_ime_popup(state, surface, data);
+        return;
+    }
     // Powierzchnia warstwowa (panel/dock) — własna ścieżka (bez xdg_surface).
     if let Some(ls) = data.layer.lock_or_recover().clone() {
         composite_layer(state, surface, data, &ls);
@@ -599,6 +658,13 @@ fn composite(
     } else {
         ((0.0, 0.0), (bw, bh))
     };
+    // `wp_viewporter`: rozmiar logiczny może być inny niż bufor. To podstawa
+    // skalowania ułamkowego i dopasowania wideo bez przeskalowywania po stronie klienta.
+    let viewport = data.viewport.lock_or_recover().clone();
+    if let Some((dw, dh)) = viewport.as_ref().and_then(|vp| vp.destination) {
+        w = dw.max(1);
+        h = dh.max(1);
+    }
     // Klient, który mimo negocjacji `server_side` rysuje własne dekoracje, ma bufor
     // większy od geometrii okna o cienie CSD (`image_offset`). Dokładanie naszego
     // paska dawało wtedy **podwójny tytuł**, a jego strefa przechwytywała kliknięcia
@@ -675,6 +741,10 @@ fn composite(
     let mut pos = (px, py);
     if let Some(win) = state.windows.lock_or_recover().get_mut(slot) {
         win.image_offset = (off_x, off_y);
+        win.image_size_override = viewport
+            .as_ref()
+            .and_then(|vp| vp.destination)
+            .map(|(w, h)| (w.max(1) as u32, h.max(1) as u32));
         // Bufor GPU bywa zmieniany na shm i odwrotnie — pole musi być aktualne.
         win.dmabuf = dmabuf.clone();
         pos = (win.x, win.y);
@@ -712,6 +782,15 @@ fn composite(
                 );
             }
         }
+        // Nowe zwykłe okno dostaje fokus od razu. Bez tego okno pojawiające się
+        // bez kliknięcia (np. agent Polkit pytający o hasło) nie przyjmowało
+        // wpisywanego hasła — klawisze szły do okna pod spodem. Menu/podpowiedzi
+        // (`is_popup`) świadomie pomijamy: nie mogą dostać fokusu. Na ekranie
+        // blokady fokus należy wyłącznie do lockera — żadna aplikacja go nie przejmie.
+        if !is_popup && !state.locked {
+            crate::seat::activate_slot(state, slot);
+        }
+        crate::activation::apply_pending(state, surface);
     }
     let geom = (w, h, bw, bh, (off_x, off_y));
     if prev_geom.is_some() && prev_geom != Some(geom) && std::env::var("SELENE_STATS").is_ok() {
@@ -851,6 +930,83 @@ fn cascade_position(state: &State, count: usize) -> (f64, f64) {
 }
 
 /// Skomponuj powierzchnię warstwową (`wlr-layer-shell`): konfiguracja + kotwiczenie.
+/// Popup IME: bufor kandydatów umieszczony tuż pod prostokątem kursora.
+///
+/// Klient (`zwp_input_popup_surface_v2`) nie zna współrzędnych globalnych,
+/// dlatego pozycję wyliczamy z ostatniego `set_cursor_rectangle` pola tekstowego.
+fn composite_ime_popup(state: &mut State, surface: &wl_surface::WlSurface, data: &SurfaceData) {
+    let Some(buffer) = data.buffer.lock_or_recover().clone() else {
+        // Klient chowa okno kandydatów, wysyłając `attach(NULL)` + `commit`.
+        if let Some(slot) = *data.slot.lock_or_recover() {
+            if let Some(win) = state.windows.lock_or_recover().get_mut(slot) {
+                win.mapped = false;
+            }
+        }
+        return;
+    };
+    let Some(buf_data) = buffer.data::<BufferData>() else {
+        return;
+    };
+    let (w, h) = (buf_data.width, buf_data.height);
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    let dmabuf = buf_data.dmabuf.clone();
+    let image = if dmabuf.is_some() {
+        std::sync::Arc::new(ImageData::empty(1, 1).with_sparse(true))
+    } else {
+        let Some((rgba, opaque)) = buf_data.to_rgba_with_opacity() else {
+            return;
+        };
+        std::sync::Arc::new(ImageData::new(w as u32, h as u32, rgba).with_opaque(opaque))
+    };
+    // Domyślnie pod cursorem; gdy nie mieści się na monitorze — nad nim.
+    let rect = state.ime.cursor_rect_global;
+    let (mut x, mut y) = match rect {
+        Some((rx, ry, _, rh)) => (rx as f64, (ry + rh) as f64),
+        None => {
+            let (px, py) = state.pointer_pos;
+            (px, py)
+        }
+    };
+    let (ox, oy, ow, oh) = {
+        let outs = state.outputs.lock_or_recover();
+        let idx = crate::monitors::output_at(&outs, x, y);
+        match outs.get(idx).or_else(|| outs.first()) {
+            Some(o) => (o.x as f64, o.y as f64, o.width as f64, o.height as f64),
+            None => (0.0, 0.0, 1280.0, 800.0),
+        }
+    };
+    if y + f64::from(h) > oy + oh {
+        if let Some((_, ry, _, _)) = rect {
+            y = (ry as f64 - f64::from(h)).max(oy);
+        }
+    }
+    x = x.clamp(ox, (ox + ow - f64::from(w)).max(ox));
+    y = y.clamp(oy, (oy + oh - f64::from(h)).max(oy));
+
+    let z = state.next_z();
+    let (slot, _) = upsert_window(
+        state, surface, data, x, y, w, h, z, "IME", true, false, true, false, image,
+    );
+    if let Some(win) = state.windows.lock_or_recover().get_mut(slot) {
+        win.image_offset = (0.0, 0.0);
+        win.dmabuf = dmabuf.clone();
+    }
+    // Zwolnienie bufora — analogicznie do zwykłych okien.
+    if dmabuf.is_some() {
+        let old = data
+            .pending_dmabuf_release
+            .lock_or_recover()
+            .replace(buffer.clone());
+        if let Some(old) = old {
+            let _ = old.send_event(wl_buffer::Event::Release);
+        }
+    } else if data.take_release() {
+        let _ = buffer.send_event(wl_buffer::Event::Release);
+    }
+}
+
 fn composite_layer(
     state: &mut State,
     surface: &wl_surface::WlSurface,
@@ -1189,6 +1345,7 @@ mod ssd_tests {
             fullscreen: false,
             ssd: true,
             saved: None,
+            image_size_override: None,
             dmabuf: None,
             data: Arc::new(ImageData::empty(10, 10)),
         };
@@ -1221,6 +1378,14 @@ mod ssd_tests {
         assert!(known_csd_client("ecosia-browser", "New Tab"));
         assert!(known_csd_client("", "Welcome ! – Ecosia Browser"));
         assert!(known_csd_client("microsoft-edge", ""));
+        // Firefox/LibreWolf pod XWayland rysują własny pasek — bez tego nasz
+        // pasek przykrywał ich zakładki i menu.
+        assert!(known_csd_client("firefox", "Mozilla Firefox"));
+        assert!(known_csd_client("", "Strona — Mozilla Firefox"));
+        assert!(known_csd_client("librewolf", "LibreWolf"));
+        assert!(known_csd_client("steam", "Steam"));
+        // Gra o tytule zawierającym „steam” nie może stracić paska przez pomyłkę.
+        assert!(!known_csd_client("steamworld", "SteamWorld Dig"));
         // Zwykłe aplikacje zachowują nasz pasek.
         assert!(!known_csd_client("eu.luna.Store", "Sklep"));
         assert!(!known_csd_client("org.gnome.Nautilus", "Pliki"));
@@ -1327,6 +1492,7 @@ fn upsert_window_at(
                 ssd,
                 saved: None,
                 data: image,
+                image_size_override: None,
                 dmabuf: None,
             });
             *slot = Some(i);
@@ -1390,7 +1556,20 @@ fn popup_position(
                 .map(|w| w.content())
         })
         .unwrap_or_else(|| Rect::from_xywh(0.0, 0.0, 1280.0, 800.0));
-    let work = work_area_at(state, parent_rect.center().x, parent_rect.center().y);
+    let work = {
+        // Monitor wybieramy po **kotwicy** popupu, a nie po środku okna rodzica.
+        // Przy dwóch monitorach okno rozciągnięte na granicy (albo menu przy krawędzi)
+        // dostawało obszar roboczy z sąsiedniego wyjścia i popup lądował na drugim
+        // ekranie albo był przesuwany o całą szerokość monitora.
+        let anchor = Rect::from_xywh(
+            parent_rect.x() + geom.anchor_x,
+            parent_rect.y() + geom.anchor_y,
+            geom.anchor_w,
+            geom.anchor_h,
+        );
+        let a = anchor.center();
+        work_area_at(state, a.x, a.y)
+    };
     let pos = crate::popup::place(&geom, parent_rect, work, size);
     (pos, (parent_rect.x(), parent_rect.y()))
 }
@@ -1431,9 +1610,48 @@ fn send_popup_configure(
                 height: h,
             });
         }
-        if !*d.configured.lock_or_recover() {
-            let _ = xdg_surface.send_event(xdg_surface::Event::Configure { serial });
-            *d.configured.lock_or_recover() = true;
+        // Świeży serial przy **każdej** konfiguracji — nie tylko pierwszej.
+        // `reposition` wymaga nowej konfiguracji powierzchni do potwierdzenia,
+        // a klient (Chromium, GTK) bez niej zostaje przy starych współrzędnych.
+        let _ = xdg_surface.send_event(xdg_surface::Event::Configure { serial });
+        *d.configured.lock_or_recover() = true;
+    }
+}
+
+/// Przelicza pozycję i rozmiar już istniejącego popupu (`xdg_popup.reposition`).
+///
+/// Klient (Chromium przy przewijaniu listy `<select>`, GTK przy zmianie rozmiaru
+/// okna) przysyła nowy `xdg_positioner` i czeka na świeżą konfigurację. Wcześniej
+/// ignorowaliśmy to żądanie, więc menu zostawało w starym miejscu, a trafienia
+/// wskaźnika szły tam, gdzie klient **uważał**, że menu się znajduje.
+pub(crate) fn reposition_popup(state: &mut State, xdg_surface: &xdg_surface::XdgSurface) {
+    let Some(d) = xdg_surface.data::<XdgSurfaceData>() else {
+        return;
+    };
+    let geom = *d.geom.lock_or_recover();
+    let slot = d
+        .wl_surface
+        .data::<SurfaceData>()
+        .and_then(|sd| *sd.slot.lock_or_recover());
+    let current = slot.and_then(|s| {
+        state
+            .windows
+            .lock_or_recover()
+            .get(s)
+            .map(|w| (w.width, w.height))
+    });
+    let (w, h) = if geom.width > 0 && geom.height > 0 {
+        (geom.width, geom.height)
+    } else {
+        current.map(|(w, h)| (w.max(1), h.max(1))).unwrap_or((1, 1))
+    };
+    let ((ax, ay), (ox, oy)) = popup_position(state, xdg_surface, (f64::from(w), f64::from(h)));
+    send_popup_configure(state, xdg_surface, (ax - ox, ay - oy), w, h);
+    if let Some(slot) = slot {
+        let mut windows = state.windows.lock_or_recover();
+        if let Some(win) = windows.get_mut(slot) {
+            win.x = ax;
+            win.y = ay;
         }
     }
 }

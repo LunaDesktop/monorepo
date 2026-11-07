@@ -22,7 +22,6 @@ const HERO_H: f64 = 168.0;
 const FOOTER_H: f64 = 34.0;
 const ROW_H: f64 = 54.0;
 const SCROLL_STEP: f64 = 64.0;
-const SCROLL_UNIT: f64 = 20.0;
 
 /// Geometria widoku.
 #[derive(Debug, Clone)]
@@ -572,7 +571,7 @@ pub fn handle_events(
             }
             Event::Scroll(scroll) if lay.viewport.contains(scroll.position) => {
                 app.scroll
-                    .on_scroll(scroll.dy / SCROLL_UNIT * SCROLL_STEP, lay.viewport);
+                    .on_scroll(scroll.notches_y() * SCROLL_STEP, lay.viewport);
             }
             Event::PointerButton(button)
                 if button.button == PointerButton::Left && button.state == ButtonState::Pressed =>

@@ -1589,10 +1589,10 @@ pub fn handle_events(
                 if app.mode == Mode::Gallery {
                     let g = grid_metrics(app.items.len(), lay.grid);
                     if g.area.contains(se.position) {
-                        app.scroll.on_scroll(se.dy * 60.0, g.area);
+                        app.scroll.on_scroll(se.notches_y() * 60.0, g.area);
                     }
                 } else if app.viewer.image.is_some() && lay.content.contains(se.position) {
-                    let factor = (-se.dy * 0.15).exp();
+                    let factor = (-se.notches_y() * 0.15).exp();
                     app.viewer.zoom = (app.viewer.zoom * factor).clamp(0.1, 32.0);
                     if app.viewer.zoom <= 1.0 {
                         app.viewer.zoom = 1.0;

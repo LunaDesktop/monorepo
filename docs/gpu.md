@@ -103,24 +103,47 @@ klatkę to wciąż szybciej niż równoległy CPU (7–10 ms na monitor). Klatka
 Zrzuty ekranu (`Super+F12`) idą z aktywnego backendu, więc z GPU widać także okna
 `dmabuf`.
 
+**Kontekst trzeba przełączać przed każdym rysowaniem.** `eglMakeCurrent` działa
+na wątek, a każdy `GpuRenderer` ma własny kontekst — po utworzeniu renderera
+drugiego monitora aktywny jest kontekst ostatniego z nich. Wcześniej `draw` nie
+wołał `eglMakeCurrent`, więc pierwszy monitor rysował w obiekty obcego kontekstu:
+na ekranie było migotanie i treść w złym rozmiarze (przy **jednym** wyjściu, np.
+nested, problem nie występował — stąd nie wyszedł w testach). Teraz `Gl::bind()`
+jest wołane na początku `draw` i `create_targets`; pilnuje tego test
+`gpu::tests::two_renderers_keep_their_own_context` (dwa renderery o różnych
+rozmiarach muszą zwrócić własne kolory i własne wymiary).
+Dodatkowo `DrmBackend::present` **nie robi page-flipu**, gdy rozmiar klatki nie
+zgadza się z trybem wyjścia — wcześniej pokazywał wtedy nieodświeżony bufor
+(migotanie) i logował to tylko przy `SELENE_STATS=1`.
+
 ### ETAP 2 — `zwp_linux_dmabuf_v1` (klienci GPU)
 
 **Status: ✅ zaimplementowany (zakres etapu 2).**
 
 Zakres (zrobione):
-1. Global `zwp_linux_dmabuf_v1` **v3** + `zwp_linux_buffer_params_v1`
+1. Global `zwp_linux_dmabuf_v1` **v4** + `zwp_linux_buffer_params_v1`
    (`create` → `created`, `create_immed`, `add`, `destroy`). Global powstaje
-   **tylko** gdy `LUNA_GPU=1` i EGL potrafi zaimportować dmabuf.
-2. Formaty **jednoplanowe** `ARGB/XRGB/ABGR/XBGR8888`, modyfikatory z
+   **tylko** gdy `LUNA_GPU=1` i EGL potrafi zaimportować dmabuf; `luna-session`
+   **nie** włącza GPU sam — zmienną ustawia się w sesji (albo w `Exec=` wpisie
+   `wayland-sessions`, patrz niżej). `LUNA_GPU=0`/brak = czysty CPU.
+2. `feedback` (v4): `format_table` (memfd, 4 B formatu + 8 B modyfikatora na
+   pozycję), `main_device` i jeden tranche (`tranche_target_device`,
+   `tranche_formats`, `tranche_flags=0`, `tranche_done`, `done`). Urządzenie to
+   `dev_t` węzła `/dev/dri/renderD*` pasującego do sterownika GPU; `LUNA_RENDER_NODE`
+   pozwala wskazać je jawnie (układy hybrydowe). Klienty v1–v3 dostają nadal
+   `format`/`modifier` — zdarzenia spoza wersji obiektu kończą klienta abortem.
+   Bez `feedback` Mesa nie zna urządzenia i wypisuje
+   `failed to get driver name for fd -1`, po czym spada do softwaru.
+3. Formaty **jednoplanowe** `ARGB/XRGB/ABGR/XBGR8888`, modyfikatory z
    `eglQueryDmaBufFormatsEXT`/`eglQueryDmaBufModifiersEXT` (odfiltrowane do
    tego, co naprawdę importujemy). Inne formaty → `failed`; klient zostaje przy shm.
-3. Import: `eglCreateImageKHR(EGL_LINUX_DMA_BUF_EXT)` +
+4. Import: `eglCreateImageKHR(EGL_LINUX_DMA_BUF_EXT)` +
    `glEGLImageTargetTexture2DOES` → tekstura w cache `GpuRenderer`
    (klucz `Arc<DmabufImage>`, zwalniana razem z `EGLImage`).
-4. `wl_buffer.release` jest wysyłany **przy następnym commicie** tej powierzchni
+5. `wl_buffer.release` jest wysyłany **przy następnym commicie** tej powierzchni
    (GPU czyta poprzednią klatkę jeszcze po `commit`); renderer kończy klatkę
    `glFinish`. Jawne fence (`EGL_KHR_fence_sync`) to optymalizacja na później.
-5. Weryfikacja: test round-trip w `libluna-render` (tekstura GL → eksport MESA
+6. Weryfikacja: test round-trip w `libluna-render` (tekstura GL → eksport MESA
    do dmabuf → import → identyczne piksele), testy walidacji parametrów
    w `selene/src/dmabuf.rs` oraz `luna-control dmabuf` w teście sesji
    (`enabled=true` tylko z GPU).
@@ -135,9 +158,25 @@ Zakres (zrobione):
    Format `XR24` z modyfikatorem liniowym NVIDII — czyli kompozycja okna GPU
    działa end-to-end, bez pośredniego shm.
 
-Ograniczenia etapu 2: brak formatów wieloplanowych (YUV/wideo), brak
-`y_invert`/`interlaced`, brak `feedback` z v4, powierzchnie warstwowe
-(`wlr-layer-shell`) nadal wymagają shm.
+Ograniczenia etapu 2: brak `y_invert`/`interlaced`, brak
+`get_surface_feedback` per powierzchnia (wysyłamy ten sam opis co domyślny),
+powierzchnie warstwowe (`wlr-layer-shell`) nadal wymagają shm. Formaty
+wieloplanowe (`NV12/NV21/YUV420/YV12`) są ogłaszane i przekazywane do EGL jako
+wszystkie plany; ich końcowa konwersja do RGB zależy od sterownika (Mesa robi ją
+w imporcie, na części sterowników potrzebny będzie osobny shader YUV).
+
+Kursory klientów z `dmabuf` są obsługiwane: Selene importuje bufor przez EGL do
+FBO, robi readback (`GpuRenderer::dmabuf_to_rgba`) i dopiero taki obraz trafia
+do płaszczyzny sprzętowej albo sceny. Bez tego Zed/GPUI ustawiał kursor buforem
+GPU, którego nie dało się pokazać — kursor był niewidoczny albo „zamrożony”
+na poprzednim kształcie.
+
+**Cache kontekstu readback.** Wcześniej każde wywołanie `dmabuf_to_rgba`
+tworzyło nowy `GpuRenderer`, czyli nowy kontekst EGL — synchronicznie w wątku
+protokołu. Kliknięcie zmienia kształt kursora (strzałka ↔ I-beam), więc sesja
+potrafiła się zaciąć na kilkadziesiąt ms przy każdym kliknięciu. Renderer jest
+teraz trzymany w `thread_local` i rośnie tylko wtedy, gdy trafi się większy
+obraz; wynik jest przycinany do rozmiaru kursora.
 
 Kryterium na kolejny krok: klient GPU (Zed/Chrome) startuje natywnie na
 Waylandzie bez `LUNA_X11_APPS` — **spełnione dla Zed** (patrz pkt 6).
@@ -149,11 +188,18 @@ okręgi, clip prostokątny/zaokrąglony, **tekst z atlasu glifów**; wektory prz
 warstwy CPU).
 
 Pozostało:
-1. **Ścieżki natywnie** — `StrokeLine`/`FillPolygon` (ikony, kursor) przez
-   triangulację/SDF, żeby zniknęły ostatnie warstwy CPU.
-2. **Clip stencil** dla wielu zaokrąglonych clipów jednocześnie (dziś ostatni).
-3. Kryterium: te same scenariusze co `render_bench`, p95 ≤ 8 ms przy 2560×1440,
+1. **Clip stencil** dla wielu zaokrąglonych clipów jednocześnie (dziś ostatni).
+2. Kryterium: te same scenariusze co `render_bench`, p95 ≤ 8 ms przy 2560×1440,
    pamięć ≤ +20%, fallback CPU gdy brak EGL.
+
+Zrobione: **ścieżki natywnie** (`StrokeLine`, `StrokePolyline`, `FillPolygon`).
+Odcinki idą jako kapsułki SDF (`mode 5` w `FS_SHAPE`), więc zaokrąglone końce
+dają dokładnie round-join. Wielokąty są triangulowane ear clippingiem, a shader
+trójkątów liczy odległość **tylko do krawędzi obrysu** (przekątne dostają
+`(0,0,-1e6)`), dzięki czemu AA jest na brzegu, bez jasnych szwów w środku.
+Wielokąt niejednoznaczny/self-intersecting wraca do warstwy CPU (`tiny-skia`).
+Wymuszenie starej ścieżki: `LUNA_GPU_CPU_PATHS=1`. Testy: `tessellate_*` oraz
+`gpu_draws_filled_polygon` / `gpu_draws_stroke_line`.
 
 Zrobione: **atlas glifów** — `TextEngine::glyph` daje krycie + metryki, `GpuRenderer`
 pakuje glify do jednej tekstury (512², półkowy packer, cache per znak/rozmiar) i
@@ -170,20 +216,56 @@ własny uniform `round_r`, a rozmiar clipu idzie w `zw`; pilnuje tego test
 
 ### ETAP 4 — wyjście zero-copy (DRM/Mesa)
 
-1. `EGL_PLATFORM_GBM` + `gbm_surface`/`gbm_bo` (Mesa), `EGL_KHR_swap_buffers_with_damage`
-   zamiast readbacku.
-2. Na NVIDIA bez GBM: pozostaje readback (1,09 ms na 1080p — akceptowalne) albo
-   `libnvidia-egl-gbm`, gdy dostępne.
-3. [x] **Readback tylko z regionu uszkodzenia** (platforma/nested): `Renderer::draw_damage`
+1. [x] **Zero-copy przez eksport EGL** (`SELENE_ZEROCOPY`, domyślnie włączone przy GPU):
+   `GpuRenderer` renderuje do **dwóch** celów (ping-pong), klatka idzie przez
+   `eglCreateImage(EGL_GL_TEXTURE_2D_KHR)` → `EGL_MESA_image_dma_buf_export` →
+   `PRIME_FD_TO_HANDLE` → `AddFB2WithModifiers` → page-flip. W trybie skanoutu
+   `draw` **nie robi readbacku** (`scanout_only`); zrzuty ekranu wołają jawne
+   `readback_full()`. Każde wyjście osobno może spaść do readbacku, gdy sterownik
+   odrzuci bufor — zero-copy nigdy nie psuje obrazu.
+2. **Wynik na NVIDIA 610 (GTX 1660 SUPER), zmierzony:** eksport `dmabuf` działa
+   (`ABGR8888`, modyfikator block-linear `0x030000000e08013/14`), `PRIME` działa,
+   ale `AddFB2WithModifiers` zwraca **EINVAL** dla każdego rozmiaru (64×48,
+   256×256, 1920×1080). Deklarowanie bufora jako **liniowego** (`flags=0`,
+   `modifier=0`) kernel przyjmuje, ale to pułapka: import tego samego bufora
+   z `modifier=0` daje czarny/śmieciowy obraz (pamięć jest kafelkowana), więc
+   taka „zero-copy” wyświetliłaby śmieci. Dlatego fallback idzie **do readbacku**.
+   Test `drm::tests::exported_dmabuf_becomes_a_framebuffer` pilnuje, że eksport
+   i `PRIME` działają, i raportuje, czy `AddFB2` przyjął modyfikator.
+3. [~] **Zero-copy na NVIDIA wymaga GBM.** Potrzebne na hoście:
+   `/usr/lib/libnvidia-egl-gbm.so.1` i `/usr/lib/gbm/nvidia-drm_gbm.so`
+   (oba są w runtime Flatpaka `org.freedesktop.Platform.GL.nvidia-*`, na hoście
+   ich brak). Wtedy alokujemy `gbm_bo` z `GBM_BO_USE_SCANOUT|GBM_BO_USE_RENDERING`,
+   renderujemy do niego przez `eglCreateImage(EGL_LINUX_DMA_BUF_EXT)` i robimy
+   page-flip bez eksportu z tekstury GL. To jedyna droga, bo modyfikator
+   zaakceptowany przez `nvidia-drm` pochodzi z alokatora NVIDII.
+   **Detekcja gotowa:** `libluna_render::gbm` sprawdza `libgbm`, platformę EGL
+   i backend `nvidia-drm_gbm`, a `SELENE_STATS=1` wypisuje konkretnie, czego brak
+   (`selene/drm: GBM (zero-copy NVIDIA): tak/nie (...)`). Alokacja+import to
+   następny krok — dopiero po instalacji `nvidia-dkms` z GBM.
+4. [x] **Readback tylko z regionu uszkodzenia** (platforma/nested): `Renderer::draw_damage`
    + `Scene::damage_bounds` (konserwatywny prostokąt różnicy scen, tekst mierzony
    silnikiem tekstu). `GpuRenderer` czyta z FBO tylko ten prostokąt, a
    `libluna-platform` kopiuje potem **tylko ten region** do `wl_shm` i aktualizuje
    `last_frame` lokalnie. Pomiar: pulpit 1,66 ms → **0,48 ms** przy damage 320×160
    (readback 1,08 → 0,22 ms). Zmiana rozmiaru, skali albo **tła** (poza sceną)
    wymusza pełną klatkę — inaczej zostałby stary obraz.
-4. Do zrobienia: ten sam mechanizm w ścieżce DRM (`present` z prostokątem na
-   dumb bufferze). Kryterium: przy animacji panelu odczyt ≤ 10% klatki.
-   Brak kopii klatki przez CPU na Intel/AMD (zero-copy) i tear-free przez page-flip.
+5. [x] **Readback tylko z regionu uszkodzenia w ścieżce DRM**: `present_region`
+   kopiuje wyłącznie prostokąt damage (a nie całe 8 MB). Ponieważ bufor `back`
+   był prezentowany **dwa** flipy temu, do kopii idzie suma damage z bieżącej
+i poprzedniej klatki. Scena z widocznym `dmabuf` wymusza pełną klatkę — klient
+   może narysować nową treść do tego samego bufora, więc różnica scen po `Arc`
+   byłaby fałszywie zerowa. Kryterium: przy animacji panelu odczyt ≤ 10% klatki.
+   Testy: `drm::tests::present_region_*`.
+
+**Pacing (zrobione):** czekanie na flipy przeniesione na początek następnej
+iteracji (`pending_flips`) — render bieżącej klatki nakłada się na skanowanie
+poprzedniej. Wcześniej `present` i `wait_flip` stały obok siebie, więc każda klatka
+płaciła pełny vblank i przy 75 Hz + 60 Hz gubiła terminy (spadki do ~16 kl./s).
+
+**Kontekst EGL per monitor (zrobione):** `Gl::bind()` przed każdym `draw`
+— bez tego drugi monitor rysował w obiekty pierwszego (migotanie i treść w złym
+rozmiarze); pilnuje tego `gpu::tests::two_renderers_keep_their_own_context`.
 
 ## 4. Ryzyka i zasady
 
@@ -209,8 +291,15 @@ własny uniform `round_r`, a rozmiar clipu idzie w `zw`; pilnuje tego test
 5. [x] Kompozycja GPU w trybie DRM (kontekst per monitor, render sekwencyjny,
    readback do dumb buffera, zrzuty z aktywnego backendu).
 6. [x] Atlas glifów: tekst bez warstw CPU (render pulpitu 0,40 ms; readback 1,08 ms).
-7. [ ] Ścieżki natywnie (ikony, kursor) — ostatnie warstwy CPU.
+7. [x] Ścieżki natywnie (ikony, kursor): kapsułki SDF + ear clipping z AA na
+   obrysie; `LUNA_GPU_CPU_PATHS=1` wraca do warstwy CPU.
 8. [x] Readback z damage w platformie/nested (pulpit 1,66 → 0,48 ms przy 320×160).
-9. [ ] Readback z damage w DRM + zero-copy na Mesa; NVIDIA — readback.
-10. [ ] Fence (`EGL_KHR_fence_sync`) zamiast synchronicznego readbacku, formaty
-    wieloplanowe (wideo), dmabuf dla `wlr-layer-shell`.
+8a. [x] Damage w prezentacji DRM (`present_region`, suma dwóch klatek).
+9. [~] Zero-copy DRM: ścieżka eksportu EGL gotowa i domyślnie włączona z fallbackiem;
+   na NVIDIA 610 `AddFB2WithModifiers` odrzuca modyfikator EGL (EINVAL) → readback.
+   Detekcja GBM gotowa (`libluna_render::gbm`); alokacja BO po instalacji
+   `nvidia-dkms` z `libnvidia-egl-gbm` + `gbm/nvidia-drm_gbm.so`.
+10. [x] Formaty wieloplanowe (NV12/NV21/YUV420/YV12) — negocjacja i wszystkie
+    plany przekazywane do EGL (konwersja YUV zależy od sterownika).
+11. [ ] Fence (`EGL_KHR_fence_sync`) zamiast synchronicznego readbacku oraz
+    dmabuf dla `wlr-layer-shell`.

@@ -22,7 +22,6 @@ use crate::plan::{Field, PartitionMode, RootMode};
 
 const PAD: f64 = 28.0;
 const SCROLL_STEP: f64 = 64.0;
-const SCROLL_UNIT: f64 = 20.0;
 const ROW_H: f64 = 30.0;
 const ENTRY_H: f64 = 62.0;
 
@@ -1542,11 +1541,11 @@ pub fn handle_events(
                     if picker_layout.list.contains(scroll.position) {
                         picker
                             .scroll
-                            .on_scroll(scroll.dy / SCROLL_UNIT * SCROLL_STEP, picker_layout.list);
+                            .on_scroll(scroll.notches_y() * SCROLL_STEP, picker_layout.list);
                     }
                 } else if lay.viewport.contains(scroll.position) {
                     app.scroll
-                        .on_scroll(scroll.dy / SCROLL_UNIT * SCROLL_STEP, lay.viewport);
+                        .on_scroll(scroll.notches_y() * SCROLL_STEP, lay.viewport);
                 }
             }
             Event::PointerButton(button)

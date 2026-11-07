@@ -33,10 +33,6 @@ fn row_height(theme: &Theme) -> f64 {
 }
 /// Przewinięcie za jeden „ząbek” kółka.
 const SCROLL_STEP: f64 = 64.0;
-/// Jeden „ząbek” kółka w jednostkach powierzchni (spójne z `selene::seat::WHEEL_STEP_PX`).
-/// Dzięki temu rolka przewija o stały krok także wtedy, gdy Selene wysyła delty
-/// w pikselach (jeden ząbek = [`SCROLL_UNIT`] px), a nie ±1.
-const SCROLL_UNIT: f64 = 20.0;
 /// Szerokość sidebara.
 const SIDEBAR_W: f64 = 236.0;
 
@@ -1327,14 +1323,14 @@ pub fn handle_events(
             }
             Event::Scroll(scroll) if lay.nav.contains(scroll.position) => {
                 let max = (app.nav.height(theme) - lay.nav.height()).max(0.0);
-                app.nav_scroll = (app.nav_scroll + scroll.dy / SCROLL_UNIT * 26.0).clamp(0.0, max);
+                app.nav_scroll = (app.nav_scroll + scroll.notches_y() * 26.0).clamp(0.0, max);
             }
             Event::Scroll(scroll)
                 if content_viewport(app, lay.viewport).contains(scroll.position) =>
             {
                 let content = content_viewport(app, lay.viewport);
                 app.scroll
-                    .on_scroll(scroll.dy / SCROLL_UNIT * SCROLL_STEP, content);
+                    .on_scroll(scroll.notches_y() * SCROLL_STEP, content);
             }
             Event::Scroll(_) => {}
             _ => {}
@@ -1590,7 +1586,7 @@ fn handle_picker_events(app: &mut SettingsApp, events: &[Event], size: Size, the
             }
             Event::Scroll(scroll) if lay.list.contains(scroll.position) => {
                 let max = picker_max_scroll(app, &lay);
-                let step = scroll.dy / SCROLL_UNIT * PICKER_ROW_H * 2.0;
+                let step = scroll.notches_y() * PICKER_ROW_H * 2.0;
                 if let Some(picker) = &mut app.picker {
                     picker.scroll = (picker.scroll + step).clamp(0.0, max);
                 }
@@ -2472,7 +2468,7 @@ fn handle_info_events(
             }
             Event::Scroll(scroll) if content.contains(scroll.position) => {
                 app.info_scroll
-                    .on_scroll(scroll.dy / SCROLL_UNIT * SCROLL_STEP, content);
+                    .on_scroll(scroll.notches_y() * SCROLL_STEP, content);
             }
             Event::Key(key) if key.state == ButtonState::Pressed && key.keysym == 0xff1b => {
                 app.close_info_sheet();
@@ -2773,7 +2769,7 @@ fn handle_wallpaper_events(app: &mut SettingsApp, events: &[Event], size: Size, 
                 } else {
                     wallpaper_tile_size(lay.grid).1 + WALLPAPER_GAP
                 };
-                let step = scroll.dy / SCROLL_UNIT * step;
+                let step = scroll.notches_y() * step;
                 if let Some(picker) = &mut app.wallpaper_picker {
                     picker.scroll = (picker.scroll + step).clamp(0.0, max);
                 }
@@ -4089,11 +4085,11 @@ mod tests {
         let lay = picker_layout(size, &theme);
         let at = lay.list.center();
 
-        // Jeden „ząbek” kółka w dół (dy = 20 jednostek) przesuwa listę o dwa wiersze.
+        // Jeden „ząbek” kółka w dół (dy = SCROLL_NOTCH_PX) przesuwa listę o dwa wiersze.
         let down = Event::Scroll(ScrollEvent {
             position: at,
             dx: 0.0,
-            dy: SCROLL_UNIT,
+            dy: libluna_core::SCROLL_NOTCH_PX,
         });
         handle_events(&mut app, &[down], size, &theme, &text);
         let scroll = app.picker.as_ref().expect("picker").scroll;
@@ -4106,7 +4102,7 @@ mod tests {
         let up = Event::Scroll(ScrollEvent {
             position: at,
             dx: 0.0,
-            dy: -SCROLL_UNIT,
+            dy: -libluna_core::SCROLL_NOTCH_PX,
         });
         handle_events(&mut app, &[up], size, &theme, &text);
         assert_eq!(app.picker.as_ref().expect("picker").scroll, 0.0);

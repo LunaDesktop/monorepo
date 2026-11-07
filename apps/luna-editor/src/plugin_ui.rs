@@ -810,7 +810,8 @@ fn handle_manager(app: &mut App, event: &Event, size: Size, theme: &Theme, _text
         Event::Scroll(scroll) if lay.list.contains(scroll.position) => {
             let total = app.plugins.plugins.len() as f64 * (ROW_H + ROW_GAP);
             let max = (total - lay.list.height()).max(0.0);
-            app.plugin_ui.scroll = (app.plugin_ui.scroll + scroll.dy).clamp(0.0, max);
+            app.plugin_ui.scroll =
+                (app.plugin_ui.scroll + scroll.notches_y() * (ROW_H + ROW_GAP)).clamp(0.0, max);
         }
         Event::PointerButton(button)
             if button.button == PointerButton::Left && button.state == ButtonState::Pressed =>
@@ -1221,7 +1222,7 @@ fn handle_picker(app: &mut App, event: &Event, size: Size, theme: &Theme, text: 
             let max = lay.total.saturating_sub(lay.visible) as f64;
             if let Some(form) = app.plugin_ui.form.as_mut() {
                 if let Some(picker) = form.picker.as_mut() {
-                    picker.scroll = (picker.scroll + scroll.dy / 26.0).clamp(0.0, max);
+                    picker.scroll = (picker.scroll + scroll.notches_y()).clamp(0.0, max);
                 }
             }
         }

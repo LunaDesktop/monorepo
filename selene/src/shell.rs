@@ -37,6 +37,16 @@ pub struct PopupGeom {
     pub constraint: u32,
 }
 
+/// Dane obiektu `xdg_popup`.
+///
+/// Trzymamy powiązanie z `xdg_surface`, bo `xdg_popup.reposition` przychodzi
+/// **na obiekcie popupu** i musi przeliczyć pozycję względem rodzica oraz wysłać
+/// nową konfigurację (menu Chrome przestawia się tak przy przewijaniu listy
+/// i przy zmianie rozmiaru okna).
+pub struct PopupData {
+    pub xdg_surface: xdg_surface::XdgSurface,
+}
+
 /// Dane `xdg_positioner`.
 #[derive(Debug, Default)]
 pub struct XdgPositionerData {
@@ -145,9 +155,9 @@ impl Dispatch<xdg_wm_base::XdgWmBase, ()> for State {
 
 impl Dispatch<xdg_surface::XdgSurface, XdgSurfaceData> for State {
     fn request(
-        state: &mut Self,
+        state: &mut State,
         _client: &Client,
-        _resource: &xdg_surface::XdgSurface,
+        resource: &xdg_surface::XdgSurface,
         request: xdg_surface::Request,
         data: &XdgSurfaceData,
         handle: &DisplayHandle,
@@ -169,7 +179,12 @@ impl Dispatch<xdg_surface::XdgSurface, XdgSurfaceData> for State {
                 parent,
                 positioner,
             } => {
-                let popup = data_init.init(id, ());
+                let popup = data_init.init(
+                    id,
+                    PopupData {
+                        xdg_surface: resource.clone(),
+                    },
+                );
                 *data.popup.lock_or_recover() = Some(popup);
                 *data.is_popup.lock_or_recover() = true;
                 // `parent` to `xdg_surface` rodzica — zapamiętujemy jego `wl_surface`
@@ -182,6 +197,22 @@ impl Dispatch<xdg_surface::XdgSurface, XdgSurfaceData> for State {
                     .data::<XdgPositionerData>()
                     .map(|p| *p.geom.lock_or_recover())
                     .unwrap_or_default();
+                // Diagnostyka: Chromium rysuje część bąbli w `wl_subsurface`, ale
+                // może też tworzyć `xdg_popup` **bez bufora** (sam do wejścia).
+                // Bez tego logu taki popup jest niewidoczny dla modelu okien.
+                if std::env::var_os("SELENE_STATS").is_some() {
+                    let geom = *data.geom.lock_or_recover();
+                    eprintln!(
+                        "selene/popup: get_popup {}x{} anchor=({:.0},{:.0}) {:.0}x{:.0} rodzic={:?}",
+                        geom.width,
+                        geom.height,
+                        geom.anchor_x,
+                        geom.anchor_y,
+                        geom.anchor_w,
+                        geom.anchor_h,
+                        data.parent.lock_or_recover().is_some()
+                    );
+                }
             }
             xdg_surface::Request::AckConfigure { .. } => {
                 // Konfiguracja potwierdzona — nic więcej nie trzeba po stronie MVP.
@@ -386,15 +417,24 @@ fn gravity_value(v: xdg_positioner::Gravity) -> u8 {
     }
 }
 
-impl Dispatch<xdg_popup::XdgPopup, ()> for State {
+impl Dispatch<xdg_popup::XdgPopup, PopupData> for State {
     fn request(
-        _state: &mut Self,
+        state: &mut Self,
         _client: &Client,
         _resource: &xdg_popup::XdgPopup,
-        _request: xdg_popup::Request,
-        _data: &(),
+        request: xdg_popup::Request,
+        data: &PopupData,
         _handle: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {
+        if let xdg_popup::Request::Reposition { positioner, .. } = request {
+            if let Some(p) = positioner.data::<XdgPositionerData>() {
+                let geom = *p.geom.lock_or_recover();
+                if let Some(xs) = data.xdg_surface.data::<XdgSurfaceData>() {
+                    *xs.geom.lock_or_recover() = geom;
+                }
+            }
+            crate::compositor::reposition_popup(state, &data.xdg_surface);
+        }
     }
 }

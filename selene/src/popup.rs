@@ -89,7 +89,16 @@ pub fn place(geom: &PopupGeom, parent: Rect, work: Rect, fallback: (f64, f64)) -
     if geom.constraint & ADJUST_SLIDE_Y != 0 {
         y = clamp_axis(y, size.1, work.y(), work.bottom());
     }
-    (x, y)
+    // **Zawsze** trzymamy popup w obszarze roboczym, nawet gdy klient nie poprosił
+    // o `slide`. Bez tego menu, które po `flip` nie mieści się ani nad, ani pod
+    // kotwicą (np. wysokie menu ⋮ Chromium na niskim ekranie), lądowało w całości
+    // poza monitorem: użytkownik widział tylko pasek przy krawędzi, a trafienia
+    // (i podświetlenie pozycji) trafiały w treść **pod** menu. Tak robią też
+    // Mutter i KWin: popup nigdy nie znika za ekranem.
+    (
+        clamp_axis(x, size.0, work.x(), work.right()),
+        clamp_axis(y, size.1, work.y(), work.bottom()),
+    )
 }
 
 /// Pozycja bez uwzględnienia ograniczeń monitora.
@@ -239,6 +248,41 @@ mod tests {
         g.constraint = ADJUST_SLIDE_X;
         let (x, _) = place(&g, parent(), work(), (200.0, 100.0));
         assert_eq!(x, 1920.0 - 200.0);
+    }
+
+    #[test]
+    fn tall_popup_that_fits_nowhere_is_kept_on_screen() {
+        // Menu ⋮ Chromium: 700 px wysokości, kotwica 100 px od góry ekranu 800 px.
+        // Pod kotwicą się nie mieści, a „flip” wyniósłby je na y = -600.
+        let mut g = geom(BOTTOM_RIGHT, BOTTOM_RIGHT);
+        g.width = 597;
+        g.height = 700;
+        g.anchor_x = 992.0;
+        g.anchor_y = 46.0;
+        g.anchor_w = 24.0;
+        g.anchor_h = 24.0;
+        g.constraint = ADJUST_FLIP_Y;
+        let parent = Rect::from_xywh(60.0, 60.0, 1018.0, 738.0);
+        let work = Rect::from_xywh(0.0, 48.0, 1280.0, 752.0);
+        let (x, y) = place(&g, parent, work, (597.0, 700.0));
+        assert!(
+            (48.0..=100.0).contains(&y),
+            "y={y} musi być w obszarze roboczym"
+        );
+        assert!(x >= 0.0 && x + 597.0 <= 1280.0, "x={x} poza ekranem");
+    }
+
+    #[test]
+    fn popup_below_anchor_is_not_moved_up_when_it_fits() {
+        let mut g = geom(BOTTOM_LEFT, BOTTOM_LEFT);
+        g.anchor_y = 100.0;
+        g.width = 300;
+        g.height = 200;
+        g.constraint = ADJUST_FLIP_Y | ADJUST_SLIDE_Y;
+        let (_, y) = place(&g, parent(), work(), (300.0, 200.0));
+        // Kotwica na dolnej krawędzi (100+30=130) — mieści się pod nią, więc ani
+        // flip, ani slide nie ruszają popupu.
+        assert_eq!(y, 130.0);
     }
 
     #[test]

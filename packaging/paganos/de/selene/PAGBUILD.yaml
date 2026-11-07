@@ -16,6 +16,7 @@ license:
 - GPL-3.0-or-later
 depends:
 - libxkbcommon
+- xorg-xkeyboard-config
 - dejavu-ttf
 makedepends:
 - rustc

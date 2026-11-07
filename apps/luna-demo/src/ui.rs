@@ -1017,11 +1017,14 @@ pub fn handle_events(
                             theme,
                             text,
                             se.position,
-                            se.dy * 60.0,
+                            se.notches_y() * 60.0,
                         );
                     } else if lay.items.contains(se.position) {
                         let step = theme.metrics.itemview.row_h;
-                        if demo.files_scroll.on_scroll(se.dy * step, lay.items) {
+                        if demo
+                            .files_scroll
+                            .on_scroll(se.notches_y() * step, lay.items)
+                        {
                             demo.items.set_scroll(demo.files_scroll.offset());
                         }
                     }

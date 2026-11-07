@@ -1547,7 +1547,7 @@ fn handle_picker(app: &mut App, event: &Event, lay: &Layout, _theme: &Theme) -> 
             if card.contains(scroll.position) {
                 let max = (models.len() as f64 * PICKER_ROW_H - list.height()).max(0.0);
                 if let Some(picker) = app.chat.picker.as_mut() {
-                    picker.scroll = (picker.scroll + scroll.dy / 20.0 * 64.0).clamp(0.0, max);
+                    picker.scroll = (picker.scroll + scroll.notches_y() * 64.0).clamp(0.0, max);
                 }
                 return true;
             }
@@ -1667,7 +1667,7 @@ pub fn handle_events(
         Event::Scroll(scroll) => {
             if panel.contains(scroll.position) {
                 let max = app.chat.scroll_max;
-                app.chat.scroll = (app.chat.scroll + scroll.dy / 20.0 * 64.0).clamp(0.0, max);
+                app.chat.scroll = (app.chat.scroll + scroll.notches_y() * 64.0).clamp(0.0, max);
                 app.chat.stick_to_bottom = false;
                 return true;
             }

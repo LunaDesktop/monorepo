@@ -16,6 +16,7 @@
 //! w widgetach.
 
 pub mod damage;
+pub mod gbm;
 pub mod gpu;
 mod path_cache;
 pub mod renderer;

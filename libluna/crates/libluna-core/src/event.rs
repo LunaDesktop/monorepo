@@ -53,12 +53,44 @@ pub struct PointerEvent {
     pub modifiers: Modifiers,
 }
 
-/// Zdarzenie przewijania (rolka/gładzik); wartości w „krokach”.
+/// Przewinięcie jednego ząbka kółka myszy w pikselach logicznych.
+///
+/// [`ScrollEvent::dx`]/[`ScrollEvent::dy`] są **zawsze w pikselach**: warstwa
+/// platformy zamienia `axis_discrete`/`axis_value120` na `ząbki ×`
+/// [`SCROLL_NOTCH_PX`], a gładzik przekazuje `axis` bez zmian. Dzięki temu
+/// aplikacje nie mnożą już surowych zdarzeń przez wysokość wiersza.
+pub const SCROLL_NOTCH_PX: f64 = 64.0;
+
+/// Standardowy krok `wl_pointer.axis` dla jednego ząbka rolki (w pikselach).
+///
+/// Tyle wysyłają kompozytory zgodne z libinput/wlroots. Klienty zewnętrzne
+/// (GTK, Chromium, XWayland) zakładają właśnie taki rząd wielkości — wysłanie
+/// 64 px na ząbek powodowało u nich przeskok (XWayland dzieli wartość przez 10
+/// i generuje kilka kliknięć rolki). Wewnątrz libLuny platforma skaluje ten
+/// krok do [`SCROLL_NOTCH_PX`].
+pub const SCROLL_WHEEL_AXIS_PX: f64 = 15.0;
+
+/// Zdarzenie przewijania (rolka/gładzik); wartości w pikselach logicznych.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct ScrollEvent {
     pub position: Point,
     pub dx: f64,
     pub dy: f64,
+}
+
+impl ScrollEvent {
+    /// Przewinięcie w poziomie wyrażone w „ząbkach” kółka (1.0 = jeden ząbek).
+    ///
+    /// Używać, gdy aplikacja chce przewinąć stałą liczbę wierszy na ząbek;
+    /// do przewijania w pikselach wystarczy [`ScrollEvent::dx`].
+    pub fn notches_x(&self) -> f64 {
+        self.dx / SCROLL_NOTCH_PX
+    }
+
+    /// Przewinięcie w pionie wyrażone w „ząbkach” kółka (1.0 = jeden ząbek).
+    pub fn notches_y(&self) -> f64 {
+        self.dy / SCROLL_NOTCH_PX
+    }
 }
 
 /// Zdarzenie klawiatury.

@@ -11,3 +11,5 @@
 /.tmp/
 /docs/luna-*.png
 *.wazne
+/docs/*.md
+/docs/github/*.md

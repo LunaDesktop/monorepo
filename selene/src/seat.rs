@@ -27,16 +27,20 @@ use crate::compositor::SurfaceData;
 use crate::data;
 use crate::shell::{XdgSurfaceData, XdgToplevelData};
 use crate::state::{
-    CornerHint, CornerKind, CursorImage, DragState, ResizeState, SavedGeom, State, TITLEBAR,
+    ButtonGrab, CornerHint, CornerKind, CursorImage, DragState, ResizeState, SavedGeom, State,
+    TITLEBAR,
 };
 use crate::sync::LockExt;
 
-/// Ile pikseli powierzchni odpowiada jednemu „ząbkowi” kółka myszy (`REL_WHEEL`).
+/// Standardowy krok `wl_pointer.axis` dla jednego ząbka rolki (15 px).
 ///
-/// `wl_pointer.axis` przenosi wartości w jednostkach powierzchni, a evdev daje ±1 na
-/// obrót — dlatego mnożymy. Wartość dobrana tak, by jeden obrót przewijał ~1 wiersz
-/// listy (~60 px) po uwzględnieniu mnożnika w powłoce.
-const WHEEL_STEP_PX: f64 = 20.0;
+/// Taki krok wysyłają kompozytory libinput/wlroots. Klienty (GTK, Chromium)
+/// oraz XWayland zakładają właśnie 10–15 px; wysyłanie 64 px na ząbek powodowało
+/// u nich przeskok — XWayland dzielił wartość przez 10 i generował kilka
+/// kliknięć rolki naraz. Krok 64 px pozostaje **wewnątrz libLuny**: platforma
+/// sama skaluje standardowe `axis` do [`SCROLL_NOTCH_PX`].
+const WHEEL_AXIS_STEP_PX: f64 = libluna_core::SCROLL_WHEEL_AXIS_PX;
+const SCROLL_NOTCH_PX: f64 = libluna_core::SCROLL_NOTCH_PX;
 
 /// Buduje tekst mapy klawiszy XKB dla danego układu (i opcjonalnego wariantu).
 ///
@@ -377,7 +381,7 @@ fn shape_name(shape: wp_cursor_shape_device_v1::Shape) -> String {
 }
 
 /// Buduje deskryptor z mapą klawiszy (memfd + tekst XKB, zakończony NUL).
-fn make_keymap() -> Option<(OwnedFd, u32)> {
+pub(crate) fn make_keymap() -> Option<(OwnedFd, u32)> {
     let fd = rustix::fs::memfd_create("selene-keymap", rustix::fs::MemfdFlags::CLOEXEC).ok()?;
     let mut file = std::fs::File::from(fd);
     let mut bytes = keymap_text().into_bytes();
@@ -412,7 +416,13 @@ pub fn handle_input(state: &mut State, handle: &DisplayHandle, event: &Event) {
                 se.dx = -se.dx;
                 se.dy = -se.dy;
             }
-            pointer_axis(state, se.dx, se.dy)
+            // `Event::Scroll` ma różne jednostki zależnie od backendu:
+            // - DRM/evdev: ząbki (±1 na obrót),
+            // - nested: piksele libLuny ([`SCROLL_NOTCH_PX`] na ząbek).
+            // Sprowadzamy oba do **standardowych pikseli Waylanda** (15 px/ząbek),
+            // bo tego oczekują zewnętrzne klienty i XWayland.
+            let (dx, dy) = scroll_delta(se.dx, se.dy, state.drm_backend);
+            pointer_axis(state, dx, dy)
         }
         Event::Key(ke) => keyboard_key(state, ke.keysym, ke.keycode, ke.state),
         _ => {}
@@ -423,16 +433,23 @@ pub fn handle_input(state: &mut State, handle: &DisplayHandle, event: &Event) {
 fn hit(state: &State, pos: Point) -> Option<(usize, Part)> {
     let windows = state.windows.lock_or_recover();
     let cur_ws = *state.ws_current.lock_or_recover();
-    let mut best: Option<(usize, i32)> = None;
+    let mut best: Option<(usize, (i32, i32))> = None;
     for (i, w) in windows.iter().enumerate() {
-        let inside = match input_region_hit(w, pos) {
-            Some(h) => h,
-            None => w.outer().contains(pos),
+        let inside = if w.popup {
+            popup_contains(w, pos)
+        } else {
+            match input_region_hit(w, pos) {
+                Some(h) => h,
+                None => w.outer().contains(pos),
+            }
         };
         if w.mapped && !w.minimized && w.in_workspace(cur_ws) && inside {
-            match best {
-                Some((_, z)) if z >= w.z => {}
-                _ => best = Some((i, w.z)),
+            // Popup ma pierwszeństwo przed każdym zwykłym oknem — nawet gdy rodzic
+            // został podniesiony po jego otwarciu. Inaczej klik w menu trafiał
+            // w okno pod spodem i menu zamykało się zamiast wybrać pozycję.
+            let rank = (if w.popup { 1 } else { 0 }, w.z);
+            if best.is_none_or(|(_, current)| rank > current) {
+                best = Some((i, rank));
             }
         }
     }
@@ -461,24 +478,37 @@ fn hit(state: &State, pos: Point) -> Option<(usize, Part)> {
 fn content_window(state: &State, pos: Point) -> Option<usize> {
     let windows = state.windows.lock_or_recover();
     let cur_ws = *state.ws_current.lock_or_recover();
-    let mut best: Option<(usize, i32)> = None;
+    let mut best: Option<(usize, (i32, i32))> = None;
     for (i, w) in windows.iter().enumerate() {
-        let inside = match input_region_hit(w, pos) {
-            Some(h) => h,
-            None => w.content().contains(pos),
+        let inside = if w.popup {
+            popup_contains(w, pos)
+        } else {
+            match input_region_hit(w, pos) {
+                Some(h) => h,
+                None => w.content().contains(pos),
+            }
         };
         if w.mapped && !w.minimized && w.in_workspace(cur_ws) && inside {
-            match best {
-                Some((_, z)) if z >= w.z => {}
-                _ => best = Some((i, w.z)),
+            let rank = (if w.popup { 1 } else { 0 }, w.z);
+            if best.is_none_or(|(_, current)| rank > current) {
+                best = Some((i, rank));
             }
         }
     }
     best.map(|(i, _)| i)
 }
 
+/// Czy punkt trafia w widoczny obszar popupu.
+///
+/// Dla CSD/cieni menedżer okien rysuje bufor większy od `content()`; klik
+/// w widoczną krawędź menu nie może być traktowany jak klik „poza menu”.
+fn popup_contains(w: &crate::state::Window, pos: Point) -> bool {
+    w.outer().contains(pos) || w.buffer_rect().contains(pos)
+}
+
 /// Zamyka popupy, poza którymi kliknięto (wysyła `xdg_popup.popup_done`, zdejmuje z widoku).
 fn dismiss_popups(state: &mut State, pos: Point) {
+    let trace = std::env::var_os("SELENE_TRACE_POPUP").is_some();
     loop {
         let top = {
             let windows = state.windows.lock_or_recover();
@@ -498,10 +528,44 @@ fn dismiss_popups(state: &mut State, pos: Point) {
             .windows
             .lock_or_recover()
             .get(slot)
-            .map(|w| w.outer().contains(pos))
+            .map(|w| popup_contains(w, pos))
             .unwrap_or(false);
         if inside {
+            if trace {
+                let rect = state
+                    .windows
+                    .lock_or_recover()
+                    .get(slot)
+                    .map(|w| w.outer())
+                    .unwrap_or(libluna_core::Rect::ZERO);
+                eprintln!(
+                    "selene/popup: klik ({:.0},{:.0}) w slot={slot} rect=({:.0},{:.0}) {:.0}x{:.0} — zostawiam otwarty",
+                    pos.x,
+                    pos.y,
+                    rect.x(),
+                    rect.y(),
+                    rect.width(),
+                    rect.height()
+                );
+            }
             break;
+        }
+        if trace {
+            let rect = state
+                .windows
+                .lock_or_recover()
+                .get(slot)
+                .map(|w| w.outer())
+                .unwrap_or(libluna_core::Rect::ZERO);
+            eprintln!(
+                "selene/popup: klik ({:.0},{:.0}) POZA slot={slot} rect=({:.0},{:.0}) {:.0}x{:.0} — zamykam",
+                pos.x,
+                pos.y,
+                rect.x(),
+                rect.y(),
+                rect.width(),
+                rect.height()
+            );
         }
         if let Some(surface) = state.slots.get(slot).cloned() {
             if let Some(sd) = surface.data::<SurfaceData>() {
@@ -539,32 +603,21 @@ fn dismiss_popups(state: &mut State, pos: Point) {
     }
 }
 
-/// Po zamknięciu popupu przywraca klawiaturę: najpierw nadrzędnemu menu (submenu),
-/// a gdy żadne menu nie zostało — najwyższemu zwykłemu oknu.
+/// Po zamknięciu popupu przywraca klawiaturę najwyższemu **zwykłemu** oknu.
 ///
-/// Bez tego fokus zostawał na ukrytej powierzchni menu i klawiatura „martwiła się”
-/// po wybraniu pozycji lub kliknięciu poza menu.
+/// Menu nie może dostać fokusu (patrz [`set_keyboard_focus`]), więc po jego
+/// zniknięciu klawiatura musi wrócić do okna nadrzędnego — inaczej zostaje na
+/// nieistniejącej powierzchni i przestaje docierać do aplikacji.
 pub(crate) fn refocus_after_popup(state: &mut State) {
     let ws = *state.ws_current.lock_or_recover();
     let slot = {
         let windows = state.windows.lock_or_recover();
-        // Nadrzędne menu (submenu właśnie się zamknęło) ma pierwszeństwo przed oknem.
-        let top_popup = windows
+        windows
             .iter()
             .enumerate()
-            .filter(|(_, w)| w.popup && w.mapped && !w.minimized && w.in_workspace(ws))
+            .filter(|(_, w)| w.mapped && !w.minimized && !w.layer && !w.popup && w.in_workspace(ws))
             .max_by_key(|(_, w)| w.z)
-            .map(|(i, _)| i);
-        top_popup.or_else(|| {
-            windows
-                .iter()
-                .enumerate()
-                .filter(|(_, w)| {
-                    w.mapped && !w.minimized && !w.layer && !w.popup && w.in_workspace(ws)
-                })
-                .max_by_key(|(_, w)| w.z)
-                .map(|(i, _)| i)
-        })
+            .map(|(i, _)| i)
     };
     match slot {
         Some(slot) => set_keyboard_focus(state, slot),
@@ -742,6 +795,74 @@ fn content_local(state: &State, slot: usize, pos: Point) -> (f64, f64) {
     }
 }
 
+/// Powierzchnia potomna okna, na której leży punkt (i jej początek na ekranie).
+///
+/// Chromium rysuje **bąble** (menu rozszerzeń, menu profilu) jako `wl_subsurface`
+/// okna przeglądarki i hit-testuje je po współrzędnych **tej** powierzchni.
+/// Dopóki wskaźnik szedł do okna, bąbel nie dostawał ani `enter`, ani pozycji:
+/// podświetlenie zostawało na treści pod menu, a klik był „poza menu”.
+fn child_at(state: &State, slot: usize, pos: Point) -> Option<(wl_surface::WlSurface, (f64, f64))> {
+    let origin = {
+        let windows = state.windows.lock_or_recover();
+        windows.get(slot)?.buffer_rect()
+    };
+    let parent = state.slots.get(slot)?.clone();
+    let pd = parent.data::<crate::compositor::SurfaceData>()?;
+    for child in pd.children.lock_or_recover().clone() {
+        let Some(sd) = child.data::<crate::compositor::SurfaceData>() else {
+            continue;
+        };
+        let guard = sd.subsurface.lock_or_recover();
+        let Some(sub) = guard.as_ref() else {
+            continue;
+        };
+        let Some(img) = sub.image.as_ref() else {
+            continue;
+        };
+        let x = origin.x() + f64::from(sub.position.0);
+        let y = origin.y() + f64::from(sub.position.1);
+        if pos.x >= x
+            && pos.x < x + f64::from(img.width)
+            && pos.y >= y
+            && pos.y < y + f64::from(img.height)
+        {
+            return Some((child.clone(), (x, y)));
+        }
+    }
+    None
+}
+
+/// Współrzędne powierzchni, do której trafia wskaźnik.
+///
+/// Dla powierzchni potomnej (bąbel) liczymy je od **jej** początku, bo tak ich
+/// oczekuje klient; dla zwykłej powierzchni okna — jak [`content_local`].
+fn pointer_local(
+    state: &State,
+    slot: usize,
+    surface: &wl_surface::WlSurface,
+    pos: Point,
+) -> (f64, f64) {
+    let is_child = state.slots.get(slot).map(|s| s != surface).unwrap_or(false);
+    if !is_child {
+        return content_local(state, slot, pos);
+    }
+    let origin = {
+        let windows = state.windows.lock_or_recover();
+        match windows.get(slot) {
+            Some(w) => w.buffer_rect(),
+            None => return (pos.x, pos.y),
+        }
+    };
+    let offset = surface
+        .data::<crate::compositor::SurfaceData>()
+        .and_then(|sd| sd.subsurface.lock_or_recover().as_ref().map(|s| s.position))
+        .unwrap_or((0, 0));
+    (
+        pos.x - (origin.x() + f64::from(offset.0)),
+        pos.y - (origin.y() + f64::from(offset.1)),
+    )
+}
+
 /// Klawiatura klienta, do którego należy `surface`.
 ///
 /// **Nie wolno** wysyłać zdarzeń klawiatury z powierzchnią innego klienta — protokół
@@ -768,7 +889,14 @@ fn pointer_for(state: &State, surface: &wl_surface::WlSurface) -> Option<wl_poin
 
 fn pointer_motion(state: &mut State, handle: &DisplayHandle, pos: Point) {
     state.note_activity();
+    // Różnica liczona z fizycznej pozycji — przy zablokowanym kursorze
+    // `pointer_pos` stoi w miejscu, ale klient nadal musi dostawać ruch.
+    let raw_prev = state.pointer_raw_pos;
+    state.pointer_raw_pos = (pos.x, pos.y);
+    let (raw_dx, raw_dy) = (pos.x - raw_prev.0, pos.y - raw_prev.1);
+    let pos = crate::pointer_constraints::filter_motion(state, pos);
     state.pointer_pos = (pos.x, pos.y);
+    state.pointer_seen = true;
     if state.overview_on() {
         // W podglądzie ruch myszy tylko aktualizuje „ducha” przeciąganego okna.
         state.move_overview_drag((pos.x, pos.y));
@@ -812,16 +940,36 @@ fn pointer_motion(state: &mut State, handle: &DisplayHandle, pos: Point) {
     if state.dnd.is_some() {
         data::dnd_motion(state, handle, (pos.x, pos.y));
     }
-    update_pointer_focus(state, pos);
-    if let Some((slot, surface)) = state.pointer_focus.clone() {
-        let (lx, ly) = content_local(state, slot, pos);
-        let time = state.time_ms();
-        if let Some(ptr) = pointer_for(state, &surface) {
+    // Wayland „implicit grab”: dopóki przycisk jest wciśnięty, ruch i zwolnienie
+    // trafiają do klienta, który dostał wciśnięcie — nawet poza jego okno.
+    state.button_grabs.retain(|grab| grab.surface.is_alive());
+    if let Some(grab) = state.button_grabs.last().cloned() {
+        if let Some(ptr) = pointer_for(state, &grab.surface) {
+            let (lx, ly) = pointer_local(state, grab.slot, &grab.surface, pos);
+            let time = state.time_ms();
             let _ = ptr.send_event(wl_pointer::Event::Motion {
                 time,
                 surface_x: lx,
                 surface_y: ly,
             });
+            let dx = raw_dx;
+            let dy = raw_dy;
+            crate::pointer_ext::send_relative_motion(state, &ptr, dx, dy);
+            pointer_frame(&ptr);
+        }
+        return;
+    }
+    update_pointer_focus(state, pos);
+    if let Some((slot, surface)) = state.pointer_focus.clone() {
+        if let Some(ptr) = pointer_for(state, &surface) {
+            let (lx, ly) = pointer_local(state, slot, &surface, pos);
+            let time = state.time_ms();
+            let _ = ptr.send_event(wl_pointer::Event::Motion {
+                time,
+                surface_x: lx,
+                surface_y: ly,
+            });
+            crate::pointer_ext::send_relative_motion(state, &ptr, raw_dx, raw_dy);
             pointer_frame(&ptr);
         }
     }
@@ -835,8 +983,13 @@ fn pointer_button(
     st: ButtonState,
 ) {
     state.note_activity();
+    state.button_grabs.retain(|grab| grab.surface.is_alive());
     if button == PointerButton::Left {
         state.left_down = st == ButtonState::Pressed;
+    }
+    if st == ButtonState::Pressed {
+        // Ograniczenia `oneshot` kończą się na pierwszym przycisku.
+        crate::pointer_constraints::button_pressed(state);
     }
     // W trybie podglądu: przeciąganie kafelka, wybór przestrzeni albo zamknięcie.
     if state.overview_on() {
@@ -895,6 +1048,7 @@ fn pointer_button(
                         state: WEnum::Value(wl_pointer::ButtonState::Pressed),
                     });
                     pointer_frame(&ptr);
+                    grab_press(state, slot, &surface, button);
                 }
             }
             return;
@@ -915,6 +1069,11 @@ fn pointer_button(
         // Zakończ przeciąganie danych, jeśli trwało.
         if state.dnd.is_some() {
             data::dnd_drop(state, handle);
+        }
+        // Implicit grab: zwolnienie trafia do klienta, który dostał wciśnięcie,
+        // nawet jeśli kursor zdążył wyjść poza jego treść albo na pasek tytułu.
+        if grab_release(state, button) {
+            return;
         }
     } else {
         // Klik poza popupem zamyka popup (przed trafieniem w okno).
@@ -1040,23 +1199,66 @@ fn pointer_button(
     }
 
     // Zdarzenie przycisku do klienta — tylko gdy kursor nad treścią okna.
-    if let Some((_, surface)) = state.pointer_focus.clone() {
-        if let Some(ptr) = pointer_for(state, &surface) {
-            let serial = state.next_serial();
-            let time = state.time_ms();
-            let wl_state = match st {
-                ButtonState::Pressed => WEnum::Value(wl_pointer::ButtonState::Pressed),
-                ButtonState::Released => WEnum::Value(wl_pointer::ButtonState::Released),
-            };
-            let _ = ptr.send_event(wl_pointer::Event::Button {
-                serial,
-                time,
-                button: button_code(button),
-                state: wl_state,
-            });
-            pointer_frame(&ptr);
+    if let Some((slot, surface)) = state.pointer_focus.clone() {
+        send_pointer_button(state, &surface, button, st);
+        if st == ButtonState::Pressed {
+            grab_press(state, slot, &surface, button);
         }
     }
+}
+
+/// Wysyła zdarzenie przycisku do klienta powierzchni (jeśli nadal żyje).
+fn send_pointer_button(
+    state: &mut State,
+    surface: &wl_surface::WlSurface,
+    button: PointerButton,
+    st: ButtonState,
+) {
+    let Some(ptr) = pointer_for(state, surface) else {
+        return;
+    };
+    let serial = state.next_serial();
+    let time = state.time_ms();
+    let wl_state = match st {
+        ButtonState::Pressed => WEnum::Value(wl_pointer::ButtonState::Pressed),
+        ButtonState::Released => WEnum::Value(wl_pointer::ButtonState::Released),
+    };
+    let _ = ptr.send_event(wl_pointer::Event::Button {
+        serial,
+        time,
+        button: button_code(button),
+        state: wl_state,
+    });
+    pointer_frame(&ptr);
+}
+
+/// Zapamiętuje, do kogo trafiło wciśnięcie (Wayland implicit grab).
+fn grab_press(
+    state: &mut State,
+    slot: usize,
+    surface: &wl_surface::WlSurface,
+    button: PointerButton,
+) {
+    state.button_grabs.retain(|grab| grab.button != button);
+    state.button_grabs.push(ButtonGrab {
+        button,
+        slot,
+        surface: surface.clone(),
+    });
+}
+
+/// Wysyła zwolnienie do klienta z uchwytem przycisku; `true`, gdy było co zwalniać.
+fn grab_release(state: &mut State, button: PointerButton) -> bool {
+    let Some(index) = state
+        .button_grabs
+        .iter()
+        .position(|grab| grab.button == button)
+    else {
+        return false;
+    };
+    let grab = state.button_grabs.remove(index);
+    send_pointer_button(state, &grab.surface, button, ButtonState::Released);
+    true
 }
 
 /// Diagnostyka (`SELENE_STATS=1`): który element dekoracji został kliknięty.
@@ -1081,6 +1283,7 @@ fn pointer_leave(state: &mut State) {
         }
     }
     state.pointer_focus = None;
+    crate::pointer_constraints::sync(state);
     // Kursor należał do klienta, który właśnie stracił wskaźnik. Nie pokazujemy
     // jego kształtu nad inną aplikacją — nowy klient ustawi własny.
     state.cursor_surface = None;
@@ -1097,6 +1300,22 @@ fn pointer_frame(ptr: &wl_pointer::WlPointer) {
     }
 }
 
+/// Zamienia `Event::Scroll` na standardowe piksele Waylanda (15 px/ząbek).
+///
+/// Evdev w trybie DRM podaje ząbki, a wątek nested — piksele libLuny
+/// ([`SCROLL_NOTCH_PX`] na ząbek). Po normalizacji klienty zewnętrzne
+/// (GTK, Chromium, XWayland) dostają wartości, których się spodziewają.
+fn scroll_delta(dx: f64, dy: f64, drm: bool) -> (f64, f64) {
+    let scale = if drm {
+        WHEEL_AXIS_STEP_PX
+    } else {
+        WHEEL_AXIS_STEP_PX / SCROLL_NOTCH_PX
+    };
+    (dx * scale, dy * scale)
+}
+
+/// Wysyła przewinięcie do klienta w **standardowych pikselach Waylanda**
+/// (15 px = jeden ząbek rolki).
 fn pointer_axis(state: &mut State, dx: f64, dy: f64) {
     state.note_activity();
     let Some((_, surface)) = state.pointer_focus.clone() else {
@@ -1106,48 +1325,159 @@ fn pointer_axis(state: &mut State, dx: f64, dy: f64) {
         return;
     };
     let time = state.time_ms();
-    // `wl_pointer.axis` oczekuje wartości w **jednostkach powierzchni** (pikselach),
-    // a evdev daje „ząbki” (±1). Skalujemy więc ząbek do [`WHEEL_STEP_PX`] px —
-    // inaczej klienci (a nasza powłoka) przewijaliby 1 px na obrót kółka.
-    //
-    // Od wersji 5 protokołu wysyłamy też `axis_source` i `axis_discrete`: GPUI
-    // (Zed) ignoruje `axis` przy źródle „wheel” i przewija na podstawie `discrete`.
+    // `wl_pointer.axis` przenosi wartości w jednostkach powierzchni. Standard
+    // libinput/wlroots to 15 px na ząbek — tyle dostają klienty zewnętrzne,
+    // żeby GTK/Chromium/XWayland przewijały normalnie. Informację dyskretną
+    // wysyłamy osobno:
+    // - v8+: `axis_value120` (jednostka 1/120 ząbka) — tego używają GTK4/Electron/GPUI,
+    // - v5–v7: `axis_discrete` (liczba ząbków).
+    // `axis_discrete` jest przestarzałe od v8 i nie wolno go wysyłać nowszym klientom.
     if ptr.version() >= 5 {
         let _ = ptr.send_event(wl_pointer::Event::AxisSource {
             axis_source: WEnum::Value(wl_pointer::AxisSource::Wheel),
         });
     }
-    if dy != 0.0 {
+    let send = |ptr: &wl_pointer::WlPointer, axis: wl_pointer::Axis, value: f64| {
         let _ = ptr.send_event(wl_pointer::Event::Axis {
             time,
-            axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
-            value: dy * WHEEL_STEP_PX,
+            axis: WEnum::Value(axis),
+            value,
         });
-        if ptr.version() >= 5 {
-            let _ = ptr.send_event(wl_pointer::Event::AxisDiscrete {
-                axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
-                discrete: dy.round() as i32,
-            });
+        if ptr.version() >= 8 {
+            let value120 = (value / WHEEL_AXIS_STEP_PX * 120.0).round() as i32;
+            if value120 != 0 {
+                let _ = ptr.send_event(wl_pointer::Event::AxisValue120 {
+                    axis: WEnum::Value(axis),
+                    value120,
+                });
+            }
+        } else if ptr.version() >= 5 {
+            let discrete = (value / WHEEL_AXIS_STEP_PX).round() as i32;
+            if discrete != 0 {
+                let _ = ptr.send_event(wl_pointer::Event::AxisDiscrete {
+                    axis: WEnum::Value(axis),
+                    discrete,
+                });
+            }
         }
+    };
+    if dy != 0.0 {
+        send(&ptr, wl_pointer::Axis::VerticalScroll, dy);
     }
     if dx != 0.0 {
-        let _ = ptr.send_event(wl_pointer::Event::Axis {
-            time,
-            axis: WEnum::Value(wl_pointer::Axis::HorizontalScroll),
-            value: dx * WHEEL_STEP_PX,
-        });
-        if ptr.version() >= 5 {
-            let _ = ptr.send_event(wl_pointer::Event::AxisDiscrete {
-                axis: WEnum::Value(wl_pointer::Axis::HorizontalScroll),
-                discrete: dx.round() as i32,
-            });
-        }
+        send(&ptr, wl_pointer::Axis::HorizontalScroll, dx);
     }
     pointer_frame(&ptr);
 }
 
+/// Odświeża fokus wskaźnika po zmianie stosu okien (nowy popup/menu pod kursorem).
+///
+/// Ruch myszy nie jest potrzebny: `enter` z bieżącą pozycją wystarcza klientowi
+/// do podświetlenia pozycji menu. `update_pointer_focus` jest idempotentne —
+/// przy niezmienionym trafieniu wraca od razu, więc wołanie co iterację jest tanie.
+pub(crate) fn refresh_pointer_focus(state: &mut State) {
+    // Przy blokadzie/zamknięciu wskaźnika pozycja musi pozostać **przefiltrowana**.
+    // Nadpisanie jej surowym ruchem myszy co iterację zniosłoby pointer lock.
+    let constrained = crate::pointer_constraints::active_locked(state)
+        || crate::pointer_constraints::active_confined(state);
+    let pos = if constrained {
+        Point::new(state.pointer_pos.0, state.pointer_pos.1)
+    } else {
+        match *state.cursor.lock_or_recover() {
+            // Backend DRM/evdev trzyma pozycję kursora w `state.cursor`.
+            Some(pos) => {
+                state.pointer_pos = (pos.x, pos.y);
+                state.pointer_seen = true;
+                pos
+            }
+            // Backend nested nie wypełnia `cursor` — bierzemy ostatnią pozycję
+            // z magistrali wejścia. Wcześniej ten wariant **w ogóle** nie działał,
+            // więc menu pojawiające się pod nieruchomym kursorem nie dostawało
+            // `wl_pointer.enter` (podświetlenie zostawało na treści pod spodem).
+            None if state.pointer_seen => Point::new(state.pointer_pos.0, state.pointer_pos.1),
+            None => return,
+        }
+    };
+    let target = content_window(state, pos);
+    let previous = state.pointer_focus.as_ref().map(|(slot, _)| *slot);
+    update_pointer_focus(state, pos);
+    // `enter` ustawia fokus, ale część toolkitów (GTK, Chromium) odświeża
+    // podświetlenie pozycji menu dopiero po `motion`. Wysyłamy je **tylko**
+    // przy zmianie celu (nowy popup pod nieruchomym kursorem) — bez spamowania.
+    if !constrained && target.is_some() && target != previous {
+        if let Some((slot, surface)) = state.pointer_focus.clone() {
+            if let Some(ptr) = pointer_for(state, &surface) {
+                let (lx, ly) = pointer_local(state, slot, &surface, pos);
+                let time = state.time_ms();
+                let _ = ptr.send_event(wl_pointer::Event::Motion {
+                    time,
+                    surface_x: lx,
+                    surface_y: ly,
+                });
+                pointer_frame(&ptr);
+            }
+        }
+    }
+}
+
+/// Przenosi kursor w pozycję lokalną powierzchni (`wp_pointer_warp_v1`).
+///
+/// Protokół pozwala odmówić — odmawiamy, gdy powierzchnia nie jest oknem albo punkt
+/// wypada poza nią: inaczej klient „teleportowałby” kursor poza własne okno.
+pub(crate) fn warp_pointer(
+    state: &mut State,
+    surface: &wl_surface::WlSurface,
+    lx: f64,
+    ly: f64,
+) -> bool {
+    let Some(slot) = state.slots.iter().position(|s| s == surface) else {
+        return false;
+    };
+    let pos = {
+        let windows = state.windows.lock_or_recover();
+        let Some(w) = windows.get(slot) else {
+            return false;
+        };
+        let content = w.content();
+        // `content_local` odejmuje początek treści i dodaje przesunięcie cieni CSD;
+        // tutaj odwracamy dokładnie to samo przekształcenie (lokalne → globalne).
+        let pos = Point::new(
+            content.x() + lx - w.image_offset.0,
+            content.y() + ly - w.image_offset.1,
+        );
+        if !content.contains(pos) {
+            return false;
+        }
+        pos
+    };
+    *state.cursor.lock_or_recover() = Some(pos);
+    state.pointer_raw_pos = (pos.x, pos.y);
+    state.pointer_pos = (pos.x, pos.y);
+    state.pointer_seen = true;
+    update_pointer_focus(state, pos);
+    if let Some((slot, surface)) = state.pointer_focus.clone() {
+        if let Some(ptr) = pointer_for(state, &surface) {
+            let (lx, ly) = content_local(state, slot, pos);
+            let time = state.time_ms();
+            let _ = ptr.send_event(wl_pointer::Event::Motion {
+                time,
+                surface_x: lx,
+                surface_y: ly,
+            });
+            pointer_frame(&ptr);
+        }
+    }
+    true
+}
+
 fn update_pointer_focus(state: &mut State, pos: Point) {
     let target = content_window(state, pos);
+    // Powierzchnia, do której naprawdę trafia wskaźnik: okno albo jego
+    // powierzchnia potomna (bąbel Chrome'a).
+    let target_surface = target.and_then(|slot| match child_at(state, slot, pos) {
+        Some((child, _)) => Some((slot, child)),
+        None => state.slots.get(slot).cloned().map(|s| (slot, s)),
+    });
     if std::env::var_os("SELENE_TRACE_POINTER").is_some() {
         eprintln!(
             "selene/pointer: pos=({:.0},{:.0}) target={target:?} focus={:?} pointers={}",
@@ -1157,15 +1487,21 @@ fn update_pointer_focus(state: &mut State, pos: Point) {
             state.pointers.len()
         );
     }
-    let same = matches!((state.pointer_focus.as_ref(), target), (Some((s, _)), Some(t)) if *s == t);
+    // Fokus jest ten sam tylko wtedy, gdy zgadza się **powierzchnia** — przejście
+    // z okna na jego bąbel (i z powrotem) musi wysłać `leave`/`enter`, inaczej
+    // klient nie wie, że wskaźnik wszedł do menu.
+    let same = match (&state.pointer_focus, &target_surface) {
+        (Some((s1, a)), Some((s2, b))) => s1 == s2 && a.id() == b.id(),
+        (None, None) => true,
+        _ => false,
+    };
     if same {
         return;
     }
-    let old_client = state
+    let old_surface_id = state
         .pointer_focus
         .as_ref()
-        .and_then(|(_, surface)| surface.client())
-        .map(|client| client.id());
+        .map(|(_, surface)| surface.id());
     if let Some((_, surface)) = state.pointer_focus.clone() {
         if let Some(ptr) = pointer_for(state, &surface) {
             let serial = state.next_serial();
@@ -1174,36 +1510,56 @@ fn update_pointer_focus(state: &mut State, pos: Point) {
         }
     }
     state.pointer_focus = None;
-    // Zmiana klienta: stary kształt (np. kursor gry albo Flatpaka) nie może
-    // "przykleić się" do nowego okna. Reset przed `enter` — nowy klient
-    // ustawi własny kursor w `wl_pointer.set_cursor`.
-    let new_client = target
-        .and_then(|slot| state.slots.get(slot))
-        .and_then(|surface| surface.client())
-        .map(|client| client.id());
-    if old_client != new_client {
+    // Zmiana powierzchni (także w obrębie tego samego klienta): poprzedni kształt
+    // nie może „przykleić się” do nowego okna/menu. Nowa powierzchnia ustawi
+    // własny kursor w `wl_pointer.set_cursor` albo `wp_cursor_shape_v1`.
+    let new_surface_id = target_surface.as_ref().map(|(_, s)| s.id());
+    if old_surface_id != new_surface_id {
         state.cursor_surface = None;
         *state.cursor_image.lock_or_recover() = CursorImage::Default;
     }
-    if let Some(slot) = target {
-        if let Some(surface) = state.slots.get(slot).cloned() {
-            let serial = state.next_serial();
-            let (lx, ly) = content_local(state, slot, pos);
-            if let Some(ptr) = pointer_for(state, &surface) {
-                if std::env::var_os("SELENE_TRACE_POINTER").is_some() {
-                    eprintln!("selene/pointer: enter slot={slot} ptr={ptr:?}");
-                }
-                let _ = ptr.send_event(wl_pointer::Event::Enter {
-                    serial,
-                    surface: surface.clone(),
-                    surface_x: lx,
-                    surface_y: ly,
-                });
-                pointer_frame(&ptr);
+    if let Some((slot, surface)) = target_surface {
+        let serial = state.next_serial();
+        let (lx, ly) = pointer_local(state, slot, &surface, pos);
+        // Diagnostyka (`SELENE_STATS`): czy menu w ogóle dostaje wskaźnik?
+        // To pierwsza rzecz do sprawdzenia, gdy „podświetla się treść POD
+        // popupem” — brak tej linii przy widocznym menu znaczy, że trafienie
+        // wybrało inne okno (albo popup nie jest `mapped`).
+        if std::env::var_os("SELENE_STATS").is_some() {
+            let (is_popup, w, h) = state
+                .windows
+                .lock_or_recover()
+                .get(slot)
+                .map(|w| (w.popup, w.width, w.height))
+                .unwrap_or((false, 0, 0));
+            let is_child = state
+                .slots
+                .get(slot)
+                .map(|s| s != &surface)
+                .unwrap_or(false);
+            if is_popup || is_child {
+                eprintln!(
+                    "selene/popup: enter slot={slot} potomna={is_child} kursor=({:.0},{:.0}) lokalne=({lx:.0},{ly:.0}) rozmiar={w}x{h}",
+                    pos.x, pos.y
+                );
             }
-            state.pointer_focus = Some((slot, surface));
         }
+        if let Some(ptr) = pointer_for(state, &surface) {
+            if std::env::var_os("SELENE_TRACE_POINTER").is_some() {
+                eprintln!("selene/pointer: enter slot={slot} ptr={ptr:?}");
+            }
+            let _ = ptr.send_event(wl_pointer::Event::Enter {
+                serial,
+                surface: surface.clone(),
+                surface_x: lx,
+                surface_y: ly,
+            });
+            pointer_frame(&ptr);
+        }
+        state.pointer_focus = Some((slot, surface));
     }
+    // Nowy fokus może aktywować ograniczenie kursora tej powierzchni.
+    crate::pointer_constraints::sync(state);
 }
 
 /// Przeskalowanie okna w trakcie przeciągania krawędzi/narożnika; wysyła `xdg_toplevel.configure`.
@@ -1475,7 +1831,7 @@ pub(crate) enum IdleAction {
 /// ekran nigdy nie gaśnie „bez zabezpieczenia”, jeśli użytkownik tego chce.
 pub(crate) fn idle_actions(state: &State) -> Vec<IdleAction> {
     let mut actions = Vec::new();
-    if state.locked {
+    if state.locked || crate::idle_inhibit::inhibited(state) {
         return actions;
     }
     let idle_secs = state.idle_last_input.elapsed().as_secs();
@@ -1511,20 +1867,39 @@ pub(crate) fn tick_idle(state: &mut State) {
                     state.idle_lock_fired = true;
                     spawn_lock();
                 }
-                let _ = Command::new("systemctl")
-                    .arg("suspend")
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn();
+                // Nie usypiamy natychmiast: najpierw ekran blokady musi zdążyć
+                // się pokazać. Wcześniej `systemctl suspend` wyprzedzał pierwszy
+                // commit `luna-lock` i po wybudzeniu nie było czego pokazać.
+                state.idle_suspend_request = Some(Instant::now());
             }
+        }
+    }
+
+    // Odroczone uśpienie: czekamy na blokadę (min. 400 ms na klatkę) albo
+    // na limit 4 s, gdy locker nie wystartuje. Bez tego wybudzenie kończyło
+    // się czarnym ekranem.
+    if let Some(since) = state.idle_suspend_request {
+        let waited = since.elapsed();
+        let lock_ready = state.locked && waited >= Duration::from_millis(400);
+        let timeout = waited >= Duration::from_secs(4);
+        if lock_ready || timeout {
+            state.idle_suspend_request = None;
+            if !state.locked {
+                eprintln!("selene/idle: ekran blokady nie wystartował — usypiam mimo to");
+            }
+            let _ = Command::new("systemctl")
+                .arg("suspend")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn();
         }
     }
 }
 
 /// Ile milisekund do najbliższej akcji bezczynności (`None` = nic nie czeka).
 pub(crate) fn idle_wait_ms(state: &State) -> Option<i64> {
-    if state.locked {
+    if state.locked || crate::idle_inhibit::inhibited(state) {
         return None;
     }
     let idle_secs = state.idle_last_input.elapsed().as_secs();
@@ -1903,6 +2278,10 @@ fn x11_window(state: &State, slot: usize) -> Option<u32> {
 /// Zdejmuje fokus klawiatury/wskaźnika z okna (np. po minimalizacji).
 pub(crate) fn clear_focus_if(state: &mut State, slot: usize) {
     if state.keyboard_focus.as_ref().map(|(s, _)| *s) == Some(slot) {
+        let old_surface = state
+            .keyboard_focus
+            .as_ref()
+            .map(|(_, surface)| surface.clone());
         if let Some((_, surface)) = state.keyboard_focus.clone() {
             if let Some(kb) = keyboard_for(state, &surface) {
                 let serial = state.next_serial();
@@ -1910,9 +2289,11 @@ pub(crate) fn clear_focus_if(state: &mut State, slot: usize) {
             }
         }
         state.keyboard_focus = None;
+        crate::text_input::focus_changed(state, old_surface.as_ref(), None);
         for window in state.windows.lock_or_recover().iter_mut() {
             window.focused = false;
         }
+        crate::keyboard_shortcuts_inhibit::refresh(state);
     }
     if state.pointer_focus.as_ref().map(|(s, _)| *s) == Some(slot) {
         pointer_leave(state);
@@ -1987,7 +2368,30 @@ pub fn close_surface(state: &mut State, surface: &wayland_server::protocol::wl_s
     }
 }
 
+/// Czy slot to menu/podpowiedź/lista rozwijana (powierzchnia, która nie może
+/// dostać fokusu klawiatury). Dla X11 `popup` oznacza okno `override-redirect`
+/// albo typ `MENU`/`DROPDOWN`/`TOOLTIP`/`POPUP`; dla Waylanda — `xdg_popup`.
+fn is_popup_slot(state: &State, slot: usize) -> bool {
+    state
+        .windows
+        .lock_or_recover()
+        .get(slot)
+        .map(|window| window.popup)
+        .unwrap_or(false)
+}
+
 pub(crate) fn set_keyboard_focus(state: &mut State, slot: usize) {
+    // Popupy (menu, podpowiedzi, listy rozwijane) **nie dostają** fokusu klawiatury.
+    // Protokół xdg-shell tego zabrania, a klienty X11/GTK/Chromium traktują zmianę
+    // fokusu jako zamknięcie menu — przez co klik w pozycję menu ginął (menu znikało
+    // w chwili `pressed`, zanim zdążyło dostać `released`). Fokus zostaje na oknie
+    // nadrzędnym; popup jest tylko podnoszony (`raise_and_focus`).
+    if slot != usize::MAX && is_popup_slot(state, slot) {
+        if std::env::var("SELENE_STATS").is_ok() {
+            eprintln!("selene/focus: slot={slot} pominięty (popup)");
+        }
+        return;
+    }
     if std::env::var("SELENE_STATS").is_ok() {
         eprintln!("selene/focus: slot={slot}");
     }
@@ -2001,6 +2405,10 @@ pub(crate) fn set_keyboard_focus(state: &mut State, slot: usize) {
     if state.keyboard_focus.as_ref().map(|(s, _)| *s) == Some(slot) {
         return;
     }
+    let old_surface = state
+        .keyboard_focus
+        .as_ref()
+        .map(|(_, surface)| surface.clone());
     if let Some((_, surface)) = state.keyboard_focus.clone() {
         if let Some(kb) = keyboard_for(state, &surface) {
             let serial = state.next_serial();
@@ -2012,6 +2420,7 @@ pub(crate) fn set_keyboard_focus(state: &mut State, slot: usize) {
         // Protokół: `wl_data_device.selection` musi dotrzeć bezpośrednio przed
         // `wl_keyboard.enter` (klienci unieważniają ofertę po utracie fokusu).
         crate::data::send_selection_for_slot(state, slot);
+        crate::primary_selection::send_selection_for_slot(state, slot);
         if let Some(kb) = keyboard_for(state, &surface) {
             let serial = state.next_serial();
             let _ = kb.send_event(wl_keyboard::Event::Enter {
@@ -2020,10 +2429,14 @@ pub(crate) fn set_keyboard_focus(state: &mut State, slot: usize) {
                 keys: vec![],
             });
         }
-        state.keyboard_focus = Some((slot, surface));
+        state.keyboard_focus = Some((slot, surface.clone()));
+        crate::text_input::focus_changed(state, old_surface.as_ref(), Some(&surface));
         // X11: powiadom XWM, które okno jest aktywne (`_NET_ACTIVE_WINDOW`).
         notify_xwm_focus(state, slot);
+    } else {
+        crate::text_input::focus_changed(state, old_surface.as_ref(), None);
     }
+    crate::keyboard_shortcuts_inhibit::refresh(state);
 }
 
 /// Informuje XWM o aktywnym oknie (jeśli to okno X11).
@@ -2055,13 +2468,21 @@ fn request_screenshot(state: &mut State) {
 
 fn keyboard_key(state: &mut State, keysym: u32, keycode: u32, st: ButtonState) {
     state.note_activity();
+    let ime_grab = !state.locked && crate::text_input::keyboard_grab(state).is_some();
     sync_modifiers(state, keysym, st);
     if is_modifier_keysym(keysym) || is_lock_keysym(keysym) {
+        // IME potrzebuje także klawiszy modyfikujących (np. Shift do wielkich
+        // liter w kompozycji). Blokady obsługuje compositor.
+        if ime_grab && !is_lock_keysym(keysym) && keycode != 0 {
+            crate::text_input::send_key(state, keycode, st == ButtonState::Pressed);
+        }
         return;
     }
     // Gdy sesja jest zablokowana, **żaden** skrót kompozytora nie działa —
     // wszystkie klawisze (także Super, Print i multimedialne) idą do lockera.
-    if !state.locked {
+    // To samo dotyczy aktywnego inhibitora skrótów: klient (gra, emulator, zdalny
+    // pulpit) świadomie przejmuje Super/Alt+Tab, więc kompozytor ich nie zjada.
+    if !state.locked && !crate::keyboard_shortcuts_inhibit::shortcuts_inhibited(state) {
         // Escape zamyka podgląd (Super+Tab) i nie trafia do klienta.
         if keysym == 0xff1b && state.overview_on() {
             state.set_overview(false);
@@ -2121,6 +2542,11 @@ fn keyboard_key(state: &mut State, keysym: u32, keycode: u32, st: ButtonState) {
         }
     }
     // Klawiatura klienta okna z fokusem — nie wolno pisać do zasobu innego klienta.
+    // Gdy IME trzyma grab, fizyczny klawisz idzie najpierw do IME.
+    if ime_grab {
+        crate::text_input::send_key(state, keycode, st == ButtonState::Pressed);
+        return;
+    }
     let Some((_, surface)) = state.keyboard_focus.clone() else {
         return;
     };
@@ -2143,6 +2569,56 @@ fn keyboard_key(state: &mut State, keysym: u32, keycode: u32, st: ButtonState) {
             state: wl_state,
         });
     }
+}
+
+/// Wstrzykuje klawisz z wirtualnej klawiatury IME do klienta z fokusem.
+///
+/// To celowo omija `keyboard_key`: IME już zdecydowało, że klawisz ma trafić
+/// do aplikacji, więc nie wolno go drugi raz interpretować jako skrótu pulpitu.
+pub(crate) fn inject_virtual_key(state: &mut State, keycode: u32, pressed: bool) {
+    let Some((_, surface)) = state.keyboard_focus.clone() else {
+        return;
+    };
+    let Some(kb) = keyboard_for(state, &surface) else {
+        return;
+    };
+    let serial = state.next_serial();
+    let time = state.time_ms();
+    let wl_state = if pressed {
+        WEnum::Value(wl_keyboard::KeyState::Pressed)
+    } else {
+        WEnum::Value(wl_keyboard::KeyState::Released)
+    };
+    let _ = kb.send_event(wl_keyboard::Event::Key {
+        serial,
+        time,
+        key: keycode,
+        state: wl_state,
+    });
+}
+
+/// Wstrzykuje stan modyfikatorów z wirtualnej klawiatury IME do klienta z fokusem.
+pub(crate) fn inject_virtual_modifiers(
+    state: &mut State,
+    depressed: u32,
+    latched: u32,
+    locked: u32,
+    group: u32,
+) {
+    let Some((_, surface)) = state.keyboard_focus.clone() else {
+        return;
+    };
+    let Some(kb) = keyboard_for(state, &surface) else {
+        return;
+    };
+    let serial = state.next_serial();
+    let _ = kb.send_event(wl_keyboard::Event::Modifiers {
+        serial,
+        mods_depressed: depressed,
+        mods_latched: latched,
+        mods_locked: locked,
+        group,
+    });
 }
 
 /// Skróty pulpitu z `shortcuts.conf`. Zwraca `true`, gdy obsłużono.
@@ -2597,36 +3073,41 @@ fn sync_modifiers(state: &mut State, keysym: u32, st: ButtonState) {
         }
     }
     // Stan modyfikatorów jest globalny, więc rozgłaszamy go do klawiatur wszystkich
-    // klientów (każdy ma własny zasób `wl_keyboard`).
+    // klientów (każdy ma własny zasób `wl_keyboard`). Gdy IME trzyma grab, klient
+    // nie może dostawać żadnych zdarzeń — modyfikatory idą do grabu, a IME
+    // odeśle je przez wirtualną klawiaturę tylko dla przepuszczonych klawiszy.
+    let ime_grab = !state.locked && crate::text_input::keyboard_grab(state).is_some();
     let keyboards: Vec<wl_keyboard::WlKeyboard> = state
         .keyboards
         .iter()
         .filter(|k| k.is_alive())
         .cloned()
         .collect();
-    for kb in &keyboards {
-        for (before, now, code) in [
-            // Kody **evdev** klawiszy modyfikujących (protokół Wayland używa evdev, nie X11).
-            (state.sent_mods.shift, mods.shift, 42u32), // KEY_LEFTSHIFT
-            (state.sent_mods.ctrl, mods.ctrl, 29),      // KEY_LEFTCTRL
-            (state.sent_mods.alt, mods.alt, 56),        // KEY_LEFTALT
-            (state.sent_mods.logo, mods.logo, 125),     // KEY_LEFTMETA
-            (state.sent_mods.level3, mods.level3, 100), // KEY_RIGHTALT (AltGr)
-        ] {
-            if before != now {
-                let serial = state.next_serial();
-                let time = state.time_ms();
-                let ks = if now {
-                    WEnum::Value(wl_keyboard::KeyState::Pressed)
-                } else {
-                    WEnum::Value(wl_keyboard::KeyState::Released)
-                };
-                let _ = kb.send_event(wl_keyboard::Event::Key {
-                    serial,
-                    time,
-                    key: code,
-                    state: ks,
-                });
+    if !ime_grab {
+        for kb in &keyboards {
+            for (before, now, code) in [
+                // Kody **evdev** klawiszy modyfikujących (protokół Wayland używa evdev, nie X11).
+                (state.sent_mods.shift, mods.shift, 42u32), // KEY_LEFTSHIFT
+                (state.sent_mods.ctrl, mods.ctrl, 29),      // KEY_LEFTCTRL
+                (state.sent_mods.alt, mods.alt, 56),        // KEY_LEFTALT
+                (state.sent_mods.logo, mods.logo, 125),     // KEY_LEFTMETA
+                (state.sent_mods.level3, mods.level3, 100), // KEY_RIGHTALT (AltGr)
+            ] {
+                if before != now {
+                    let serial = state.next_serial();
+                    let time = state.time_ms();
+                    let ks = if now {
+                        WEnum::Value(wl_keyboard::KeyState::Pressed)
+                    } else {
+                        WEnum::Value(wl_keyboard::KeyState::Released)
+                    };
+                    let _ = kb.send_event(wl_keyboard::Event::Key {
+                        serial,
+                        time,
+                        key: code,
+                        state: ks,
+                    });
+                }
             }
         }
     }
@@ -2634,15 +3115,19 @@ fn sync_modifiers(state: &mut State, keysym: u32, st: ButtonState) {
         state.sent_mods = mods;
         // Lock = bit 1, Mod2 (NumLock) = bit 4 — tak samo jak w masce XKB.
         let locked = (u32::from(state.caps_lock) << 1) | (u32::from(state.num_lock) << 4);
-        for kb in &keyboards {
-            let serial = state.next_serial();
-            let _ = kb.send_event(wl_keyboard::Event::Modifiers {
-                serial,
-                mods_depressed: modifier_mask(mods),
-                mods_latched: 0,
-                mods_locked: locked,
-                group: 0,
-            });
+        if ime_grab {
+            crate::text_input::send_modifiers(state, modifier_mask(mods), locked);
+        } else {
+            for kb in &keyboards {
+                let serial = state.next_serial();
+                let _ = kb.send_event(wl_keyboard::Event::Modifiers {
+                    serial,
+                    mods_depressed: modifier_mask(mods),
+                    mods_latched: 0,
+                    mods_locked: locked,
+                    group: 0,
+                });
+            }
         }
     }
 }
@@ -2946,9 +3431,32 @@ mod tests {
             fullscreen: false,
             ssd: true,
             saved: None,
+            image_size_override: None,
             dmabuf: None,
             data: Arc::new(ImageData::empty(200, 120)),
         }
+    }
+
+    #[test]
+    fn popup_wins_hit_even_when_parent_has_higher_z() {
+        // Menu kontekstowe musi dostawać kliknięcia nawet jeśli rodzic został
+        // podniesiony po jego otwarciu (inaczej klik zamyka menu zamiast
+        // wybrać pozycję).
+        let mut state = State::default();
+        let mut parent = sample_window();
+        parent.x = 0.0;
+        parent.y = 0.0;
+        parent.z = 100;
+        let mut menu = sample_window();
+        menu.x = 10.0;
+        menu.y = 10.0;
+        menu.z = 1;
+        menu.popup = true;
+        menu.ssd = false;
+        state.windows.lock().unwrap().push(parent);
+        state.windows.lock().unwrap().push(menu);
+        let (slot, _) = hit(&state, Point::new(20.0, 20.0)).expect("trafienie");
+        assert_eq!(slot, 1);
     }
 
     #[test]
@@ -2984,6 +3492,24 @@ mod tests {
         w.image_offset = (14.0, 12.0);
         s.windows.lock_or_recover().push(w); // x=100, y=50
         assert_eq!(content_local(&s, 0, Point::new(140.0, 100.0)), (54.0, 62.0));
+    }
+
+    #[test]
+    fn clicking_a_popup_does_not_move_keyboard_focus() {
+        // Menu (X11 override-redirect / `xdg_popup`) nie może dostać fokusu:
+        // klient zamyka je wtedy w chwili `pressed`, zanim dostanie `released`.
+        let mut s = State::default();
+        s.windows.lock_or_recover().push(sample_window());
+        let mut menu = sample_window();
+        menu.popup = true;
+        s.windows.lock_or_recover().push(menu);
+
+        set_keyboard_focus(&mut s, 0);
+        set_keyboard_focus(&mut s, 1);
+
+        let windows = s.windows.lock_or_recover();
+        assert!(windows[0].focused, "fokus zostaje na oknie nadrzędnym");
+        assert!(!windows[1].focused, "menu nie może dostać fokusu");
     }
 
     #[test]
@@ -3299,5 +3825,15 @@ mod tests {
         // Nie da się wywieźć okna całkowicie za prawą krawędź.
         let (x2, _) = clamp_drag_pos(area, 48.0, 800.0, 5000.0, 200.0);
         assert_eq!(x2, 1920.0 - MIN_VISIBLE);
+    }
+
+    #[test]
+    fn scroll_delta_uses_standard_wheel_units() {
+        // DRM/evdev: jeden ząbek → 15 px (a nie 64 px, które psuło XWayland).
+        assert_eq!(scroll_delta(1.0, 2.0, true), (15.0, 30.0));
+        // Nested: libLuna podaje 64 px/ząbek → przeliczamy na standardowe 15 px.
+        assert_eq!(scroll_delta(64.0, -64.0, false), (15.0, -15.0));
+        // Gładzik w nested jest w pikselach libLuny, ale zachowuje kierunek.
+        assert_eq!(scroll_delta(7.5, 0.0, false), (7.5 * 15.0 / 64.0, 0.0));
     }
 }

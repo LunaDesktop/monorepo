@@ -33,7 +33,6 @@ const MIN_CARD_W: f64 = 260.0;
 const LIST_ROW_H: f64 = 66.0;
 const LIST_GAP: f64 = 8.0;
 const SCROLL_STEP: f64 = 64.0;
-const SCROLL_UNIT: f64 = 20.0;
 
 /// Geometria okna.
 #[derive(Debug, Clone, Copy)]
@@ -1771,7 +1770,7 @@ pub fn handle_events(
                 if lay.viewport.contains(scroll.position) && !app.sheet.is_open() =>
             {
                 app.scroll
-                    .on_scroll(scroll.dy / SCROLL_UNIT * SCROLL_STEP, lay.viewport);
+                    .on_scroll(scroll.notches_y() * SCROLL_STEP, lay.viewport);
             }
             Event::Key(key) if key.state == ButtonState::Pressed => {
                 handle_key(app, key, &lay, theme);

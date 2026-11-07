@@ -73,7 +73,14 @@ pub fn output_at(outs: &[OutputInfo], x: f64, y: f64) -> usize {
 }
 
 /// Wysyła klientowi opis monitora (geometria, tryb, skala, nazwa, gotowe).
+///
+/// Global jest wystawiony w wersji 4, ale klient ma prawo związać go w wersji
+/// niższej — a wysłanie zdarzenia spoza związanej wersji kończy się `abort()`
+/// w libwayland po stronie klienta (np. `listener function for opcode 4 of
+/// wl_output is NULL`). Dlatego każde zdarzenie jest bramkowane wersją:
+/// `scale`/`done` od v2, `name`/`description` od v4.
 pub fn send_info(output: &WlOutput, info: &OutputInfo) {
+    let version = output.version();
     let _ = output.send_event(wl_output::Event::Geometry {
         x: info.x,
         y: info.y,
@@ -90,11 +97,20 @@ pub fn send_info(output: &WlOutput, info: &OutputInfo) {
         height: info.height,
         refresh: info.refresh_hz.max(1) * 1000,
     });
-    let _ = output.send_event(wl_output::Event::Scale { factor: info.scale });
-    let _ = output.send_event(wl_output::Event::Name {
-        name: info.name.clone(),
-    });
-    let _ = output.send_event(wl_output::Event::Done);
+    if version >= 2 {
+        let _ = output.send_event(wl_output::Event::Scale { factor: info.scale });
+    }
+    if version >= 4 {
+        let _ = output.send_event(wl_output::Event::Name {
+            name: info.name.clone(),
+        });
+        let _ = output.send_event(wl_output::Event::Description {
+            description: format!("Luna {}", info.name),
+        });
+    }
+    if version >= 2 {
+        let _ = output.send_event(wl_output::Event::Done);
+    }
 }
 
 impl GlobalDispatch<WlOutput, usize> for State {
@@ -164,6 +180,8 @@ pub fn refresh_bound(state: &mut State) {
             send_info(res, info);
         }
     }
+    // Ten sam model napędza `zxdg_output_v1` (pozycja logiczna, nazwa złącza).
+    crate::xdg_output::refresh(state);
 }
 
 #[cfg(test)]

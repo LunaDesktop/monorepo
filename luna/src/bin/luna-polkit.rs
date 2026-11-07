@@ -15,9 +15,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     println!("luna-polkit: start agenta uwierzytelniania Polkit");
     let pending: Arc<Mutex<Option<AuthRequest>>> = Arc::new(Mutex::new(None));
+    let done: Arc<Mutex<Option<std::sync::mpsc::Sender<()>>>> = Arc::new(Mutex::new(None));
 
     let agent = PolkitAgent {
         pending: Arc::clone(&pending),
+        done: Arc::clone(&done),
     };
 
     let object_path = "/org/paganlinux/Luna/PolicyKit1/AuthenticationAgent";
@@ -43,6 +45,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             let result = show_dialog(&req, move |password| {
                 verify_agent_request(&user, &cookie, password)
             });
+            // Odblokowuje `BeginAuthentication` w wątku D-Bus — dopiero teraz
+            // polkitd może zakończyć sesję autoryzacji.
+            if let Some(done) = done.lock().unwrap().take() {
+                let _ = done.send(());
+            }
             match result {
                 Some(_) => eprintln!(
                     "luna-polkit: autoryzacja OK ({}), {:.1} s",

@@ -46,7 +46,7 @@ use smithay_client_toolkit::{
     registry_handlers,
     seat::{
         keyboard::{KeyEvent as SctkKeyEvent, KeyboardHandler, Keysym, Modifiers as KbModifiers},
-        pointer::{PointerEvent as SctkPointerEvent, PointerEventKind, PointerHandler},
+        pointer::{AxisScroll, PointerEvent as SctkPointerEvent, PointerEventKind, PointerHandler},
         Capability, SeatHandler, SeatState,
     },
     shell::{
@@ -220,6 +220,25 @@ impl LayerConfig {
             margin: (0, 0, 0, 0),
             exclusive_zone: bar as i32,
             keyboard: true,
+            keyboard_exclusive: false,
+        }
+    }
+
+    /// Tło pulpitu: pełnoekranowa powierzchnia **pod oknami**, bez rezerwacji
+    /// miejsca i bez fokusu klawiatury.
+    ///
+    /// Klient rysuje tylko ikony (resztę zostawia przezroczystą), więc tapeta
+    /// kompozytora pozostaje widoczna. `size = (0, 0)` oznacza „rozciągnij na
+    /// całe wyjście” — rozmiar przychodzi w `configure`.
+    pub fn background(namespace: impl Into<String>) -> Self {
+        Self {
+            namespace: namespace.into(),
+            layer: Layer::Background,
+            anchor: Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT,
+            size: (0, 0),
+            margin: (0, 0, 0, 0),
+            exclusive_zone: 0,
+            keyboard: false,
             keyboard_exclusive: false,
         }
     }
@@ -651,11 +670,7 @@ where
                 }
             }
             // Wątek odczytu upuszczonych plików (`text/uri-list`) zakończył pracę.
-            let dropped = app
-                .drop_data
-                .lock()
-                .ok()
-                .and_then(|mut guard| guard.take());
+            let dropped = app.drop_data.lock().ok().and_then(|mut guard| guard.take());
             if let Some((position, copy, paths)) = dropped {
                 app.queue(Event::DragLeave);
                 app.queue(Event::Drop {
@@ -729,8 +744,23 @@ where
         }
     };
 
+    // Powierzchnia z `size = (0, 0)` dostaje rozmiar dopiero w `configure`;
+    // początkowy pool bierzemy z `initial_size`, żeby nie alokować 1×1 piksela.
     let (iw, ih) = match &config.layer {
-        Some(l) => (l.size.0.max(1), l.size.1.max(1)),
+        Some(l) => (
+            if l.size.0 == 0 {
+                config.initial_size.0
+            } else {
+                l.size.0
+            }
+            .max(1),
+            if l.size.1 == 0 {
+                config.initial_size.1
+            } else {
+                l.size.1
+            }
+            .max(1),
+        ),
         None => config.initial_size,
     };
     let pool = SlotPool::new((iw as usize * ih as usize * 4).max(1024), &shm)?;
@@ -772,6 +802,7 @@ where
         seat: None,
         last_serial: 0,
         last_pointer_serial: 0,
+        axis_source: None,
         data_device_manager,
         data_device: None,
         clipboard_source: None,
@@ -908,6 +939,10 @@ struct App {
     last_serial: u32,
     /// Serial ostatniego **wciśnięcia wskaźnika** (wymagany przez `move`/`resize`).
     last_pointer_serial: u32,
+    /// Ostatnie `axis_source` z `wl_pointer` — sctk dostarcza je w osobnym zdarzeniu
+    /// o zerowej wartości, a kolejne `axis` nie powtarza źródła. Bez zapamiętania
+    /// nie da się odróżnić rolki od gładzika przy skalowaniu kroku.
+    axis_source: Option<wl_pointer::AxisSource>,
     /// Menedżer schowka (może być niedostępny w starym kompozytorze).
     data_device_manager: Option<DataDeviceManagerState>,
     /// Urządzenie schowka dla aktywnego seat.
@@ -1778,6 +1813,42 @@ fn read_selection_pipe(pipe: &ReadPipe) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Zamienia zdarzenie `wl_pointer.axis` na przesunięcie w pikselach logicznych.
+///
+/// Protokół potrafi opisać ten sam ruch na dwa sposoby: `axis` (piksele, używane
+/// przez gładziki) oraz `axis_discrete`/`axis_value120` (ząbki kółka). Bierzemy
+/// **jedną** jednostkę dla całej aplikacji:
+///
+/// - rolka (`source=Wheel`, także bez źródła, gdy jest `discrete`) →
+///   `ząbki × `[`SCROLL_NOTCH_PX`](libluna_core::SCROLL_NOTCH_PX),
+/// - gładzik (`Finger`/`Continuous`) → `axis` bez zmian (to już piksele).
+///
+/// Kompozytory wysyłają `axis` w standardowych pikselach (15 na ząbek).
+/// Rolka bez `discrete` (protokół v8+: `axis_value120`, którego sctk 0.19 nie
+/// mapuje) jest więc skalowana z 15 px do [`SCROLL_NOTCH_PX`] — dzięki temu
+/// jeden ząbek to nadal jeden krok aplikacji, a klienty zewnętrzne dostają
+/// standardowe wartości.
+fn axis_scroll_pixels(
+    horizontal: AxisScroll,
+    vertical: AxisScroll,
+    source: Option<wl_pointer::AxisSource>,
+) -> (f64, f64) {
+    fn axis(scroll: AxisScroll, source: Option<wl_pointer::AxisSource>) -> f64 {
+        let continuous = matches!(
+            source,
+            Some(wl_pointer::AxisSource::Finger | wl_pointer::AxisSource::Continuous)
+        );
+        if !continuous && scroll.discrete != 0 {
+            scroll.discrete as f64 * libluna_core::SCROLL_NOTCH_PX
+        } else if matches!(source, Some(wl_pointer::AxisSource::Wheel)) {
+            scroll.absolute * (libluna_core::SCROLL_NOTCH_PX / libluna_core::SCROLL_WHEEL_AXIS_PX)
+        } else {
+            scroll.absolute
+        }
+    }
+    (axis(horizontal, source), axis(vertical, source))
+}
+
 fn map_button(code: u32) -> PointerButton {
     match code {
         0x110 => PointerButton::Left,
@@ -2123,13 +2194,23 @@ impl PointerHandler for App {
                 PointerEventKind::Axis {
                     horizontal,
                     vertical,
+                    source,
                     ..
                 } => {
-                    self.queue(Event::Scroll(ScrollEvent {
-                        position,
-                        dx: horizontal.absolute,
-                        dy: vertical.absolute,
-                    }));
+                    // `axis_source` przychodzi osobno (z zerowymi wartościami) i nie
+                    // powtarza się w kolejnych `axis`, więc zapamiętujemy je na czas
+                    // całej sekwencji przewijania.
+                    if let Some(src) = source {
+                        self.axis_source = Some(src);
+                    }
+                    let effective = source.or(self.axis_source);
+                    let (dx, dy) = axis_scroll_pixels(horizontal, vertical, effective);
+                    // `axis_stop` i puste ramki nie są przewijaniem — nie budzimy
+                    // aplikacji zdarzeniem o zerowym przesunięciu.
+                    if dx == 0.0 && dy == 0.0 {
+                        continue;
+                    }
+                    self.queue(Event::Scroll(ScrollEvent { position, dx, dy }));
                 }
             }
         }
@@ -2273,12 +2354,7 @@ impl DataDeviceHandler for App {
 
     fn selection(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {}
 
-    fn drop_performed(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        device: &WlDataDevice,
-    ) {
+    fn drop_performed(&mut self, _: &Connection, _: &QueueHandle<Self>, device: &WlDataDevice) {
         self.read_drop(device);
     }
 }
@@ -2427,7 +2503,9 @@ fn file_uri(path: &std::path::Path) -> String {
 }
 
 /// Pierwszy MIME z oferty nadający się na pliki (`text/uri-list`, potem `text/plain`).
-fn drag_mime(offer: &smithay_client_toolkit::data_device_manager::data_offer::DragOffer) -> Option<String> {
+fn drag_mime(
+    offer: &smithay_client_toolkit::data_device_manager::data_offer::DragOffer,
+) -> Option<String> {
     offer.with_mime_types(|types| {
         types
             .iter()
@@ -2507,6 +2585,70 @@ pub fn uri_list(paths: &[PathBuf]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wheel_notches_become_one_step_in_pixels() {
+        use libluna_core::SCROLL_NOTCH_PX;
+        let notch = |discrete: i32, absolute: f64| AxisScroll {
+            absolute,
+            discrete,
+            stop: false,
+        };
+        // Rolka: liczy się `discrete`, a nie surowe `axis` (Selene wysyła 15 px).
+        let (dx, dy) = axis_scroll_pixels(
+            notch(0, 0.0),
+            notch(1, 15.0),
+            Some(wl_pointer::AxisSource::Wheel),
+        );
+        assert_eq!((dx, dy), (0.0, SCROLL_NOTCH_PX));
+        let (dx, dy) = axis_scroll_pixels(
+            notch(0, 0.0),
+            notch(-2, -30.0),
+            Some(wl_pointer::AxisSource::Wheel),
+        );
+        assert_eq!((dx, dy), (0.0, -2.0 * SCROLL_NOTCH_PX));
+        // Brak `axis_source`, ale jest `discrete` (starsze kompozytory).
+        let (_, dy) = axis_scroll_pixels(notch(0, 0.0), notch(1, 15.0), None);
+        assert_eq!(dy, SCROLL_NOTCH_PX);
+        // Protokół v8+: `axis_value120` jest mapowane przez platformę, więc
+        // przychodzi samo `absolute` = 15 px/ząbek — skalujemy je do kroku Luny.
+        let (_, dy) = axis_scroll_pixels(
+            notch(0, 0.0),
+            notch(0, 15.0),
+            Some(wl_pointer::AxisSource::Wheel),
+        );
+        assert_eq!(dy, SCROLL_NOTCH_PX);
+        let (_, dy) = axis_scroll_pixels(
+            notch(0, 0.0),
+            notch(0, -45.0),
+            Some(wl_pointer::AxisSource::Wheel),
+        );
+        assert_eq!(dy, -3.0 * SCROLL_NOTCH_PX);
+    }
+
+    #[test]
+    fn touchpad_and_hi_res_scroll_stay_in_pixels() {
+        let scroll = |absolute: f64, discrete: i32| AxisScroll {
+            absolute,
+            discrete,
+            stop: false,
+        };
+        // Gładzik: `absolute` jest już w pikselach i nie mnożymy go przez ząbek.
+        let (_, dy) = axis_scroll_pixels(
+            scroll(0.0, 0),
+            scroll(7.5, 0),
+            Some(wl_pointer::AxisSource::Finger),
+        );
+        assert_eq!(dy, 7.5);
+        // Rolka bez `discrete` (protokół v8+, `axis_value120`): standardowe
+        // 15 px na ząbek skalujemy do wewnętrznego kroku Luny.
+        let (_, dy) = axis_scroll_pixels(
+            scroll(0.0, 0),
+            scroll(15.0, 0),
+            Some(wl_pointer::AxisSource::Wheel),
+        );
+        assert_eq!(dy, libluna_core::SCROLL_NOTCH_PX);
+    }
 
     #[test]
     fn resize_edges_map_to_xdg_edges() {
