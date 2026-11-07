@@ -899,6 +899,17 @@ impl DrmBackend {
         self.outputs.iter().any(|o| o.gamma_size > 0)
     }
 
+    /// Czy można używać sprzętowej płaszczyzny kursora.
+    ///
+    /// Karty wirtualne (qxl, virtio_gpu, bochs, ...) mają płaszczyznę kursora,
+    /// ale nie nadaje się ona do użytku: qxl wywraca jądro w
+    /// `qxl_plane_prepare_fb` (zapis poza VRAM) już przy pierwszym
+    /// `DRM_IOCTL_MODE_CURSOR`, a pozostałym zdarza się obraz z zamienionymi
+    /// kanałami. Na takich kartach kursor rysuje scena (`cursor::paint`).
+    pub fn supports_hw_cursor(&self) -> bool {
+        !is_virtual_driver(self.driver.as_deref())
+    }
+
     /// Po powrocie z uśpienia: odzyskaj mastera DRM i odtwórz tryb na wyjściach.
     ///
     /// Jądro po suspend/resume może zgubić stan CRTC albo mastera DRM. Ponawiamy

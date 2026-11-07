@@ -508,7 +508,10 @@ pub fn spawn_drm(
         let mut cursor_source = crate::state::CursorImage::Default;
         crate::cursor::set_model(&cursor_source);
         let (mut cursor_gfx, mut cursor_hotspot) = crate::cursor::current();
-        let mut hw_cursor = crate::cursor::fits_hardware(&cursor_gfx);
+        // Na kartach wirtualnych płaszczyzna kursora jest bezużyteczna (qxl
+        // wywraca w niej jądro), więc kursor rysuje scena — bez MODE_CURSOR.
+        let hw_cursor_supported = backend.supports_hw_cursor();
+        let mut hw_cursor = hw_cursor_supported && crate::cursor::fits_hardware(&cursor_gfx);
         for i in 0..sizes.len() {
             // Bezpieczna próba na (0, 0) i natychmiastowe ukrycie — uodparnia na
             // sterowniki DRM odrzucające ujemne współrzędne w `MODE_CURSOR`.
@@ -575,7 +578,7 @@ pub fn spawn_drm(
                 applied_power = false;
                 flip_error_logged = false;
                 // Płaszczyzna kursora też została zresetowana przez resume.
-                hw_cursor = crate::cursor::fits_hardware(&cursor_gfx);
+                hw_cursor = hw_cursor_supported && crate::cursor::fits_hardware(&cursor_gfx);
                 for i in 0..sizes.len() {
                     if !hw_cursor
                         || !backend.set_cursor_image(
@@ -671,7 +674,7 @@ pub fn spawn_drm(
                                 .collect();
                         }
                         // Płaszczyzna kursora mogła zostać zresetowana przez modeset.
-                        hw_cursor = crate::cursor::fits_hardware(&cursor_gfx);
+                        hw_cursor = hw_cursor_supported && crate::cursor::fits_hardware(&cursor_gfx);
                         for i in 0..sizes.len() {
                             if !hw_cursor
                                 || !backend.set_cursor_image(
