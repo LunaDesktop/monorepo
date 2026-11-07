@@ -674,7 +674,8 @@ pub fn spawn_drm(
                                 .collect();
                         }
                         // Płaszczyzna kursora mogła zostać zresetowana przez modeset.
-                        hw_cursor = hw_cursor_supported && crate::cursor::fits_hardware(&cursor_gfx);
+                        hw_cursor =
+                            hw_cursor_supported && crate::cursor::fits_hardware(&cursor_gfx);
                         for i in 0..sizes.len() {
                             if !hw_cursor
                                 || !backend.set_cursor_image(
