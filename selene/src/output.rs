@@ -50,26 +50,32 @@ pub fn sync_surface_outputs(state: &crate::state::State) {
         return;
     }
     let windows = state.windows.lock_or_recover();
+    // Jeden bufor na wszystkie okna — `sync_surface_outputs` chodzi w każdej
+    // iteracji pętli głównej, więc alokacja `Vec` per okno to zbędny narzut.
+    let mut hits: Vec<usize> = Vec::with_capacity(outs.len());
     for (slot, w) in windows.iter().enumerate() {
         let Some(surface) = state.slots.get(slot) else {
             continue;
         };
-        let hits: Vec<usize> = if w.mapped && !w.minimized {
+        hits.clear();
+        if w.mapped && !w.minimized {
             let r = w.outer().union(&w.buffer_rect());
-            outs.iter()
-                .filter(|(_, x, y, ow, oh)| {
-                    r.right() > *x && r.x() < x + ow && r.bottom() > *y && r.y() < y + oh
-                })
-                .map(|(i, ..)| *i)
-                .collect()
-        } else {
-            Vec::new()
-        };
+            for (i, x, y, ow, oh) in &outs {
+                if r.right() > *x && r.x() < x + ow && r.bottom() > *y && r.y() < y + oh {
+                    hits.push(*i);
+                }
+            }
+        }
         apply_entered(state, surface, &hits);
         // Powierzchnie potomne leżą wewnątrz rodzica — dostają ten sam zbiór.
+        // Bez klonowania listy: `children` i `entered_outputs` to niezależne mutexy,
+        // a `apply_entered` nie sięga do listy dzieci, więc trzymanie blokady przez
+        // czas kolejkowania `enter`/`leave` nie tworzy cyklu (kolejność blokad jest
+        // ta sama co w `seat::child_at`: najpierw `windows`, potem `children`).
         if let Some(pd) = surface.data::<crate::compositor::SurfaceData>() {
-            for child in pd.children.lock_or_recover().clone() {
-                apply_entered(state, &child, &hits);
+            let children = pd.children.lock_or_recover();
+            for child in children.iter() {
+                apply_entered(state, child, &hits);
             }
         }
     }
@@ -80,8 +86,11 @@ fn apply_entered(state: &crate::state::State, surface: &WlSurface, hits: &[usize
     let Some(sd) = surface.data::<crate::compositor::SurfaceData>() else {
         return;
     };
-    let client = surface.client();
     let mut entered = sd.entered_outputs.lock_or_recover();
+    if *entered == hits {
+        return;
+    }
+    let client = surface.client();
     for idx in entered.iter() {
         if !hits.contains(idx) {
             if let Some(out) = output_res(state, client.as_ref(), *idx) {
@@ -369,7 +378,7 @@ pub fn spawn_drm(
                     width: *w as i32,
                     height: *h as i32,
                     refresh_hz: *hz as i32,
-                    scale: 1,
+                    scale: if *w >= 3840 || *h >= 2160 { 2 } else { 1 },
                     x: 0,
                     y: 0,
                 })
@@ -713,7 +722,7 @@ pub fn spawn_drm(
                                 width: *w as i32,
                                 height: *h as i32,
                                 refresh_hz: *hz as i32,
-                                scale: 1,
+                                scale: if *w >= 3840 || *h >= 2160 { 2 } else { 1 },
                                 x: 0,
                                 y: 0,
                             })

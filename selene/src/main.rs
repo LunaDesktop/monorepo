@@ -366,16 +366,24 @@ fn main() -> Result<(), Box<dyn Error>> {
         let backend = unsafe { BorrowedFd::borrow_raw(backend_fd) };
         let wake = unsafe { BorrowedFd::borrow_raw(wake_fd) };
         let input_raw = evdev_input.as_ref().map(|e| e.fds()).unwrap_or_default();
-        // SAFETY: deskryptory należą do `evdev_input`, który żyje przez całą iterację.
         let input_fds: Vec<BorrowedFd> = input_raw
             .iter()
             .map(|&r| unsafe { BorrowedFd::borrow_raw(r) })
             .collect();
-        let mut fds = vec![
-            rustix::event::PollFd::new(&listener, rustix::event::PollFlags::IN),
-            rustix::event::PollFd::new(&backend, rustix::event::PollFlags::IN),
-            rustix::event::PollFd::new(&wake, rustix::event::PollFlags::IN),
-        ];
+
+        let mut fds = Vec::with_capacity(5 + input_fds.len());
+        fds.push(rustix::event::PollFd::new(
+            &listener,
+            rustix::event::PollFlags::IN,
+        ));
+        fds.push(rustix::event::PollFd::new(
+            &backend,
+            rustix::event::PollFlags::IN,
+        ));
+        fds.push(rustix::event::PollFd::new(
+            &wake,
+            rustix::event::PollFlags::IN,
+        ));
         for fd in &input_fds {
             fds.push(rustix::event::PollFd::new(fd, rustix::event::PollFlags::IN));
         }
@@ -422,10 +430,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
 
         // Wejście evdev → trasowanie (jak z magistrali).
-        if input_fds
-            .iter()
-            .enumerate()
-            .any(|(i, _)| fds[3 + i].revents().contains(rustix::event::PollFlags::IN))
+        if (0..input_fds.len()).any(|i| fds[3 + i].revents().contains(rustix::event::PollFlags::IN))
         {
             if let Some(input) = evdev_input.as_mut() {
                 let bounds = {

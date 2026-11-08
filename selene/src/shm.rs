@@ -223,7 +223,13 @@ impl BufferData {
             wl_shm::Format::Xrgb8888 | wl_shm::Format::Xbgr8888
         );
         let mut opaque = true;
-        let mut out = vec![0u8; out_len];
+        // Pomiń zerowanie pamięci (calloc / memset 0): każda komórka od 0 do out_len
+        // jest natychmiast i w całości nadpisywana w pętli wierszy poniżej (h wierszy po w*4 bajtów).
+        // Podwójny zapis 8-33 MB na klatkę drastycznie obciążał przepustowość pamięci.
+        let mut out = Vec::with_capacity(out_len);
+        unsafe {
+            out.set_len(out_len);
+        }
         #[cfg(target_endian = "little")]
         {
             // Piksele przetwarzamy po cztery bajty naraz (u32). Podmiana R↔B to kilka

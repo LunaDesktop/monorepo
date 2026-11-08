@@ -94,9 +94,10 @@ fn send_info(xdg: &zxdg_output_v1::ZxdgOutputV1, output: &WlOutput, info: &Outpu
         x: info.x,
         y: info.y,
     });
+    let scale = info.scale.max(1);
     let _ = xdg.send_event(zxdg_output_v1::Event::LogicalSize {
-        width: info.width,
-        height: info.height,
+        width: info.width / scale,
+        height: info.height / scale,
     });
     if version >= 2 {
         let _ = xdg.send_event(zxdg_output_v1::Event::Name {

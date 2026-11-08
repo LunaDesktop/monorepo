@@ -369,8 +369,11 @@ fn driver_name(card: &PathBuf) -> Option<String> {
 ///
 /// Takie karty nie obsługują `XBGR8888` na płaszczyźnie głównej — akceptują
 /// `ADDFB2`, ale obraz wychodzi z zamienionymi kanałami R/B. Dlatego od razu
-/// wybieramy `XRGB8888` i przepisujemy kanały przy prezentacji (koszt ~1–2 ms
-/// na klatkę 1080p, akceptowalny dla maszyny wirtualnej).
+/// wybieramy `XRGB8888` i przepisujemy kanały przy prezentacji.
+///
+/// Zmierzone na pełnej klatce 1920×1080: kopia `memcpy` ~0,4 ms, zamiana kanałów
+/// ~0,7 ms (`bench_present_copy`). Przy znanym damage i tak kopiujemy tylko brudny
+/// prostokąt, więc bezpośrednie rysowanie do scanoutu nie dałoby tu istotnego zysku.
 fn is_virtual_driver(driver: Option<&str>) -> bool {
     matches!(
         driver,
@@ -608,12 +611,25 @@ fn probe_connector(fd: BorrowedFd, id: u32) -> Option<OutputInfo> {
 
     let mode = pick_best_mode(&modes)?;
 
+    let scale = if c.mm_width > 0 {
+        let dpi = (mode.hdisplay as u64 * 254) / (c.mm_width as u64 * 10);
+        if dpi >= 180 {
+            2
+        } else {
+            1
+        }
+    } else if mode.hdisplay >= 3840 || mode.vdisplay >= 2160 {
+        2
+    } else {
+        1
+    };
+
     Some(OutputInfo {
         name: connector_name(c.connector_type, c.connector_type_id),
         width: mode.hdisplay as i32,
         height: mode.vdisplay as i32,
         refresh_hz: mode.vrefresh as i32,
-        scale: 1,
+        scale,
         x: 0,
         y: 0,
     })
@@ -1666,11 +1682,19 @@ fn swizzle_region_into(
     let count = x1 - x0;
     unsafe {
         for y in y0..y1 {
-            let src = &rgba[(y * width + x0) * 4..(y * width + x1) * 4];
+            let src_u32 = std::slice::from_raw_parts(
+                (rgba.as_ptr() as *const u32).add(y * width + x0),
+                count,
+            );
             let row_dst =
                 std::slice::from_raw_parts_mut(dst.add(y * pitch + x0 * 4) as *mut u32, count);
-            for (d, s) in row_dst.iter_mut().zip(src.chunks_exact(4)) {
-                *d = u32::from_ne_bytes([s[2], s[1], s[0], 0xff]);
+            for (d, &px) in row_dst.iter_mut().zip(src_u32.iter()) {
+                // RGBA na little-endian: bajty [R, G, B, A] -> u32 0xAABBGGRR.
+                // XRGB w pamięci: bajty [B, G, R, 0xFF] -> u32 0xFFRRGGBB.
+                *d = (px & 0x0000_FF00)
+                    | ((px & 0x0000_00FF) << 16)
+                    | ((px & 0x00FF_0000) >> 16)
+                    | 0xFF00_0000;
             }
         }
     }
@@ -1684,10 +1708,14 @@ fn swizzle_into(dst: *mut u8, pitch: usize, rgba: &[u8], width: usize, height: u
     }
     unsafe {
         for y in 0..height {
-            let src = &rgba[y * width * 4..(y + 1) * width * 4];
+            let src_u32 =
+                std::slice::from_raw_parts((rgba.as_ptr() as *const u32).add(y * width), width);
             let row_dst = std::slice::from_raw_parts_mut(dst.add(y * pitch) as *mut u32, width);
-            for (d, s) in row_dst.iter_mut().zip(src.chunks_exact(4)) {
-                *d = u32::from_ne_bytes([s[2], s[1], s[0], 0xff]);
+            for (d, &px) in row_dst.iter_mut().zip(src_u32.iter()) {
+                *d = (px & 0x0000_FF00)
+                    | ((px & 0x0000_00FF) << 16)
+                    | ((px & 0x00FF_0000) >> 16)
+                    | 0xFF00_0000;
             }
         }
     }
@@ -2025,6 +2053,56 @@ mod tests {
         assert_eq!(&dst[12..20], &src[8..16]);
         // Padding pozostaje nietknięty.
         assert!(dst[8..12].iter().all(|&b| b == 0xAA));
+    }
+
+    #[test]
+    fn swizzle_writes_bgrx_and_leaves_padding_intact() {
+        // RGBA (R,G,B,A) → XRGB8888 w pamięci: B,G,R,0xFF. Sprawdza przepisanie
+        // kanałów na nieparzystej szerokości (3 px) i wycinek z paddingiem `pitch`.
+        let (w, h) = (3usize, 2usize);
+        let mut src = vec![0u8; w * h * 4];
+        for (i, px) in src.chunks_exact_mut(4).enumerate() {
+            px[0] = i as u8; // R
+            px[1] = 0x10 + i as u8; // G
+            px[2] = 0x80 + i as u8; // B
+            px[3] = 0xAA; // A — w XRGB zastępowane przez 0xFF
+        }
+
+        let mut dst = vec![0u8; w * h * 4];
+        assert!(swizzle_into(dst.as_mut_ptr(), w * 4, &src, w, h));
+        for i in 0..(w * h) {
+            assert_eq!(
+                &dst[i * 4..i * 4 + 4],
+                &[0x80 + i as u8, 0x10 + i as u8, i as u8, 0xFF],
+                "piksel {i}"
+            );
+        }
+
+        // Wycinek 1×1 (wiersz 1, kolumna 1) w buforze z paddingiem jednego piksela.
+        let pitch = (w + 1) * 4;
+        let mut dst = vec![0u8; pitch * h];
+        assert!(swizzle_region_into(
+            dst.as_mut_ptr(),
+            pitch,
+            &src,
+            w,
+            h,
+            PixelRect {
+                x: 1,
+                y: 1,
+                w: 1,
+                h: 1
+            }
+        ));
+        let i = w + 1; // indeks piksela w źródle
+        let at = pitch + 4; // początek kolumny 1 w wierszu 1
+        assert_eq!(
+            &dst[at..at + 4],
+            &[0x80 + i as u8, 0x10 + i as u8, i as u8, 0xFF]
+        );
+        // Sąsiednie piksele i padding pozostają nietknięte.
+        assert!(dst[at + 4..].iter().all(|&b| b == 0));
+        assert!(dst[..at].iter().all(|&b| b == 0));
     }
 
     fn mode(w: u16, h: u16, hz: u32, preferred: bool) -> ModeInfo {
