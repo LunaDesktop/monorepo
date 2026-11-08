@@ -481,11 +481,16 @@ if ! grep -q '^XKB_DEFAULT_LAYOUT=' "$TARGET/etc/environment" 2>/dev/null; then
     } >> "$TARGET/etc/environment"
 fi
 
-mount --bind /dev "$TARGET/dev"
-mount --bind /dev/pts "$TARGET/dev/pts"
-mount -t proc proc "$TARGET/proc"
-mount -t sysfs sys "$TARGET/sys"
-mount --bind /run "$TARGET/run"
+# rsync celowo pomija /dev /proc /sys /run, więc w świeżo skopiowanym systemie
+# tych katalogów NIE MA. `mount --bind` wymaga istniejącego punktu montowania —
+# bez `mkdir -p` instalacja kończyła się kodem 32 („mount point does not exist”)
+# po skopiowaniu całego systemu, zostawiając niedokończony rootfs.
+mkdir -p "$TARGET/dev" "$TARGET/dev/pts" "$TARGET/proc" "$TARGET/sys" "$TARGET/run"
+mount --bind /dev "$TARGET/dev" || die "cannot bind-mount /dev into $TARGET"
+mount --bind /dev/pts "$TARGET/dev/pts" || die "cannot bind-mount /dev/pts into $TARGET"
+mount -t proc proc "$TARGET/proc" || die "cannot mount /proc in $TARGET"
+mount -t sysfs sys "$TARGET/sys" || die "cannot mount /sys in $TARGET"
+mount --bind /run "$TARGET/run" || die "cannot bind-mount /run into $TARGET"
 
 if [ "$FILESYSTEM" = btrfs ]; then
     mkdir -p "$TARGET/home"
