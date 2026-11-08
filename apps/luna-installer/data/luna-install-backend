@@ -587,15 +587,62 @@ fi
 
 progress 80
 if [ "$BOOTLOADER" = "grub" ]; then
-    step "Installing GRUB"
-    chroot "$TARGET" sh -c 'command -v grub-install' >/dev/null 2>&1 || die "grub-install is missing in the live system"
     if [ "$EFI" = "1" ]; then
+        step "Installing GRUB (UEFI)"
+        chroot "$TARGET" sh -c 'command -v grub-install' >/dev/null 2>&1 \
+            || die "grub-install is missing in the live system"
         chroot "$TARGET" grub-install --target=x86_64-efi \
             --efi-directory=/boot/efi --bootloader-id=Luna --recheck
+        chroot "$TARGET" sh -c 'command -v grub-mkconfig >/dev/null 2>&1 && grub-mkconfig -o /boot/grub/grub.cfg' || true
     else
-        chroot "$TARGET" grub-install --target=i386-pc --recheck "$DISK"
+        # BIOS: GRUB i386-pc z tego wydania produkuje core.img, który wywala
+        # maszynę („GRUB loading.” i reset), więc na dysk trafia EXTLINUX —
+        # ten sam bootloader, którym obraz live startuje w trybie BIOS.
+        step "Installing EXTLINUX (BIOS)"
+
+        SYS_DIR=
+        for d in /usr/libexec/luna/syslinux /usr/lib/syslinux; do
+            [ -f "$d/ldlinux.c32" ] && { SYS_DIR=$d; break; }
+        done
+        [ -n "$SYS_DIR" ] || die "extlinux payload missing (ldlinux.c32 in the live image)"
+
+        EXTLINUX_BIN=
+        for b in "$SYS_DIR/extlinux" /usr/sbin/extlinux /usr/bin/extlinux /sbin/extlinux; do
+            [ -x "$b" ] && { EXTLINUX_BIN=$b; break; }
+        done
+        [ -n "$EXTLINUX_BIN" ] || die "extlinux binary missing in the live image"
+
+        KVER=$(ls -1 "$TARGET"/boot/vmlinuz-* 2>/dev/null | sed 's|.*/vmlinuz-||' \
+               | sed '/^linux$/d' | sort -V | tail -n1)
+        [ -n "$KVER" ] || die "no /boot/vmlinuz-<version> in $TARGET"
+        INITRD_NAME="initramfs-$KVER.img"
+        [ -f "$TARGET/boot/$INITRD_NAME" ] || INITRD_NAME="initrd.img-$KVER"
+        [ -f "$TARGET/boot/$INITRD_NAME" ] || die "no initramfs for kernel $KVER"
+
+        mkdir -p "$TARGET/boot/extlinux"
+        for f in ldlinux.c32 libcom32.c32 libutil.c32 menu.c32; do
+            [ -f "$SYS_DIR/$f" ] && cp -f "$SYS_DIR/$f" "$TARGET/boot/extlinux/"
+        done
+        "$EXTLINUX_BIN" --install "$TARGET/boot/extlinux" \
+            || die "extlinux --install failed"
+        cat > "$TARGET/boot/extlinux/extlinux.conf" <<EOF
+DEFAULT pagan
+PROMPT 0
+TIMEOUT 30
+LABEL pagan
+  LINUX /boot/vmlinuz-$KVER
+  INITRD /boot/$INITRD_NAME
+  APPEND root=UUID=$ROOT_UUID rw quiet
+EOF
+
+        # GPT: kod startowy syslinux + „legacy BIOS bootable” na partycji root.
+        if [ -f "$SYS_DIR/gptmbr.bin" ]; then
+            dd if="$SYS_DIR/gptmbr.bin" of="$DISK" bs=440 count=1 conv=notrunc 2>/dev/null
+        fi
+        PARTNUM=${ROOT_PART#"$DISK"}
+        PARTNUM=${PARTNUM#p}
+        [ -n "$PARTNUM" ] && sgdisk -A "$PARTNUM:set:2" "$DISK" >/dev/null 2>&1 || true
     fi
-    chroot "$TARGET" sh -c 'command -v grub-mkconfig >/dev/null 2>&1 && grub-mkconfig -o /boot/grub/grub.cfg' || true
 else
     step "Skipping the boot loader (requested)"
 fi
