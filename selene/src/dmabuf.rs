@@ -488,7 +488,7 @@ impl Dispatch<ZwpLinuxBufferParamsV1, Params> for State {
 mod tests {
     use super::*;
 
-    fn params(format: u32, stride: u32, modifier: u64) -> Params {
+    fn params(_format: u32, stride: u32, modifier: u64) -> Params {
         let p = Params::default();
         let fd: OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
         p.add(

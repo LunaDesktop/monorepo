@@ -441,10 +441,6 @@ fn blend(dst: &mut [u8], dw: u32, dh: u32, src: &ImageData, pos: (i32, i32)) {
 mod tests {
     use super::*;
 
-    fn base(rgba: Vec<u8>, w: u32, h: u32) -> Arc<ImageData> {
-        Arc::new(ImageData::new(w, h, rgba))
-    }
-
     #[test]
     fn opaque_child_replaces_pixels() {
         let mut dst = vec![9, 9, 9, 255, 9, 9, 9, 255, 9, 9, 9, 255, 9, 9, 9, 255];

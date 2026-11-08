@@ -424,6 +424,8 @@ fi
 # Ikony pulpitu (pliki, foldery, skróty `.desktop`). Osobny proces, bo jest
 # powierzchnią warstwową pod oknami — restart pulpitu nie restartuje paska.
 if command -v luna-desktop >/dev/null 2>&1; then
+    # Jedna instancja — ikony mają być tylko na jednym pulpicie. Uruchamianie
+    # kopii na każdym monitorze dublowałoby te same pliki na wszystkich ekranach.
     ts "uruchamiam luna-desktop"
     luna-desktop >/dev/null 2>&1 &
 else
