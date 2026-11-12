@@ -5,7 +5,7 @@
 //! Plik z dysku ma pierwszeństwo nad wbudowanym, więc wydanie systemu może
 //! podmienić treść bez przebudowy aplikacji.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Wbudowane notatki — używane, gdy system nie dostarczył własnego pliku.
 pub const EMBEDDED_NEWS: &str = include_str!("../data/news.md");
@@ -106,13 +106,7 @@ pub fn search_paths() -> Vec<PathBuf> {
     if let Some(custom) = std::env::var_os("LUNA_WELCOME_NEWS").filter(|v| !v.is_empty()) {
         paths.push(PathBuf::from(custom));
     }
-    paths.push(PathBuf::from("/usr/local/share/luna/welcome/news.md"));
-    paths.push(PathBuf::from("/usr/share/luna/welcome/news.md"));
-    if let Some(dirs) = std::env::var_os("XDG_DATA_DIRS").filter(|v| !v.is_empty()) {
-        for dir in std::env::split_paths(&dirs) {
-            paths.push(dir.join("luna/welcome/news.md"));
-        }
-    }
+    // Nadpisanie użytkownika ma pierwszeństwo przed systemem.
     if let Some(data) = std::env::var_os("XDG_DATA_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
@@ -122,9 +116,30 @@ pub fn search_paths() -> Vec<PathBuf> {
                 .map(|h| PathBuf::from(h).join(".local/share"))
         })
     {
-        paths.push(data.join("luna/welcome/news.md"));
+        push_news_paths(&mut paths, &data);
+    }
+    push_news_paths(&mut paths, Path::new("/usr/local/share"));
+    push_news_paths(&mut paths, Path::new("/usr/share"));
+    if let Some(dirs) = std::env::var_os("XDG_DATA_DIRS").filter(|v| !v.is_empty()) {
+        for dir in std::env::split_paths(&dirs) {
+            push_news_paths(&mut paths, &dir);
+        }
     }
     paths
+}
+
+/// Kandydaci w jednym katalogu danych: Luna, potem pakiet wydania („os-info”)
+/// — w PaganOS notatki wydania dostarcza `pagan-release`.
+fn push_news_paths(paths: &mut Vec<PathBuf>, base: &Path) {
+    for relative in [
+        "luna/welcome/news.md",
+        "os-info/release-notes.md",
+        "os-info/news.md",
+        "pagan-release/release-notes.md",
+        "pagan-release/news.md",
+    ] {
+        paths.push(base.join(relative));
+    }
 }
 
 /// Wczytuje pierwszy istniejący plik; w razie braku — wbudowane notatki.
@@ -142,36 +157,22 @@ pub fn load() -> Notes {
     Notes::parse(EMBEDDED_NEWS)
 }
 
-/// Wersja systemu: `LUNA_VERSION`, `/etc/luna-release`, a na końcu notatki.
+/// Wersja systemu: `LUNA_VERSION`, pliki pakietu wydania (`/etc/luna-release`,
+/// `/etc/pagan-release`, `/etc/os-release`), a na końcu notatki.
 pub fn system_version(notes: &Notes) -> String {
     if let Ok(version) = std::env::var("LUNA_VERSION") {
         if !version.trim().is_empty() {
             return version.trim().to_owned();
         }
     }
-    if let Ok(text) = std::fs::read_to_string("/etc/luna-release") {
-        if let Some(version) = parse_release_file(&text) {
-            return version;
-        }
+    if let Some(version) = crate::os_info::version() {
+        return version;
     }
     notes
         .latest()
         .map(|release| release.version.clone())
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| "0.0.8".to_owned())
-}
-
-fn parse_release_file(text: &str) -> Option<String> {
-    for line in text.lines() {
-        let line = line.trim();
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        if key.trim().eq_ignore_ascii_case("VERSION") && !value.trim().is_empty() {
-            return Some(value.trim().trim_matches('"').to_owned());
-        }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -206,11 +207,17 @@ mod tests {
     }
 
     #[test]
-    fn release_file_version_is_read() {
-        assert_eq!(
-            parse_release_file("NAME=\"Luna\"\nVERSION=\"1.2.3\"\n").as_deref(),
-            Some("1.2.3")
-        );
+    fn search_paths_include_os_info() {
+        let paths = search_paths();
+        let joined: Vec<String> = paths
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        assert!(joined
+            .iter()
+            .any(|p| p.ends_with("os-info/release-notes.md")));
+        assert!(joined.iter().any(|p| p.ends_with("pagan-release/news.md")));
+        assert!(joined.iter().any(|p| p.ends_with("luna/welcome/news.md")));
     }
 
     #[test]

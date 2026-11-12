@@ -21,20 +21,32 @@ cargo run --bin welcome-render -- --live --dark /tmp/welcome.png
   (albo program wskazany przez `LUNA_INSTALLER`).
 - Na zainstalowanym systemie nie ma przycisku instalatora — zostają skróty do
   Sklepu, Ustawień i dokumentacji.
-- Powitanie **niczego nie zapisuje** i nie zmienia dysku. Uruchamia wyłącznie
+- **Dokumentacja** („Read the documentation”) otwiera adres z pakietu wydania
+  („os-info”): `LUNA_DOC_URL` → `DOCUMENTATION_URL`/`DOC_URL`/`DOCS_URL`
+  z `/etc/luna-release`, `/etc/pagan-release` lub `/etc/os-release` → lokalny
+  `share/os-info/docs/index.html`. Gdy wydanie nic nie poda — domyślne
+  `https://luna.paganlinux.eu/docs/`.
+- Powitanie **nie zmienia dysku ani ustawień systemowych**. Uruchamia wyłącznie
   inne aplikacje (`luna-installer`, `luna-store`, `luna-settings`) lub
   `xdg-open` dla dokumentacji. Błąd uruchomienia trafia do paska komunikatu.
 - Zamknięcie: kontrolki okna, `Esc` lub `Ctrl+W`. Na obrazie live `Enter`
   uruchamia instalator.
+- **Autostart:** `luna-session` uruchamia powitanie przy każdym logowaniu.
+  Checkbox w stopce **„Nie uruchamiaj ponownie po zalogowaniu”** zapisuje przy
+  zamknięciu okna `$XDG_CONFIG_HOME/luna/welcome.conf` (`autostart = false`),
+  który blokuje kolejne uruchomienia. Usunięcie pliku (albo `autostart = true`)
+  przywraca powitanie.
 
 ## „Co nowego”
 
 Treść pochodzi z pierwszego dostępnego pliku:
 
 1. `LUNA_WELCOME_NEWS` (własna ścieżka),
-2. `/usr/local/share/luna/welcome/news.md` lub
-   `/usr/share/luna/welcome/news.md` (także katalogi z `XDG_DATA_DIRS`),
-3. `$XDG_DATA_HOME/luna/welcome/news.md`,
+2. `$XDG_DATA_HOME/...` (nadpisanie użytkownika),
+3. `/usr/local/share/` i `/usr/share/` (oraz katalogi z `XDG_DATA_DIRS`),
+   w każdym z nich kolejno:
+   `luna/welcome/news.md`, `os-info/release-notes.md`, `os-info/news.md`,
+   `pagan-release/release-notes.md`, `pagan-release/news.md`,
 4. wbudowanego `data/news.md`.
 
 Format:

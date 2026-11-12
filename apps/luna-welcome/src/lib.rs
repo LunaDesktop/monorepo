@@ -8,11 +8,14 @@
 pub mod app;
 pub mod live;
 pub mod news;
+pub mod os_info;
+pub mod settings;
 pub mod ui;
 
 pub use app::{Action, App};
 pub use live::LiveEnvironment;
 pub use news::{Notes, Release};
+pub use settings::WelcomeSettings;
 
 use std::error::Error;
 use std::time::Duration;

@@ -9,8 +9,8 @@ use libluna_core::{ButtonState, Event, Insets, KeyEvent, Point, PointerButton, R
 use libluna_i18n::{tr, tr_args};
 use libluna_render::{Scene, TextEngine};
 use libluna_widgets::{
-    paint_icon, Banner, Button, ButtonVariant, Card, ControlsSide, HeaderBar, IconName, PaintCtx,
-    WindowControl,
+    paint_icon, Banner, Button, ButtonVariant, Card, CheckButton, ControlsSide, HeaderBar,
+    IconName, PaintCtx, WindowControl,
 };
 
 use crate::app::{Action, App};
@@ -19,7 +19,7 @@ use crate::news::{Notes, Release};
 const PAD: f64 = 28.0;
 const CONTENT_MAX: f64 = 900.0;
 const HERO_H: f64 = 168.0;
-const FOOTER_H: f64 = 34.0;
+const FOOTER_H: f64 = 40.0;
 const ROW_H: f64 = 54.0;
 const SCROLL_STEP: f64 = 64.0;
 
@@ -34,6 +34,8 @@ pub struct Layout {
     pub banner: Option<Rect>,
     pub news: Rect,
     pub quick: Rect,
+    /// Checkbox „Nie uruchamiaj ponownie po zalogowaniu” w stopce.
+    pub autostart: Rect,
     /// Akcje klikalne (przycisk instalatora + wiersze „Zacznij od…”).
     pub actions: Vec<(Action, Rect)>,
     /// Wysokość całej treści (do paska przewijania).
@@ -100,6 +102,22 @@ pub fn layout(app: &App, size: Size, theme: &Theme, text: &TextEngine) -> Layout
     let max_offset = (content_height - viewport.height()).max(0.0);
     let offset = app.scroll.offset().min(max_offset);
 
+    // Checkbox w stopce — zawsze z marginesem od prawej krawędzi (PAD).
+    let check_label = tr("Don't show again at login");
+    let check_w = theme.metrics.check.size
+        + theme.metrics.check.gap
+        + text
+            .measure(&check_label, theme.typography.body.size, weight::NORMAL)
+            .width;
+    let available = (footer.width() - 2.0 * PAD).max(0.0);
+    let check_w = check_w.min(available);
+    let autostart = Rect::from_xywh(
+        footer.right() - PAD - check_w,
+        footer.y() + 4.0,
+        check_w,
+        (footer.height() - 8.0).max(0.0),
+    );
+
     // Pozycje po uwzględnieniu przewinięcia.
     let shift = |r: Rect| Rect::from_xywh(r.x(), r.y() - offset, r.width(), r.height());
     let hero = shift(hero);
@@ -138,6 +156,7 @@ pub fn layout(app: &App, size: Size, theme: &Theme, text: &TextEngine) -> Layout
         banner,
         news,
         quick,
+        autostart,
         actions,
         content_height,
         offset,
@@ -145,11 +164,15 @@ pub fn layout(app: &App, size: Size, theme: &Theme, text: &TextEngine) -> Layout
 }
 
 fn live_banner(app: &App) -> Banner {
-    let banner = Banner::new(tr("You're running the Luna live image"))
-        .description(tr(
-            "Nothing is written to your disk until you confirm in the installer.",
-        ))
-        .action(tr("Install Luna"));
+    let system = libluna_core::os_name();
+    let banner = Banner::new(tr_args(
+        "You're running the {system} live image",
+        &[("system", &system)],
+    ))
+    .description(tr(
+        "Nothing is written to your disk until you confirm in the installer.",
+    ))
+    .action(tr_args("Install {system}", &[("system", &system)]));
     let _ = app;
     banner
 }
@@ -274,7 +297,7 @@ pub fn paint(app: &App, scene: &mut Scene, size: Size, theme: &Theme, text: &Tex
     scroll.set_offset(lay.offset, lay.viewport);
     scroll.paint_scrollbar(&mut ctx, lay.viewport);
 
-    paint_footer(app, &mut ctx, lay.footer);
+    paint_footer(app, &mut ctx, lay.footer, lay.autostart);
 }
 
 fn paint_hero(app: &App, ctx: &mut PaintCtx, area: Rect) {
@@ -352,7 +375,9 @@ fn paint_live_banner(app: &App, ctx: &mut PaintCtx, area: Rect) {
     banner.paint(ctx, area);
     let rects = banner.rects(area, ctx.theme, ctx.text);
     if let Some(button_rect) = rects.actions.first().copied() {
-        let mut button = Button::new(tr("Install Luna")).variant(ButtonVariant::Suggested);
+        let system = libluna_core::os_name();
+        let mut button = Button::new(tr_args("Install {system}", &[("system", &system)]))
+            .variant(ButtonVariant::Suggested);
         button.set_hovered(app.hover == Some(Action::Install));
         button.paint(ctx, button_rect);
     }
@@ -511,7 +536,7 @@ fn paint_error_banner(ctx: &mut PaintCtx, message: &str, viewport: Rect) {
         .paint(ctx, area);
 }
 
-fn paint_footer(app: &App, ctx: &mut PaintCtx, area: Rect) {
+fn paint_footer(app: &App, ctx: &mut PaintCtx, area: Rect, autostart: Rect) {
     let theme = *ctx.theme;
     let colors = theme.colors;
     let caption = theme.typography.caption;
@@ -529,6 +554,7 @@ fn paint_footer(app: &App, ctx: &mut PaintCtx, area: Rect) {
         "Luna {version} · {mode}",
         &[("version", &app.version), ("mode", &mode)],
     );
+    let label_w = ctx.measure(&label, caption.size, weight::NORMAL);
     ctx.label_left(
         area.x() + PAD,
         area.center().y,
@@ -537,14 +563,27 @@ fn paint_footer(app: &App, ctx: &mut PaintCtx, area: Rect) {
         weight::NORMAL,
         colors.dim_text,
     );
-    ctx.label_right(
-        area.right() - PAD,
-        area.center().y,
-        &tr("Press Esc to close"),
-        caption.size,
-        weight::NORMAL,
-        colors.dim_text,
-    );
+
+    // Checkbox „nie uruchamiaj ponownie po zalogowaniu”.
+    let mut check = CheckButton::new(tr("Don't show again at login"));
+    check.set_checked(app.dont_show_again.checked());
+    check.set_hovered(app.dont_show_again_hovered);
+    check.paint(ctx, autostart);
+
+    // Podpowiedź o Esc — tylko jeśli nie nachodzi na wersję systemu.
+    let hint = tr("Press Esc to close");
+    let hint_w = ctx.measure(&hint, caption.size, weight::NORMAL);
+    let hint_right = autostart.x() - theme.spacing.lg;
+    if hint_right - hint_w > area.x() + PAD + label_w + theme.spacing.lg {
+        ctx.label_right(
+            hint_right,
+            area.center().y,
+            &hint,
+            caption.size,
+            weight::NORMAL,
+            colors.dim_text,
+        );
+    }
 }
 
 /// Obsługuje zdarzenia wejścia.
@@ -564,10 +603,12 @@ pub fn handle_events(
             Event::PointerMotion { position, .. } => {
                 app.pointer = Some(*position);
                 app.hover = hit_action(&lay, *position);
+                app.dont_show_again_hovered = lay.autostart.contains(*position);
             }
             Event::PointerLeave => {
                 app.pointer = None;
                 app.hover = None;
+                app.dont_show_again_hovered = false;
             }
             Event::Scroll(scroll) if lay.viewport.contains(scroll.position) => {
                 app.scroll
@@ -601,6 +642,10 @@ fn handle_click(app: &mut App, lay: &Layout, theme: &Theme, point: Point) {
     }
     if lay.header.contains(point) {
         app.pending.begin_move = true;
+        return;
+    }
+    if lay.autostart.contains(point) {
+        app.toggle_dont_show_again();
         return;
     }
     if let Some(action) = hit_action(lay, point) {
@@ -706,5 +751,31 @@ mod tests {
                 .iter()
                 .any(|(candidate, _)| *candidate == action));
         }
+    }
+
+    #[test]
+    fn autostart_checkbox_sits_in_footer_with_margin() {
+        let theme = Theme::light();
+        let text = TextEngine::system();
+        let lay = layout(&app(false), Size::new(980.0, 760.0), &theme, &text);
+        assert!(lay.autostart.width() > 0.0);
+        assert!(lay.autostart.y() >= lay.footer.y());
+        assert!(lay.autostart.bottom() <= lay.footer.bottom());
+        // Checkbox nigdy nie dotyka prawej krawędzi okna.
+        assert!(lay.autostart.right() <= lay.footer.right() - PAD + 0.5);
+        assert!(lay.autostart.right() > lay.footer.right() - PAD - 600.0);
+    }
+
+    #[test]
+    fn clicking_checkbox_toggles_dont_show_again() {
+        let theme = Theme::light();
+        let text = TextEngine::system();
+        let mut app = app(false);
+        let lay = layout(&app, Size::new(980.0, 760.0), &theme, &text);
+        let point = lay.autostart.center();
+        handle_click(&mut app, &lay, &theme, point);
+        assert!(app.dont_show_again.checked());
+        handle_click(&mut app, &lay, &theme, point);
+        assert!(!app.dont_show_again.checked());
     }
 }

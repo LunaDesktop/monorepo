@@ -10,10 +10,11 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use libluna_core::Point;
-use libluna_widgets::ScrollView;
+use libluna_widgets::{CheckButton, ScrollView};
 
 use crate::live::LiveEnvironment;
 use crate::news::{self, Notes};
+use crate::settings::WelcomeSettings;
 
 /// Akcja dostępna z poziomu powitania.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,7 +29,10 @@ pub enum Action {
 impl Action {
     pub fn label(self) -> String {
         match self {
-            Self::Install => libluna_i18n::tr("Install Luna"),
+            Self::Install => {
+                let system = libluna_core::os_name();
+                libluna_i18n::tr_args("Install {system}", &[("system", &system)])
+            }
             Self::Store => libluna_i18n::tr("Open the Store"),
             Self::Settings => libluna_i18n::tr("Open Settings"),
             Self::Docs => libluna_i18n::tr("Read the documentation"),
@@ -56,6 +60,13 @@ pub struct App {
     pub hover: Option<Action>,
     pub pending: Pending,
     pub error: Option<String>,
+    /// Checkbox w stopce: „Nie uruchamiaj ponownie po zalogowaniu”.
+    pub dont_show_again: CheckButton,
+    /// Czy kursor jest nad checkboxem (podgląd przy najechaniu).
+    pub dont_show_again_hovered: bool,
+    /// Dokąd prowadzi „Read the documentation” (os-info → domyślny adres Luny).
+    pub docs: String,
+    settings: WelcomeSettings,
     error_until: Option<Instant>,
     started: Instant,
 }
@@ -65,10 +76,22 @@ impl App {
         let live = LiveEnvironment::detect();
         let notes = news::load();
         let version = news::system_version(&notes);
-        Self::with_environment(live, notes, version)
+        Self::with_settings(live, notes, version, WelcomeSettings::load())
     }
 
+    /// Wariant bez czytania konfiguracji użytkownika (podgląd/testy).
     pub fn with_environment(live: LiveEnvironment, notes: Notes, version: String) -> Self {
+        Self::with_settings(live, notes, version, WelcomeSettings::default())
+    }
+
+    pub fn with_settings(
+        live: LiveEnvironment,
+        notes: Notes,
+        version: String,
+        settings: WelcomeSettings,
+    ) -> Self {
+        let mut dont_show_again = CheckButton::new(libluna_i18n::tr("Don't show again at login"));
+        dont_show_again.set_checked(!settings.autostart);
         Self {
             live,
             notes,
@@ -78,8 +101,26 @@ impl App {
             hover: None,
             pending: Pending::default(),
             error: None,
+            dont_show_again,
+            dont_show_again_hovered: false,
+            docs: crate::os_info::documentation_target(),
+            settings,
             error_until: None,
             started: Instant::now(),
+        }
+    }
+
+    /// Przełącza checkbox „nie uruchamiaj ponownie” (klik w stopce).
+    pub fn toggle_dont_show_again(&mut self) {
+        let checked = !self.dont_show_again.checked();
+        self.dont_show_again.set_checked(checked);
+    }
+
+    /// Zapisuje wybór z checkboxa do `welcome.conf` (czyta go `luna-session`).
+    pub fn persist_settings(&mut self) {
+        self.settings.autostart = !self.dont_show_again.checked();
+        if let Err(error) = self.settings.save() {
+            eprintln!("luna-welcome: nie udało się zapisać ustawień: {error}");
         }
     }
 
@@ -104,7 +145,7 @@ impl App {
             ),
             Action::Store => self.spawn(std::path::Path::new("luna-store")),
             Action::Settings => self.spawn(std::path::Path::new("luna-settings")),
-            Action::Docs => open_uri("https://luna.paganlinux.eu/docs/"),
+            Action::Docs => open_uri(&self.docs),
             Action::Close => Ok(()),
         };
         if let Err(error) = result {
@@ -157,6 +198,8 @@ impl App {
     /// Zapisuje żądania okna do [`crate::ui`] — aplikacja wywołuje to raz na klatkę.
     pub fn apply_pending(&mut self, frame: &mut libluna_platform::Frame<'_>) {
         if self.pending.close {
+            // Wybór „nie uruchamiaj ponownie” obowiązuje od następnego logowania.
+            self.persist_settings();
             frame.close();
         }
         if self.pending.minimize {
@@ -226,5 +269,26 @@ mod tests {
         let mut app = app(true);
         app.launch(Action::Close);
         assert!(app.pending.close);
+    }
+
+    #[test]
+    fn settings_disable_autostart_checks_the_box() {
+        let notes = Notes::parse("## 0.0.8 — 2026-11-05\n- Nowość\n");
+        let app = App::with_settings(
+            LiveEnvironment {
+                live: false,
+                medium: None,
+                reason: String::new(),
+            },
+            notes,
+            "0.0.8".to_owned(),
+            WelcomeSettings { autostart: false },
+        );
+        assert!(app.dont_show_again.checked());
+    }
+
+    #[test]
+    fn autostart_enabled_leaves_the_box_unchecked() {
+        assert!(!app(false).dont_show_again.checked());
     }
 }
