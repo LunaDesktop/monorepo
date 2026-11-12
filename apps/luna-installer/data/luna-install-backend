@@ -738,7 +738,10 @@ fi
 
 progress 92
 step "Refreshing the initial ramdisk"
-if chroot "$TARGET" sh -c 'command -v update-initramfs' >/dev/null 2>&1; then
+# Kolejność: natywny mechanizm PaganOS, potem typowe dla innych dystrybucji.
+if chroot "$TARGET" sh -c 'command -v pagan-initramfs' >/dev/null 2>&1; then
+    chroot "$TARGET" pagan-initramfs
+elif chroot "$TARGET" sh -c 'command -v update-initramfs' >/dev/null 2>&1; then
     chroot "$TARGET" update-initramfs -u
 elif chroot "$TARGET" sh -c 'command -v mkinitcpio' >/dev/null 2>&1; then
     chroot "$TARGET" mkinitcpio -P
