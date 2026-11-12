@@ -71,7 +71,7 @@ impl Assistant {
     }
 
     pub fn footer_height(&self, theme: &Theme) -> f64 {
-        theme.metrics.button.height + theme.spacing.xs * 2.0
+        theme.metrics.button.height + theme.spacing.md * 2.0
     }
 
     /// Prostokąt nagłówka (górna część).
@@ -129,7 +129,7 @@ impl Assistant {
         let f = self.footer_rect(rect, theme);
         let cy = f.center().y;
         let h = theme.metrics.button.height;
-        let pad = theme.spacing.md;
+        let pad = (theme.spacing.lg * 1.5).max(24.0);
         let next_w = Button::new(next_label).width(text, theme);
         let cancel_w = Button::new(cancel_label).width(text, theme);
         let next = Rect::from_xywh(f.right() - pad - next_w, cy - h / 2.0, next_w, h);

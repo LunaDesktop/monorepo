@@ -133,6 +133,8 @@ impl Button {
             ButtonVariant::Default => {
                 ctx.scene
                     .fill_rounded_rect(rect, radius, shade(&colors, strong));
+                ctx.scene
+                    .stroke_rounded_rect(rect, radius, 1.0, colors.border.scale_alpha(0.6));
             }
             ButtonVariant::Flat => {
                 if strong {
@@ -148,10 +150,15 @@ impl Button {
             _ => colors.dim_text,
         };
 
+        let font_weight = match self.variant {
+            ButtonVariant::Suggested | ButtonVariant::Destructive => weight::MEDIUM,
+            _ => weight::NORMAL,
+        };
+
         let body = theme.typography.body.size;
         let m = theme.metrics.button;
         let cy = rect.center().y;
-        let label_w = ctx.measure(&self.label, body, weight::NORMAL);
+        let label_w = ctx.measure(&self.label, body, font_weight);
         let content_w = label_w
             + if self.dropdown {
                 m.chevron_gap + m.chevron
@@ -159,7 +166,7 @@ impl Button {
                 0.0
             };
         let start_x = rect.center().x - content_w / 2.0;
-        ctx.label_left(start_x, cy, &self.label, body, weight::NORMAL, fg);
+        ctx.label_left(start_x, cy, &self.label, body, font_weight, fg);
 
         if self.dropdown {
             let cx = start_x + label_w + m.chevron_gap + m.chevron / 2.0;
