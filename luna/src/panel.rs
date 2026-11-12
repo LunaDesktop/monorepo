@@ -4105,12 +4105,15 @@ mod taskbar_tests {
     }
 }
 
-/// Krótka etykieta okna (tytuł, a gdy pusty — `app_id`), przycięta do ~28 znaków.
+/// Krótka etykieta okna (tytuł, a gdy pusty — czytelna nazwa aplikacji),
+/// przycięta do ~28 znaków.
 fn task_label(task: &Task) -> String {
     let s = if !task.title.is_empty() {
         task.title.clone()
     } else {
-        task.app_id.clone()
+        // `app_id` bywa identyfikatorem (`eu.luna.Settings`) — pokazujemy nazwę
+        // wpisu `.desktop` („Ustawienia”), a dopiero gdy go nie ma, samo `app_id`.
+        crate::apps::name_for_app_id(&task.app_id).unwrap_or_else(|| task.app_id.clone())
     };
     let max = 28;
     if s.chars().count() > max {

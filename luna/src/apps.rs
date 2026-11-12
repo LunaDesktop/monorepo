@@ -31,6 +31,8 @@ pub struct DesktopApp {
     pub not_show_in: Vec<String>,
     /// `DBusActivatable=true` — aplikacja startuje przez D-Bus (może nie mieć binarki).
     pub dbus_activatable: bool,
+    /// `StartupWMClass` — klasa okna X11 / `app_id` Waylanda, gdy różni się od id wpisu.
+    pub wm_class: Option<String>,
     /// Ścieżka pliku `.desktop` — pozwala uruchomić aplikację przez `gio launch`,
     /// które obsługuje `Path=`, kody pól (`%u`) i aktywację D-Bus.
     pub desktop_path: Option<PathBuf>,
@@ -154,6 +156,7 @@ pub fn parse(content: &str, lang: Option<&str>) -> Option<DesktopApp> {
     let mut not_show_in: Vec<String> = Vec::new();
     let mut dbus_activatable = false;
     let mut categories = Vec::new();
+    let mut wm_class = None;
 
     let name_key = lang.map(|l| format!("Name[{l}]"));
     let comment_key = lang.map(|l| format!("Comment[{l}]"));
@@ -185,6 +188,7 @@ pub fn parse(content: &str, lang: Option<&str>) -> Option<DesktopApp> {
             "OnlyShowIn" => only_show_in = split_list(v),
             "NotShowIn" => not_show_in = split_list(v),
             "DBusActivatable" => dbus_activatable = v.eq_ignore_ascii_case("true"),
+            "StartupWMClass" => wm_class = Some(v.to_owned()),
             "NoDisplay" => nodisplay = v.eq_ignore_ascii_case("true"),
             "Hidden" => hidden = v.eq_ignore_ascii_case("true"),
             "Categories" => {
@@ -218,6 +222,7 @@ pub fn parse(content: &str, lang: Option<&str>) -> Option<DesktopApp> {
         only_show_in,
         not_show_in,
         dbus_activatable,
+        wm_class,
         desktop_path: None,
     })
 }
@@ -387,6 +392,66 @@ pub fn refresh_icon_names() {
     if let Ok(mut cache) = icon_names_lock().write() {
         *cache = None;
     }
+    if let Ok(mut cache) = app_names_lock().write() {
+        *cache = None;
+    }
+}
+
+static APP_NAMES: OnceLock<RwLock<Option<HashMap<String, String>>>> = OnceLock::new();
+
+fn app_names_lock() -> &'static RwLock<Option<HashMap<String, String>>> {
+    APP_NAMES.get_or_init(|| RwLock::new(None))
+}
+
+/// Mapowanie `app_id`/`StartupWMClass` → czytelna (zlokalizowana) nazwa aplikacji.
+fn app_names_from(apps: &[DesktopApp]) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for app in apps {
+        let mut keys: Vec<String> = Vec::new();
+        if let Some(stem) = app
+            .desktop_path
+            .as_ref()
+            .and_then(|path| path.file_stem())
+            .and_then(|stem| stem.to_str())
+        {
+            let stem = stem.to_lowercase();
+            keys.push(stem.clone());
+            // Część aplikacji podaje jako `app_id` pełny identyfikator wpisu.
+            keys.push(format!("{stem}.desktop"));
+        }
+        if let Some(wm_class) = &app.wm_class {
+            keys.push(wm_class.to_lowercase());
+        }
+        keys.push(app.name.to_lowercase());
+        for key in keys {
+            map.entry(key).or_insert_with(|| app.name.clone());
+        }
+    }
+    map
+}
+
+/// Czytelna (zlokalizowana) nazwa aplikacji dla `app_id` okna.
+///
+/// Kompozytor przekazuje taskbarowi tylko `app_id` (np. `eu.luna.Settings`),
+/// a nie wpis `.desktop`. Dzięki tej mapie taskbar pokazuje „Ustawienia”
+/// zamiast identyfikatora, gdy okno nie ma jeszcze tytułu.
+pub fn name_for_app_id(app_id: &str) -> Option<String> {
+    let key = app_id.trim().to_lowercase();
+    if key.is_empty() {
+        return None;
+    }
+    let lock = app_names_lock();
+    if let Ok(cache) = lock.read() {
+        if let Some(map) = cache.as_ref() {
+            return map.get(&key).cloned();
+        }
+    }
+    let map = app_names_from(&scan());
+    let hit = map.get(&key).cloned();
+    if let Ok(mut cache) = lock.write() {
+        *cache = Some(map);
+    }
+    hit
 }
 
 /// Oryginalna nazwa ikony (`Icon=`) dla `app_id` okna.
@@ -825,6 +890,39 @@ Categories=Network;WebBrowser;
     }
 
     #[test]
+    fn taskbar_names_use_desktop_entry_name() {
+        let app = DesktopApp {
+            name: "Ustawienia".into(),
+            exec: "luna-settings".into(),
+            icon: None,
+            comment: None,
+            terminal: false,
+            categories: Vec::new(),
+            try_exec: None,
+            only_show_in: Vec::new(),
+            not_show_in: Vec::new(),
+            dbus_activatable: false,
+            wm_class: Some("org.luna.Settings".into()),
+            desktop_path: Some(PathBuf::from(
+                "/usr/share/applications/eu.luna.Settings.desktop",
+            )),
+        };
+        let map = app_names_from(std::slice::from_ref(&app));
+        for key in [
+            "eu.luna.settings",
+            "eu.luna.settings.desktop",
+            "org.luna.settings",
+            "ustawienia",
+        ] {
+            assert_eq!(
+                map.get(key).map(String::as_str),
+                Some("Ustawienia"),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
     fn icon_heuristics_cover_common_categories() {
         let mk = |cat: &str, name: &str| DesktopApp {
             name: name.into(),
@@ -841,6 +939,7 @@ Categories=Network;WebBrowser;
             only_show_in: Vec::new(),
             not_show_in: Vec::new(),
             dbus_activatable: false,
+            wm_class: None,
             desktop_path: None,
         };
         assert_eq!(

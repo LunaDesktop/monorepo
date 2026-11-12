@@ -18,7 +18,9 @@ use std::time::{Duration, Instant};
 
 use libluna_core::desktop::{self, DesktopEntry, DesktopItemKind, DesktopSettings};
 use libluna_core::{ButtonState, Event, Point, PointerButton, Rect, ScrollEvent, Size, Theme};
+use libluna_i18n::tr;
 use libluna_platform::{run, AppConfig, Frame, InputRegion, LayerConfig};
+use libluna_render::TextEngine;
 use libluna_widgets::PaintCtx;
 use luna::desktop as view;
 use luna::panel::THICKNESS;
@@ -40,7 +42,7 @@ struct Menu {
 }
 
 struct MenuRow {
-    label: &'static str,
+    label: String,
     action: MenuAction,
 }
 
@@ -167,27 +169,27 @@ impl DesktopApp {
         match target.and_then(|i| placed.get(i)) {
             Some(item) => {
                 rows.push(MenuRow {
-                    label: "Otwórz",
+                    label: tr("Open"),
                     action: MenuAction::Open,
                 });
                 if item.entry.kind != DesktopItemKind::Dir {
                     rows.push(MenuRow {
-                        label: "Pokaż w Plikach",
+                        label: tr("Show in Files"),
                         action: MenuAction::ShowInFiles,
                     });
                 }
                 rows.push(MenuRow {
-                    label: "Przenieś do kosza",
+                    label: tr("Move to Trash"),
                     action: MenuAction::Trash,
                 });
             }
             None => {
                 rows.push(MenuRow {
-                    label: "Nowy folder",
+                    label: tr("New Folder"),
                     action: MenuAction::NewFolder,
                 });
                 rows.push(MenuRow {
-                    label: "Odśwież",
+                    label: tr("Refresh"),
                     action: MenuAction::Refresh,
                 });
             }
@@ -261,7 +263,7 @@ impl DesktopApp {
                     }
                     // Klik w otwarte menu: wykonaj pozycję albo zamknij.
                     if let Some(menu) = &self.menu {
-                        let rect = menu_rect(menu, size, &frame.theme);
+                        let rect = menu_rect(menu, size, &frame.theme, frame.text);
                         if let Some(index) = menu_item_at(rect, &menu.rows, button.position) {
                             let action = menu.rows[index].action;
                             self.run_menu_action(action, placed);
@@ -390,14 +392,28 @@ fn distance(a: Point, b: Point) -> f64 {
     ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt()
 }
 
-fn menu_rect(menu: &Menu, size: Size, _theme: &Theme) -> Rect {
-    const W: f64 = 200.0;
+fn menu_rect(menu: &Menu, size: Size, theme: &Theme, text: &TextEngine) -> Rect {
+    const MIN_W: f64 = 200.0;
     const ROW_H: f64 = 32.0;
     const PAD: f64 = 6.0;
     let h = PAD * 2.0 + menu.rows.len() as f64 * ROW_H;
-    let x = menu.at.x.clamp(4.0, (size.width - W - 4.0).max(4.0));
+    // Szerokość z najdłuższej etykiety — tłumaczenia bywają dłuższe niż angielski.
+    let label_w = menu
+        .rows
+        .iter()
+        .map(|row| {
+            text.measure(
+                &row.label,
+                theme.typography.body.size,
+                libluna_core::style::weight::NORMAL,
+            )
+            .width
+        })
+        .fold(0.0, f64::max);
+    let w = (label_w + 2.0 * 10.0 + 14.0).max(MIN_W);
+    let x = menu.at.x.clamp(4.0, (size.width - w - 4.0).max(4.0));
     let y = menu.at.y.clamp(4.0, (size.height - h - 4.0).max(4.0));
-    Rect::from_xywh(x, y, W, h)
+    Rect::from_xywh(x, y, w, h)
 }
 
 fn menu_item_at(rect: Rect, rows: &[MenuRow], p: Point) -> Option<usize> {
@@ -416,7 +432,7 @@ fn menu_item_at(rect: Rect, rows: &[MenuRow], p: Point) -> Option<usize> {
 
 fn paint_menu(ctx: &mut PaintCtx, menu: &Menu, size: Size, pointer: &Option<Point>) {
     let t = ctx.theme;
-    let rect = menu_rect(menu, size, t);
+    let rect = menu_rect(menu, size, t, ctx.text);
     ctx.scene
         .fill_rounded_rect(rect, t.radius.medium, t.colors.card_bg);
     ctx.scene
@@ -443,7 +459,7 @@ fn paint_menu(ctx: &mut PaintCtx, menu: &Menu, size: Size, pointer: &Option<Poin
         ctx.label_left(
             r.x() + 10.0,
             r.center().y,
-            row.label,
+            &row.label,
             t.typography.body.size,
             libluna_core::style::weight::NORMAL,
             color,
@@ -452,8 +468,13 @@ fn paint_menu(ctx: &mut PaintCtx, menu: &Menu, size: Size, pointer: &Option<Poin
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Wielojęzyczność: ten sam mechanizm co w powłoce i aplikacjach Luny
+    // (język z Ustawień lub ze środowiska sesji).
+    libluna_i18n::set_locale(libluna_i18n::preferred_locale());
+    libluna_i18n::load_catalogs_from_dirs();
+
     let mut app = DesktopApp::new();
-    let config = AppConfig::new("Pulpit")
+    let config = AppConfig::new(tr("Desktop"))
         .app_id("eu.paganlinux.Luna.Desktop")
         .layer(LayerConfig::background("luna-desktop"))
         .transparent(true)

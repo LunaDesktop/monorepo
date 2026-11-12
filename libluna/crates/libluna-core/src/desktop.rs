@@ -30,8 +30,11 @@ pub enum DesktopItemKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesktopEntry {
     pub path: PathBuf,
+    /// Czytelna nazwa: nazwa pliku/katalogu albo zlokalizowane `Name` skrótu.
     pub name: String,
     pub kind: DesktopItemKind,
+    /// `Icon=` ze skrótu `.desktop` (odczytane raz przy skanowaniu, bez I/O na klatkę).
+    pub icon: Option<String>,
 }
 
 /// Ustawienia pulpitu (`~/.config/luna/desktop.conf`).
@@ -217,27 +220,40 @@ pub fn entry_for(path: &Path) -> Option<DesktopEntry> {
             path: path.to_path_buf(),
             name,
             kind: DesktopItemKind::Dir,
+            icon: None,
         });
     }
     if !meta.is_file() {
         return None;
     }
     if name.to_ascii_lowercase().ends_with(".desktop") {
-        if let Ok(text) = std::fs::read_to_string(path) {
-            if shortcut_hidden(&text) {
+        // Czytamy plik raz: z tej samej treści bierzemy `Hidden`, czytelną,
+        // zlokalizowaną nazwę (`Name[pl]` → `Name` → nazwa pliku) i `Icon`.
+        let text = std::fs::read_to_string(path).ok();
+        if let Some(text) = &text {
+            if shortcut_hidden(text) {
                 return None;
             }
         }
+        let name = match &text {
+            Some(text) => shortcut_name_from_text(path, text),
+            None => fallback_stem(path),
+        };
+        let icon = text
+            .as_deref()
+            .and_then(|text| field_from_text(text, "Icon"));
         return Some(DesktopEntry {
             path: path.to_path_buf(),
             name,
             kind: DesktopItemKind::Shortcut,
+            icon,
         });
     }
     Some(DesktopEntry {
         path: path.to_path_buf(),
         name,
         kind: DesktopItemKind::File,
+        icon: None,
     })
 }
 
@@ -267,6 +283,21 @@ pub fn shortcut_hidden(text: &str) -> bool {
 /// Pole z sekcji `[Desktop Entry]` pliku `.desktop`.
 fn shortcut_field(path: &Path, wanted: &str) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
+    field_from_text(&text, wanted)
+}
+
+/// Pole z już odczytanej treści wpisu (ostatnia wartość wygrywa).
+fn field_from_text(text: &str, wanted: &str) -> Option<String> {
+    entry_fields(text)
+        .into_iter()
+        .rev()
+        .find(|(key, _)| key == wanted)
+        .map(|(_, value)| value)
+}
+
+/// Wszystkie pary `klucz = wartość` z sekcji `[Desktop Entry]`.
+fn entry_fields(text: &str) -> Vec<(String, String)> {
+    let mut fields = Vec::new();
     let mut in_entry = false;
     for raw in text.lines() {
         let line = raw.trim();
@@ -279,21 +310,115 @@ fn shortcut_field(path: &Path, wanted: &str) -> Option<String> {
         }
         if let Some((key, value)) = line.split_once('=') {
             let value = value.trim();
-            if key.trim() == wanted && !value.is_empty() {
-                return Some(value.to_owned());
+            if !value.is_empty() {
+                fields.push((key.trim().to_owned(), value.to_owned()));
             }
         }
+    }
+    fields
+}
+
+/// Język interfejsu ze standardowych zmiennych (`LC_ALL` → `LC_MESSAGES` →
+/// `LANGUAGE` → `LANG`), w postaci `(pełny_tag, język)` — np. `("pl_PL", "pl")`.
+///
+/// `libluna-core` nie zależy od `libluna-i18n`, więc robimy to lokalnie, według
+/// tej samej kolejności zmiennych. Bez locale wracamy do `Name`.
+fn desktop_locale() -> Option<(String, String)> {
+    for key in ["LC_ALL", "LC_MESSAGES", "LANGUAGE", "LANG"] {
+        let Ok(value) = std::env::var(key) else {
+            continue;
+        };
+        // `LANGUAGE` może być listą priorytetów (`pl:de:en`).
+        let first = value.split(':').next().unwrap_or("");
+        let first = first.split('.').next().unwrap_or(first);
+        let first = first.split('@').next().unwrap_or(first);
+        if first.is_empty()
+            || first.eq_ignore_ascii_case("C")
+            || first.eq_ignore_ascii_case("POSIX")
+        {
+            continue;
+        }
+        let language = first
+            .split(['_', '-'])
+            .next()
+            .unwrap_or(first)
+            .to_ascii_lowercase();
+        return Some((first.to_owned(), language));
     }
     None
 }
 
-/// Nazwa ikony/etykiety skrótu `.desktop` (pole `Name`), z fallbackiem na nazwę pliku.
+/// Czytelna nazwa skrótu `.desktop` z już odczytanej treści pliku.
+///
+/// Kolejność: `Name[pełny_tag]` → jakikolwiek `Name[<język>_*]` → `Name` →
+/// nazwa pliku bez rozszerzenia. Dzięki temu na pulpicie widać „Ustawienia”,
+/// a nie `org.luna.Settings.desktop`.
+fn shortcut_name_from_text(path: &Path, text: &str) -> String {
+    let locale = desktop_locale();
+    shortcut_name_localized(
+        path,
+        text,
+        locale
+            .as_ref()
+            .map(|(tag, language)| (tag.as_str(), language.as_str())),
+    )
+}
+
+/// Wariant [`shortcut_name_from_text`] z jawnie podanym językiem (testy).
+fn shortcut_name_localized(path: &Path, text: &str, locale: Option<(&str, &str)>) -> String {
+    let fields = entry_fields(text);
+    if let Some((tag, language)) = locale {
+        if let Some(name) = fields
+            .iter()
+            .rev()
+            .find(|(key, _)| key.eq_ignore_ascii_case(&format!("Name[{tag}]")))
+            .map(|(_, value)| value.clone())
+        {
+            return name;
+        }
+        // Np. wpis ma `Name[pl_PL]`, a użytkownik ma samo `pl`.
+        if let Some(name) = fields
+            .iter()
+            .rev()
+            .find(|(key, _)| {
+                key.strip_prefix("Name[")
+                    .and_then(|rest| rest.strip_suffix(']'))
+                    .map(|entry_tag| {
+                        entry_tag
+                            .split(['_', '-'])
+                            .next()
+                            .unwrap_or(entry_tag)
+                            .eq_ignore_ascii_case(language)
+                    })
+                    .unwrap_or(false)
+            })
+            .map(|(_, value)| value.clone())
+        {
+            return name;
+        }
+    }
+    fields
+        .iter()
+        .rev()
+        .find(|(key, _)| key.eq_ignore_ascii_case("Name"))
+        .map(|(_, value)| value.clone())
+        .unwrap_or_else(|| fallback_stem(path))
+}
+
+/// Nazwa pliku bez `.desktop` — ostatnia linia obrony, gdy wpis nie ma `Name`.
+fn fallback_stem(path: &Path) -> String {
+    path.file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// Nazwa ikony/etykiety skrótu `.desktop`: zlokalizowane `Name[xx]`, `Name`,
+/// a dopiero na końcu nazwa pliku bez rozszerzenia.
 pub fn shortcut_name(path: &Path) -> String {
-    shortcut_field(path, "Name").unwrap_or_else(|| {
-        path.file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| path.display().to_string())
-    })
+    match std::fs::read_to_string(path) {
+        Ok(text) => shortcut_name_from_text(path, &text),
+        Err(_) => fallback_stem(path),
+    }
 }
 
 /// Nazwa ikony z pliku `.desktop` (pole `Icon`), jeśli jest podana.
@@ -434,10 +559,44 @@ mod tests {
         .unwrap();
         let entries = scan(&[dir.clone()]);
         let names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
-        assert_eq!(names, vec!["Folder", "notatka.txt", "widoczna.desktop"]);
+        // Skrót pokazuje `Name` z `.desktop`, nie nazwę pliku.
+        assert_eq!(names, vec!["Folder", "notatka.txt", "Widoczna"]);
         assert_eq!(entries[0].kind, DesktopItemKind::Dir);
         assert_eq!(entries[2].kind, DesktopItemKind::Shortcut);
         assert_eq!(shortcut_name(&dir.join("widoczna.desktop")), "Widoczna");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn localized_shortcut_name_prefers_language() {
+        let dir = temp("localized");
+        let path = dir.join("org.luna.Settings.desktop");
+        let text = "[Desktop Entry]\nName=Settings\nName[pl]=Ustawienia\nName[de]=Einstellungen\n";
+        assert_eq!(
+            shortcut_name_localized(&path, text, Some(("pl_PL", "pl"))),
+            "Ustawienia"
+        );
+        assert_eq!(
+            shortcut_name_localized(&path, text, Some(("de_DE", "de"))),
+            "Einstellungen"
+        );
+        // Brak tłumaczenia dla języka → `Name`.
+        assert_eq!(
+            shortcut_name_localized(&path, text, Some(("fr_FR", "fr"))),
+            "Settings"
+        );
+        assert_eq!(shortcut_name_localized(&path, text, None), "Settings");
+        // Wpis ma tylko wariant regionalny — dopasowujemy po języku.
+        let regional = "[Desktop Entry]\nName=Settings\nName[pl_PL]=Ustawienia PL\n";
+        assert_eq!(
+            shortcut_name_localized(&path, regional, Some(("pl", "pl"))),
+            "Ustawienia PL"
+        );
+        // Bez żadnego `Name` zostaje nazwa pliku bez `.desktop`.
+        assert_eq!(
+            shortcut_name_localized(&path, "[Desktop Entry]\n", Some(("pl", "pl"))),
+            "org.luna.Settings"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

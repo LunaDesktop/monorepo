@@ -223,13 +223,21 @@ pub fn parse_desktop_file(path: &Path, id: &str) -> Option<DesktopApp> {
 
 /// Czysty parser wpisu (testowalny bez systemu plików).
 pub fn parse_desktop_entry(text: &str, id: &str) -> Option<DesktopApp> {
+    parse_desktop_entry_lang(text, id, Some(libluna_i18n::locale().language()))
+}
+
+/// Wariant [`parse_desktop_entry`] z jawnie podanym językiem (testy).
+fn parse_desktop_entry_lang(text: &str, id: &str, lang: Option<&str>) -> Option<DesktopApp> {
     let mut in_entry = false;
     let mut name = None;
+    let mut localized_name = None;
     let mut exec = None;
     let mut kind = None;
     let mut hidden = false;
     let mut categories = Vec::new();
     let mut mime_types = Vec::new();
+    // Nazwa w języku interfejsu (`Name[pl]`), jak w launcherze i na pulpicie.
+    let name_key = lang.map(|lang| format!("Name[{lang}]"));
     for raw in text.lines() {
         let line = raw.trim();
         if line.starts_with('[') {
@@ -245,6 +253,7 @@ pub fn parse_desktop_entry(text: &str, id: &str) -> Option<DesktopApp> {
         let value = value.trim();
         match key.trim() {
             "Name" => name = Some(value.to_owned()),
+            key if name_key.as_deref() == Some(key) => localized_name = Some(value.to_owned()),
             "Exec" => exec = Some(value.to_owned()),
             "Type" => kind = Some(value.to_owned()),
             "NoDisplay" | "Hidden" => hidden = hidden || matches!(value, "true" | "True" | "1"),
@@ -268,7 +277,7 @@ pub fn parse_desktop_entry(text: &str, id: &str) -> Option<DesktopApp> {
     if kind.as_deref() != Some("Application") || hidden {
         return None;
     }
-    let name = name.filter(|name| !name.is_empty())?;
+    let name = localized_name.or(name).filter(|name| !name.is_empty())?;
     let exec = exec.filter(|exec| !exec.is_empty())?;
     Some(DesktopApp {
         desktop_id: id.to_owned(),
@@ -368,6 +377,19 @@ MimeType=text/html;x-scheme-handler/http;x-scheme-handler/https;
         assert!(parse_desktop_entry(&hidden, "ukryta.desktop").is_none());
         let library = FIREFOX.replace("Type=Application", "Type=Link");
         assert!(parse_desktop_entry(&library, "link.desktop").is_none());
+    }
+
+    #[test]
+    fn localized_name_is_used_when_available() {
+        let text = "[Desktop Entry]\nType=Application\nName=Settings\nName[pl]=Ustawienia\nExec=luna-settings\n";
+        let app =
+            parse_desktop_entry_lang(text, "org.luna.Settings.desktop", Some("pl")).expect("wpis");
+        assert_eq!(app.name, "Ustawienia");
+        let app =
+            parse_desktop_entry_lang(text, "org.luna.Settings.desktop", Some("de")).expect("wpis");
+        assert_eq!(app.name, "Settings");
+        let app = parse_desktop_entry_lang(text, "org.luna.Settings.desktop", None).expect("wpis");
+        assert_eq!(app.name, "Settings");
     }
 
     #[test]

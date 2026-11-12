@@ -8,10 +8,9 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use libluna_core::desktop::{
-    shortcut_icon, shortcut_name, DesktopEntry, DesktopItemKind, DesktopPositions, DesktopSettings,
-};
+use libluna_core::desktop::{DesktopEntry, DesktopItemKind, DesktopPositions, DesktopSettings};
 use libluna_core::{Color, Point, Rect, Theme};
+use libluna_i18n::tr;
 use libluna_widgets::{paint_icon, IconName, PaintCtx};
 
 /// Odstęp ikony od górnej krawędzi komórki.
@@ -138,8 +137,8 @@ pub fn icon_for_entry(entry: &DesktopEntry) -> IconName {
                 .file_stem()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_default();
-            let icon = shortcut_icon(&entry.path);
-            crate::apps::icon_for_hint(&stem, &shortcut_name(&entry.path), icon.as_deref(), &[], "")
+            // Nazwa i `Icon=` są już odczytane przy skanowaniu — bez I/O na klatkę.
+            crate::apps::icon_for_hint(&stem, &entry.name, entry.icon.as_deref(), &[], "")
         }
         DesktopItemKind::File => icon_for_file(&entry.name),
     }
@@ -365,11 +364,12 @@ fn spawn(program: &str, args: &[&std::ffi::OsStr]) -> bool {
 /// Nowy folder o unikalnej nazwie („Nowy folder”, „Nowy folder 2”, …).
 pub fn new_folder(dir: &Path) -> Option<PathBuf> {
     let _ = std::fs::create_dir_all(dir);
+    let base = tr("New Folder");
     for n in 1..100 {
         let name = if n == 1 {
-            "Nowy folder".to_owned()
+            base.clone()
         } else {
-            format!("Nowy folder {n}")
+            format!("{base} {n}")
         };
         let path = dir.join(name);
         if !path.exists() {
@@ -391,9 +391,10 @@ mod tests {
 
     fn entry(name: &str, kind: DesktopItemKind) -> DesktopEntry {
         DesktopEntry {
-            path: PathBuf::from(format!("/tmp/{name}")),
+            path: std::path::PathBuf::from(format!("/tmp/{name}")),
             name: name.to_owned(),
             kind,
+            icon: None,
         }
     }
 
