@@ -32,8 +32,14 @@ use std::error::Error;
 use std::time::Duration;
 
 use libluna_core::ThemeSettings;
-use libluna_i18n::{set_locale, tr};
+use libluna_i18n::{set_locale, tr_args};
 use libluna_platform::{run, AppConfig, Frame};
+
+/// Tytuł instalatora z nazwą systemu operacyjnego.
+pub fn app_title() -> String {
+    let system = libluna_core::os_name();
+    tr_args("Install {system}", &[("system", &system)])
+}
 
 /// Uruchamia okno instalatora (binarka `luna-installer`).
 pub fn run_installer() -> Result<(), Box<dyn Error>> {
@@ -48,7 +54,7 @@ pub fn run_installer() -> Result<(), Box<dyn Error>> {
     let mut app = App::new();
     let mut ui_language = libluna_i18n::locale().language().to_owned();
 
-    let config = AppConfig::new(tr("Install Luna"))
+    let config = AppConfig::new(app_title())
         .app_id("eu.luna.Installer")
         .initial_size(980, 720)
         .settings(settings)
@@ -59,7 +65,7 @@ pub fn run_installer() -> Result<(), Box<dyn Error>> {
         let language = libluna_i18n::locale().language().to_owned();
         if language != ui_language {
             ui_language = language;
-            frame.set_title(tr("Install Luna"));
+            frame.set_title(app_title());
         }
 
         app.poll_job();

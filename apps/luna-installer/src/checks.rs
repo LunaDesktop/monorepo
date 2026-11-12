@@ -92,9 +92,13 @@ fn architecture() -> Check {
 
 fn live_image(live: bool) -> Check {
     if live {
+        let system = libluna_core::os_name();
         Check::new(
             libluna_i18n::tr("Live image"),
-            libluna_i18n::tr("Running from the Luna live image"),
+            libluna_i18n::tr_args(
+                "Running from the {system} live image",
+                &[("system", &system)],
+            ),
             Level::Ok,
         )
     } else {
@@ -132,7 +136,7 @@ fn secure_boot() -> Check {
     match secure_boot_enabled() {
         Some(true) => Check::new(
             libluna_i18n::tr("Secure Boot"),
-            libluna_i18n::tr("Enabled — Luna's boot loader is not signed; disable Secure Boot or enroll keys after installation"),
+            libluna_i18n::tr("Enabled — boot loader is not signed; disable Secure Boot or enroll keys after installation"),
             Level::Warning,
         ),
         Some(false) => Check::new(

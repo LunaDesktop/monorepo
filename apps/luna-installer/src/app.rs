@@ -59,7 +59,10 @@ impl Step {
             Self::Disk => libluna_i18n::tr("Disk & partitioning"),
             Self::Account => libluna_i18n::tr("Account"),
             Self::Summary => libluna_i18n::tr("Summary"),
-            Self::Progress => libluna_i18n::tr("Installing Luna"),
+            Self::Progress => {
+                let system = libluna_core::os_name();
+                libluna_i18n::tr_args("Installing {system}", &[("system", &system)])
+            }
             Self::Done => libluna_i18n::tr("Finished"),
         }
     }
@@ -155,7 +158,10 @@ impl PickerKind {
             Self::Model => libluna_i18n::tr("Keyboard model"),
             Self::Timezone => libluna_i18n::tr("Timezone"),
             Self::Disk => libluna_i18n::tr("Disk"),
-            Self::Mode => libluna_i18n::tr("How should Luna use this disk?"),
+            Self::Mode => {
+                let system = libluna_core::os_name();
+                libluna_i18n::tr_args("How should {system} use this disk?", &[("system", &system)])
+            }
             Self::RootPartition => libluna_i18n::tr("Root partition"),
             Self::EfiPartition => libluna_i18n::tr("EFI system partition"),
             Self::SwapPartition => libluna_i18n::tr("Swap partition (optional)"),
@@ -910,12 +916,20 @@ impl App {
     }
 
     pub fn confirm_label(&self) -> String {
+        let system = libluna_core::os_name();
         match self.options.mode {
-            PartitionMode::EraseDisk => libluna_i18n::tr("Erase the disk and install Luna"),
-            PartitionMode::FreeSpace => libluna_i18n::tr("Use the free space and install Luna"),
-            PartitionMode::Manual => {
-                libluna_i18n::tr("Format the selected partitions and install Luna")
-            }
+            PartitionMode::EraseDisk => libluna_i18n::tr_args(
+                "Erase the disk and install {system}",
+                &[("system", &system)],
+            ),
+            PartitionMode::FreeSpace => libluna_i18n::tr_args(
+                "Use the free space and install {system}",
+                &[("system", &system)],
+            ),
+            PartitionMode::Manual => libluna_i18n::tr_args(
+                "Format the selected partitions and install {system}",
+                &[("system", &system)],
+            ),
         }
     }
 
@@ -924,9 +938,13 @@ impl App {
             PartitionMode::EraseDisk => {
                 libluna_i18n::tr("The selected disk is erased completely.")
             }
-            PartitionMode::FreeSpace => libluna_i18n::tr(
-                "Existing systems are kept; Luna is installed into unallocated space.",
-            ),
+            PartitionMode::FreeSpace => {
+                let system = libluna_core::os_name();
+                libluna_i18n::tr_args(
+                    "Existing systems are kept; {system} is installed into unallocated space.",
+                    &[("system", &system)],
+                )
+            }
             PartitionMode::Manual => libluna_i18n::tr(
                 "Only the selected root/swap partitions are formatted; the EFI partition is reused.",
             ),
@@ -974,7 +992,11 @@ impl App {
             }
             Step::Disk => {
                 if self.selected_disk().is_none() {
-                    self.banner = Some(libluna_i18n::tr("Choose a disk to install Luna on"));
+                    let system = libluna_core::os_name();
+                    self.banner = Some(libluna_i18n::tr_args(
+                        "Choose a disk to install {system} on",
+                        &[("system", &system)],
+                    ));
                     return;
                 }
                 let mut issues = plan::validate_options(&self.options);
@@ -1050,7 +1072,11 @@ impl App {
             }
             Step::Summary => {
                 let Some(plan) = self.plan() else {
-                    self.banner = Some(libluna_i18n::tr("Choose a disk to install Luna on"));
+                    let system = libluna_core::os_name();
+                    self.banner = Some(libluna_i18n::tr_args(
+                        "Choose a disk to install {system} on",
+                        &[("system", &system)],
+                    ));
                     return;
                 };
                 if self.options.update_system && !(self.network.connected && self.network.internet)
@@ -1295,9 +1321,10 @@ impl App {
         match backend::start(&plan) {
             Ok(job) => {
                 self.log.clear();
+                let system = libluna_core::os_name();
                 self.log.push(libluna_i18n::tr_args(
-                    "Installing Luna on {disk}…",
-                    &[("disk", &plan.disk.path)],
+                    "Installing {system} on {disk}…",
+                    &[("system", &system), ("disk", &plan.disk.path)],
                 ));
                 if self.options.update_system {
                     self.log.push(libluna_i18n::tr("System update requested"));

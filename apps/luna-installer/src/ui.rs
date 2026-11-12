@@ -184,7 +184,13 @@ fn step_description(step: Step) -> String {
         Step::Region => tr("Set the timezone. It is detected automatically and can be changed."),
         Step::Network => tr("An internet connection is optional, but required for system updates during installation."),
         Step::Requirements => tr("The installer checks the live image, firmware, memory, power and required tools."),
-        Step::Disk => tr("Choose a disk, then how Luna should use it. Nothing is written until you confirm the summary."),
+        Step::Disk => {
+            let system = libluna_core::os_name();
+            tr_args(
+                "Choose a disk, then how {system} should use it. Nothing is written until you confirm the summary.",
+                &[("system", &system)],
+            )
+        }
         Step::Account => tr("Create the account you will use to log in. It can administer the computer."),
         Step::Summary => tr("Review every choice before the installer starts."),
         Step::Progress => tr("Do not turn off the computer. This can take several minutes."),
@@ -327,10 +333,14 @@ fn layout_picker(app: &App, area: Rect) -> Option<PickerLayout> {
 }
 
 fn layout_welcome(_app: &App, stack: &mut Stack, layout: &mut Layout) {
+    let system = libluna_core::os_name();
     stack.space(76.0);
     stack.note(
         layout,
-        tr("This guided installer copies the running Luna system to a disk."),
+        tr_args(
+            "This guided installer copies the running {system} system to a disk.",
+            &[("system", &system)],
+        ),
     );
     stack.space(8.0);
     stack.note(
@@ -399,7 +409,11 @@ fn layout_disk(app: &App, stack: &mut Stack, layout: &mut Layout) {
     stack.label(layout, tr("Disk"));
     stack.select_row(layout, Hit::OpenPicker(PickerKind::Disk));
     stack.space(8.0);
-    stack.label(layout, tr("How should Luna use this disk?"));
+    let system = libluna_core::os_name();
+    stack.label(
+        layout,
+        tr_args("How should {system} use this disk?", &[("system", &system)]),
+    );
     stack.select_row(layout, Hit::OpenPicker(PickerKind::Mode));
     stack.note(layout, app.options.mode.description());
     if app.options.mode == PartitionMode::FreeSpace {
@@ -500,14 +514,15 @@ fn layout_summary(app: &App, stack: &mut Stack, layout: &mut Layout) {
 
 fn layout_progress(app: &App, stack: &mut Stack, layout: &mut Layout, theme: &Theme) {
     let top = layout.viewport.y();
+    let margin = 12.0;
     layout.save_log = Some(Rect::from_xywh(
-        layout.viewport.right() - 120.0,
+        layout.viewport.right() - margin - 120.0,
         top,
         120.0,
         30.0,
     ));
     layout.log_toggle = Some(Rect::from_xywh(
-        layout.viewport.right() - 250.0,
+        layout.viewport.right() - margin - 250.0,
         top,
         120.0,
         30.0,
@@ -517,35 +532,22 @@ fn layout_progress(app: &App, stack: &mut Stack, layout: &mut Layout, theme: &Th
 }
 
 fn layout_done(app: &App, stack: &mut Stack, layout: &mut Layout) {
-    let y = layout.area.bottom() - 52.0;
+    let margin = PAD;
+    let y = layout.area.bottom() - 56.0;
     let width = 150.0;
     let gap = 12.0;
-    let close = Rect::from_xywh(layout.area.right() - width, y, width, 38.0);
+    let right = layout.area.right() - margin;
+    let close = Rect::from_xywh(right - width, y, width, 38.0);
     layout.rows.push((Hit::Close, close));
-    let save = Rect::from_xywh(layout.area.right() - 2.0 * width - gap, y, width, 38.0);
+    let save = Rect::from_xywh(right - 2.0 * width - gap, y, width, 38.0);
     layout.save_log = Some(save);
     if matches!(app.finished, Some(Ok(()))) {
-        let restart = Rect::from_xywh(
-            layout.area.right() - 3.0 * width - 2.0 * gap,
-            y,
-            width,
-            38.0,
-        );
-        let power = Rect::from_xywh(
-            layout.area.right() - 4.0 * width - 3.0 * gap,
-            y,
-            width,
-            38.0,
-        );
+        let restart = Rect::from_xywh(right - 3.0 * width - 2.0 * gap, y, width, 38.0);
+        let power = Rect::from_xywh(right - 4.0 * width - 3.0 * gap, y, width, 38.0);
         layout.rows.push((Hit::Restart, restart));
         layout.rows.push((Hit::PowerOff, power));
     } else {
-        let retry = Rect::from_xywh(
-            layout.area.right() - 3.0 * width - 2.0 * gap,
-            y,
-            width,
-            38.0,
-        );
+        let retry = Rect::from_xywh(right - 3.0 * width - 2.0 * gap, y, width, 38.0);
         layout.rows.push((Hit::Retry, retry));
     }
     let _ = stack;
@@ -558,8 +560,9 @@ pub fn paint(app: &App, scene: &mut Scene, size: Size, theme: &Theme, text: &Tex
     ctx.scene
         .fill_rect(Rect::from_size(size), theme.colors.window_bg);
 
+    let system = libluna_core::os_name();
     let header = HeaderBar::new()
-        .title(tr("Install Luna"))
+        .title(tr_args("Install {system}", &[("system", &system)]))
         .controls(ControlsSide::Right);
     let hover_control = app
         .pointer
@@ -760,10 +763,11 @@ fn paint_welcome(_app: &App, ctx: &mut PaintCtx, lay: &Layout) {
         icon.deflate(Insets::splat(13.0)),
         colors.accent,
     );
+    let system = libluna_core::os_name();
     ctx.label_left(
         icon.right() + theme.spacing.md,
         icon.center().y - 8.0,
-        &tr("Install Luna"),
+        &tr_args("Install {system}", &[("system", &system)]),
         theme.typography.title.size,
         weight::BOLD,
         colors.text,
@@ -771,7 +775,7 @@ fn paint_welcome(_app: &App, ctx: &mut PaintCtx, lay: &Layout) {
     ctx.label_left(
         icon.right() + theme.spacing.md,
         icon.center().y + 20.0,
-        &tr("A guided installation of the Luna desktop"),
+        &tr_args("A guided installation of {system}", &[("system", &system)]),
         theme.typography.body.size,
         weight::NORMAL,
         colors.dim_text,
@@ -1186,10 +1190,11 @@ fn paint_progress(app: &App, ctx: &mut PaintCtx, lay: &Layout) {
             side,
         ),
     );
+    let system = libluna_core::os_name();
     ctx.label_center(
         lay.viewport.center().x,
         lay.viewport.y() + 6.0 + side + 26.0,
-        &tr("Installing Luna"),
+        &tr_args("Installing {system}", &[("system", &system)]),
         theme.typography.heading.size,
         weight::BOLD,
         colors.text,
@@ -1252,8 +1257,9 @@ fn paint_done(app: &App, ctx: &mut PaintCtx, lay: &Layout) {
     ctx.scene
         .fill_rounded_rect(circle, 32.0, color.scale_alpha(0.14));
     paint_icon(ctx, icon, circle.deflate(Insets::splat(18.0)), color);
+    let system = libluna_core::os_name();
     let title = if success {
-        tr("Luna is installed")
+        tr_args("{system} is installed", &[("system", &system)])
     } else {
         tr("Installation failed")
     };
