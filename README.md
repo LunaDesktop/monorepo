@@ -232,8 +232,10 @@ cargo test --manifest-path apps/luna-demo/Cargo.toml --test interaction       # 
 ## Instalacja środowiska na PC (testowo / na stałe)
 
 `scripts/install.sh` buduje binarki w trybie release i instaluje **środowisko Luna**
-(kompozytor `selene`, powłoka `luna-shell`, sesja `luna-session`, demo, tłumaczenia, motywy,
-wpis sesji Wayland, **ikonę sesji** oraz ekran logowania `luna-greeter`):
+(kompozytor `selene`, powłoka `luna-shell`, sesja `luna-session`, tłumaczenia, motywy,
+wpis sesji Wayland, **ikonę sesji** oraz ekran logowania `luna-greeter`).
+Demo/galeria widgetów (`luna-demo`, `luna-gallery`, `luna-showcase`) to narzędzie dla
+deweloperów — **nie** jest instalowane domyślnie; włącza je `--with-demo`.
 
 ```bash
 # instalacja bez roota — np. sam sklep w ~/.local
@@ -253,10 +255,14 @@ sudo ./scripts/install.sh --prefix /usr --uninstall
 
 # aktualizacja TYLKO jednego komponentu (np. terminala) — bez całego środowiska
 sudo ./scripts/install.sh --prefix /usr --only terminal
+
+# doinstalowanie demo/galerii widgetów (dokumentacja dla deweloperów)
+sudo ./scripts/install.sh --prefix /usr --with-demo
 ```
 
-Komponenty dla `--only`: `base`, `selene`, `luna`, `greeter`, `demo`, `settings`,
-`files`, `media`, `clock`, `store`, `editor`, `terminal`, `icons`. `base` instaluje tylko wspólne zasoby (sesja, tłumaczenia, motywy,
+Komponenty dla `--only`: `base`, `selene`, `luna`, `greeter`, `settings`,
+`files`, `media`, `clock`, `store`, `editor`, `terminal`, `icons` oraz `demo`
+(dokumentacja widgetów, tylko na żądanie). `base` instaluje tylko wspólne zasoby (sesja, tłumaczenia, motywy,
 ikona, licencja), a `icons` sam pastelowy pakiet ikon (`share/icons/Luna-Icons`:
 PNG 16–512 px + skalowalne SVG).
 

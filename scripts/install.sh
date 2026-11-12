@@ -2,7 +2,7 @@
 # Instalator środowiska Luna (libLuna + Selene + powłoka Luna) na zwykłym PC.
 #
 # Buduje binarki w trybie release i instaluje je do prefiksu (domyślnie /usr/local):
-#   bin/selene, bin/luna-shell, bin/luna-demo, bin/luna-session
+#   bin/selene, bin/luna-shell, bin/luna-session
 #   bin/luna-greeter, bin/luna-greeter-config, bin/luna-greeter-session (ekran logowania dla greetd)
 #   bin/luna-settings (centrum ustawień; zapis ekranu logowania przez pkexec)
 #   bin/luna-store (sklep: pacman/pag/apt/dnf/emerge/Flatpak + aktualizacje)
@@ -15,6 +15,11 @@
 #   bin/luna-terminal (emulator terminala: PTY + VT100/xterm na libLunie)
 #   bin/luna-media (przeglądarka obrazów i filmów: libLuna + ffmpeg)
 #   bin/luna-clock (zegar, minutnik, stoper, strefy czasowe i kalendarz)
+#
+# Demo/galeria widgetów (`bin/luna-demo`, `bin/luna-gallery`, `bin/luna-showcase`)
+# to dokumentacja dla deweloperów — **nie** instalujemy jej u zwykłych użytkowników.
+# Włącza się ją jawnie przez `--with-demo` (albo `--only demo`).
+#
 #   share/wayland-sessions/selene.desktop   (sesja „Luna” w menedżerze logowania)
 #   share/icons/hicolor/scalable/apps/luna.svg   (ikona sesji)
 #   share/icons/hicolor/<N>x<N>/apps/luna.png     (rastrowe, dla greeterów bez SVG)
@@ -31,6 +36,7 @@
 #   ./scripts/install.sh --dry-run            # tylko pokaż, co zostanie zrobione
 #   sudo ./scripts/install.sh --uninstall     # usuń zainstalowane pliki
 #   sudo ./scripts/install.sh --only terminal # aktualizuj TYLKO terminal (nie całe środowisko)
+#   sudo ./scripts/install.sh --with-demo     # doinstaluj demo/galerię widgetów (dev)
 #   sudo ./scripts/install.sh --keep-old      # nadpisz pliki bez usuwania starej wersji
 #   ./scripts/install.sh --user --only store  # instalacja bez roota do ~/.local
 #
@@ -52,6 +58,7 @@ uninstall=0
 keep_old=0
 purge_stale=0
 only=""
+with_demo=0
 
 # Znajduje cargo: $CARGO → PATH → typowe lokalizacje rustup/systemowe.
 find_cargo() {
@@ -89,6 +96,9 @@ Użycie: $prog [opcje]
   --only NAME      tylko jeden komponent: base, selene, luna, greeter,
                    demo, settings, files, media, clock, store, welcome,
                    installer, editor, terminal, icons
+  --with-demo      doinstaluj demo/galerię widgetów (luna-demo, luna-gallery,
+                   luna-showcase). Domyślnie pomijane — to narzędzie dla
+                   deweloperów, nie część pulpitu dla zwykłego użytkownika.
   -h, --help       ta pomoc
 
 Zmienne: CARGO (domyślnie: cargo), PREFIX, DESTDIR,
@@ -110,6 +120,7 @@ while [ $# -gt 0 ]; do
         --user) prefix="${HOME:?brak HOME}/.local"; shift ;;
         --only) only="$2"; shift 2 ;;
         --only=*) only="${1#*=}"; shift ;;
+        --with-demo) with_demo=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "nieznana opcja: $1" >&2; usage; exit 2 ;;
     esac
@@ -119,6 +130,11 @@ case "$only" in
     ""|base|selene|luna|greeter|demo|settings|files|media|clock|store|welcome|installer|editor|terminal|icons) ;;
     *) echo "nieznany komponent: $only (dozwolone: base, selene, luna, greeter, demo, settings, files, media, clock, store, welcome, installer, editor, terminal, icons)" >&2; exit 2 ;;
 esac
+
+# `--only demo` jest równoważne `--with-demo` (wybór komponentu to jawna zgoda).
+if [ "$only" = "demo" ]; then
+    with_demo=1
+fi
 
 dest="${destdir}${prefix}"
 
@@ -203,7 +219,21 @@ files() {
     emit "greeter"  "$lib/luna-greeter-config" "$dest/bin/luna-greeter-config" "755"
     emit "greeter"  "$root/de/session/luna-greeter-session" "$dest/bin/luna-greeter-session" "755"
     emit "greeter"  "$root/de/greetd/config.toml.example" "$dest/share/luna/greetd/config.toml.example" "644"
-    emit "demo"     "$lib/luna-demo"       "$dest/bin/luna-demo"       "755"
+    # Demo/galeria/showcase to dokumentacja widgetów dla deweloperów — nie jest
+    # częścią pulpitu zwykłego użytkownika. Instalujemy ją tylko na jawne żądanie
+    # (`--with-demo` / `--only demo`); przy `files all` (odinstalowanie i czysta
+    # instalacja) wypisujemy ją zawsze, żeby usunąć pozostałości po starszych wersjach.
+    if [ "$all" = "all" ] || [ "$with_demo" = 1 ]; then
+        emit "demo" "$lib/luna-demo" "$dest/bin/luna-demo" "755"
+        if [ "$all" = "all" ] || [ -f "$lib/gallery" ]; then
+            emit "demo" "$lib/gallery" "$dest/bin/luna-gallery" "755"
+        fi
+        # Dokumentacja widgetów libLuny (binarka `showcase` z luna-demo).
+        if [ "$all" = "all" ] || [ -f "$lib/showcase" ]; then
+            emit "demo" "$lib/showcase" "$dest/bin/luna-showcase" "755"
+            emit "demo" "$root/de/session/luna-showcase.desktop" "$dest/share/applications/luna-showcase.desktop" "644"
+        fi
+    fi
     # Komponenty opcjonalne: instalujemy tylko wtedy, gdy binarka istnieje.
     # `files all` pomija ten warunek — czyszczenie musi znać także stare cele.
     if [ "$all" = "all" ] || [ -f "$lib/luna-settings" ]; then
@@ -252,14 +282,6 @@ files() {
         emit "installer" "$lib/luna-installer" "$dest/bin/luna-installer" "755"
         emit "installer" "$root/de/session/eu.luna.Installer.desktop" "$dest/share/applications/eu.luna.Installer.desktop" "644"
         emit "installer" "$root/apps/luna-installer/data/luna-install-backend" "$dest/libexec/luna/luna-install-backend" "755"
-    fi
-    if [ "$all" = "all" ] || [ -f "$lib/gallery" ]; then
-        emit "demo" "$lib/gallery" "$dest/bin/luna-gallery" "755"
-    fi
-    # Dokumentacja widgetów libLuny (binarka `showcase` z luna-demo).
-    if [ "$all" = "all" ] || [ -f "$lib/showcase" ]; then
-        emit "demo" "$lib/showcase" "$dest/bin/luna-showcase" "755"
-        emit "demo" "$root/de/session/luna-showcase.desktop" "$dest/share/applications/luna-showcase.desktop" "644"
     fi
     emit "base"     "$root/de/session/luna-session" "$dest/bin/luna-session" "755"
     # Wariant sesji z GPU (LUNA_GPU=1) — wybór „Luna (GPU)” w menedżerze logowania.
@@ -382,9 +404,13 @@ EOF
     if [ -n "$only" ]; then
         build_component "$only"
     else
-        for c in selene luna greeter demo settings files media clock store welcome installer editor terminal; do
+        # Demo pomijamy domyślnie — buduje je dopiero `--with-demo`.
+        for c in selene luna greeter settings files media clock store welcome installer editor terminal; do
             build_component "$c"
         done
+        if [ "$with_demo" = 1 ]; then
+            build_component demo
+        fi
     fi
 fi
 
@@ -417,9 +443,12 @@ if [ -f "$lib/selene" ]; then
     # sprawdzamy `luna-shell`, żeby nie zgłaszać fałszywych alarmów o keyring/lock/polkit.
     check_stale "$lib/luna-shell" "$root/luna/src"
     check_stale "$lib/luna-greeter" "$root/luna-greeter/src"
-    for app in demo files media settings store editor terminal clock welcome installer; do
+    for app in files media settings store editor terminal clock welcome installer; do
         check_stale "$lib/luna-$app" "$root/apps/luna-$app/src"
     done
+    if [ "$with_demo" = 1 ]; then
+        check_stale "$lib/luna-demo" "$root/apps/luna-demo/src"
+    fi
 fi
 if [ -n "$stale_bins" ]; then
     say ""
@@ -483,6 +512,31 @@ if [ -z "$only" ] || [ "$only" = "settings" ]; then
         chmod 644 "$tmp"
         mv "$tmp" "$settings_desktop"
         say "launcher: $system_name Settings"
+    fi
+fi
+
+if [ -z "$only" ] || [ "$only" = "installer" ]; then
+    installer_desktop="$dest/share/applications/eu.luna.Installer.desktop"
+    if [ "$dry_run" = 1 ]; then
+        if [ -f "$lib/luna-installer" ]; then
+            say "  [dry-run] launcher: Install $system_name ($installer_desktop)"
+        fi
+    elif [ -f "$installer_desktop" ]; then
+        tmp="$installer_desktop.tmp.$$"
+        while IFS= read -r line || [ -n "$line" ]; do
+            case "$line" in
+                Name=*)          printf 'Name=Install %s\n' "$system_name" ;;
+                'Name[pl]='*)    printf 'Name[pl]=Zainstaluj %s\n' "$system_name" ;;
+                'Name[de]='*)    printf 'Name[de]=%s installieren\n' "$system_name" ;;
+                Comment=*)       printf 'Comment=Install %s on this computer from the live image\n' "$system_name" ;;
+                'Comment[pl]='*) printf 'Comment[pl]=Zainstaluj system %s na tym komputerze z obrazu live\n' "$system_name" ;;
+                'Comment[de]='*) printf 'Comment[de]=%s von einem Live-Image auf diesem Computer installieren\n' "$system_name" ;;
+                *)               printf '%s\n' "$line" ;;
+            esac
+        done <"$installer_desktop" >"$tmp"
+        chmod 644 "$tmp"
+        mv "$tmp" "$installer_desktop"
+        say "launcher: Install $system_name"
     fi
 fi
 

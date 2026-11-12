@@ -432,6 +432,30 @@ else
     ts "brak luna-desktop w PATH"
 fi
 
+# Powitanie: „Co nowego” i (na obrazie live) skrót do instalatora.
+#
+# Okno pokazuje się przy każdym logowaniu, chyba że użytkownik zaznaczył
+# w nim „Nie uruchamiaj ponownie po zalogowaniu”. Wtedy w `welcome.conf`
+# leży `autostart = false` i ten blok je pomija. Plik można usunąć, żeby
+# przywrócić powitanie.
+if command -v luna-welcome >/dev/null 2>&1; then
+    welcome_conf=""
+    if [ -n "${XDG_CONFIG_HOME:-}" ]; then
+        welcome_conf="$XDG_CONFIG_HOME/luna/welcome.conf"
+    elif [ -n "${HOME:-}" ]; then
+        welcome_conf="$HOME/.config/luna/welcome.conf"
+    fi
+    if [ -n "$welcome_conf" ] && [ -r "$welcome_conf" ] \
+        && grep -qiE '^[[:space:]]*autostart[[:space:]]*=[[:space:]]*(0|false|no|off)[[:space:]]*$' "$welcome_conf"; then
+        ts "powitanie wyłączone przez użytkownika ($welcome_conf)"
+    else
+        ts "uruchamiam luna-welcome"
+        luna-welcome >/dev/null 2>&1 &
+    fi
+else
+    ts "brak luna-welcome w PATH"
+fi
+
 # Sesja żyje, dopóki działa kompozytor.
 status=0
 wait "$selene_pid" || status=$?

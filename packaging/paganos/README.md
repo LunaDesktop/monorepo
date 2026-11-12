@@ -14,7 +14,7 @@ pliki instalowane do `${PKGDIR}`.
 
 | Plik | Rola |
 | --- | --- |
-| `de/libluna/PAGBUILD.yaml` | pakiet `libluna` — demo (`luna-demo`) + galeria (`luna-gallery`), tłumaczenia, przykładowe motywy |
+| `de/libluna/PAGBUILD.yaml` | pakiet `libluna` — tłumaczenia i przykładowe motywy (bez demo — to osobny, opcjonalny pakiet `luna-demo` dla deweloperów) |
 | `de/selene/PAGBUILD.yaml` | pakiet `selene` — binarka kompozytora, skrypt sesji i wpis sesji Wayland |
 | `de/selene/luna-session` | launcher sesji (ustawia `XDG_*` i `SELENE_BACKEND`) |
 | `de/selene/selene.desktop` | wpis do `/usr/share/wayland-sessions` |
@@ -25,7 +25,7 @@ pliki instalowane do `${PKGDIR}`.
 | `make-tarball.sh` | generuje tarball i składa gotowy katalog `out/` z uzupełnionymi sha256 |
 
 Oba pakiety budują się z **tego samego** tarballa, ale każdy z **własnego workspace'u**
-(`libluna/`, `selene/`, `apps/luna-demo`) — dzięki temu można je wydawać i aktualizować
+(`libluna/`, `selene/`) — dzięki temu można je wydawać i aktualizować
 niezależnie. Katalog w tarballu to
 `luna-${pkgver}/`, stąd `cd luna-${pkgver}` w fazach `build:`.
 

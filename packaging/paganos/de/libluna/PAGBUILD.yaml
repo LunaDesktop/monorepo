@@ -7,7 +7,7 @@
 pkgname: libluna
 pkgver: '0.0.5'
 pkgrel: 1
-pkgdesc: 'libLuna — lekki toolkit GUI w Rust (alternatywa dla GTK4/libadwaita): widgety, render software, i18n; demo + galeria'
+pkgdesc: 'libLuna — lekki toolkit GUI w Rust (alternatywa dla GTK4/libadwaita): widgety, render software, i18n'
 url: 'https://git.paganlinux.eu/luna.git'
 arch: x86_64
 license:
@@ -23,12 +23,6 @@ sha256sums:
 - __TARBALL_SHA256__
 build: |
   cd luna-${pkgver}
-
-  # Demo jest osobnym workspace'em; budujemy tylko je (bez Selene/Luny).
-  ( cd apps/luna-demo && cargo build --release --locked )
-
-  install -Dm755 apps/luna-demo/target/release/luna-demo "${PKGDIR}/usr/bin/luna-demo"
-  install -Dm755 apps/luna-demo/target/release/gallery  "${PKGDIR}/usr/bin/luna-gallery"
 
   # Katalogi tłumaczeń (doładowywane w runtime z /usr/share/luna/i18n).
   install -d "${PKGDIR}/usr/share/luna/i18n"
