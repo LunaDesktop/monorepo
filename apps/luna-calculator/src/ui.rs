@@ -6,11 +6,12 @@ use libluna_core::{
 };
 use libluna_render::{Scene, TextEngine};
 use libluna_widgets::{
-    Button, ButtonVariant, ControlsSide, HeaderBar, PaintCtx, TitleAlign, ViewSwitcher,
-    WindowControl,
+    Button, ButtonVariant, ControlsSide, HeaderBar, MenuButton, PaintCtx, PreferencesDialog,
+    TitleAlign, ViewSwitcher, WindowControl,
 };
 
-use crate::app::{Action, App, Key, Mode};
+use crate::app::{Action, App, Key, MenuState, Mode};
+use crate::eval::AngleMode;
 
 // Keysyms XKB.
 const KEY_ESCAPE: u32 = 0xff1b;
@@ -20,6 +21,7 @@ const KEY_BACKSPACE: u32 = 0xff08;
 const KEY_DELETE: u32 = 0xffff;
 const KEY_C: u32 = 0x63;
 const KEY_V: u32 = 0x76;
+const KEY_COMMA: u32 = 0x2c;
 
 const STANDARD_ROWS: [&[Key]; 5] = [
     &[Key::Clear, Key::Backspace, Key::Percent, Key::Div],
@@ -43,6 +45,7 @@ const SCIENTIFIC_ROWS: [&[Key]; 6] = [
 struct Chrome {
     header: Rect,
     tabs: Rect,
+    menu: Rect,
     content: Rect,
 }
 
@@ -61,11 +64,22 @@ fn chrome(size: Size, theme: &Theme, text: &TextEngine) -> Chrome {
             weight::BOLD,
         )
         .width;
+
+    let menu_h = MenuButton::burger()
+        .width(text, theme)
+        .clamp(26.0, (header.height() - 8.0).max(26.0));
+    let menu = Rect::from_xywh(
+        available.right() - menu_h,
+        header.center().y - menu_h / 2.0,
+        menu_h,
+        menu_h,
+    );
+
     let title_end = available.x() + title_width + 20.0;
-    let free = (available.right() - title_end).max(0.0);
+    let free = (menu.x() - 8.0 - title_end).max(0.0);
     let tabs_w = free.min(260.0);
     let tabs = Rect::from_xywh(
-        title_end + (free - tabs_w).max(0.0),
+        menu.x() - 8.0 - tabs_w,
         header.center().y - 15.0,
         tabs_w,
         30.0,
@@ -84,8 +98,14 @@ fn chrome(size: Size, theme: &Theme, text: &TextEngine) -> Chrome {
     Chrome {
         header,
         tabs,
+        menu,
         content,
     }
+}
+
+/// Prostokąt przycisku menu — używany też przez podglądy headless.
+pub fn menu_anchor(size: Size, theme: &Theme, text: &TextEngine) -> Rect {
+    chrome(size, theme, text).menu
 }
 
 fn paint_card(ctx: &mut PaintCtx, rect: Rect) {
@@ -123,7 +143,40 @@ pub fn paint(app: &mut App, scene: &mut Scene, size: Size, theme: &Theme, text: 
         .paint(&mut ctx, layout.header, app.controls_hover);
 
     paint_mode_switch(app, &mut ctx, layout.tabs);
+    paint_menu_button(app, &mut ctx, layout.menu);
     paint_content(app, &mut ctx, layout.content);
+
+    if let Some(state) = &mut app.menu {
+        // Po zmianie rozmiaru okna menu podąża za przyciskiem w pasku tytułu.
+        state.anchor = layout.menu;
+    }
+    if let Some(state) = &app.menu {
+        let panel = menu_panel(state, size, theme, text);
+        state.menu.paint(&mut ctx, panel);
+    }
+
+    if app.settings_open {
+        app.hits.clear();
+        paint_settings(app, &mut ctx, size);
+    }
+    if let Some(about) = &app.about {
+        app.hits.clear();
+        about.paint(&mut ctx, size);
+    }
+}
+
+fn paint_menu_button(app: &mut App, ctx: &mut PaintCtx, rect: Rect) {
+    let mut button = MenuButton::burger();
+    button.set_open(app.menu.is_some());
+    button.set_hovered(is_hovered(app, rect));
+    button.paint(ctx, rect);
+}
+
+fn menu_panel(state: &MenuState, size: Size, theme: &Theme, text: &TextEngine) -> Rect {
+    let width = state.menu.width(text, theme);
+    state
+        .menu
+        .place(state.anchor, width, Rect::from_size(size), theme)
 }
 
 fn paint_mode_switch(app: &mut App, ctx: &mut PaintCtx, rect: Rect) {
@@ -242,6 +295,100 @@ fn paint_display(app: &mut App, ctx: &mut PaintCtx, rect: Rect) {
     }
 }
 
+fn settings_dialog() -> PreferencesDialog {
+    PreferencesDialog::new(libluna_i18n::tr("Calculator Settings"), 300.0)
+}
+
+struct SettingsLayout {
+    rows: [Rect; 2],
+    angle_seg: Rect,
+    mode_seg: Rect,
+    done: Rect,
+}
+
+fn settings_layout(size: Size, theme: &Theme) -> SettingsLayout {
+    let rects = settings_dialog().rects(size, theme);
+    let pad = theme.spacing.lg;
+    let inner = rects.content.deflate(Insets::new(pad, pad, pad, pad));
+    let row_h = 52.0;
+    let rows: [Rect; 2] = std::array::from_fn(|i| {
+        Rect::from_xywh(
+            inner.x(),
+            inner.y() + i as f64 * row_h,
+            inner.width(),
+            row_h,
+        )
+    });
+    let seg_w = 220.0_f64.min(inner.width() * 0.55);
+    let seg = |i: usize| {
+        Rect::from_xywh(
+            inner.right() - seg_w,
+            rows[i].center().y - 15.0,
+            seg_w,
+            30.0,
+        )
+    };
+    let bh = theme.metrics.button.height;
+    let done = Rect::from_xywh(inner.right() - 120.0, inner.bottom() - bh, 120.0, bh);
+    SettingsLayout {
+        rows,
+        angle_seg: seg(0),
+        mode_seg: seg(1),
+        done,
+    }
+}
+
+fn paint_settings(app: &App, ctx: &mut PaintCtx, size: Size) {
+    settings_dialog().paint(ctx, size);
+    let theme = *ctx.theme;
+    let lay = settings_layout(size, &theme);
+    let body = theme.typography.body.size;
+    let labels = [
+        libluna_i18n::tr("Angle unit"),
+        libluna_i18n::tr("Start mode"),
+    ];
+    for (i, label) in labels.iter().enumerate() {
+        ctx.label_left(
+            lay.rows[i].x() + 12.0,
+            lay.rows[i].center().y,
+            label,
+            body,
+            weight::NORMAL,
+            theme.colors.text,
+        );
+        if i > 0 {
+            ctx.scene.fill_rect(
+                Rect::from_xywh(lay.rows[i].x(), lay.rows[i].y(), lay.rows[i].width(), 1.0),
+                theme.colors.border,
+            );
+        }
+    }
+
+    let mut angle = ViewSwitcher::new(["DEG", "RAD"]);
+    angle.set_selected(match app.angle {
+        AngleMode::Degrees => 0,
+        AngleMode::Radians => 1,
+    });
+    angle.set_hovered(
+        app.pointer
+            .and_then(|point| angle.index_at(lay.angle_seg, point)),
+    );
+    angle.paint(ctx, lay.angle_seg);
+
+    let mut mode =
+        ViewSwitcher::new([libluna_i18n::tr("Standard"), libluna_i18n::tr("Scientific")]);
+    mode.set_selected(app.prefs.start_mode.index());
+    mode.set_hovered(
+        app.pointer
+            .and_then(|point| mode.index_at(lay.mode_seg, point)),
+    );
+    mode.paint(ctx, lay.mode_seg);
+
+    let mut done = Button::new(libluna_i18n::tr("Done")).variant(ButtonVariant::Suggested);
+    done.set_hovered(is_hovered(app, lay.done));
+    done.paint(ctx, lay.done);
+}
+
 fn paint_keypad(app: &mut App, ctx: &mut PaintCtx, card: Rect, rows: &[&[Key]]) {
     paint_card(ctx, card);
     if rows.is_empty() {
@@ -281,7 +428,6 @@ fn paint_key(app: &mut App, ctx: &mut PaintCtx, rect: Rect, key: Key) {
         Key::Clear
             | Key::Backspace
             | Key::Negate
-            | Key::Angle
             | Key::Sin
             | Key::Cos
             | Key::Tan
@@ -336,6 +482,20 @@ pub fn handle_events(
     theme: &Theme,
     text: &TextEngine,
 ) {
+    // Modalne okna i menu przechwytują wejście, zanim trafi ono do klawiatury.
+    if app.about.is_some() {
+        handle_about_events(app, events, size, theme, text);
+        return;
+    }
+    if app.settings_open {
+        handle_settings_events(app, events, size, theme);
+        return;
+    }
+    if app.menu.is_some() {
+        handle_menu_events(app, events, size, theme, text);
+        return;
+    }
+
     let layout = chrome(size, theme, text);
     let header = HeaderBar::new().controls(ControlsSide::Right);
 
@@ -350,6 +510,11 @@ pub fn handle_events(
                         WindowControl::Maximize => app.pending_maximize = true,
                         WindowControl::Close => app.pending_close = true,
                     }
+                    continue;
+                }
+
+                if layout.menu.contains(button.position) {
+                    app.open_menu(layout.menu);
                     continue;
                 }
 
@@ -383,6 +548,161 @@ pub fn handle_events(
     }
 }
 
+fn handle_menu_events(
+    app: &mut App,
+    events: &[Event],
+    size: Size,
+    theme: &Theme,
+    text: &TextEngine,
+) {
+    let anchor = menu_anchor(size, theme, text);
+    if let Some(state) = &mut app.menu {
+        state.anchor = anchor;
+    }
+    let Some(panel) = app
+        .menu
+        .as_ref()
+        .map(|state| menu_panel(state, size, theme, text))
+    else {
+        return;
+    };
+
+    for event in events {
+        match event {
+            Event::PointerButton(button)
+                if button.button == PointerButton::Left && button.state == ButtonState::Pressed =>
+            {
+                let index = app
+                    .menu
+                    .as_ref()
+                    .and_then(|state| state.menu.index_at(panel, button.position, theme));
+                if let Some(index) = index {
+                    app.run_menu(index);
+                } else {
+                    // Klik poza menu (także w przycisk burger) zamyka panel.
+                    app.menu = None;
+                }
+                break;
+            }
+            Event::PointerMotion { position, .. } => {
+                if let Some(state) = &mut app.menu {
+                    state.menu.hover_at(panel, Some(*position), theme);
+                }
+                app.pointer = Some(*position);
+                app.controls_hover = None;
+            }
+            Event::PointerLeave => {
+                if let Some(state) = &mut app.menu {
+                    state.menu.hover_at(panel, None, theme);
+                }
+                app.pointer = None;
+                app.controls_hover = None;
+            }
+            Event::Key(key) if key.state == ButtonState::Pressed => {
+                if key.keysym == KEY_ESCAPE {
+                    app.menu = None;
+                    break;
+                }
+                if key.modifiers.ctrl && key.keysym == KEY_COMMA {
+                    app.open_settings();
+                    break;
+                }
+            }
+            Event::Window(WindowEvent::CloseRequested) => app.pending_close = true,
+            _ => {}
+        }
+    }
+}
+
+fn handle_about_events(
+    app: &mut App,
+    events: &[Event],
+    size: Size,
+    theme: &Theme,
+    text: &TextEngine,
+) {
+    for event in events {
+        match event {
+            Event::PointerButton(button)
+                if button.button == PointerButton::Left && button.state == ButtonState::Pressed =>
+            {
+                let close = app.about.as_ref().is_some_and(|about| {
+                    let rects = about.rects(size, theme, text);
+                    about
+                        .action_at(size, theme, text, button.position)
+                        .is_some()
+                        || rects.dialog.close.contains(button.position)
+                        || !rects.dialog.panel.contains(button.position)
+                });
+                if close {
+                    app.about = None;
+                    break;
+                }
+            }
+            Event::PointerMotion { position, .. } => app.pointer = Some(*position),
+            Event::PointerLeave => app.pointer = None,
+            Event::Key(key) if key.state == ButtonState::Pressed && key.keysym == KEY_ESCAPE => {
+                app.about = None;
+                break;
+            }
+            Event::Window(WindowEvent::CloseRequested) => app.pending_close = true,
+            _ => {}
+        }
+    }
+}
+
+fn handle_settings_events(app: &mut App, events: &[Event], size: Size, theme: &Theme) {
+    let dialog = settings_dialog();
+    let lay = settings_layout(size, theme);
+
+    for event in events {
+        match event {
+            Event::PointerButton(button)
+                if button.button == PointerButton::Left && button.state == ButtonState::Pressed =>
+            {
+                if dialog.close_at(size, theme, button.position)
+                    || dialog.scrim_at(size, theme, button.position)
+                    || lay.done.contains(button.position)
+                {
+                    app.settings_open = false;
+                    app.save_prefs();
+                    break;
+                }
+
+                let angle = ViewSwitcher::new(["DEG", "RAD"]);
+                if let Some(index) = angle.index_at(lay.angle_seg, button.position) {
+                    app.set_angle(if index == 0 {
+                        AngleMode::Degrees
+                    } else {
+                        AngleMode::Radians
+                    });
+                }
+
+                let mode = ViewSwitcher::new([
+                    libluna_i18n::tr("Standard"),
+                    libluna_i18n::tr("Scientific"),
+                ]);
+                if let Some(index) = mode.index_at(lay.mode_seg, button.position) {
+                    app.set_start_mode(Mode::from_index(index));
+                }
+            }
+            Event::PointerMotion { position, .. } => app.pointer = Some(*position),
+            Event::PointerLeave => app.pointer = None,
+            Event::Key(key)
+                if key.state == ButtonState::Pressed
+                    && (key.keysym == KEY_ESCAPE
+                        || (key.modifiers.ctrl && key.keysym == KEY_COMMA)) =>
+            {
+                app.settings_open = false;
+                app.save_prefs();
+                break;
+            }
+            Event::Window(WindowEvent::CloseRequested) => app.pending_close = true,
+            _ => {}
+        }
+    }
+}
+
 fn apply_action(app: &mut App, action: Action) {
     match action {
         Action::Mode(mode) => app.mode = mode,
@@ -395,6 +715,7 @@ fn handle_key(app: &mut App, key: &KeyEvent) {
         match key.keysym {
             KEY_C => app.clipboard_text = Some(app.copy_text()),
             KEY_V => app.pending_paste = true,
+            KEY_COMMA => app.open_settings(),
             _ => {}
         }
         return;
@@ -443,6 +764,35 @@ mod tests {
             .expect("klawisz 7 powinien mieć region kliknięcia");
         click(&mut app, size, &theme, &text, seven.center());
         assert_eq!(app.expression, "7");
+    }
+
+    #[test]
+    fn burger_opens_menu() {
+        let mut app = App::new();
+        let (size, theme, text) = paint_standard(&mut app);
+        let layout = chrome(size, &theme, &text);
+        click(&mut app, size, &theme, &text, layout.menu.center());
+        assert!(app.menu.is_some());
+    }
+
+    #[test]
+    fn settings_dialog_changes_angle_and_start_mode() {
+        let mut app = App::new();
+        app.open_settings();
+        let (size, theme, text) = paint_standard(&mut app);
+        let lay = settings_layout(size, &theme);
+
+        let rad = ViewSwitcher::new(["DEG", "RAD"]).segments(lay.angle_seg)[1].center();
+        click(&mut app, size, &theme, &text, rad);
+        assert_eq!(app.angle, AngleMode::Radians);
+
+        let scientific =
+            ViewSwitcher::new(["Standard", "Scientific"]).segments(lay.mode_seg)[1].center();
+        click(&mut app, size, &theme, &text, scientific);
+        assert_eq!(app.prefs.start_mode, Mode::Scientific);
+
+        click(&mut app, size, &theme, &text, lay.done.center());
+        assert!(!app.settings_open);
     }
 
     #[test]

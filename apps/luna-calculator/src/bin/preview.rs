@@ -1,7 +1,7 @@
 //! Headless-podglądy `luna-calculator` do dokumentacji (bez kompozytora).
 //!
 //! Uruchom: `cargo run --bin preview`
-//! → `docs/images/calculator-standard.png` i `docs/images/calculator-scientific.png`.
+//! → `docs/images/calculator-{standard,scientific,menu,settings}.png`.
 
 use std::error::Error;
 use std::path::PathBuf;
@@ -10,6 +10,8 @@ use libluna_core::{Size, Theme};
 use libluna_i18n::{set_locale, Locale};
 use libluna_render::{Scene, SoftwareRenderer, TextEngine};
 use luna_calculator::app::{App, Mode};
+use luna_calculator::eval::AngleMode;
+use luna_calculator::prefs::Prefs;
 use luna_calculator::ui;
 
 const W: u32 = 900;
@@ -20,37 +22,57 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let size = Size::new(W as f64, H as f64);
     let text = TextEngine::system();
+    let dark = Theme::dark();
+    let light = Theme::light();
 
     let mut standard = App::new();
     standard.expression = "2+3×4".to_owned();
-    let dark = Theme::dark();
-    save(&standard, size, &dark, &text, "calculator-standard.png")?;
+    save(&mut standard, size, &dark, &text, "calculator-standard.png")?;
+
+    standard.expression = "2+3×4".to_owned();
+    standard.open_menu(ui::menu_anchor(size, &dark, &text));
+    save(&mut standard, size, &dark, &text, "calculator-menu.png")?;
 
     let mut scientific = App::new();
     scientific.mode = Mode::Scientific;
     scientific.expression = "sin(30)+√(16)".to_owned();
-    let light = Theme::light();
     save(
-        &scientific,
+        &mut scientific,
         size,
         &light,
         &text,
         "calculator-scientific.png",
     )?;
 
+    let mut settings = App::with_prefs(Prefs {
+        angle: AngleMode::Radians,
+        start_mode: Mode::Scientific,
+    });
+    settings.settings_open = true;
+    save(
+        &mut settings,
+        size,
+        &light,
+        &text,
+        "calculator-settings.png",
+    )?;
+
+    let mut about = App::new();
+    about.show_about();
+    save(&mut about, size, &light, &text, "calculator-about.png")?;
+
     Ok(())
 }
 
 fn save(
-    app: &App,
+    app: &mut App,
     size: Size,
     theme: &Theme,
     text: &TextEngine,
     name: &str,
 ) -> Result<(), Box<dyn Error>> {
-    let mut app = clone_for_preview(app);
     let mut scene = Scene::new();
-    ui::paint(&mut app, &mut scene, size, theme, text);
+    ui::paint(app, &mut scene, size, theme, text);
 
     let mut renderer = SoftwareRenderer::new(W, H);
     renderer.draw(&scene, 1.0, theme.colors.window_bg);
@@ -61,17 +83,4 @@ fn save(
     std::fs::write(&path, png)?;
     println!("saved {}", path.display());
     Ok(())
-}
-
-/// `App` nie implementuje `Clone`; podgląd potrzebuje tylko kilku pól stanu.
-fn clone_for_preview(app: &App) -> App {
-    let mut copy = App::new();
-    copy.mode = app.mode;
-    copy.expression = app.expression.clone();
-    copy.result = app.result;
-    copy.last_result = app.last_result;
-    copy.error = app.error;
-    copy.angle = app.angle;
-    copy.just_evaluated = app.just_evaluated;
-    copy
 }

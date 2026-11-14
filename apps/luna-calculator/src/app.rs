@@ -5,9 +5,10 @@ use std::error::Error;
 use libluna_core::{Point, Rect, ThemeSettings};
 use libluna_i18n::{load_catalogs_from_dirs, preferred_locale, set_locale, tr};
 use libluna_platform::{run as run_app, AppConfig, Frame};
-use libluna_widgets::WindowControl;
+use libluna_widgets::{AlertDialog, Menu, MenuEntry, WindowControl};
 
 use crate::eval::{evaluate, format_number, AngleMode};
+use crate::prefs::Prefs;
 
 /// Tryb pracy kalkulatora.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,9 +217,29 @@ pub enum Action {
     Press(Key),
 }
 
+/// Pozycja menu głównego.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuAction {
+    Settings,
+    About,
+}
+
+/// Otwarte menu pod przyciskiem „burger”.
+pub struct MenuState {
+    pub menu: Menu,
+    pub anchor: Rect,
+    pub actions: Vec<Option<MenuAction>>,
+}
+
 /// Stan aplikacji.
 pub struct App {
     pub mode: Mode,
+    pub prefs: Prefs,
+    /// Czy zapisywać preferencje (w testach wyłączone).
+    pub persist_prefs: bool,
+    pub menu: Option<MenuState>,
+    pub settings_open: bool,
+    pub about: Option<AlertDialog>,
     pub expression: String,
     pub result: Option<f64>,
     pub last_result: Option<f64>,
@@ -248,6 +269,11 @@ impl App {
     pub fn new() -> Self {
         Self {
             mode: Mode::Standard,
+            prefs: Prefs::default(),
+            persist_prefs: false,
+            menu: None,
+            settings_open: false,
+            about: None,
             expression: String::new(),
             result: None,
             last_result: None,
@@ -266,8 +292,81 @@ impl App {
         }
     }
 
+    pub fn with_prefs(prefs: Prefs) -> Self {
+        let mut app = Self::new();
+        app.prefs = prefs;
+        app.angle = prefs.angle;
+        app.mode = prefs.start_mode;
+        app
+    }
+
     pub fn window_title(&self) -> String {
         tr("Calculator")
+    }
+
+    /// Zapisuje preferencje tylko wtedy, gdy aplikacja działa normalnie.
+    pub fn save_prefs(&self) {
+        if self.persist_prefs {
+            self.prefs.save();
+        }
+    }
+
+    pub fn set_angle(&mut self, angle: AngleMode) {
+        self.angle = angle;
+        self.prefs.angle = angle;
+        self.save_prefs();
+    }
+
+    pub fn set_start_mode(&mut self, mode: Mode) {
+        self.prefs.start_mode = mode;
+        self.save_prefs();
+    }
+
+    /// Otwiera menu główne pod podanym przyciskiem.
+    pub fn open_menu(&mut self, anchor: Rect) {
+        let entries = vec![
+            MenuEntry::action(tr("Settings")).shortcut("Ctrl+,"),
+            MenuEntry::separator(),
+            MenuEntry::action(tr("About Calculator")),
+        ];
+        self.menu = Some(MenuState {
+            menu: Menu::new(entries),
+            anchor,
+            actions: vec![Some(MenuAction::Settings), None, Some(MenuAction::About)],
+        });
+    }
+
+    pub fn run_menu(&mut self, index: usize) {
+        let action = self
+            .menu
+            .as_ref()
+            .and_then(|state| state.actions.get(index).copied().flatten());
+        self.menu = None;
+        match action {
+            Some(MenuAction::Settings) => self.open_settings(),
+            Some(MenuAction::About) => self.show_about(),
+            None => {}
+        }
+    }
+
+    pub fn open_settings(&mut self) {
+        self.menu = None;
+        self.settings_open = true;
+    }
+
+    pub fn show_about(&mut self) {
+        self.menu = None;
+        let body = format!(
+            "Luna Calculator {}\n{}\n\n{}\n\n© 2026 Luna Project · GPL-3.0-or-later",
+            env!("CARGO_PKG_VERSION"),
+            tr("Standard and scientific calculator for the Luna desktop."),
+            tr("All calculations run locally. No history is saved and no network requests are made."),
+        );
+        self.about = Some(
+            AlertDialog::new(tr("About Calculator"), body)
+                .width(480.0)
+                .button(tr("Done")),
+        );
     }
 
     /// Podgląd wyniku podczas pisania (bez zatwierdzania `=`).
@@ -295,7 +394,8 @@ impl App {
             Key::Equals => self.equals(),
             Key::Negate => self.negate(),
             Key::Angle => {
-                self.angle = self.angle.toggle();
+                let angle = self.angle.toggle();
+                self.set_angle(angle);
             }
             Key::Ans => {
                 if let Some(value) = self.last_result {
@@ -534,7 +634,8 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     set_locale(preferred_locale());
     load_catalogs_from_dirs();
 
-    let mut app = App::new();
+    let mut app = App::with_prefs(Prefs::load());
+    app.persist_prefs = true;
     if std::env::args().any(|arg| arg == "--scientific") {
         app.mode = Mode::Scientific;
     }
@@ -570,6 +671,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         }
         if app.pending_close {
             app.pending_close = false;
+            app.save_prefs();
             frame.close();
         }
         if app.pending_minimize {
@@ -756,6 +858,32 @@ mod tests {
             &[Key::Digit(5), Key::TenPow, Key::Digit(2), Key::Equals],
         );
         assert_eq!(app.expression, "500");
+    }
+
+    #[test]
+    fn menu_actions_open_settings_and_about() {
+        let mut app = App::new();
+        let anchor = Rect::from_xywh(700.0, 8.0, 30.0, 30.0);
+        app.open_menu(anchor);
+        app.run_menu(0);
+        assert!(app.settings_open);
+        assert!(app.menu.is_none());
+
+        app.open_menu(anchor);
+        app.run_menu(2);
+        assert!(app.about.is_some());
+        assert!(app.menu.is_none());
+    }
+
+    #[test]
+    fn prefs_apply_on_start() {
+        let prefs = crate::prefs::Prefs {
+            angle: AngleMode::Radians,
+            start_mode: Mode::Scientific,
+        };
+        let app = App::with_prefs(prefs);
+        assert_eq!(app.angle, AngleMode::Radians);
+        assert_eq!(app.mode, Mode::Scientific);
     }
 
     #[test]

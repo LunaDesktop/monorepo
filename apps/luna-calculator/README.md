@@ -7,6 +7,12 @@ wykonuje się lokalnie w aplikacji — bez GTK, bez bazy danych i bez sieci.
 
 ![Tryb naukowy](../../docs/images/calculator-scientific.png)
 
+![Menu aplikacji](../../docs/images/calculator-menu.png)
+
+![Ustawienia](../../docs/images/calculator-settings.png)
+
+![O kalkulatorze](../../docs/images/calculator-about.png)
+
 ## Funkcje
 
 - **Standard** — cztery działania, procenty, zmiana znaku, nawiasy i pamięć
@@ -16,7 +22,12 @@ wykonuje się lokalnie w aplikacji — bez GTK, bez bazy danych i bez sieci.
   notacja naukowa (`EXP`, `10ˣ`) i przełącznik `DEG`/`RAD`.
 - **Podgląd na żywo** — wynik pojawia się pod wyrażeniem jeszcze przed `=`.
 - **Klawiatura** — cyfry, operatory, `Enter` (=), `Backspace`, `Esc` (czyść),
-  `Ctrl+C` (kopiuj wynik), `Ctrl+V` (wklej wyrażenie).
+  `Ctrl+C` (kopiuj wynik), `Ctrl+V` (wklej wyrażenie), `Ctrl+,` (ustawienia).
+- **Menu** — hamburger w pasku tytułu z **Ustawieniami** i **O kalkulatorze**.
+- **Ustawienia** — jednostka kąta (`DEG`/`RAD`) i tryb startowy
+  (`Standard`/`Naukowy`), zapisywane w `~/.config/luna/calculator.conf`.
+  Tryb startowy działa przy następnym uruchomieniu; bieżący tryb zmienia
+  przełącznik w pasku tytułu.
 - **Niejawne mnożenie** — `2π`, `3(4+5)` i `2sin(30)` działają bez dodatkowego `×`.
 - **Procent i modulo** — `%` jest postfiksowe (`50%` = `0.5`), a `mod` liczy resztę
   z dzielenia (`7 mod 3` = `1`).
@@ -42,12 +53,13 @@ cargo run --manifest-path apps/luna-calculator/Cargo.toml --bin preview
 | `Esc`, `Delete` | wyczyść wyrażenie |
 | `Ctrl+C` | skopiuj wynik |
 | `Ctrl+V` | wklej wyrażenie |
+| `Ctrl+,` | otwórz ustawienia |
 
 ## Prywatność
 
-Aplikacja nie zapisuje historii, nie zna konta użytkownika i nie wykonuje
-żadnych zapytań sieciowych. Stan (tryb, kąt, ostatni wynik) żyje tylko w pamięci
-procesu i znika po zamknięciu okna.
+Aplikacja nie zapisuje historii obliczeń, nie zna konta użytkownika i nie wykonuje
+żadnych zapytań sieciowych. Lokalnie zapisuje tylko jednostkę kąta i tryb
+startowy w `~/.config/luna/calculator.conf`; reszta stanu żyje w pamięci procesu.
 
 ## Licencja
 

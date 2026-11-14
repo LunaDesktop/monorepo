@@ -610,12 +610,20 @@ Szczegóły: [`docs/terminal.md`](docs/terminal.md).
 
 Kalkulator (`luna-calculator`) — tryb standardowy i naukowy w jednym oknie:
 cztery działania, procenty, nawiasy, trygonometria, logarytmy, potęgi, silnia,
-`π`/`e`, `DEG`/`RAD` i notacja naukowa. Parser i podgląd wyniku działają
-lokalnie, bez sieci. Szczegóły: [`docs/calculator.md`](docs/calculator.md).
+`π`/`e`, `DEG`/`RAD` i notacja naukowa. Menu w pasku tytułu daje
+**Ustawienia** (jednostka kąta i tryb startowy) oraz **O kalkulatorze**.
+Parser i podgląd wyniku działają lokalnie, bez sieci.
+Szczegóły: [`docs/calculator.md`](docs/calculator.md).
 
 ![Luna Calculator — standard](docs/images/calculator-standard.png)
 
 ![Luna Calculator — naukowy](docs/images/calculator-scientific.png)
+
+![Luna Calculator — menu](docs/images/calculator-menu.png)
+
+![Luna Calculator — ustawienia](docs/images/calculator-settings.png)
+
+![Luna Calculator — o aplikacji](docs/images/calculator-about.png)
 
 Edytor tekstu i kodu (`luna-editor`) — lekki edytor na `CodeView` z libLuny:
 zakładki w headerbarze, numery linii, podświetlanie składni (Rust, TOML, JSON,
