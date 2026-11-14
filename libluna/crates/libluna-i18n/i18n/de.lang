@@ -1789,5 +1789,7 @@ Calculator Settings = Rechner-Einstellungen
 Angle unit = Winkeleinheit
 Start mode = Startmodus
 About Calculator = Über den Rechner
+Clear history = Verlauf löschen
+No calculations yet = Noch keine Berechnungen
 Standard and scientific calculator for the Luna desktop. = Standard- und Wissenschaftsrechner für die Luna-Arbeitsumgebung.
 All calculations run locally. No history is saved and no network requests are made. = Alle Berechnungen laufen lokal. Es wird kein Verlauf gespeichert und es werden keine Netzwerkanfragen gestellt.

@@ -1,7 +1,7 @@
 //! Headless-podglądy `luna-calculator` do dokumentacji (bez kompozytora).
 //!
 //! Uruchom: `cargo run --bin preview`
-//! → `docs/images/calculator-{standard,scientific,menu,settings}.png`.
+//! → `docs/images/calculator-{standard,scientific,menu,history,settings,about}.png`.
 
 use std::error::Error;
 use std::path::PathBuf;
@@ -14,31 +14,53 @@ use luna_calculator::eval::AngleMode;
 use luna_calculator::prefs::Prefs;
 use luna_calculator::ui;
 
-const W: u32 = 900;
-const H: u32 = 680;
+const STANDARD: Size = Size {
+    width: 640.0,
+    height: 680.0,
+};
+const WIDE: Size = Size {
+    width: 900.0,
+    height: 680.0,
+};
 
 fn main() -> Result<(), Box<dyn Error>> {
     set_locale(Locale::new("pl"));
 
-    let size = Size::new(W as f64, H as f64);
     let text = TextEngine::system();
     let dark = Theme::dark();
     let light = Theme::light();
 
     let mut standard = App::new();
     standard.expression = "2+3×4".to_owned();
-    save(&mut standard, size, &dark, &text, "calculator-standard.png")?;
+    save(
+        &mut standard,
+        STANDARD,
+        &dark,
+        &text,
+        "calculator-standard.png",
+    )?;
 
-    standard.expression = "2+3×4".to_owned();
-    standard.open_menu(ui::menu_anchor(size, &dark, &text));
-    save(&mut standard, size, &dark, &text, "calculator-menu.png")?;
+    standard.open_menu(ui::menu_anchor(STANDARD, &dark, &text));
+    save(&mut standard, STANDARD, &dark, &text, "calculator-menu.png")?;
+
+    standard.history.add("12×8", "96");
+    standard.history.add("sin(30)", "0.5");
+    standard.history.add("2^10", "1024");
+    standard.open_history();
+    save(
+        &mut standard,
+        STANDARD,
+        &dark,
+        &text,
+        "calculator-history.png",
+    )?;
 
     let mut scientific = App::new();
     scientific.mode = Mode::Scientific;
     scientific.expression = "sin(30)+√(16)".to_owned();
     save(
         &mut scientific,
-        size,
+        WIDE,
         &light,
         &text,
         "calculator-scientific.png",
@@ -51,7 +73,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     settings.settings_open = true;
     save(
         &mut settings,
-        size,
+        WIDE,
         &light,
         &text,
         "calculator-settings.png",
@@ -59,7 +81,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut about = App::new();
     about.show_about();
-    save(&mut about, size, &light, &text, "calculator-about.png")?;
+    save(&mut about, WIDE, &light, &text, "calculator-about.png")?;
 
     Ok(())
 }
@@ -74,7 +96,9 @@ fn save(
     let mut scene = Scene::new();
     ui::paint(app, &mut scene, size, theme, text);
 
-    let mut renderer = SoftwareRenderer::new(W, H);
+    let width = size.width.round() as u32;
+    let height = size.height.round() as u32;
+    let mut renderer = SoftwareRenderer::new(width, height);
     renderer.draw(&scene, 1.0, theme.colors.window_bg);
     let png = renderer.encode_png().ok_or("nie udało się zakodować PNG")?;
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

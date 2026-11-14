@@ -181,8 +181,9 @@ Selene.
   standardowy i naukowy: cztery działania, procenty, nawiasy, trygonometria,
   logarytmy, potęgi, silnia, `π`/`e`, `DEG`/`RAD` i notacja naukowa. Wynik jest
   liczony lokalnie, a podgląd pojawia się jeszcze przed `=`. Menu w pasku tytułu
-  daje **Ustawienia** (jednostka kąta, tryb startowy; zapis w
-  `~/.config/luna/calculator.conf`) i **O kalkulatorze**. Wejście z wpisu
+  daje **Historię** (ostatnie 100 obliczeń, zapis lokalny), **Ustawienia**
+  (jednostka kąta, tryb startowy; zapis w `~/.config/luna/calculator.conf`)
+  i **O kalkulatorze**. Wejście z wpisu
   `eu.luna.Calculator.desktop`; podglądy:
   `cargo run --manifest-path apps/luna-calculator/Cargo.toml --bin preview` →
   `docs/images/calculator-*.png`.

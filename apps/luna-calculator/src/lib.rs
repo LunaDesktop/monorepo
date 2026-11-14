@@ -6,6 +6,7 @@
 
 pub mod app;
 pub mod eval;
+pub mod history;
 pub mod prefs;
 pub mod ui;
 

@@ -5,9 +5,10 @@ use std::error::Error;
 use libluna_core::{Point, Rect, ThemeSettings};
 use libluna_i18n::{load_catalogs_from_dirs, preferred_locale, set_locale, tr};
 use libluna_platform::{run as run_app, AppConfig, Frame};
-use libluna_widgets::{AlertDialog, Menu, MenuEntry, WindowControl};
+use libluna_widgets::{AlertDialog, BottomSheet, Menu, MenuEntry, ScrollView, WindowControl};
 
 use crate::eval::{evaluate, format_number, AngleMode};
+use crate::history::History;
 use crate::prefs::Prefs;
 
 /// Tryb pracy kalkulatora.
@@ -215,11 +216,14 @@ impl Key {
 pub enum Action {
     Mode(Mode),
     Press(Key),
+    History(usize),
+    ClearHistory,
 }
 
 /// Pozycja menu głównego.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuAction {
+    History,
     Settings,
     About,
 }
@@ -240,6 +244,9 @@ pub struct App {
     pub menu: Option<MenuState>,
     pub settings_open: bool,
     pub about: Option<AlertDialog>,
+    pub history: History,
+    pub history_sheet: BottomSheet,
+    pub history_scroll: ScrollView,
     pub expression: String,
     pub result: Option<f64>,
     pub last_result: Option<f64>,
@@ -274,6 +281,14 @@ impl App {
             menu: None,
             settings_open: false,
             about: None,
+            history: History::empty(),
+            history_sheet: {
+                let mut sheet = BottomSheet::new();
+                sheet.set_height(300.0);
+                sheet.set_title(Some(tr("History")));
+                sheet
+            },
+            history_scroll: ScrollView::new(),
             expression: String::new(),
             result: None,
             last_result: None,
@@ -298,6 +313,14 @@ impl App {
         app.angle = prefs.angle;
         app.mode = prefs.start_mode;
         app
+    }
+
+    /// Szerokość okna dobrana do zawartości trybu.
+    pub fn preferred_size(&self) -> (u32, u32) {
+        match self.mode {
+            Mode::Standard => (640, 680),
+            Mode::Scientific => (900, 680),
+        }
     }
 
     pub fn window_title(&self) -> String {
@@ -325,14 +348,20 @@ impl App {
     /// Otwiera menu główne pod podanym przyciskiem.
     pub fn open_menu(&mut self, anchor: Rect) {
         let entries = vec![
+            MenuEntry::action(tr("History")).shortcut("Ctrl+H"),
             MenuEntry::action(tr("Settings")).shortcut("Ctrl+,"),
             MenuEntry::separator(),
-            MenuEntry::action(tr("About Calculator")),
+            MenuEntry::action(tr("About Calculator")).shortcut("F1"),
         ];
         self.menu = Some(MenuState {
             menu: Menu::new(entries),
             anchor,
-            actions: vec![Some(MenuAction::Settings), None, Some(MenuAction::About)],
+            actions: vec![
+                Some(MenuAction::History),
+                Some(MenuAction::Settings),
+                None,
+                Some(MenuAction::About),
+            ],
         });
     }
 
@@ -343,19 +372,50 @@ impl App {
             .and_then(|state| state.actions.get(index).copied().flatten());
         self.menu = None;
         match action {
+            Some(MenuAction::History) => self.open_history(),
             Some(MenuAction::Settings) => self.open_settings(),
             Some(MenuAction::About) => self.show_about(),
             None => {}
         }
     }
 
+    pub fn open_history(&mut self) {
+        self.menu = None;
+        self.history_sheet.set_title(Some(tr("History")));
+        self.history_sheet.set_open(true);
+    }
+
+    pub fn close_history(&mut self) {
+        self.history_sheet.set_open(false);
+    }
+
+    pub fn use_history(&mut self, index: usize) {
+        let Some(result) = self
+            .history
+            .entries()
+            .get(index)
+            .map(|entry| entry.result.clone())
+        else {
+            return;
+        };
+        self.close_history();
+        self.insert_value(&result);
+    }
+
+    pub fn clear_history(&mut self) {
+        self.history.clear();
+        self.history_scroll = ScrollView::new();
+    }
+
     pub fn open_settings(&mut self) {
         self.menu = None;
+        self.close_history();
         self.settings_open = true;
     }
 
     pub fn show_about(&mut self) {
         self.menu = None;
+        self.close_history();
         let body = format!(
             "Luna Calculator {}\n{}\n\n{}\n\n© 2026 Luna Project · GPL-3.0-or-later",
             env!("CARGO_PKG_VERSION"),
@@ -426,12 +486,14 @@ impl App {
     }
 
     fn equals(&mut self) {
-        if self.expression.trim().is_empty() {
+        if self.just_evaluated || self.expression.trim().is_empty() {
             return;
         }
+        let input = self.expression.clone();
         match evaluate(&self.expression, self.angle) {
             Ok(value) => {
                 let text = format_number(value);
+                self.history.add(&input, &text);
                 self.expression = text;
                 self.last_result = Some(value);
                 self.result = Some(value);
@@ -636,15 +698,17 @@ pub fn run() -> Result<(), Box<dyn Error>> {
 
     let mut app = App::with_prefs(Prefs::load());
     app.persist_prefs = true;
+    app.history = History::load();
     if std::env::args().any(|arg| arg == "--scientific") {
         app.mode = Mode::Scientific;
     }
 
     let settings = ThemeSettings::load();
     let system_dark = libluna_core::appearance::system_dark();
+    let (width, height) = app.preferred_size();
     let config = AppConfig::new(tr("Calculator"))
         .app_id("eu.luna.Calculator")
-        .initial_size(900, 680)
+        .initial_size(width, height)
         .settings(settings)
         .system_dark(system_dark)
         .escape_to_exit(false);
@@ -865,14 +929,37 @@ mod tests {
         let mut app = App::new();
         let anchor = Rect::from_xywh(700.0, 8.0, 30.0, 30.0);
         app.open_menu(anchor);
-        app.run_menu(0);
+        app.run_menu(1);
         assert!(app.settings_open);
         assert!(app.menu.is_none());
 
         app.open_menu(anchor);
-        app.run_menu(2);
+        app.run_menu(3);
         assert!(app.about.is_some());
         assert!(app.menu.is_none());
+    }
+
+    #[test]
+    fn preferred_width_follows_mode() {
+        let mut app = App::new();
+        assert_eq!(app.preferred_size(), (640, 680));
+        app.mode = Mode::Scientific;
+        assert_eq!(app.preferred_size(), (900, 680));
+    }
+
+    #[test]
+    fn history_and_reuse() {
+        let mut app = App::new();
+        type_keys(
+            &mut app,
+            &[Key::Digit(2), Key::Add, Key::Digit(2), Key::Equals],
+        );
+        assert_eq!(app.history.len(), 1);
+        app.press(Key::Clear);
+        app.use_history(0);
+        assert_eq!(app.expression, "4");
+        app.clear_history();
+        assert!(app.history.is_empty());
     }
 
     #[test]

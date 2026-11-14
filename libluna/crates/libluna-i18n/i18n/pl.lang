@@ -1803,5 +1803,7 @@ Calculator Settings = Ustawienia kalkulatora
 Angle unit = Jednostka kąta
 Start mode = Tryb startowy
 About Calculator = O kalkulatorze
+Clear history = Wyczyść historię
+No calculations yet = Brak obliczeń
 Standard and scientific calculator for the Luna desktop. = Kalkulator standardowy i naukowy środowiska Luna.
 All calculations run locally. No history is saved and no network requests are made. = Wszystkie obliczenia wykonują się lokalnie. Aplikacja nie zapisuje historii i nie łączy się z siecią.

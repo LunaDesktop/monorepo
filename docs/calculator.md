@@ -2,6 +2,8 @@
 
 ![Tryb standardowy](images/calculator-standard.png)
 
+![Historia obliczeń](images/calculator-history.png)
+
 ![Tryb naukowy](images/calculator-scientific.png)
 
 ![Menu aplikacji](images/calculator-menu.png)
@@ -21,8 +23,9 @@ usług w tle i nie wysyła żadnych danych.
 | **Standard** | `+ − × ÷`, procenty, nawiasy, zmiana znaku, `Ans`, kopiowanie wyniku |
 | **Naukowy** | `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `ln`, `log`, `√`, `x²`, `xʸ`, `1/x`, `x!`, `π`, `e`, `EXP`, `10ˣ`, `DEG`/`RAD` |
 | **Podgląd** | wynik obliczany na bieżąco pod wyrażeniem, jeszcze przed `=` |
-| **Klawiatura** | cyfry i operatory, `Enter`, `Backspace`, `Esc`, `Ctrl+C`/`Ctrl+V`, `Ctrl+,` (ustawienia) |
-| **Menu** | hamburger w pasku tytułu: **Ustawienia**, **O kalkulatorze** |
+| **Klawiatura** | cyfry i operatory, `Enter`, `Backspace`, `Esc`, `Ctrl+C`/`Ctrl+V`, `Ctrl+H` (historia), `Ctrl+,` (ustawienia), `F1` (o aplikacji) |
+| **Menu** | hamburger w pasku tytułu: **Historia**, **Ustawienia**, **O kalkulatorze** |
+| **Historia** | ostatnie 100 obliczeń, kliknięcie wstawia wynik, przycisk **Wyczyść historię**; zapis lokalny |
 | **Ustawienia** | jednostka kąta (`DEG`/`RAD`) i tryb startowy (`Standard`/`Naukowy`), zapisywane lokalnie |
 | **Parser** | liczby dziesiętne i naukowe, niejawne mnożenie (`2π`, `3(4+5)`), prawostronne `^`, silnia i procenty |
 
@@ -41,12 +44,17 @@ usług w tle i nie wysyła żadnych danych.
   bieżący tryb zmieniasz przełącznikiem w pasku tytułu.
 - Po `=` kolejna cyfra zaczyna nowe wyrażenie, a operator kontynuuje obliczenia
   na ostatnim wyniku.
+- Okno startuje węższe w trybie standardowym, a szersze w naukowym; układ
+  (pole równania i klawiatura) dopasowuje się do bieżącego rozmiaru okna.
+  `xdg-shell` nie pozwala klientowi wymusić zmiany rozmiaru po zamapowaniu,
+  więc po ręcznej zmianie trybu okno zachowuje swoją szerokość.
 
 ## Prywatność
 
-Aplikacja nie zapisuje historii obliczeń, nie zna konta użytkownika i nie
-wykonuje żadnych zapytań sieciowych. Lokalnie zapisuje tylko dwie preferencje
-(jednostkę kąta i tryb startowy); reszta stanu żyje w pamięci procesu.
+Aplikacja nie zna konta użytkownika i nie wykonuje żadnych zapytań sieciowych.
+Lokalnie zapisuje **historię obliczeń** (`history.tsv`, prawa `0600`) oraz dwie
+preferencje (jednostka kąta i tryb startowy). Historię można wyczyścić z panelu
+historii; reszta stanu żyje w pamięci procesu.
 
 ## Pliki
 
@@ -54,6 +62,7 @@ wykonuje żadnych zapytań sieciowych. Lokalnie zapisuje tylko dwie preferencje
 |---|---|
 | `src/eval.rs` | tokenizer, parser i formatowanie wyniku |
 | `src/app.rs` | stan kalkulatora, klawisze, tryby i pętla aplikacji |
+| `src/history.rs` | zapis/odczyt `~/.local/share/luna/calculator/history.tsv` |
 | `src/prefs.rs` | zapis/odczyt `~/.config/luna/calculator.conf` |
 | `src/ui.rs` | układ okna, rysowanie klawiatury, menu i obsługa zdarzeń |
 
@@ -67,4 +76,4 @@ cargo run --manifest-path apps/luna-calculator/Cargo.toml --bin preview
 ```
 
 Wejście z wpisu `eu.luna.Calculator.desktop`; podglądy headless trafiają do
-`docs/images/calculator-{standard,scientific,menu,settings,about}.png`.
+`docs/images/calculator-{standard,scientific,menu,history,settings,about}.png`.

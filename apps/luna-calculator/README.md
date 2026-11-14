@@ -5,6 +5,8 @@ wykonuje się lokalnie w aplikacji — bez GTK, bez bazy danych i bez sieci.
 
 ![Tryb standardowy](../../docs/images/calculator-standard.png)
 
+![Historia obliczeń](../../docs/images/calculator-history.png)
+
 ![Tryb naukowy](../../docs/images/calculator-scientific.png)
 
 ![Menu aplikacji](../../docs/images/calculator-menu.png)
@@ -22,8 +24,12 @@ wykonuje się lokalnie w aplikacji — bez GTK, bez bazy danych i bez sieci.
   notacja naukowa (`EXP`, `10ˣ`) i przełącznik `DEG`/`RAD`.
 - **Podgląd na żywo** — wynik pojawia się pod wyrażeniem jeszcze przed `=`.
 - **Klawiatura** — cyfry, operatory, `Enter` (=), `Backspace`, `Esc` (czyść),
-  `Ctrl+C` (kopiuj wynik), `Ctrl+V` (wklej wyrażenie), `Ctrl+,` (ustawienia).
-- **Menu** — hamburger w pasku tytułu z **Ustawieniami** i **O kalkulatorze**.
+  `Ctrl+C` (kopiuj wynik), `Ctrl+V` (wklej wyrażenie), `Ctrl+H` (historia),
+  `Ctrl+,` (ustawienia), `F1` (o aplikacji).
+- **Menu** — hamburger w pasku tytułu z **Historią**, **Ustawieniami**
+  i **O kalkulatorze**.
+- **Historia** — ostatnie 100 obliczeń, kliknięcie wstawia wynik, przycisk
+  **Wyczyść historię**; zapis w `~/.local/share/luna/calculator/history.tsv`.
 - **Ustawienia** — jednostka kąta (`DEG`/`RAD`) i tryb startowy
   (`Standard`/`Naukowy`), zapisywane w `~/.config/luna/calculator.conf`.
   Tryb startowy działa przy następnym uruchomieniu; bieżący tryb zmienia
@@ -53,13 +59,16 @@ cargo run --manifest-path apps/luna-calculator/Cargo.toml --bin preview
 | `Esc`, `Delete` | wyczyść wyrażenie |
 | `Ctrl+C` | skopiuj wynik |
 | `Ctrl+V` | wklej wyrażenie |
+| `Ctrl+H` | otwórz historię |
 | `Ctrl+,` | otwórz ustawienia |
+| `F1` | o aplikacji |
 
 ## Prywatność
 
-Aplikacja nie zapisuje historii obliczeń, nie zna konta użytkownika i nie wykonuje
-żadnych zapytań sieciowych. Lokalnie zapisuje tylko jednostkę kąta i tryb
-startowy w `~/.config/luna/calculator.conf`; reszta stanu żyje w pamięci procesu.
+Aplikacja nie zna konta użytkownika i nie wykonuje żadnych zapytań sieciowych.
+Lokalnie zapisuje historię obliczeń (`history.tsv`, prawa `0600`) oraz jednostkę
+kąta i tryb startowy w `~/.config/luna/calculator.conf`. Historię można
+wyczyścić z panelu; reszta stanu żyje w pamięci procesu.
 
 ## Licencja
 

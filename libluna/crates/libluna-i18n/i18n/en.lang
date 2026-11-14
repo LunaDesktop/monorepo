@@ -1761,5 +1761,7 @@ Calculator Settings = Calculator Settings
 Angle unit = Angle unit
 Start mode = Start mode
 About Calculator = About Calculator
+Clear history = Clear history
+No calculations yet = No calculations yet
 Standard and scientific calculator for the Luna desktop. = Standard and scientific calculator for the Luna desktop.
 All calculations run locally. No history is saved and no network requests are made. = All calculations run locally. No history is saved and no network requests are made.

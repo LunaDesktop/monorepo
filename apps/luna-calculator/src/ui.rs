@@ -6,8 +6,8 @@ use libluna_core::{
 };
 use libluna_render::{Scene, TextEngine};
 use libluna_widgets::{
-    Button, ButtonVariant, ControlsSide, HeaderBar, MenuButton, PaintCtx, PreferencesDialog,
-    TitleAlign, ViewSwitcher, WindowControl,
+    BottomSheet, Button, ButtonVariant, ControlsSide, HeaderBar, MenuButton, PaintCtx,
+    PreferencesDialog, TitleAlign, ViewSwitcher, WindowControl,
 };
 
 use crate::app::{Action, App, Key, MenuState, Mode};
@@ -20,8 +20,10 @@ const KEY_KP_ENTER: u32 = 0xff8d;
 const KEY_BACKSPACE: u32 = 0xff08;
 const KEY_DELETE: u32 = 0xffff;
 const KEY_C: u32 = 0x63;
+const KEY_H: u32 = 0x68;
 const KEY_V: u32 = 0x76;
 const KEY_COMMA: u32 = 0x2c;
+const KEY_F1: u32 = 0xffbe;
 
 const STANDARD_ROWS: [&[Key]; 5] = [
     &[Key::Clear, Key::Backspace, Key::Percent, Key::Div],
@@ -155,6 +157,13 @@ pub fn paint(app: &mut App, scene: &mut Scene, size: Size, theme: &Theme, text: 
         state.menu.paint(&mut ctx, panel);
     }
 
+    if app.history_sheet.is_open() {
+        app.history_sheet
+            .set_title(Some(libluna_i18n::tr("History")));
+        app.hits.clear();
+        paint_history(app, &mut ctx, size);
+    }
+
     if app.settings_open {
         app.hits.clear();
         paint_settings(app, &mut ctx, size);
@@ -261,6 +270,13 @@ fn paint_display(app: &mut App, ctx: &mut PaintCtx, rect: Rect) {
     while ctx.measure(&expression, size, weight::BOLD) > rect.width() - pad * 2.0 && size > 18.0 {
         size -= 2.0;
     }
+    let expression = ellipsize(
+        ctx,
+        &expression,
+        rect.width() - pad * 2.0,
+        size,
+        weight::BOLD,
+    );
     ctx.label_right(
         rect.right() - pad,
         rect.y() + rect.height() * 0.52,
@@ -389,6 +405,146 @@ fn paint_settings(app: &App, ctx: &mut PaintCtx, size: Size) {
     done.paint(ctx, lay.done);
 }
 
+struct HistoryLayout {
+    clear: Rect,
+    list: Rect,
+}
+
+fn history_layout(sheet: &BottomSheet, size: Size, theme: &Theme) -> HistoryLayout {
+    let content = sheet.content_rect(size, theme);
+    let pad = theme.spacing.lg.max(16.0);
+    let inner = content.deflate(Insets::new(pad, pad, pad, pad));
+    let bh = theme.metrics.button.height;
+    let clear_w = 150.0_f64.min(inner.width() * 0.5);
+    let clear = Rect::from_xywh(inner.right() - clear_w, inner.y(), clear_w, bh);
+    let list_y = inner.y() + bh + 8.0;
+    let list = Rect::from_xywh(
+        inner.x(),
+        list_y,
+        inner.width(),
+        (inner.bottom() - list_y).max(0.0),
+    );
+    HistoryLayout { clear, list }
+}
+
+fn paint_history(app: &mut App, ctx: &mut PaintCtx, size: Size) {
+    app.history_sheet.paint(ctx, size);
+    let theme = *ctx.theme;
+    let lay = history_layout(&app.history_sheet, size, &theme);
+
+    let mut clear = Button::new(libluna_i18n::tr("Clear history"))
+        .variant(ButtonVariant::Default)
+        .enabled(!app.history.is_empty());
+    clear.set_hovered(is_hovered(app, lay.clear));
+    clear.paint(ctx, lay.clear);
+    if !app.history.is_empty() {
+        hit(app, Action::ClearHistory, lay.clear);
+    }
+
+    if app.history.is_empty() {
+        ctx.label_center(
+            lay.list.center().x,
+            lay.list.center().y,
+            &libluna_i18n::tr("No calculations yet"),
+            theme.typography.body.size,
+            weight::NORMAL,
+            theme.colors.dim_text,
+        );
+        return;
+    }
+
+    let entries: Vec<(String, String)> = app
+        .history
+        .entries()
+        .iter()
+        .rev()
+        .map(|entry| (entry.expression.clone(), entry.result.clone()))
+        .collect();
+    let row_h = 36.0;
+
+    app.history_scroll
+        .set_content_height(entries.len() as f64 * row_h);
+    app.history_scroll
+        .set_offset(app.history_scroll.offset(), lay.list);
+    let offset = app.history_scroll.offset();
+
+    ctx.scene.push_clip(lay.list);
+    for (i, (expression, result)) in entries.iter().enumerate() {
+        let row = Rect::from_xywh(
+            lay.list.x(),
+            lay.list.y() + i as f64 * row_h - offset,
+            (lay.list.width() - 12.0).max(0.0),
+            row_h - 2.0,
+        );
+        if row.bottom() < lay.list.y() || row.y() > lay.list.bottom() {
+            continue;
+        }
+        if is_hovered(app, row) {
+            ctx.scene.fill_rounded_rect(
+                row,
+                theme.radius.small,
+                theme.colors.shade.scale_alpha(0.8),
+            );
+        }
+
+        let body = theme.typography.body.size;
+        let mut result_size = body;
+        while ctx.measure(result, result_size, weight::BOLD) > row.width() * 0.5
+            && result_size > 11.0
+        {
+            result_size -= 1.0;
+        }
+        let result_width = ctx.measure(result, result_size, weight::BOLD);
+        let expression_width = (row.width() - result_width - 30.0).max(20.0);
+        let expression = ellipsize(ctx, expression, expression_width, body, weight::NORMAL);
+
+        ctx.label_left(
+            row.x() + 10.0,
+            row.center().y,
+            &expression,
+            body,
+            weight::NORMAL,
+            theme.colors.dim_text,
+        );
+        ctx.label_right(
+            row.right() - 10.0,
+            row.center().y,
+            result,
+            result_size,
+            weight::BOLD,
+            theme.colors.text,
+        );
+
+        let index = entries.len() - 1 - i;
+        hit(app, Action::History(index), row);
+    }
+    ctx.scene.pop_clip();
+    app.history_scroll.paint_scrollbar(ctx, lay.list);
+}
+
+/// Skraca tekst od lewej, zostawiając koniec i wielokropek — dla pól
+/// wyrównanych do prawej i wierszy historii.
+fn ellipsize(ctx: &PaintCtx, text: &str, width: f64, size: f64, font_weight: u16) -> String {
+    if width <= 0.0 || text.is_empty() {
+        return String::new();
+    }
+    if ctx.measure(text, size, font_weight) <= width {
+        return text.to_owned();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::from("…");
+    for start in (0..chars.len()).rev() {
+        let mut candidate = String::from("…");
+        candidate.extend(&chars[start..]);
+        if ctx.measure(&candidate, size, font_weight) <= width {
+            out = candidate;
+        } else {
+            break;
+        }
+    }
+    out
+}
+
 fn paint_keypad(app: &mut App, ctx: &mut PaintCtx, card: Rect, rows: &[&[Key]]) {
     paint_card(ctx, card);
     if rows.is_empty() {
@@ -489,6 +645,10 @@ pub fn handle_events(
     }
     if app.settings_open {
         handle_settings_events(app, events, size, theme);
+        return;
+    }
+    if app.history_sheet.is_open() {
+        handle_history_events(app, events, size, theme);
         return;
     }
     if app.menu.is_some() {
@@ -607,6 +767,14 @@ fn handle_menu_events(
                     app.open_settings();
                     break;
                 }
+                if key.modifiers.ctrl && key.keysym == KEY_H {
+                    app.open_history();
+                    break;
+                }
+                if key.keysym == KEY_F1 {
+                    app.show_about();
+                    break;
+                }
             }
             Event::Window(WindowEvent::CloseRequested) => app.pending_close = true,
             _ => {}
@@ -643,6 +811,51 @@ fn handle_about_events(
             Event::PointerLeave => app.pointer = None,
             Event::Key(key) if key.state == ButtonState::Pressed && key.keysym == KEY_ESCAPE => {
                 app.about = None;
+                break;
+            }
+            Event::Window(WindowEvent::CloseRequested) => app.pending_close = true,
+            _ => {}
+        }
+    }
+}
+
+fn handle_history_events(app: &mut App, events: &[Event], size: Size, theme: &Theme) {
+    let lay = history_layout(&app.history_sheet, size, theme);
+
+    for event in events {
+        match event {
+            Event::PointerButton(button)
+                if button.button == PointerButton::Left && button.state == ButtonState::Pressed =>
+            {
+                if app.history_sheet.close_at(size, theme, button.position)
+                    || app.history_sheet.scrim_at(size, theme, button.position)
+                {
+                    app.close_history();
+                    break;
+                }
+                let action = app
+                    .hits
+                    .iter()
+                    .rev()
+                    .find(|(_, rect)| rect.contains(button.position))
+                    .map(|(action, _)| *action);
+                if let Some(action) = action {
+                    apply_action(app, action);
+                    break;
+                }
+            }
+            Event::PointerMotion { position, .. } => app.pointer = Some(*position),
+            Event::PointerLeave => app.pointer = None,
+            Event::Scroll(scroll) if lay.list.contains(scroll.position) => {
+                app.history_scroll
+                    .on_scroll(scroll.notches_y() * 36.0, lay.list);
+            }
+            Event::Key(key)
+                if key.state == ButtonState::Pressed
+                    && (key.keysym == KEY_ESCAPE
+                        || (key.modifiers.ctrl && key.keysym == KEY_H)) =>
+            {
+                app.close_history();
                 break;
             }
             Event::Window(WindowEvent::CloseRequested) => app.pending_close = true,
@@ -707,6 +920,8 @@ fn apply_action(app: &mut App, action: Action) {
     match action {
         Action::Mode(mode) => app.mode = mode,
         Action::Press(key) => app.press(key),
+        Action::History(index) => app.use_history(index),
+        Action::ClearHistory => app.clear_history(),
     }
 }
 
@@ -714,6 +929,7 @@ fn handle_key(app: &mut App, key: &KeyEvent) {
     if key.modifiers.ctrl {
         match key.keysym {
             KEY_C => app.clipboard_text = Some(app.copy_text()),
+            KEY_H => app.open_history(),
             KEY_V => app.pending_paste = true,
             KEY_COMMA => app.open_settings(),
             _ => {}
@@ -725,6 +941,7 @@ fn handle_key(app: &mut App, key: &KeyEvent) {
         KEY_ESCAPE | KEY_DELETE => app.press(Key::Clear),
         KEY_ENTER | KEY_KP_ENTER => app.press(Key::Equals),
         KEY_BACKSPACE => app.press(Key::Backspace),
+        KEY_F1 => app.show_about(),
         _ => {}
     }
 }
@@ -793,6 +1010,67 @@ mod tests {
 
         click(&mut app, size, &theme, &text, lay.done.center());
         assert!(!app.settings_open);
+    }
+
+    #[test]
+    fn history_row_click_inserts_result() {
+        let mut app = App::new();
+        app.history.add("2+2", "4");
+        app.open_history();
+        let (size, theme, text) = paint_standard(&mut app);
+        let row = app
+            .hits
+            .iter()
+            .find_map(|(action, rect)| (*action == Action::History(0)).then_some(*rect))
+            .expect("wiersz historii powinien mieć region kliknięcia");
+        click(&mut app, size, &theme, &text, row.center());
+        assert_eq!(app.expression, "4");
+        assert!(!app.history_sheet.is_open());
+    }
+
+    #[test]
+    fn keyboard_shortcuts_open_dialogs() {
+        let mut app = App::new();
+        let (size, theme, text) = paint_standard(&mut app);
+
+        handle_events(&mut app, &[key_event(KEY_H, true)], size, &theme, &text);
+        assert!(app.history_sheet.is_open());
+        handle_events(
+            &mut app,
+            &[key_event(KEY_ESCAPE, false)],
+            size,
+            &theme,
+            &text,
+        );
+        assert!(!app.history_sheet.is_open());
+
+        handle_events(&mut app, &[key_event(KEY_COMMA, true)], size, &theme, &text);
+        assert!(app.settings_open);
+        handle_events(
+            &mut app,
+            &[key_event(KEY_ESCAPE, false)],
+            size,
+            &theme,
+            &text,
+        );
+        assert!(!app.settings_open);
+
+        handle_events(&mut app, &[key_event(KEY_F1, false)], size, &theme, &text);
+        assert!(app.about.is_some());
+    }
+
+    fn key_event(keysym: u32, ctrl: bool) -> Event {
+        Event::Key(KeyEvent {
+            keysym,
+            keycode: 0,
+            text: None,
+            state: ButtonState::Pressed,
+            modifiers: libluna_core::Modifiers {
+                ctrl,
+                ..Default::default()
+            },
+            repeat: false,
+        })
     }
 
     #[test]
