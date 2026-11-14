@@ -22,6 +22,8 @@ const MAX_IMAGE_BYTES: usize = 256 * 1024 * 1024;
 struct Mapping {
     ptr: *mut c_void,
     size: usize,
+    /// Czy mapa pozwala pisać (screencopy kopiuje piksele do bufora klienta).
+    writable: bool,
 }
 
 // SAFETY: mapa jest tylko do odczytu; dostęp do `ptr` serializuje `Mutex`
@@ -44,13 +46,17 @@ impl ShmPoolData {
         // a odczyt poza obiekt kończy się SIGBUS (nie do złapania). Przycinamy rozmiar.
         let real = real_size(&fd);
         let size = declared_size.min(real);
-        let ptr = map_region(&fd, size);
+        let (ptr, writable) = map_region(&fd, size);
         if debug() {
             eprintln!("selene/shm: create_pool declared={declared_size} real={real} used={size}");
         }
         Self {
             fd,
-            map: Mutex::new(Mapping { ptr, size }),
+            map: Mutex::new(Mapping {
+                ptr,
+                size,
+                writable,
+            }),
         }
     }
 
@@ -71,8 +77,10 @@ impl ShmPoolData {
                 let _ = rustix::mm::munmap(map.ptr, map.size);
             }
         }
-        map.ptr = map_region(&self.fd, size);
+        let (ptr, writable) = map_region(&self.fd, size);
+        map.ptr = ptr;
         map.size = size;
+        map.writable = writable;
         if debug() {
             eprintln!("selene/shm: pool resize -> used={size}");
         }
@@ -99,13 +107,30 @@ fn real_size(fd: &OwnedFd) -> usize {
         .unwrap_or(0)
 }
 
-/// Mapuje `size` bajtów pliku `fd` (tylko odczyt). `null` przy niepowodzeniu.
-fn map_region(fd: &OwnedFd, size: usize) -> *mut c_void {
+/// Mapuje `size` bajtów pliku `fd`.
+///
+/// Najpierw próbujemy `READ|WRITE` + `MAP_SHARED` (potrzebne `wlr-screencopy`:
+/// kompozytor wpisuje piksele do bufora klienta). Gdy `fd` jest tylko do odczytu,
+/// zostaje mapa `READ` + `MAP_PRIVATE` — wystarczy do komponowania.
+fn map_region(fd: &OwnedFd, size: usize) -> (*mut c_void, bool) {
     if size == 0 {
-        return std::ptr::null_mut();
+        return (std::ptr::null_mut(), false);
     }
-    // SAFETY: `fd` żyje w strukturze, mapujemy tylko do odczytu.
-    unsafe {
+    // SAFETY: `fd` żyje w strukturze; mapujemy `size` bajtów z początku pliku.
+    let shared = unsafe {
+        rustix::mm::mmap(
+            std::ptr::null_mut::<c_void>(),
+            size,
+            rustix::mm::ProtFlags::READ | rustix::mm::ProtFlags::WRITE,
+            rustix::mm::MapFlags::SHARED,
+            fd,
+            0,
+        )
+    };
+    if let Ok(ptr) = shared {
+        return (ptr, true);
+    }
+    let readonly = unsafe {
         rustix::mm::mmap(
             std::ptr::null_mut::<c_void>(),
             size,
@@ -114,8 +139,8 @@ fn map_region(fd: &OwnedFd, size: usize) -> *mut c_void {
             fd,
             0,
         )
-    }
-    .unwrap_or(std::ptr::null_mut())
+    };
+    (readonly.unwrap_or(std::ptr::null_mut()), false)
 }
 
 fn debug() -> bool {
@@ -296,6 +321,55 @@ impl BufferData {
             }
         }
         Some((out, opaque))
+    }
+
+    /// Wpisuje piksele **RGBA8 (góra→dół)** do bufora shm klienta.
+    ///
+    /// Używane przez `wlr-screencopy`: klient alokuje `Xrgb8888`/`Argb8888`
+    /// i oczekuje w pamięci kolejności `B,G,R,X/A`. Bufor musi mieć dokładnie
+    /// zadeklarowaną geometrię i mapę otwartą do zapisu.
+    pub fn write_rgba(&self, rgba: &[u8]) -> bool {
+        let Some(pool) = self.pool.as_ref() else {
+            return false;
+        };
+        if self.width <= 0 || self.height <= 0 || self.stride <= 0 {
+            return false;
+        }
+        let (w, h) = (self.width as usize, self.height as usize);
+        let stride = self.stride as usize;
+        if stride < w * 4 || rgba.len() < w * h * 4 {
+            return false;
+        }
+        let Some(end) = self
+            .offset
+            .checked_add(stride.checked_mul(h).unwrap_or(usize::MAX))
+        else {
+            return false;
+        };
+        let map = pool.map.lock_or_recover();
+        if !map.writable || map.ptr.is_null() || end > map.size {
+            return false;
+        }
+        let base = map.ptr as *mut u8;
+        let argb = matches!(self.format, wl_shm::Format::Argb8888);
+        let xrgb = matches!(self.format, wl_shm::Format::Xrgb8888);
+        if !argb && !xrgb {
+            return false;
+        }
+        for y in 0..h {
+            let src = &rgba[y * w * 4..(y + 1) * w * 4];
+            // SAFETY: `end` mieści się w zmapowanym regionie (sprawdzone wyżej).
+            let dst = unsafe {
+                std::slice::from_raw_parts_mut(base.add(self.offset + y * stride), w * 4)
+            };
+            for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+                d[0] = s[2];
+                d[1] = s[1];
+                d[2] = s[0];
+                d[3] = if argb { s[3] } else { 0xff };
+            }
+        }
+        true
     }
 }
 

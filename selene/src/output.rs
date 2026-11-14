@@ -324,6 +324,7 @@ pub fn spawn_drm(
     ws_count: WorkspaceCountModel,
     display_request: crate::state::DisplayRequestModel,
     position_request: crate::state::PositionRequestModel,
+    vt_request: std::sync::Arc<std::sync::Mutex<Option<u32>>>,
 ) {
     std::thread::spawn(move || {
         let display = libluna_core::DisplaySettings::load();
@@ -619,6 +620,62 @@ pub fn spawn_drm(
                 }
                 ms_wait += t.elapsed().as_secs_f64() * 1000.0;
                 pending_flips = 0;
+            }
+            // Przełączenie VT (`Ctrl+Alt+F1…F12`). Najpierw oddajemy master DRM —
+            // bez tego konsola jądra (fbcon) nie przejmie ekranu i nowy VT jest
+            // czarny. Po powrocie robimy pełny modeset; `wait_active` blokuje ten
+            // wątek do czasu powrotu (renderowanie nie ma wtedy czego pokazać).
+            if let Some(target) = vt_request.lock_or_recover().take() {
+                // Bez `XDG_VTNR` nie wiemy, na który VT wracać — wtedy nie ruszamy
+                // terminala (lepiej zostać niż zawiesić sesję na obcej konsoli).
+                if let Some(own) = crate::vt::current() {
+                    if own != target {
+                        backend.drop_master();
+                        crate::vt::set_active(false);
+                        let switched = crate::vt::activate(target);
+                        if switched {
+                            crate::vt::wait_active(own);
+                        }
+                        // Powrót (albo nieudane przełączenie): master i tryby z powrotem.
+                        backend.resume();
+                        // Ekran trzeba odrysować od zera — sygnatury i damage sprzed
+                        // przełączenia opisują bufory, których już nie ma na skanoucie.
+                        for sig in last_sigs.iter_mut() {
+                            *sig = None;
+                        }
+                        for scene in prev_scene.iter_mut() {
+                            *scene = None;
+                        }
+                        for damage in prev_damage.iter_mut() {
+                            *damage = None;
+                        }
+                        cursor_shown = vec![false; sizes.len()];
+                        applied_night = None;
+                        applied_power = false;
+                        flip_error_logged = false;
+                        pending_flips = 0;
+                        last_present = std::time::Instant::now();
+                        // Modeset zresetował płaszczyznę kursora — ładujemy ją ponownie.
+                        hw_cursor =
+                            hw_cursor_supported && crate::cursor::fits_hardware(&cursor_gfx);
+                        for i in 0..sizes.len() {
+                            if !hw_cursor
+                                || !backend.set_cursor_image(
+                                    i,
+                                    &cursor_gfx.rgba,
+                                    cursor_gfx.width,
+                                    cursor_gfx.height,
+                                    0,
+                                    0,
+                                )
+                                || !backend.hide_cursor(i)
+                            {
+                                hw_cursor = false;
+                            }
+                        }
+                        crate::vt::set_active(true);
+                    }
+                }
             }
             // Motyw użytkownika mógł się zmienić (demo/Ustawienia) — odśwież, gdy inny.
             if theme_checked.elapsed() >= Duration::from_secs(2) {
@@ -1461,13 +1518,31 @@ fn build_scene(
             // potrzebuje zaokrągleń — narożniki i tak leżą na krawędzi ekranu, a clip
             // wymusza budowę maski o rozmiarze całego bufora i blokuje szybki blit.
             let spans_width = outer.x() <= 0.5 && outer.right() >= size.width - 0.5;
-            let radius = if !w.popup && !w.layer && !w.maximized && !w.fullscreen && !spans_width {
+            // Okna CSD mają w buforze własne marginesy cieni (`image_offset`).
+            // Przycinanie do widocznego prostokąta z naszym promieniem obcinało
+            // ten cień i zaokrąglenia klienta — okno wyglądało na płaskie.
+            // Wyjątek: okna z **naszym** paskiem (SSD) — tam kształt okna definiujemy
+            // my (jak w aplikacjach libLuny), więc cień klienta i tak jest nieistotny.
+            let shadowed = !w.ssd && (w.image_offset.0 > 0.5 || w.image_offset.1 > 0.5);
+            let radius = if !w.popup
+                && !w.layer
+                && !w.maximized
+                && !w.fullscreen
+                && !spans_width
+                && !shadowed
+            {
                 theme.radius.large
             } else {
                 0.0
             };
             if radius > 0.0 {
                 scene.push_clip_rounded(outer, radius);
+            }
+            // Okno z naszym paskiem: najpierw tło okna (jak aplikacje libLuny).
+            // Bez tego przezroczyste piksele zaokrąglonych narożników klienta
+            // przepuszczały tapetę i w rogach pojawiały się jasne „zęby”.
+            if w.ssd {
+                scene.fill_rect(outer, theme.colors.window_bg);
             }
             match &w.dmabuf {
                 Some(db) => {
@@ -1496,11 +1571,17 @@ fn build_scene(
                         None
                     }
                 });
+                // Dokładnie ten sam widget i te same kolory co aplikacje libLuny:
+                // tło z motywu (`colors.headerbar_bg`), bez barwienia pod treść
+                // klienta — inaczej każda aplikacja miała inny pasek niż reszta Luny.
                 let mut header = HeaderBar::new()
                     .title(w.title.clone())
                     .controls(ControlsSide::Right);
-                // Dopasuj kolor paska do górnej części okna (jeśli bufor ma kryjące piksele).
-                if let Some((bg, fg)) = crate::decoration::tint_from_image(&w.data) {
+                // Adaptacja do jasności aplikacji: ciemny pasek nad jasnym oknem,
+                // jasny nad ciemnym (neutralne warianty motywu, nie kolor pikseli).
+                if let Some((bg, fg)) =
+                    crate::decoration::adaptive_header(&w.data, w.image_offset.1, theme)
+                {
                     header = header.tinted(bg, fg);
                 }
                 header.paint(&mut ctx, bar, hovered);
@@ -1555,6 +1636,105 @@ fn build_scene(
 }
 
 /// Wypełnia prostokąt pionowym gradientem (pasami — tanie, a tło nie jest płaskie).
+/// Renderuje scenę jednego wyjścia do **RGBA8** (góra→dół) — dla `wlr-screencopy`.
+///
+/// `region` jest w pikselach fizycznych wyjścia (przycięty do jego obszaru).
+/// Renderer trzymamy w `thread_local`: kontekst EGL jest per wątek, a `dyn Renderer`
+/// nie jest `Send`. Preferujemy GPU (ważne, gdy okna klientów to `dmabuf` — software
+/// ich nie narysuje), z fallbackiem na CPU.
+pub(crate) fn capture_output_rgba(
+    state: &crate::state::State,
+    index: usize,
+    overlay_cursor: bool,
+    region: Option<(i32, i32, i32, i32)>,
+) -> Option<(Vec<u8>, u32, u32)> {
+    use std::cell::RefCell;
+    thread_local! {
+        static CAPTURE: RefCell<Option<Box<dyn Renderer>>> = const { RefCell::new(None) };
+    }
+    let (ox, oy, ow, oh) = {
+        let outs = state.outputs.lock_or_recover();
+        let out = outs.get(index)?;
+        (
+            out.x as f64,
+            out.y as f64,
+            out.width as u32,
+            out.height as u32,
+        )
+    };
+    if ow == 0 || oh == 0 {
+        return None;
+    }
+    // Region w pikselach fizycznych; przycinamy do obszaru wyjścia.
+    let (rx, ry, rw, rh) = match region {
+        None => (0i32, 0i32, ow as i32, oh as i32),
+        Some((x, y, w, h)) => {
+            let x0 = x.max(0).min(ow as i32);
+            let y0 = y.max(0).min(oh as i32);
+            let x1 = x.saturating_add(w).clamp(0, ow as i32);
+            let y1 = y.saturating_add(h).clamp(0, oh as i32);
+            (x0, y0, (x1 - x0).max(0), (y1 - y0).max(0))
+        }
+    };
+    if rw <= 0 || rh <= 0 {
+        return None;
+    }
+    let theme = user_theme();
+    let ov = *state.overview.lock_or_recover();
+    let ws = *state.ws_current.lock_or_recover();
+    let ws_count = state
+        .ws_count_model
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let cursor = if overlay_cursor {
+        *state.cursor.lock_or_recover()
+    } else {
+        None
+    };
+    CAPTURE.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let stale = slot
+            .as_ref()
+            .map_or(true, |r| r.width() != ow || r.height() != oh);
+        if stale {
+            let fresh: Box<dyn Renderer> = match GpuRenderer::new(ow, oh) {
+                Ok(renderer) => Box::new(renderer),
+                Err(_) => Box::new(SoftwareRenderer::new(ow, oh)),
+            };
+            *slot = Some(fresh);
+        }
+        let renderer = slot.as_mut()?;
+        renderer.resize(ow, oh);
+        let mut scene = Scene::new();
+        build_scene(
+            &mut scene,
+            Size::new(f64::from(ow), f64::from(oh)),
+            ox,
+            oy,
+            &state.windows,
+            ws,
+            ws_count,
+            ov,
+            true,
+            cursor,
+            overlay_cursor,
+            &theme,
+            renderer.text_engine(),
+        );
+        renderer.draw(&scene, 1.0, Color::BLACK);
+        let full = renderer.data();
+        if rw as u32 == ow && rh as u32 == oh && rx == 0 && ry == 0 {
+            return Some((full.to_vec(), ow, oh));
+        }
+        let stride = ow as usize * 4;
+        let mut out = Vec::with_capacity(rw as usize * rh as usize * 4);
+        for y in 0..rh as usize {
+            let start = (ry as usize + y) * stride + rx as usize * 4;
+            out.extend_from_slice(&full[start..start + rw as usize * 4]);
+        }
+        Some((out, rw as u32, rh as u32))
+    })
+}
+
 /// Tapeta pulpitu (z `assets/branding`), przeskalowana „cover” do rozmiaru wyjścia.
 ///
 /// Skalowanie robimy **raz** na rozmiar i trzymamy w cache — w pętli renderowania
@@ -2140,17 +2320,16 @@ mod tests {
     }
 
     #[test]
-    fn ssd_header_takes_color_from_window_content() {
+    fn ssd_header_uses_theme_colors_like_apps() {
         use libluna_render::DrawCommand;
         use std::sync::{Arc, Mutex};
-        // Ciemny, kryjący pasek narzędzi w górnych 28 px → pasek SSD w tym samym kolorze.
+        // Treść w jaskrawym kolorze **nie** może zmieniać paska: w aplikacjach
+        // libLuny pasek bierze `colors.headerbar_bg` z motywu, więc dekoracje okna
+        // muszą wyglądać tak samo niezależnie od tego, co rysuje klient.
         let (w, h) = (400u32, 300u32);
         let mut rgba = vec![0u8; (w * h * 4) as usize];
-        for y in 0..28u32 {
-            for x in 0..w {
-                let i = ((y * w + x) * 4) as usize;
-                rgba[i..i + 4].copy_from_slice(&[0x11, 0x22, 0x33, 0xff]);
-            }
+        for px in rgba.chunks_exact_mut(4) {
+            px.copy_from_slice(&[0x11, 0x22, 0x33, 0xff]);
         }
         let model: WindowModel = Arc::new(Mutex::new(vec![Window {
             x: 0.0,
@@ -2177,6 +2356,7 @@ mod tests {
             data: Arc::new(ImageData::new(w, h, rgba)),
         }]));
         let mut scene = Scene::new();
+        let theme = Theme::dark();
         build_scene(
             &mut scene,
             Size::new(800.0, 600.0),
@@ -2189,17 +2369,29 @@ mod tests {
             true,
             None,
             false,
-            &Theme::dark(),
+            &theme,
             &TextEngine::none(),
         );
-        let tint = Color::from_rgba8(0x11, 0x22, 0x33, 0xff);
         assert!(
             scene.commands().iter().any(|c| matches!(
                 c,
                 DrawCommand::FillRect { rect, color }
-                    if *color == tint && rect.y() == 0.0 && rect.height() == crate::state::TITLEBAR
+                    if *color == theme.colors.headerbar_bg
+                        && rect.y() == 0.0
+                        && rect.height() == crate::state::TITLEBAR
             )),
-            "pasek SSD powinien przyjąć kolor górnej części treści okna"
+            "pasek SSD ma kolory motywu, jak HeaderBar w aplikacjach"
+        );
+        // Tło okna pod treścią — zaokrąglone narożniki nie przepuszczają tapety.
+        assert!(
+            scene.commands().iter().any(|c| matches!(
+                c,
+                DrawCommand::FillRect { rect, color }
+                    if *color == theme.colors.window_bg
+                        && rect.y() == 0.0
+                        && rect.height() == crate::state::TITLEBAR + 300.0
+            )),
+            "okno z naszym paskiem ma tło `window_bg`, jak aplikacje libLuny"
         );
     }
 

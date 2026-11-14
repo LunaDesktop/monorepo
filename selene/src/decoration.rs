@@ -18,7 +18,7 @@ use crate::shell::XdgToplevelData;
 use crate::state::State;
 use crate::sync::LockExt;
 
-use libluna_core::Color;
+use libluna_core::{Color, Theme};
 use libluna_render::ImageData;
 
 /// Uchwyt obiektu dekoracji okna.
@@ -39,12 +39,59 @@ pub struct DecoData {
     pub toplevel: xdg_toplevel::XdgToplevel,
 }
 
-/// Dobiera kolor paska SSD do górnej części treści okna.
+/// Paleta paska SSD dopasowana do **jasności** treści okna.
 ///
-/// Próbkujemy pierwsze ~28 px bufora klienta (tam zwykle jest pasek narzędzi/header
-/// aplikacji), pomijając piksele przezroczyste (cienie CSD). Zwracamy parę
-/// `(tło paska, kolor tekstu/ikon)` z automatycznym kontrastem.
-pub fn tint_from_image(img: &ImageData) -> Option<(Color, Color)> {
+/// Nie kopiujemy koloru aplikacji (barwienie paska na średni kolor treści dawało
+/// efekt „paska z innego środowiska”). Zamiast tego wybieramy neutralny wariant
+/// motywu — ciemny dla jasnych aplikacji, jasny dla ciemnych — tak jak robi to
+/// „adaptive” w libadwaita/KDE. Pasek zostaje spójny z resztą Luny, a jednocześnie
+/// nie razi bielą nad czarnym terminalem ani czernią nad białym edytorem.
+///
+/// `offset_y` to górny margines bufora (cienie CSD), żeby nie próbkować cienia.
+/// Zwraca `None`, gdy motyw już pasuje do treści (albo treść jest neutralna).
+pub fn adaptive_header(img: &ImageData, offset_y: f64, theme: &Theme) -> Option<(Color, Color)> {
+    let lum = top_luminance(img, offset_y)?;
+    // Progi z zapasem: treść wideo nie może migotać kolorem paska przy każdej klatce.
+    let want_dark = if luminance(theme.colors.headerbar_bg) < 0.5 {
+        if lum <= 0.70 {
+            return None;
+        }
+        false
+    } else {
+        if lum >= 0.35 {
+            return None;
+        }
+        true
+    };
+    let (bg, fg) = variant_palette(want_dark);
+    (bg != theme.colors.headerbar_bg).then_some((bg, fg))
+}
+
+/// Neutralna paleta paska (`tło`, `tekst/ikony`) z wbudowanego wariantu motywu.
+///
+/// Budowana raz — `Theme` ma pola tekstowe, więc nie chcemy alokować go na każdą
+/// klatkę okna z jasną treścią.
+fn variant_palette(dark: bool) -> (Color, Color) {
+    static DARK: std::sync::OnceLock<(Color, Color)> = std::sync::OnceLock::new();
+    static LIGHT: std::sync::OnceLock<(Color, Color)> = std::sync::OnceLock::new();
+    if dark {
+        *DARK.get_or_init(|| {
+            let t = Theme::dark();
+            (t.colors.headerbar_bg, t.colors.text)
+        })
+    } else {
+        *LIGHT.get_or_init(|| {
+            let t = Theme::light();
+            (t.colors.headerbar_bg, t.colors.text)
+        })
+    }
+}
+
+/// Średnia luminancja górnego pasa treści (pasek narzędzi aplikacji).
+///
+/// Próbkujemy rzadko (do 64 kolumn w 36 wierszach) i pomijamy piksele
+/// przezroczyste — cień CSD ani zaokrąglenia nie zaburzają wyniku.
+fn top_luminance(img: &ImageData, offset_y: f64) -> Option<f64> {
     if img.width == 0 || img.height == 0 {
         return None;
     }
@@ -52,34 +99,31 @@ pub fn tint_from_image(img: &ImageData) -> Option<(Color, Color)> {
     if img.rgba.len() < expected {
         return None;
     }
-    let y1 = img.height.min(28);
-    let step_x = (img.width / 48).max(1);
-    let (mut r, mut g, mut b, mut n) = (0u64, 0u64, 0u64, 0u64);
-    for y in 0..y1 {
+    let y0 = offset_y.max(0.0) as u32;
+    let y1 = (y0 + 36).min(img.height);
+    if y0 >= y1 {
+        return None;
+    }
+    let step_x = (img.width / 64).max(1);
+    let (mut sum, mut n) = (0.0f64, 0u64);
+    for y in y0..y1 {
         let mut x = 0;
         while x < img.width {
             let i = ((y * img.width + x) * 4) as usize;
             if img.rgba[i + 3] > 200 {
-                r += img.rgba[i] as u64;
-                g += img.rgba[i + 1] as u64;
-                b += img.rgba[i + 2] as u64;
+                sum += 0.2126 * f64::from(img.rgba[i])
+                    + 0.7152 * f64::from(img.rgba[i + 1])
+                    + 0.0722 * f64::from(img.rgba[i + 2]);
                 n += 1;
             }
             x += step_x;
         }
     }
-    if n < 8 {
-        return None;
-    }
-    let bg = Color::from_rgba8((r / n) as u8, (g / n) as u8, (b / n) as u8, 0xff);
-    // Percepcyjna luminancja — na jasnym tle dajemy ciemny tekst, na ciemnym biały.
-    let lum = 0.2126 * bg.r + 0.7152 * bg.g + 0.0722 * bg.b;
-    let fg = if lum > 0.60 {
-        Color::from_rgba8(0x1c, 0x1c, 0x1c, 0xff)
-    } else {
-        Color::WHITE
-    };
-    Some((bg, fg))
+    (n >= 8).then(|| sum / (n as f64) / 255.0)
+}
+
+fn luminance(c: Color) -> f64 {
+    0.2126 * f64::from(c.r) + 0.7152 * f64::from(c.g) + 0.0722 * f64::from(c.b)
 }
 
 impl GlobalDispatch<decoration_manager::ZxdgDecorationManagerV1, ()> for State {
@@ -177,34 +221,76 @@ impl Dispatch<toplevel_decoration::ZxdgToplevelDecorationV1, DecoData> for State
 mod tests {
     use super::*;
 
-    fn image(color: [u8; 3], alpha: u8) -> ImageData {
-        let (w, h) = (64u32, 64u32);
+    fn image(top: [u8; 3], bottom: [u8; 3], alpha: u8) -> ImageData {
+        let (w, h) = (80u32, 60u32);
         let mut rgba = vec![0u8; (w * h * 4) as usize];
-        for y in 0..20 {
+        for y in 0..h {
+            let c = if y < 36 { top } else { bottom };
             for x in 0..w {
                 let i = ((y * w + x) * 4) as usize;
-                rgba[i] = color[0];
-                rgba[i + 1] = color[1];
-                rgba[i + 2] = color[2];
-                rgba[i + 3] = alpha;
+                rgba[i..i + 4].copy_from_slice(&[c[0], c[1], c[2], alpha]);
             }
         }
         ImageData::new(w, h, rgba)
     }
 
     #[test]
-    fn tint_takes_top_strip_and_picks_contrast() {
-        let (bg, fg) = tint_from_image(&image([30, 40, 50], 255)).expect("ciemny pasek");
-        assert!((bg.r - 30.0 / 255.0).abs() < 0.01);
-        assert_eq!(fg, Color::WHITE);
-
-        let (bg, fg) = tint_from_image(&image([240, 240, 240], 255)).expect("jasny pasek");
-        assert!(bg.r > 0.9);
-        assert!(fg.r < 0.2, "na jasnym tle tekst musi być ciemny");
+    fn dark_content_gets_dark_bar_on_light_theme() {
+        let theme = Theme::light();
+        let (bg, _fg) = adaptive_header(&image([20, 20, 20], [0, 0, 0], 255), 0.0, &theme)
+            .expect("ciemna treść powinna dać ciemny pasek");
+        assert!(luminance(bg) < 0.2);
+        assert_ne!(bg, theme.colors.headerbar_bg);
     }
 
     #[test]
-    fn transparent_pixels_do_not_tint() {
-        assert!(tint_from_image(&image([200, 50, 50], 0)).is_none());
+    fn light_content_gets_light_bar_on_dark_theme() {
+        let theme = Theme::dark();
+        let (bg, fg) = adaptive_header(&image([245, 245, 245], [255, 255, 255], 255), 0.0, &theme)
+            .expect("jasna treść powinna dać jasny pasek");
+        assert!(luminance(bg) > 0.8);
+        assert!(luminance(fg) < 0.3, "na jasnym pasku tekst musi być ciemny");
+    }
+
+    #[test]
+    fn matching_content_keeps_theme() {
+        assert!(
+            adaptive_header(&image([20, 20, 20], [0, 0, 0], 255), 0.0, &Theme::dark()).is_none(),
+            "ciemna treść na ciemnym motywie nie zmienia paska"
+        );
+        assert!(
+            adaptive_header(
+                &image([245, 245, 245], [255, 255, 255], 255),
+                0.0,
+                &Theme::light()
+            )
+            .is_none(),
+            "jasna treść na jasnym motywie nie zmienia paska"
+        );
+    }
+
+    #[test]
+    fn transparent_pixels_are_ignored() {
+        // Sam cień CSD (alfa 0) nie niesie koloru — pasek zostaje z motywu.
+        assert!(adaptive_header(&image([0, 0, 0], [0, 0, 0], 0), 0.0, &Theme::light()).is_none());
+    }
+
+    #[test]
+    fn shadow_offset_skips_the_margin() {
+        // 22 px kryjącego cienia nad jasnym paskiem aplikacji: bez pominięcia
+        // marginesu średnia wypada szaro (brak adaptacji), z pominięciem — jasno.
+        let (w, h) = (80u32, 80u32);
+        let mut rgba = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            let c = if y < 22 { [0, 0, 0] } else { [245, 245, 245] };
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                rgba[i..i + 4].copy_from_slice(&[c[0], c[1], c[2], 255]);
+            }
+        }
+        let img = ImageData::new(w, h, rgba);
+        let theme = Theme::dark();
+        assert!(adaptive_header(&img, 0.0, &theme).is_none());
+        assert!(adaptive_header(&img, 22.0, &theme).is_some());
     }
 }

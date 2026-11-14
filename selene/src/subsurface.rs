@@ -257,6 +257,7 @@ pub fn commit(state: &mut State, data: &SurfaceData) {
     if data.take_release() {
         if let Some(buffer) = data.buffer.lock_or_recover().clone() {
             let _ = buffer.send_event(wayland_server::protocol::wl_buffer::Event::Release);
+            crate::syncobj::release_buffer(data, &buffer);
         }
     }
     let (parent, repaint, info) = {

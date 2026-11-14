@@ -8,7 +8,7 @@
 
 pkgname: selene
 pkgver: '0.0.5'
-pkgrel: 1
+pkgrel: '2'
 pkgdesc: 'Selene — kompozytor Wayland środowiska Luna (czysty Rust, bez smithay): xdg-shell, layer-shell, SSD, DRM/KMS, schowek, DnD'
 url: 'https://git.paganlinux.eu/luna.git'
 arch: x86_64
@@ -18,15 +18,19 @@ depends:
 - libxkbcommon
 - xorg-xkeyboard-config
 - dejavu-ttf
+- xdg-desktop-portal
+- xdg-desktop-portal-gtk
 makedepends:
 - rustc
 source:
 - luna-${pkgver}.tar.gz
 - luna-session
+- luna-session.target
 - selene.desktop
 sha256sums:
 - __TARBALL_SHA256__
-- __SESSION_SHA256__
+- 0205bed9740ec5ef016fb6d19e21823908d67ad75c389937aaf00a477def0ebe
+- 3ca502d380f46f8f3d36d32ac37cafac3f26c8cc631761ab6878e745c62b1063
 - __DESKTOP_SHA256__
 build: |
   cd luna-${pkgver}

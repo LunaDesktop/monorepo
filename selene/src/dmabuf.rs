@@ -337,8 +337,17 @@ fn format_table_fd(pairs: &[(u32, u64)]) -> Option<(OwnedFd, u32)> {
 /// Bierzemy `/dev/dri/renderD*` pasujący do sterownika GPU używanego przez Selene;
 /// `LUNA_RENDER_NODE` pozwala wskazać węzeł jawnie (układy hybrydowe).
 fn render_device() -> Option<u64> {
+    render_node().and_then(|path| device_of(&path))
+}
+
+/// Ścieżka węzła renderowania, na którym klienci mają alokować bufory.
+///
+/// Używana przez `dmabuf` (do `main_device` w feedbacku) i przez jawną
+/// synchronizację (`syncobj`) — obie ścieżki **muszą** patrzeć na to samo
+/// urządzenie, inaczej import osi czasu się nie uda.
+pub(crate) fn render_node() -> Option<std::path::PathBuf> {
     if let Some(path) = std::env::var_os("LUNA_RENDER_NODE") {
-        return device_of(std::path::Path::new(&path));
+        return Some(std::path::PathBuf::from(path));
     }
     let mut fallback = None;
     for entry in std::fs::read_dir("/dev/dri").ok()?.flatten() {
@@ -347,16 +356,16 @@ fn render_device() -> Option<u64> {
         if !name.starts_with("renderD") {
             continue;
         }
-        let Some(device) = device_of(&entry.path()) else {
+        if device_of(&entry.path()).is_none() {
             continue;
-        };
+        }
         let driver = std::fs::read_link(format!("/sys/class/drm/{name}/device/driver"))
             .ok()
             .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
         match driver {
-            Some(driver) if driver_matches_gpu(&driver) => return Some(device),
+            Some(driver) if driver_matches_gpu(&driver) => return Some(entry.path()),
             _ => {
-                fallback.get_or_insert(device);
+                fallback.get_or_insert(entry.path());
             }
         }
     }

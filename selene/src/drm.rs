@@ -957,6 +957,15 @@ impl DrmBackend {
         ok
     }
 
+    /// Zwalnia DRM master — **przed** przełączeniem VT.
+    ///
+    /// Konsola jądra (fbcon) może przejąć ekran tylko wtedy, gdy nikt nie trzyma
+    /// mastera; bez tego nowy VT zostaje czarny. Master odzyskuje [`Self::resume`]
+    /// po powrocie na nasz VT.
+    pub fn drop_master(&mut self) {
+        let _ = ioctl_none::<DRM_IOCTL_DROP_MASTER, _>(&self.fd.as_fd());
+    }
+
     /// Zmienia tryb wyjścia **na żywo** (bez restartu sesji).
     ///
     /// Tworzy nowe bufory i framebuffery, przepina CRTC i dopiero po sukcesie

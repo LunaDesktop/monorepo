@@ -407,6 +407,26 @@ enum Part {
 
 /// Trasuje jedno zdarzenie wejścia do klientów/okien.
 pub fn handle_input(state: &mut State, handle: &DisplayHandle, event: &Event) {
+    // Na ekranie jest inny VT: wejście nie może trafiać do klientów (Selene czyta
+    // `evdev` także wtedy — inaczej hasło wpisane na VT2 poleciałoby do aktywnego
+    // pola tekstowego aplikacji na VT7). Śledzimy tylko modyfikatory, żeby po
+    // powrocie nie zostały „zaciśnięte”, a skrót Ctrl+Alt+Fn nadal działa —
+    // powrót na nasz VT musi być możliwy także wtedy (wątek wyjścia czeka
+    // w `VT_WAITACTIVE`, więc nie obsłuży nowego żądania).
+    if !crate::vt::active() {
+        if let Event::Key(ke) = event {
+            if let Some(vt) = vt_for_keysym(ke.keysym) {
+                if state.sent_mods.ctrl && state.sent_mods.alt && ke.state == ButtonState::Pressed {
+                    crate::vt::activate(vt);
+                }
+                return;
+            }
+            if is_modifier_keysym(ke.keysym) {
+                sync_modifiers(state, ke.keysym, ke.state);
+            }
+        }
+        return;
+    }
     match event {
         Event::PointerMotion { position, .. } => pointer_motion(state, handle, *position),
         Event::PointerButton(pe) => pointer_button(state, handle, pe.position, pe.button, pe.state),
@@ -437,6 +457,11 @@ fn hit(state: &State, pos: Point) -> Option<(usize, Part)> {
     for (i, w) in windows.iter().enumerate() {
         let inside = if w.popup {
             popup_contains(w, pos)
+        } else if !w.layer && (w.titlebar().contains(pos) || w.resize_edges(pos) != 0) {
+            // Pasek tytułu i krawędzie do skalowania rysuje kompozytor — region
+            // wejścia klienta ich nie obejmuje (klient nie wie o naszym SSD),
+            // więc nie wolno ich tu odsiewać.
+            true
         } else {
             match input_region_hit(w, pos) {
                 Some(h) => h,
@@ -630,14 +655,21 @@ pub(crate) fn window_at(state: &State, pos: (f64, f64)) -> Option<usize> {
     content_window(state, Point::new(pos.0, pos.1))
 }
 
-/// Trafienie w region wejścia powierzchni warstwowej; `None` = brak regionu (cała).
+/// Trafienie w region wejścia powierzchni; `None` = klient nie ustawił regionu
+/// (`wl_surface.set_input_region` nie było wołane — cała powierzchnia).
+///
+/// Region jest w układzie **bufora** powierzchni, a model okna trzyma widoczny
+/// prostokąt. Okna CSD mają bufor większy o marginesy cieni, więc punkt trzeba
+/// przesunąć o `image_offset` — inaczej region „ucieka” o kilkanaście pikseli
+/// i klik w górną krawędź treści wypada poza okno.
 fn input_region_hit(w: &crate::state::Window, pos: Point) -> Option<bool> {
-    if !w.layer {
-        return None;
-    }
-    w.input
-        .as_ref()
-        .map(|rects| rects.iter().any(|r| r.offset(w.x, w.y).contains(pos)))
+    let rects = w.input.as_ref()?;
+    let c = w.content();
+    let local = Point::new(
+        pos.x - (c.x() - w.image_offset.0),
+        pos.y - (c.y() - w.image_offset.1),
+    );
+    Some(rects.iter().any(|r| r.contains(local)))
 }
 
 /// Slot powierzchni warstwowej przechwytującej kliknięcia, gdy punkt leży **poza**
@@ -812,26 +844,44 @@ fn child_at(state: &State, slot: usize, pos: Point) -> Option<(wl_surface::WlSur
     };
     let parent = state.slots.get(slot)?.clone();
     let pd = parent.data::<crate::compositor::SurfaceData>()?;
-    for child in pd.children.lock_or_recover().clone() {
+    // Lista jest w kolejności stosu **od dołu** — wskaźnik trafia w najwyższe
+    // dziecko, więc przeglądamy od końca.
+    let mut children = pd.children.lock_or_recover().clone();
+    children.reverse();
+    for child in children {
         let Some(sd) = child.data::<crate::compositor::SurfaceData>() else {
             continue;
         };
-        let guard = sd.subsurface.lock_or_recover();
-        let Some(sub) = guard.as_ref() else {
-            continue;
+        let (position, size) = {
+            let guard = sd.subsurface.lock_or_recover();
+            let Some(sub) = guard.as_ref() else {
+                continue;
+            };
+            let Some(img) = sub.image.as_ref() else {
+                continue;
+            };
+            (sub.position, (img.width, img.height))
         };
-        let Some(img) = sub.image.as_ref() else {
-            continue;
-        };
-        let x = origin.x() + f64::from(sub.position.0);
-        let y = origin.y() + f64::from(sub.position.1);
-        if pos.x >= x
-            && pos.x < x + f64::from(img.width)
-            && pos.y >= y
-            && pos.y < y + f64::from(img.height)
+        let x = origin.x() + f64::from(position.0);
+        let y = origin.y() + f64::from(position.1);
+        if pos.x < x
+            || pos.x >= x + f64::from(size.0)
+            || pos.y < y
+            || pos.y >= y + f64::from(size.1)
         {
-            return Some((child.clone(), (x, y)));
+            continue;
         }
+        // Region wejścia dziecka obowiązuje tak samo jak okna. GTK/Firefox
+        // ustawiają na powierzchni treści **pusty** region i całe wejście
+        // obsługuje powierzchnia nadrzędna — bez tego kliknięcia trafiały
+        // w subsurface, który ich nie przyjmuje (całe okno „nie reagowało”).
+        let local = Point::new(pos.x - x, pos.y - y);
+        if let Some(region) = sd.input.lock_or_recover().as_ref() {
+            if !region.iter().any(|r| r.contains(local)) {
+                continue;
+            }
+        }
+        return Some((child, (x, y)));
     }
     None
 }
@@ -920,7 +970,7 @@ fn pointer_motion(state: &mut State, handle: &DisplayHandle, pos: Point) {
         let area = output_rect_at(state, pos);
         let (x, y) = clamp_drag_pos(
             area,
-            inset_at(state, pos),
+            insets_at(state, pos),
             width,
             pos.x - drag.off_x,
             pos.y - drag.off_y,
@@ -1576,16 +1626,17 @@ fn do_resize(state: &mut State, pos: Point) {
         return;
     };
     let (ox, oy, ow, oh) = window_output_rect(state, rs.slot);
-    let top = window_inset(state, rs.slot);
+    let insets = window_insets(state, rs.slot);
     let bar = state
         .windows
         .lock_or_recover()
         .get(rs.slot)
         .map(|w| w.bar())
         .unwrap_or(0.0);
-    let right = ox + ow;
-    let work_top = oy + top;
-    let bottom = oy + oh;
+    let work_left = ox + insets.left;
+    let right = ox + ow - insets.right;
+    let work_top = oy + insets.top;
+    let bottom = oy + oh - insets.bottom;
 
     let dx = pos.x - rs.start_px;
     let dy = pos.y - rs.start_py;
@@ -1597,8 +1648,8 @@ fn do_resize(state: &mut State, pos: Point) {
     if rs.edges & EDGE_LEFT != 0 {
         w = (rs.start_w - dx).max(MIN_W);
         x = rs.start_x + (rs.start_w - w);
-        if x < ox {
-            x = ox;
+        if x < work_left {
+            x = work_left;
             w = (rs.start_x + rs.start_w - x).max(MIN_W);
         }
     } else if rs.edges & EDGE_RIGHT != 0 {
@@ -1718,19 +1769,20 @@ fn corner_at(state: &State, pos: Point) -> Option<CornerKind> {
         return None;
     }
     let (ox, oy, ow, oh) = output_rect_at(state, pos);
-    let top = inset_at(state, pos).min(oh);
+    let insets = insets_at(state, pos);
+    let top = insets.top.min(oh);
     if state.ws_overview_corner
-        && pos.x <= ox + CORNER
+        && pos.x <= ox + insets.left + CORNER
         && pos.y >= oy + top
         && pos.y <= oy + top + CORNER
     {
         return Some(CornerKind::TopLeft);
     }
     if state.ws_corner_switch {
-        if pos.x <= ox + CORNER && pos.y >= oy + oh - CORNER {
+        if pos.x <= ox + insets.left + CORNER && pos.y >= oy + oh - insets.bottom - CORNER {
             return Some(CornerKind::BottomLeft);
         }
-        if pos.x >= ox + ow - CORNER && pos.y >= oy + oh - CORNER {
+        if pos.x >= ox + ow - insets.right - CORNER && pos.y >= oy + oh - insets.bottom - CORNER {
             return Some(CornerKind::BottomRight);
         }
     }
@@ -1759,7 +1811,7 @@ fn note_corner(state: &mut State, pos: Point) {
     state.ws_corner_hover = corner;
     state.ws_corner_since = corner.map(|_| Instant::now());
     state.ws_corner_top = if corner.is_some() {
-        inset_at(state, pos)
+        insets_at(state, pos).top
     } else {
         0.0
     };
@@ -1953,23 +2005,37 @@ fn window_output_index(state: &State, slot: usize) -> usize {
     crate::monitors::output_at(&outs, center.x, center.y)
 }
 
-/// Górna strefa wyłączna panelu na danym monitorze (0 = brak panelu).
-fn inset_for_output(state: &State, idx: usize) -> f64 {
-    state.top_insets.get(&idx).copied().unwrap_or(0.0)
+/// Strefy wyłącznej paneli na danym monitorze (wszystkie cztery krawędzie).
+#[derive(Debug, Clone, Copy, Default)]
+struct Insets {
+    top: f64,
+    right: f64,
+    bottom: f64,
+    left: f64,
 }
 
-/// Górna strefa wyłączna panelu na monitorze, na którym leży okno.
-fn window_inset(state: &State, slot: usize) -> f64 {
-    inset_for_output(state, window_output_index(state, slot))
+fn insets_for_output(state: &State, idx: usize) -> Insets {
+    let get = |map: &std::collections::HashMap<usize, f64>| map.get(&idx).copied().unwrap_or(0.0);
+    Insets {
+        top: get(&state.top_insets),
+        right: get(&state.right_insets),
+        bottom: get(&state.bottom_insets),
+        left: get(&state.left_insets),
+    }
 }
 
-/// Górna strefa wyłączna panelu na monitorze pod punktem.
-fn inset_at(state: &State, pos: Point) -> f64 {
+/// Strefy wyłącznej paneli na monitorze, na którym leży okno.
+fn window_insets(state: &State, slot: usize) -> Insets {
+    insets_for_output(state, window_output_index(state, slot))
+}
+
+/// Strefy wyłącznej paneli na monitorze pod punktem.
+fn insets_at(state: &State, pos: Point) -> Insets {
     let idx = {
         let outs = state.outputs.lock_or_recover();
         crate::monitors::output_at(&outs, pos.x, pos.y)
     };
-    inset_for_output(state, idx)
+    insets_for_output(state, idx)
 }
 
 /// Ogranicza pozycję przeciąganego okna do obszaru roboczego.
@@ -1979,17 +2045,17 @@ fn inset_at(state: &State, pos: Point) -> f64 {
 /// [`MIN_VISIBLE`] pikseli okna zostaje na monitorze.
 fn clamp_drag_pos(
     area: (f64, f64, f64, f64),
-    top_inset: f64,
+    insets: Insets,
     width: f64,
     x: f64,
     y: f64,
 ) -> (f64, f64) {
     let (ox, oy, ow, oh) = area;
-    let min_y = oy + top_inset;
-    let max_y = (oy + oh - MIN_VISIBLE).max(min_y);
+    let min_y = oy + insets.top;
+    let max_y = (oy + oh - insets.bottom - MIN_VISIBLE).max(min_y);
     let y = y.clamp(min_y, max_y);
-    let min_x = ox - (width - MIN_VISIBLE).max(0.0);
-    let max_x = (ox + ow - MIN_VISIBLE).max(min_x);
+    let min_x = ox + insets.left - (width - MIN_VISIBLE).max(0.0);
+    let max_x = (ox + ow - insets.right - MIN_VISIBLE).max(min_x);
     let x = x.clamp(min_x, max_x);
     (x, y)
 }
@@ -2116,8 +2182,8 @@ pub fn set_fullscreen(state: &mut State, slot: usize, fullscreen: bool) {
 /// Przełącza maksymalizację (zapamiętuje/odtwarza geometrię).
 fn toggle_maximize(state: &mut State, slot: usize) {
     let (ox, oy, ow, oh) = window_output_rect(state, slot);
-    // Górny panel rezerwuje miejsce **tylko na swoim monitorze**.
-    let top = window_inset(state, slot);
+    // Panele rezerwują miejsce **tylko na swoim monitorze** (dowolna krawędź).
+    let insets = window_insets(state, slot);
     {
         let mut windows = state.windows.lock_or_recover();
         let Some(w) = windows.get_mut(slot) else {
@@ -2152,10 +2218,10 @@ fn toggle_maximize(state: &mut State, slot: usize) {
             // Okna CSD (GTK/libadwaita, X11) nie mają naszego paska tytułu — nie
             // rezerwujemy dla niego wysokości paska, bo zostawałaby pusta szrama u dołu.
             let bar = if w.ssd { TITLEBAR } else { 0.0 };
-            w.x = ox;
-            w.y = oy + top;
-            w.width = ow as i32;
-            w.height = (oh - top - bar).max(MIN_H) as i32;
+            w.x = ox + insets.left;
+            w.y = oy + insets.top;
+            w.width = (ow - insets.left - insets.right).max(1.0) as i32;
+            w.height = (oh - insets.top - insets.bottom - bar).max(MIN_H) as i32;
         }
     }
     let (nw, nh) = window_geometry(state, slot)
@@ -2182,9 +2248,8 @@ fn toggle_maximize(state: &mut State, slot: usize) {
 /// Przełącza pełny ekran (ukrywa dekorację).
 fn toggle_fullscreen(state: &mut State, slot: usize) {
     let (ox, oy, ow, oh) = window_output_rect(state, slot);
-    // Panel górny jest zawsze widoczny na swoim monitorze — pełny ekran zajmuje
-    // **obszar roboczy tylko tam**. Na monitorze bez panelu okno dostaje całą wysokość.
-    let top = window_inset(state, slot);
+    // Pełny ekran zajmuje całe wyjście. Panel jest rysowany w warstwie top
+    // nad treścią, więc nie zostawiamy szczeliny z żadnej strony.
     // Nowa kolejność dla wejścia i wyjścia — okno wraca nad pozostałe.
     let raise_z = state.next_z();
     {
@@ -2216,10 +2281,13 @@ fn toggle_fullscreen(state: &mut State, slot: usize) {
             w.fullscreen = true;
             w.maximized = false;
             w.minimized = false;
+            // Pełny ekran zajmuje **całe wyjście** — pasek panelu nie może
+            // zostawiać szczeliny z lewej/dole. Panel (warstwa top) i tak jest
+            // rysowany nad treścią, a okno dostaje całą powierzchnię.
             w.x = ox;
-            w.y = oy + top;
+            w.y = oy;
             w.width = ow as i32;
-            w.height = (oh - top).max(MIN_H) as i32;
+            w.height = oh as i32;
             w.z = raise_z;
         }
     }
@@ -2472,6 +2540,22 @@ fn request_screenshot(state: &mut State) {
 
 fn keyboard_key(state: &mut State, keysym: u32, keycode: u32, st: ButtonState) {
     state.note_activity();
+    // Ctrl+Alt+F1…F12: przełączenie wirtualnego terminala. Jądro nie widzi tych
+    // klawiszy (Selene czyta `evdev` w trybie surowym), więc obsługujemy je sami
+    // i **nie** przekazujemy do klientów. Samo przełączenie robi wątek wyjścia
+    // DRM (musi oddać i odzyskać master); w trybie nested nic nie robimy.
+    if state.drm_backend && state.sent_mods.ctrl && state.sent_mods.alt {
+        if let Some(vt) = vt_for_keysym(keysym) {
+            if st == ButtonState::Pressed {
+                let own = crate::vt::current();
+                // Bez numeru własnego VT nie umiemy wrócić — nie ruszamy terminala.
+                if own.is_some() && own != Some(vt) {
+                    *state.vt_request.lock_or_recover() = Some(vt);
+                }
+            }
+            return;
+        }
+    }
     let ime_grab = !state.locked && crate::text_input::keyboard_grab(state).is_some();
     sync_modifiers(state, keysym, st);
     if is_modifier_keysym(keysym) || is_lock_keysym(keysym) {
@@ -2770,11 +2854,16 @@ fn snap_rect(zone: SnapZone, area: Rect, bar: f64) -> (f64, f64, f64, f64) {
     }
 }
 
-/// Obszar roboczy monitora pod kursorem (bez górnego panelu — jeśli tam jest).
+/// Obszar roboczy monitora pod kursorem (bez panelu — dowolna krawędź).
 fn workarea_at(state: &State, pos: Point) -> Rect {
     let (ox, oy, ow, oh) = output_rect_at(state, pos);
-    let top = inset_at(state, pos).min(oh - MIN_H);
-    Rect::from_xywh(ox, oy + top, ow, (oh - top).max(MIN_H))
+    let insets = insets_at(state, pos);
+    Rect::from_xywh(
+        ox + insets.left,
+        oy + insets.top,
+        (ow - insets.left - insets.right).max(MIN_W),
+        (oh - insets.top - insets.bottom).max(MIN_H),
+    )
 }
 
 /// Po upuszczeniu przeciąganego okna: przyciągnij je, jeśli kursor jest przy krawędzi.
@@ -2814,8 +2903,13 @@ fn snap_to_zone(state: &mut State, slot: usize, zone: SnapZone, remember: Option
         return;
     }
     let (ox, oy, ow, oh) = window_output_rect(state, slot);
-    let top = window_inset(state, slot).min(oh - MIN_H);
-    let work = Rect::from_xywh(ox, oy + top, ow, (oh - top).max(MIN_H));
+    let insets = window_insets(state, slot);
+    let work = Rect::from_xywh(
+        ox + insets.left,
+        oy + insets.top,
+        (ow - insets.left - insets.right).max(MIN_W),
+        (oh - insets.top - insets.bottom).max(MIN_H),
+    );
     let bar = {
         let windows = state.windows.lock_or_recover();
         match windows.get(slot) {
@@ -3151,6 +3245,15 @@ fn is_modifier_keysym(keysym: u32) -> bool {
     modifier_for_keysym(keysym).is_some()
 }
 
+/// `F1…F12` (keysym `0xffbe`–`0xffc9`) → numer VT `1…12`.
+fn vt_for_keysym(keysym: u32) -> Option<u32> {
+    if (0xffbe..=0xffc9).contains(&keysym) {
+        Some(keysym - 0xffbe + 1)
+    } else {
+        None
+    }
+}
+
 /// CapsLock/NumLock — blokady obsługiwane przez `mods_locked` (nie przez zwykły klawisz).
 fn is_lock_keysym(keysym: u32) -> bool {
     matches!(keysym, 0xffe5 | 0xff7f)
@@ -3404,6 +3507,16 @@ mod tests {
     }
 
     #[test]
+    fn function_keys_map_to_vts() {
+        // XKB: XKB_KEY_F1 = 0xffbe … XKB_KEY_F12 = 0xffc9.
+        assert_eq!(vt_for_keysym(0xffbe), Some(1));
+        assert_eq!(vt_for_keysym(0xffbf), Some(2));
+        assert_eq!(vt_for_keysym(0xffc9), Some(12));
+        assert_eq!(vt_for_keysym(0xffcd), None, "F15 to nie VT");
+        assert_eq!(vt_for_keysym(b'a' as u32), None);
+    }
+
+    #[test]
     fn altgr_is_level3_and_super_is_logo() {
         assert!(matches!(modifier_for_keysym(0xfe03), Some(_)));
         let mut m = Modifiers::NONE;
@@ -3496,6 +3609,52 @@ mod tests {
         w.image_offset = (14.0, 12.0);
         s.windows.lock_or_recover().push(w); // x=100, y=50
         assert_eq!(content_local(&s, 0, Point::new(140.0, 100.0)), (54.0, 62.0));
+    }
+
+    #[test]
+    fn toplevel_input_region_is_in_buffer_coordinates() {
+        // Zen/Firefox: bufor ma marginesy cieni (24,22), a region wejścia klient
+        // podaje od początku **bufora**. Punkt w widocznym oknie ma trafiać,
+        // a klik w sam cień już nie.
+        let s = State::default();
+        let mut w = sample_window();
+        w.ssd = false;
+        w.image_offset = (24.0, 22.0);
+        w.input = Some(vec![libluna_core::Rect::from_xywh(
+            24.0, 22.0, 200.0, 120.0,
+        )]);
+        s.windows.lock_or_recover().push(w); // widoczne: (100,50)-(300,170)
+        assert!(content_window(&s, Point::new(150.0, 100.0)).is_some());
+        // (80,32) leży w marginesie cienia (bufor zaczyna się w (76,28)).
+        assert!(content_window(&s, Point::new(80.0, 32.0)).is_none());
+    }
+
+    #[test]
+    fn empty_input_region_means_no_input() {
+        // `wl_region` bez prostokątów = powierzchnia nie przyjmuje wejścia.
+        // Dokładnie tak GTK3/Firefox oznaczają subsurface treści — kliknięcia
+        // mają spaść na powierzchnię nadrzędną, a nie ginąć w dziecku.
+        let s = State::default();
+        let mut w = sample_window();
+        w.ssd = false;
+        w.input = Some(Vec::new());
+        s.windows.lock_or_recover().push(w);
+        assert!(content_window(&s, Point::new(150.0, 100.0)).is_none());
+        assert!(hit(&s, Point::new(150.0, 100.0)).is_none());
+    }
+
+    #[test]
+    fn titlebar_of_ssd_window_stays_clickable() {
+        // Region klienta obejmuje tylko treść (nie zna naszego paska). Klik w pasek
+        // musi nadal trafiać w dekorację, inaczej nie da się zamknąć okna.
+        let s = State::default();
+        let mut w = sample_window();
+        w.input = Some(vec![libluna_core::Rect::from_xywh(0.0, 0.0, 200.0, 120.0)]);
+        s.windows.lock_or_recover().push(w); // x=100, y=50, treść od y=50+TITLEBAR
+        let (_, part) = hit(&s, Point::new(150.0, 50.0 + TITLEBAR / 2.0)).expect("pasek tytułu");
+        assert_eq!(part, Part::Title);
+        let (_, part) = hit(&s, Point::new(150.0, 50.0 + TITLEBAR + 10.0)).expect("treść");
+        assert_eq!(part, Part::Content);
     }
 
     #[test]
@@ -3742,16 +3901,16 @@ mod tests {
     }
 
     #[test]
-    fn fullscreen_keeps_panel_gap_on_panel_output() {
+    fn fullscreen_covers_the_whole_output_even_with_a_panel() {
         let mut s = two_output_state();
         s.windows.lock_or_recover().push(sample_window());
         set_fullscreen(&mut s, 0, true);
-        let (y, height) = {
+        let (x, y, width, height) = {
             let ws = s.windows.lock_or_recover();
-            (ws[0].y, ws[0].height)
+            (ws[0].x, ws[0].y, ws[0].width, ws[0].height)
         };
-        assert_eq!(y, 40.0);
-        assert_eq!(height, 1080 - 40);
+        // Panel warstwy top rysuje się nad treścią; okno dostaje całe wyjście.
+        assert_eq!((x, y, width, height), (0.0, 0.0, 1920, 1080));
     }
 
     #[test]
@@ -3841,11 +4000,29 @@ mod tests {
     #[test]
     fn drag_clamp_keeps_titlebar_below_panel() {
         let area = (0.0, 0.0, 1920.0, 1080.0);
-        let (x, y) = clamp_drag_pos(area, 48.0, 800.0, 100.0, -200.0);
+        let insets = Insets {
+            top: 48.0,
+            ..Insets::default()
+        };
+        let (x, y) = clamp_drag_pos(area, insets, 800.0, 100.0, -200.0);
         assert_eq!((x, y), (100.0, 48.0));
         // Nie da się wywieźć okna całkowicie za prawą krawędź.
-        let (x2, _) = clamp_drag_pos(area, 48.0, 800.0, 5000.0, 200.0);
+        let (x2, _) = clamp_drag_pos(area, insets, 800.0, 5000.0, 200.0);
         assert_eq!(x2, 1920.0 - MIN_VISIBLE);
+    }
+
+    #[test]
+    fn drag_clamp_respects_side_and_bottom_panels() {
+        let area = (0.0, 0.0, 1920.0, 1080.0);
+        let insets = Insets {
+            top: 0.0,
+            right: 0.0,
+            bottom: 40.0,
+            left: 40.0,
+        };
+        let (x, y) = clamp_drag_pos(area, insets, 800.0, -5000.0, 5000.0);
+        assert_eq!(x, insets.left - (800.0 - MIN_VISIBLE));
+        assert_eq!(y, 1080.0 - insets.bottom - MIN_VISIBLE);
     }
 
     #[test]

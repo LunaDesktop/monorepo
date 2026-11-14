@@ -30,6 +30,7 @@ mod pointer_warp;
 mod popup;
 mod primary_selection;
 mod protocols;
+mod screencopy;
 mod seat;
 mod shell;
 mod shm;
@@ -37,12 +38,14 @@ mod single_pixel_buffer;
 mod state;
 mod subsurface;
 mod sync;
+mod syncobj;
 mod tearing_control;
 mod test_input;
 mod text_input;
 mod viewporter;
 mod vt;
 mod workspace;
+mod xdg_foreign;
 mod xdg_output;
 mod xwayland;
 mod xwm;
@@ -169,6 +172,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             let formats = libluna_render::gpu::dmabuf_formats();
             eprintln!("selene/dmabuf: global v3 ({} formatów EGL)", formats.len());
         }
+        // Jawna synchronizacja buforów (`wp_linux_drm_syncobj_v1`). Ogłaszamy ją
+        // tylko gdy sterownik naprawdę wspiera osie czasu — bez tego klienty
+        // (Xwayland, Mesa) nie mają jak przekazać fence'ów, a my nie mamy czego
+        // czekać. Zapisuje to też punkt „release”, więc klient nie czeka na
+        // niejawną synchronizację sterownika.
+        if syncobj::probe() {
+            handle.create_global::<State, syncobj::Manager, ()>(1, ());
+        }
     }
     // Jeden global `wl_output` na monitor.
     for index in 0..output_count {
@@ -208,6 +219,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     handle.create_global::<State, WpViewporter, ()>(1, ());
     handle.create_global::<State, WpFractionalScaleManagerV1, ()>(1, ());
     handle.create_global::<State, ZwlrForeignToplevelManagerV1, ()>(3, ());
+    // Kopiowanie ekranu (`wlr-screencopy`) — ScreenCast/Screenshot przez portal.
+    // Renderujemy scenę tym samym kodem co monitor, więc zrzut jest 1:1 z obrazem.
+    handle.create_global::<State, crate::screencopy::Manager, ()>(3, ());
+    // Uchwyty powierzchni między klientami (`xdg-foreign`). Portal używa ich do
+    // ustawienia okna dialogu jako dziecka okna aplikacji (v1: GTK3, v2: GTK4/Flatpak).
+    handle.create_global::<State, crate::xdg_foreign::ExporterV1, ()>(1, ());
+    handle.create_global::<State, crate::xdg_foreign::ImporterV1, ()>(1, ());
+    handle.create_global::<State, crate::xdg_foreign::ExporterV2, ()>(1, ());
+    handle.create_global::<State, crate::xdg_foreign::ImporterV2, ()>(1, ());
     handle.create_global::<State, ExtWorkspaceManagerV1, ()>(1, ());
     // X11 (XWayland): bez tego globalu Xwayland nie przypisze okien X11 do powierzchni.
     handle.create_global::<State, XwaylandShellV1, ()>(1, ());
@@ -296,6 +316,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             ws_count,
             Arc::clone(&state.display_request),
             Arc::clone(&state.position_request),
+            Arc::clone(&state.vt_request),
         );
     } else {
         output::spawn(

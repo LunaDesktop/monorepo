@@ -235,11 +235,21 @@ impl Dispatch<layer_surface::ZwlrLayerSurfaceV1, LayerData> for State {
             }
             layer_surface::Request::Destroy => {
                 // Panel znika — jego rezerwacja miejsca też (per monitor).
-                if st.layer == 2
-                    && st.anchor & crate::layer::ANCHOR_TOP != 0
-                    && st.exclusive_zone > 0
-                {
-                    state.top_insets.remove(&data.output.unwrap_or(0));
+                if st.layer == 2 && st.exclusive_zone > 0 {
+                    let left = st.anchor & crate::layer::ANCHOR_LEFT != 0;
+                    let right = st.anchor & crate::layer::ANCHOR_RIGHT != 0;
+                    let top = st.anchor & crate::layer::ANCHOR_TOP != 0;
+                    let bottom = st.anchor & crate::layer::ANCHOR_BOTTOM != 0;
+                    let idx = data.output.unwrap_or(0);
+                    if left && !right {
+                        state.left_insets.remove(&idx);
+                    } else if right && !left {
+                        state.right_insets.remove(&idx);
+                    } else if top && !bottom {
+                        state.top_insets.remove(&idx);
+                    } else if bottom && !top {
+                        state.bottom_insets.remove(&idx);
+                    }
                 }
                 // Zdejmij powierzchnię z widoku (na wszystkich monitorach).
                 drop(st);

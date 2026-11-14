@@ -530,6 +530,9 @@ pub struct State {
     pub outputs: Outputs,
     /// Podłączeni menedżerowie `zwlr_foreign_toplevel` (paski/taskbary).
     pub toplevel_managers: Vec<ZwlrForeignToplevelManagerV1>,
+    /// Uchwyty `xdg_foreign` (eksport/import powierzchni między klientami).
+    /// Potrzebne portalom do powiązania dialogu z oknem aplikacji.
+    pub xdg_foreign: std::sync::Mutex<crate::xdg_foreign::Handles>,
 
     // — Przestrzenie robocze (`ext_workspace_v1`) —
     /// Liczba przestrzeni roboczych.
@@ -648,9 +651,12 @@ pub struct State {
     /// przychodzi od klienta **asynchronicznie** — przy bardzo szybkim kliknięciu
     /// docierał już po zwolnieniu przycisku i zostawiał „przyklejone” przeciąganie.
     pub left_down: bool,
-    /// Strefa wyłączna górnych paneli, **per indeks wyjścia**. Panel jest tylko na
-    /// jednym monitorze — drugi nie może dostawać u góry pustej szczeliny.
+    /// Strefa wyłączna paneli, **per indeks wyjścia**. Panel jest tylko na jednym
+    /// monitorze — drugi nie może dostawać u góry pustej szczeliny.
     pub top_insets: std::collections::HashMap<usize, f64>,
+    pub bottom_insets: std::collections::HashMap<usize, f64>,
+    pub left_insets: std::collections::HashMap<usize, f64>,
+    pub right_insets: std::collections::HashMap<usize, f64>,
     /// Trwające przeciąganie okna.
     pub drag: Option<DragState>,
     /// Trwające przeskalowanie okna.
@@ -665,6 +671,9 @@ pub struct State {
     pub display_request: DisplayRequestModel,
     /// Żądanie przesunięcia monitora (`luna-control output-position`).
     pub position_request: PositionRequestModel,
+    /// Żądanie przełączenia VT (`Ctrl+Alt+F1…F12`) — obsługuje wątek wyjścia DRM
+    /// (musi zwolnić master przed przełączeniem i odzyskać go po powrocie).
+    pub vt_request: Arc<Mutex<Option<u32>>>,
 }
 
 impl Default for State {
@@ -685,6 +694,7 @@ impl Default for State {
             z_counter: 1,
             outputs: Arc::new(Mutex::new(vec![OutputInfo::default()])),
             toplevel_managers: Vec::new(),
+            xdg_foreign: std::sync::Mutex::new(crate::xdg_foreign::Handles::default()),
             ws_count: 4,
             ws_count_model: Arc::new(std::sync::atomic::AtomicUsize::new(4)),
             ws_names: Vec::new(),
@@ -734,6 +744,9 @@ impl Default for State {
             relative_pointers: Vec::new(),
             left_down: false,
             top_insets: std::collections::HashMap::new(),
+            bottom_insets: std::collections::HashMap::new(),
+            left_insets: std::collections::HashMap::new(),
+            right_insets: std::collections::HashMap::new(),
             last_title_click: None,
             drag: None,
             resize: None,
@@ -741,6 +754,7 @@ impl Default for State {
             night_light: Arc::new(std::sync::atomic::AtomicU8::new(0)),
             display_request: Arc::new(Mutex::new(None)),
             position_request: Arc::new(Mutex::new(None)),
+            vt_request: Arc::new(Mutex::new(None)),
             power_saver: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             idle: IdleSettings::default(),
             idle_last_input: Instant::now(),

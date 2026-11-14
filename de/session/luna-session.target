@@ -1,0 +1,11 @@
+[Unit]
+Description=Luna desktop session
+Documentation=man:systemd.special(7)
+# `graphical-session.target` ma `RefuseManualStart=yes` — nie da się go
+# uruchomić ręcznie. Wciągamy go zależnością z własnego targetu sesji, bo
+# `xdg-desktop-portal.service` i `xdg-desktop-portal-gtk.service` mają
+# `Requisite=graphical-session.target`: bez aktywnego targetu aktywacja
+# przez D-Bus kończy się „Dependency failed”, a portale (Flatpak, wybór
+# plików, Ustawienia) czekają na timeout.
+Wants=graphical-session.target
+After=graphical-session.target

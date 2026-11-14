@@ -82,6 +82,12 @@ pub struct SurfaceData {
     /// do vblanku, ale wartość jest zapisana, gdyby warstwa wyjścia dostała kiedyś
     /// plane z tearingiem.
     pub tearing: Mutex<crate::tearing_control::PresentationHint>,
+    /// Punkt `acquire` z najbliższego commitu — czekamy na niego przed próbkowaniem.
+    pub sync_acquire: Mutex<Option<crate::syncobj::Point>>,
+    /// Punkt `release` z najbliższego commitu — sygnalizowany przy oddaniu bufora.
+    pub sync_release: Mutex<Option<crate::syncobj::Point>>,
+    /// Punkty `release` przypisane do konkretnych buforów (id zasobu → punkt).
+    pub release_points: Mutex<Vec<(u32, crate::syncobj::Point)>>,
 }
 
 impl SurfaceData {
@@ -108,6 +114,9 @@ impl SurfaceData {
             entered_outputs: Mutex::new(Vec::new()),
             content_type: Mutex::new(crate::content_type::ContentType::None),
             tearing: Mutex::new(crate::tearing_control::PresentationHint::Vsync),
+            sync_acquire: Mutex::new(None),
+            sync_release: Mutex::new(None),
+            release_points: Mutex::new(Vec::new()),
         }
     }
 
@@ -246,6 +255,8 @@ impl Dispatch<wl_surface::WlSurface, SurfaceData> for State {
                 if *need {
                     if let Some(prev) = cur.take() {
                         let _ = prev.send_event(wl_buffer::Event::Release);
+                        // Jawna synchronizacja: dopiero teraz bufor jest naprawdę wolny.
+                        crate::syncobj::release_buffer(data, &prev);
                     }
                 }
                 *need = buffer.is_some();
@@ -286,6 +297,21 @@ impl Dispatch<wl_surface::WlSurface, SurfaceData> for State {
                 }
                 // Pierwszy commit powierzchni z `xdg_surface` → wyślij konfigurację.
                 maybe_configure_xdg(state, data);
+                // Jawna synchronizacja (`wp_linux_drm_syncobj_v1`): zanim dotkniemy
+                // bufora, czekamy na punkt `acquire` od klienta (GPU skończyło
+                // rysować). Punkt `release` przypinamy do bufora i sygnalizujemy
+                // dopiero przy `wl_buffer.release`.
+                if crate::syncobj::enabled() {
+                    let acquire = data.sync_acquire.lock_or_recover().take();
+                    let release = data.sync_release.lock_or_recover().take();
+                    let buffer = data.buffer.lock_or_recover().clone();
+                    if let (Some(point), Some(_)) = (acquire, buffer.as_ref()) {
+                        crate::syncobj::wait_acquire(point, std::time::Duration::from_millis(200));
+                    }
+                    if let (Some(buffer), Some(point)) = (buffer, release) {
+                        crate::syncobj::remember_release(data, &buffer, point);
+                    }
+                }
                 // Powierzchnia potomna nie tworzy okna — jej bufor składamy na rodzicu.
                 if data.subsurface.lock_or_recover().is_some() {
                     crate::subsurface::commit(state, data);
@@ -295,10 +321,13 @@ impl Dispatch<wl_surface::WlSurface, SurfaceData> for State {
                 }
             }
             wl_surface::Request::Destroy => {
+                // Uchwyty `xdg-foreign` tej powierzchni są już bezużyteczne.
+                crate::xdg_foreign::forget_surface(state, resource);
                 // Oddaj bufor, jeśli jeszcze go trzymamy.
                 if data.take_release() {
                     if let Some(b) = data.buffer.lock_or_recover().take() {
                         let _ = b.send_event(wl_buffer::Event::Release);
+                        crate::syncobj::release_buffer(data, &b);
                     }
                 }
             }
@@ -449,6 +478,62 @@ fn wants_ssd(is_x11: bool, is_popup: bool, deco: Option<crate::decoration::DecoM
     } else {
         deco == Some(DecoMode::Server)
     }
+}
+
+/// Czy klient oczekuje, że **kompozytor** narysuje pasek tytułu, mimo że nie
+/// negocjował `zxdg_toplevel_decoration_v1`.
+///
+/// Firefox (i pochodne: Zen, LibreWolf, Waterfox, Thunderbird, Floorp) pod
+/// Waylandem wyłącza własny pasek tytułu i nie rysuje przycisków okna — zostawia
+/// tylko zakładki i pasek adresu. Bufor ma przy tym marginesy cieni CSD (np.
+/// 24×22 px), więc wygląda jak zwykłe CSD, ale bez naszego SSD okna nie da się
+/// zamknąć ani przesunąć myszą. Uzupełniamy więc brakujący pasek.
+///
+/// Wyłączenie (gdyby jakaś wersja przeglądarki rysowała własne kontrolki):
+/// `SELENE_BROWSER_SSD=0`.
+fn expects_system_titlebar(app_id: &str, title: &str) -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let enabled = *ENABLED.get_or_init(|| {
+        !std::env::var("SELENE_BROWSER_SSD").is_ok_and(|v| {
+            v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("off")
+        })
+    });
+    if !enabled {
+        return false;
+    }
+    let id = app_id.to_ascii_lowercase();
+    const IDS: &[&str] = &[
+        "zen",
+        "firefox",
+        "librewolf",
+        "waterfox",
+        "mullvad-browser",
+        "tor-browser",
+        "floorp",
+        "thunderbird",
+    ];
+    // `app_id` bywa dłuższe (`zen-beta`, `firefox-esr`, `org.mozilla.firefox`).
+    if IDS.iter().any(|needle| {
+        id == *needle
+            || id.starts_with(&format!("{needle}-"))
+            || id.ends_with(&format!(".{needle}"))
+    }) {
+        return true;
+    }
+    // Starsze wersje nie ustawiają `app_id` — wtedy zostaje tytuł okna.
+    let title = title.to_ascii_lowercase();
+    [
+        "zen browser",
+        "mozilla firefox",
+        "librewolf",
+        "waterfox",
+        "mullvad browser",
+        "tor browser",
+        "floorp",
+        "thunderbird",
+    ]
+    .iter()
+    .any(|needle| title.contains(needle))
 }
 
 /// Skomponuj powierzchnię do modelu okien (toplevel, popup lub powierzchnia warstwowa).
@@ -611,6 +696,13 @@ fn composite(
     if is_x11 && ssd && !is_popup && known_csd_client("", &title) {
         ssd = false;
     }
+    // Przeglądarki na Waylandzie, które w ogóle nie negocjowały dekoracji, a mimo
+    // to nie rysują żadnego paska tytułu (patrz `expects_system_titlebar`).
+    let system_titlebar =
+        !is_x11 && !is_popup && deco_mode.is_none() && expects_system_titlebar(&app_id, &title);
+    if system_titlebar {
+        ssd = true;
+    }
     // Widoczna geometria (`xdg_surface.set_window_geometry`). Okna z własnymi
     // dekoracjami (GTK/libadwaita, Firefox, Electron) mają bufor większy od okna
     // o cienie CSD. Model trzyma **widoczny** prostokąt (to on idzie w `configure`
@@ -674,6 +766,7 @@ fn composite(
     if ssd
         && !is_x11
         && !is_popup
+        && !system_titlebar
         && (off_x > 0.5 || off_y > 0.5 || known_csd_client(&app_id, &title))
     {
         *data.csd.lock_or_recover() = true;
@@ -884,9 +977,11 @@ fn composite(
             .replace(buffer.clone());
         if let Some(old) = old {
             let _ = old.send_event(wl_buffer::Event::Release);
+            crate::syncobj::release_buffer(data, &old);
         }
     } else if data.take_release() {
         let _ = buffer.send_event(wl_buffer::Event::Release);
+        crate::syncobj::release_buffer(data, &buffer);
     }
 }
 
@@ -1001,9 +1096,11 @@ fn composite_ime_popup(state: &mut State, surface: &wl_surface::WlSurface, data:
             .replace(buffer.clone());
         if let Some(old) = old {
             let _ = old.send_event(wl_buffer::Event::Release);
+            crate::syncobj::release_buffer(data, &old);
         }
     } else if data.take_release() {
         let _ = buffer.send_event(wl_buffer::Event::Release);
+        crate::syncobj::release_buffer(data, &buffer);
     }
 }
 
@@ -1097,20 +1194,44 @@ fn composite_layer(
             .with_sparse(total > 0.0 && covered < total * 0.75),
     );
     let z = crate::layer::layer_z(st.layer);
-    // Strefa wyłączna górnego panelu → obszar roboczy. Bez tego maksymalizowane okna
-    // zaczynałyby się pod panelem, chowając własny pasek tytułu. Zapamiętujemy ją
-    // **per monitor** — panel jest tylko na jednym wyjściu.
+    // Strefa wyłączna panelu → obszar roboczy. Obsługujemy wszystkie cztery
+    // krawędzie: pasek może być na górze, dole, z lewej albo z prawej.
+    // Zapamiętujemy ją **per monitor** — panel jest tylko na jednym wyjściu.
     let out_idx = ld.output.unwrap_or(0);
-    if st.layer == 2 && st.anchor & crate::layer::ANCHOR_TOP != 0 && st.exclusive_zone > 0 {
-        let inset = state.top_insets.entry(out_idx).or_insert(0.0);
-        let next = inset.max(st.exclusive_zone as f64);
-        if next != *inset && std::env::var("SELENE_STATS").is_ok() {
-            eprintln!(
-                "selene/layer: panel rezerwuje {:.0} px na wyjściu {out_idx}",
-                st.exclusive_zone
-            );
+    if st.layer == 2 && st.exclusive_zone > 0 {
+        let left = st.anchor & crate::layer::ANCHOR_LEFT != 0;
+        let right = st.anchor & crate::layer::ANCHOR_RIGHT != 0;
+        let top = st.anchor & crate::layer::ANCHOR_TOP != 0;
+        let bottom = st.anchor & crate::layer::ANCHOR_BOTTOM != 0;
+        let zone = st.exclusive_zone as f64;
+        let chosen = if left && !right {
+            Some(2u8)
+        } else if right && !left {
+            Some(3u8)
+        } else if top && !bottom {
+            Some(0u8)
+        } else if bottom && !top {
+            Some(1u8)
+        } else {
+            None
+        };
+        if let Some(edge) = chosen {
+            let map = match edge {
+                0 => &mut state.top_insets,
+                1 => &mut state.bottom_insets,
+                2 => &mut state.left_insets,
+                _ => &mut state.right_insets,
+            };
+            let inset = map.entry(out_idx).or_insert(0.0);
+            let next = inset.max(zone);
+            if next != *inset && std::env::var("SELENE_STATS").is_ok() {
+                eprintln!(
+                    "selene/layer: panel rezerwuje {:.0} px na wyjściu {out_idx}",
+                    zone
+                );
+            }
+            *inset = next;
         }
-        *inset = next;
     }
     // Jeden klient = jedna powierzchnia na **jednym** monitorze. Panele na kolejnych
     // monitorach to osobne instancje powłoki (każda wiąże swój `wl_output`). Wyjątkiem
@@ -1189,6 +1310,7 @@ fn composite_layer(
     }
     if data.take_release() {
         let _ = buffer.send_event(wl_buffer::Event::Release);
+        crate::syncobj::release_buffer(data, &buffer);
     }
 }
 
@@ -1311,6 +1433,21 @@ mod ssd_tests {
     fn popup_never_gets_our_bar() {
         assert!(!wants_ssd(false, true, Some(DecoMode::Server)));
         assert!(!wants_ssd(true, true, None));
+    }
+
+    #[test]
+    fn firefox_family_gets_system_titlebar() {
+        // Zen/Firefox nie rysują własnych przycisków okna pod Waylandem — bez
+        // naszego SSD okna nie da się zamknąć ani przesunąć myszą.
+        assert!(expects_system_titlebar("zen", "Zen Browser"));
+        assert!(expects_system_titlebar("zen-beta", ""));
+        assert!(expects_system_titlebar("firefox", ""));
+        assert!(expects_system_titlebar("org.mozilla.firefox", ""));
+        assert!(expects_system_titlebar("", "Strona — Mozilla Firefox"));
+        // Klienty z własnym paskiem (GTK4/libadwaita, Chromium) muszą zostać bez zmian.
+        assert!(!expects_system_titlebar("org.gnome.Nautilus", "Pliki"));
+        assert!(!expects_system_titlebar("google-chrome", "Google Chrome"));
+        assert!(!expects_system_titlebar("eu.luna.Store", "Sklep"));
     }
 
     #[test]
@@ -1503,6 +1640,13 @@ fn upsert_window_at(
     drop(windows);
     // Zarejestruj powierzchnię okna (indeks = slot) do trasowania wejścia.
     register_slot(state, idx, surface);
+    // `xdg-foreign` mógł ustawić rodzica, zanim okno dostało bufor — dokańczamy
+    // wtedy centrowanie dialogu nad oknem aplikacji.
+    if created && !popup && !layer {
+        if let Some(parent) = crate::xdg_foreign::parent_surface(surface) {
+            crate::xdg_foreign::center_on_parent(state, &parent, idx);
+        }
+    }
     (idx, created)
 }
 
@@ -1574,18 +1718,23 @@ fn popup_position(
     (pos, (parent_rect.x(), parent_rect.y()))
 }
 
-/// Obszar roboczy monitora pod punktem (pełny ekran minus górny panel).
+/// Obszar roboczy monitora pod punktem (pełny ekran minus panel).
 fn work_area_at(state: &State, x: f64, y: f64) -> Rect {
     let outs = state.outputs.lock_or_recover();
     let idx = crate::monitors::output_at(&outs, x, y);
     match outs.get(idx).or_else(|| outs.first()) {
         Some(o) => {
-            let top = state.top_insets.get(&idx).copied().unwrap_or(0.0);
+            let get =
+                |map: &std::collections::HashMap<usize, f64>| map.get(&idx).copied().unwrap_or(0.0);
+            let top = get(&state.top_insets);
+            let bottom = get(&state.bottom_insets);
+            let left = get(&state.left_insets);
+            let right = get(&state.right_insets);
             Rect::from_xywh(
-                o.x as f64,
+                o.x as f64 + left,
                 o.y as f64 + top,
-                o.width as f64,
-                (o.height as f64 - top).max(1.0),
+                (o.width as f64 - left - right).max(1.0),
+                (o.height as f64 - top - bottom).max(1.0),
             )
         }
         None => Rect::from_xywh(0.0, 0.0, 1280.0, 800.0),

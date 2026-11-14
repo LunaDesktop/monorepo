@@ -27,6 +27,13 @@ static ORIGINAL_PGRP: AtomicI32 = AtomicI32::new(0);
 static CLAIMED: AtomicBool = AtomicBool::new(false);
 
 const KD_GET_MODE: libc::c_ulong = 0x4B3B; // KDGETMODE
+/// Przełączenie aktywnego VT (jądro przełącza konsolę i oddaje ekran fbconowi).
+const VT_ACTIVATE: libc::c_ulong = 0x5606;
+/// Czeka, aż podany VT stanie się aktywny (blokuje wywołującego).
+const VT_WAITACTIVE: libc::c_ulong = 0x5607;
+
+/// Czy nasz VT jest na ekranie. Gdy nie — wejście nie może trafiać do klientów.
+static ACTIVE: AtomicBool = AtomicBool::new(true);
 
 /// Przejmuje pierwszy plan VT dla procesu Selene.
 ///
@@ -148,6 +155,79 @@ fn vt_fd() -> Option<RawFd> {
     None
 }
 
+// ── Przełączanie VT (`Ctrl+Alt+F1…F12`) ──
+
+/// Czy nasz VT jest aktywny (widoczny na ekranie).
+///
+/// W trybie DRM Selene czyta klawiaturę bezpośrednio z `evdev`, więc zdarzenia
+/// docierają także wtedy, gdy na ekranie jest inna konsola. Wątek protokołu
+/// sprawdza ten stan i nie przekazuje wtedy wejścia klientom (inaczej pisanie
+/// hasła na VT2 trafiłoby do aktywnego pola tekstowego w aplikacji na VT7).
+pub fn active() -> bool {
+    ACTIVE.load(Ordering::Relaxed)
+}
+
+/// Ustawia stan aktywności VT (woła wątek wyjścia DRM).
+pub fn set_active(active: bool) {
+    ACTIVE.store(active, Ordering::Relaxed);
+}
+
+/// Numer naszego VT z `XDG_VTNR` (menedżer logowania ustawia go dla sesji).
+pub fn current() -> Option<u32> {
+    std::env::var("XDG_VTNR").ok().and_then(|v| parse_vt(&v))
+}
+
+/// Parsuje numer VT (1–63); oddzielone od `current`, żeby dało się testować.
+fn parse_vt(value: &str) -> Option<u32> {
+    value
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|n| (1..=63).contains(n))
+}
+
+/// Przełącza na wirtualny terminal `n` (1–63).
+///
+/// `false`, gdy nie mamy dostępu do terminala albo jądro odmówiło. Uprawnienia
+/// do `VT_ACTIVATE` ma proces, dla którego ten VT jest terminalem kontrolującym
+/// (czyli Selene uruchomiony przez menedżera sesji) — bez potrzeby roota.
+pub fn activate(n: u32) -> bool {
+    if !(1..=63).contains(&n) {
+        return false;
+    }
+    let Some(fd) = vt_fd() else {
+        return false;
+    };
+    let rc = unsafe { libc::ioctl(fd, VT_ACTIVATE, n as libc::c_int) };
+    let err = std::io::Error::last_os_error();
+    unsafe { libc::close(fd) };
+    if rc < 0 {
+        if std::env::var_os("SELENE_STATS").is_some() {
+            eprintln!("selene/vt: VT_ACTIVATE({n}) nie powiodło się: {err}");
+        }
+        return false;
+    }
+    true
+}
+
+/// Czeka, aż VT `n` znów będzie aktywny. **Blokuje** — woła to wątek wyjścia
+/// w trakcie przełączenia (renderowanie i tak nie ma wtedy sensu).
+pub fn wait_active(n: u32) -> bool {
+    let Some(fd) = vt_fd() else {
+        return false;
+    };
+    let rc = unsafe { libc::ioctl(fd, VT_WAITACTIVE, n as libc::c_int) };
+    let err = std::io::Error::last_os_error();
+    unsafe { libc::close(fd) };
+    if rc < 0 {
+        if std::env::var_os("SELENE_STATS").is_some() {
+            eprintln!("selene/vt: VT_WAITACTIVE({n}) nie powiodło się: {err}");
+        }
+        return false;
+    }
+    true
+}
+
 // ── Diagnostyka sygnałów ──
 
 /// Handlery `SIGTERM`/`SIGHUP` logują nadawcę i kończą sesję; `SIGINT`, `SIGQUIT`
@@ -242,5 +322,14 @@ mod tests {
     fn restore_without_claim_is_a_noop() {
         CLAIMED.store(false, Ordering::Relaxed);
         restore();
+    }
+
+    #[test]
+    fn vt_numbers_are_validated() {
+        assert_eq!(parse_vt("7"), Some(7));
+        assert_eq!(parse_vt(" 12 "), Some(12));
+        assert_eq!(parse_vt("0"), None);
+        assert_eq!(parse_vt("64"), None);
+        assert_eq!(parse_vt("tty7"), None);
     }
 }

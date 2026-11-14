@@ -158,12 +158,18 @@ export CARGO_TARGET_DIR
 lib="$CARGO_TARGET_DIR/release"
 
 # Typowa pułapka: target/ po wcześniejszym `sudo cargo build` należy do roota.
-# Dajemy czytelny komunikat zamiast błędu cargo o pliku blokady.
-if [ "$dry_run" = 0 ] && [ "$uninstall" = 0 ] && [ "$do_build" = 1 ] && [ -d "$lib" ] && { [ ! -w "$lib" ] || { [ -d "$lib/deps" ] && [ ! -w "$lib/deps" ]; } || { [ -e "$lib/.cargo-lock" ] && [ ! -w "$lib/.cargo-lock" ]; }; }; then
-    echo "brak prawa zapisu do $lib (często po buildzie przez sudo)" >&2
-    echo "napraw:  sudo chown -R \$(id -u):\$(id -g) '$CARGO_TARGET_DIR'" >&2
-    echo "albo:    CARGO_TARGET_DIR=/tmp/luna-target $prog ..." >&2
-    exit 1
+# Gdy instalator działa pod sudo, od razu przywracamy własność użytkownikowi.
+if [ "$dry_run" = 0 ] && [ "$do_build" = 1 ]; then
+    if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+        chown -R "$SUDO_USER" "$CARGO_TARGET_DIR" 2>/dev/null || true
+    elif [ "$(id -u)" -ne 0 ] && [ -d "$CARGO_TARGET_DIR" ]; then
+        if find "$CARGO_TARGET_DIR" -maxdepth 4 -user 0 -print -quit 2>/dev/null | grep -q .; then
+            echo "katalog $CARGO_TARGET_DIR zawiera pliki należące do roota (po wcześniejszym sudo)" >&2
+            echo "napraw:  sudo chown -R \$(id -u):\$(id -g) '$CARGO_TARGET_DIR'" >&2
+            echo "albo:    sudo rm -rf '$CARGO_TARGET_DIR'" >&2
+            exit 1
+        fi
+    fi
 fi
 
 say() { printf '%s\n' "$*"; }
@@ -265,11 +271,12 @@ files() {
         emit "clock" "$lib/luna-clock" "$dest/bin/luna-clock" "755"
         emit "clock" "$root/de/session/eu.luna.Clock.desktop" "$dest/share/applications/eu.luna.Clock.desktop" "644"
     fi
-    # Sklep z oprogramowaniem Luna Store (+ domyślny plik repozytoriów).
+    # Sklep z oprogramowaniem Luna Store (+ domyślny plik repozytoriów, reguła polkit).
     if [ "$all" = "all" ] || [ -f "$lib/luna-store" ]; then
         emit "store" "$lib/luna-store" "$dest/bin/luna-store" "755"
         emit "store" "$root/de/session/eu.luna.Store.desktop" "$dest/share/applications/eu.luna.Store.desktop" "644"
         emit "store" "$root/apps/luna-store/data/repositories.conf" "$dest/share/luna/store/repositories.conf" "644"
+        emit "store" "$root/apps/luna-store/data/49-luna-store.rules" "$dest/share/polkit-1/rules.d/49-luna-store.rules" "644"
     fi
     # Powitanie: nowości i (na obrazie live) przejście do instalatora.
     if [ "$all" = "all" ] || [ -f "$lib/luna-welcome" ]; then
@@ -284,6 +291,11 @@ files() {
         emit "installer" "$root/apps/luna-installer/data/luna-install-backend" "$dest/libexec/luna/luna-install-backend" "755"
     fi
     emit "base"     "$root/de/session/luna-session" "$dest/bin/luna-session" "755"
+    # Target sesji systemd: wciąga `graphical-session.target` zależnością
+    # (`RefuseManualStart=yes` blokuje ręczny start). Usługi portali mają
+    # `Requisite=graphical-session.target`, więc bez tego targetu nie startują
+    # przez D-Bus, a Flatpaki czekają na portal do timeoutu.
+    emit "base"     "$root/de/session/luna-session.target" "$dest/lib/systemd/user/luna-session.target" "644"
     # Wariant sesji z GPU (LUNA_GPU=1) — wybór „Luna (GPU)” w menedżerze logowania.
     emit "base"     "$root/de/session/luna-session-gpu" "$dest/bin/luna-session-gpu" "755"
     # Backend portali XDG dla Luny — bez tego `xdg-desktop-portal` nie wybiera backendu
@@ -315,6 +327,11 @@ remove_installed() {
     done < <(files all)
     if [ -z "$only" ] || [ "$only" = "store" ]; then
         do_cmd rmdir "$dest/share/luna/store" 2>/dev/null || true
+        do_cmd rmdir "$dest/share/polkit-1/rules.d" 2>/dev/null || true
+        do_cmd rmdir "$dest/share/polkit-1" 2>/dev/null || true
+        if [ "$destdir" = "" ] && [ "$(id -u)" -eq 0 ]; then
+            do_cmd rm -f "/etc/polkit-1/rules.d/49-luna-store.rules"
+        fi
     fi
     if [ -z "$only" ] || [ "$only" = "base" ]; then
         # Całe drzewa danych Luna: nowa wersja może nie mieć starych plików
@@ -411,6 +428,12 @@ EOF
         if [ "$with_demo" = 1 ]; then
             build_component demo
         fi
+    fi
+
+    # Po budowaniu pod sudo przywracamy własność target/ normalnemu użytkownikowi,
+    # żeby kolejne wywołania bez sudo nie kończyły się błędem „Permission denied”.
+    if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+        chown -R "$SUDO_USER" "$CARGO_TARGET_DIR" 2>/dev/null || true
     fi
 fi
 
@@ -601,6 +624,20 @@ if [ "$destdir" = "" ] && [ "$(id -u)" -eq 0 ]; then
             do_cmd chmod 4755 "$helper"
         fi
     done
+
+    # Reguła polkit dla Sklepu (synchronizacja i pobieranie aktualizacji bez hasła).
+    # Polkit czyta reguły z /etc/polkit-1/rules.d/ oraz /usr/share/polkit-1/rules.d/.
+    # Jeśli instalujemy z prefiksem innym niż /usr (np. /usr/local), demon polkit
+    # nie zobaczy pliku w /usr/local/share, więc kopiujemy go także do systemowego katalogu reguł.
+    if [ -f "$root/apps/luna-store/data/49-luna-store.rules" ]; then
+        if [ -d /etc/polkit-1/rules.d ]; then
+            say "polkit: instaluję regułę bezhasłowej synchronizacji Sklepu do /etc/polkit-1/rules.d/49-luna-store.rules"
+            do_cmd install -D -m 644 "$root/apps/luna-store/data/49-luna-store.rules" "/etc/polkit-1/rules.d/49-luna-store.rules"
+        elif [ -d /usr/share/polkit-1/rules.d ]; then
+            say "polkit: instaluję regułę bezhasłowej synchronizacji Sklepu do /usr/share/polkit-1/rules.d/49-luna-store.rules"
+            do_cmd install -D -m 644 "$root/apps/luna-store/data/49-luna-store.rules" "/usr/share/polkit-1/rules.d/49-luna-store.rules"
+        fi
+    fi
 fi
 
 managed_bins="selene luna-shell luna-desktop luna-lock luna-keyring luna-polkit luna-eq luna-accounts luna-security luna-greeter luna-greeter-config luna-demo luna-settings luna-files luna-media luna-clock luna-store luna-welcome luna-installer luna-editor luna-terminal luna-session luna-session-gpu"
