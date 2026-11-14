@@ -8,7 +8,7 @@
 
 > Status: **M0 działające** — fundament, rysowanie, okno Wayland oraz **wielojęzyczność
 > i przełączanie wyglądu** (tryb jasny/ciemny/auto, kolory akcentu, metryki kontrolek).
-> Repozytorium: <https://github.com/mijsys/libLuna>.
+> Repozytorium: <https://github.com/LunaDesktop/libLuna>.
 
 ## Why libLuna exists
 
@@ -284,7 +284,7 @@ Najszybsza droga to **fasada `libluna`** — jedna zależność zamiast czterech
 ```toml
 [dependencies]
 libluna = { path = "../libluna/crates/libluna" }     # monorepo / sąsiedni katalog
-# libluna = { git = "https://github.com/mijsys/libLuna.git" }  # z repozytorium
+# libluna = { git = "https://github.com/LunaDesktop/libLuna.git" }  # z repozytorium
 # libluna = "0.0.1"                                      # z rejestru (docelowo)
 ```
 
@@ -387,6 +387,26 @@ Klucze pokrywają `colors.*`, `spacing.*`, `radius.*`, `typography.*.size` i `me
 Nieznane klucze są ignorowane (zgodność wprzód). Wczytuje/nakłada to
 `libluna_core::theme_file` (`ThemePatch`), a wybrany styl zapisuje się w `theme.conf`
 (`style = <nazwa>`). Przykłady: `examples/luna/themes/nord.theme`, `paper.theme`.
+
+Ten sam plik można też pisać czytelniej — z nazwą po `::`, sekcjami i myślnikami:
+
+```ini
+::Name - RedLuna
+appearance: dark
+accent: red
+
+panel:
+-color-bar: red
+-round: false
+-float: true
+-transparent: 40%
+```
+
+W sekcji `panel` działają `color-bar`, `round`, `float`, `transparent` (procent
+przezroczystości) i `opacity` (procent krycia). Kolory przyjmują `#rrggbb[aa]`
+lub nazwy (`red`, `teal`, `black`…). Pełny przykład wszystkich kluczy to
+`examples/luna/themes/full-example.theme`, a plan rozszerzenia o grafiki
+(PNG/SVG, 9-slice, stany kontrolek) — [`THEMING-TODO.md`](THEMING-TODO.md).
 
 Podgląd (headless) tego samego okna w stylach:
 

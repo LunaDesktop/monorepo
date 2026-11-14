@@ -12,3 +12,4 @@ libluna-core.workspace = true
 tiny-skia.workspace = true
 fontdue = "0.9"
 resvg.workspace = true
+cosmic-text = "0.17.0"

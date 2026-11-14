@@ -2718,6 +2718,11 @@ fn apply_edit(app: &mut App) {
     if text.is_empty() {
         return;
     }
+    // Sekretny kod nie tworzy pliku — otwiera księżycowe jajko.
+    if libluna_core::egg::matches(&text) {
+        app.show_egg();
+        return;
+    }
     if let Some(from) = edit.rename {
         let to = from
             .parent()
@@ -3219,6 +3224,43 @@ mod tests {
 
     fn app() -> App {
         App::new(std::env::temp_dir())
+    }
+
+    #[test]
+    fn secret_code_opens_the_moon_egg_instead_of_creating_a_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "luna-files-moon-egg-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Znacznik odkrycia nie może trafić do prawdziwego katalogu stanu.
+        std::env::set_var("XDG_STATE_HOME", dir.join("state"));
+
+        let mut app = App::new(dir.clone());
+        let mut edit = EditState::path(&dir);
+        edit.new_folder = true;
+        let mut entry = TextEntry::new("Name");
+        entry.set_text(libluna_core::egg::CODE.to_owned());
+        edit.entry = entry;
+        app.panes[0].edit = Some(edit);
+
+        apply_edit(&mut app);
+
+        assert!(app.about.is_some(), "okno księżycowego jajka");
+        assert!(app.panes[0].edit.is_none(), "tryb edycji zamknięty");
+        assert!(
+            !dir.join(libluna_core::egg::CODE).exists(),
+            "kod nie tworzy pliku"
+        );
+        assert!(
+            dir.join("state").join("luna").join("moon-egg").is_file(),
+            "znacznik odkrycia"
+        );
+
+        std::env::remove_var("XDG_STATE_HOME");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

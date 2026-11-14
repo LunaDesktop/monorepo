@@ -1,0 +1,116 @@
+# ============================================================================
+#  Pełny przykład motywu Luny — „Aurora”
+# ============================================================================
+#
+#  Pokazuje wszystkie obsługiwane klucze w czytelnym zapisie:
+#    ::Name - Nazwa          nazwa widoczna w Ustawieniach
+#    sekcja:                 colors / syntax / spacing / radius / typography /
+#                            metrics / panel
+#    -klucz: wartość         myślnik jest opcjonalny
+#
+#  Wartości można też podawać w starym zapisie `klucz = wartość`.
+#  Kolory: `#rrggbb`, `#rrggbbaa` albo nazwy (red, teal, black, white…).
+#  Nieznane klucze są ignorowane, więc plik działa też na przyszłych wersjach.
+#
+#  Instalacja:
+#    cp full-example.theme ~/.config/luna/themes/aurora.theme
+#  i wybór w Ustawieniach → Wygląd → Styl.
+# ============================================================================
+
+::Name - Aurora
+
+# Bazowy wariant palety: dark albo light.
+appearance: dark
+
+# Akcent: nazwa (blue, teal, green, yellow, orange, red, pink, purple, slate)
+# albo dowolny kolor, np. `accent: #7c5cff`.
+accent: teal
+
+# ── Paleta ─────────────────────────────────────────────────────────────────
+colors:
+-window_bg:       #131820    # tło okna aplikacji
+-view_bg:         #0f141b    # tło głównego widoku / listy
+-card_bg:         #1a2230    # karty, powierzchnie podniesione
+-headerbar_bg:    #182430    # nagłówki okien (i domyślnie pasek)
+-sidebar_bg:      #151d28    # panel boczny
+-text:            #e8eef7    # tekst podstawowy
+-dim_text:        #9aa8ba    # tekst drugorzędny
+-accent:          #2bb3c0    # akcent (przyciski sugerowane, przełączniki)
+-accent_fg:       #08131a    # tekst/ikony na akcencie
+-border:          #2c3a4c    # obramowania i separatory
+-shade:           #ffffff14  # delikatna nakładka hover/pressed (8% bieli)
+-error:           #e5484d
+-warning:         #f0a020
+-success:         #3fb950
+
+# ── Kolory składni (edytor / podglądy kodu) ────────────────────────────────
+syntax:
+-keyword:         #c792ea
+-type_name:       #ffcb6b
+-function:        #82aaff
+-string:          #c3e88d
+-number:          #f78c6c
+-comment:         #5c6a7d
+-operator:        #89ddff
+-constant:        #ff9e64
+-variable:        #e8eef7
+
+# ── Odstępy (px) ───────────────────────────────────────────────────────────
+# Zamiast sekcji można napisać `spacing: 12` — wtedy skala liczy się sama.
+spacing:
+-xs: 4
+-sm: 8
+-md: 12
+-lg: 18
+-xl: 24
+
+# ── Promienie zaokrągleń (px) ──────────────────────────────────────────────
+# Zamiast sekcji można napisać `radius: 10`.
+radius:
+-small: 5
+-medium: 9
+-large: 13
+
+# ── Typografia (rozmiary tekstu w px) ──────────────────────────────────────
+typography:
+-title.size: 20
+-heading.size: 15
+-body.size: 14
+-caption.size: 12
+
+# ── Geometria kontrolek (px) ───────────────────────────────────────────────
+metrics:
+-headerbar.height: 40
+-headerbar.control: 24
+-button.height: 34
+-switch.width: 44
+-switch.height: 24
+-slider.track_height: 4
+-tabs.height: 34
+-entry.height: 34
+-menu.item_h: 32
+-card.header: 42
+-itemview.row_h: 36
+
+# ── Panel ──────────────────────────────────────────────────────────────────
+# color-bar   kolor paska (trafia też do nagłówków okien, jeśli nie ustawiono
+#             jawnie colors.headerbar_bg)
+# round       zaokrąglone rogi paska
+# float       pływający pasek (nie zajmuje całej krawędzi)
+# transparent procent przezroczystości tła (40% = krycie 60%)
+# opacity     alternatywa: procent krycia (80% = transparent 20%)
+panel:
+-color-bar: #182430
+-round: true
+-float: false
+-transparent: 8%
+
+#  Gotowe warianty do podmiany:
+#    panel:
+#    -color-bar: red
+#    -round: false
+#    -float: true
+#    -transparent: 40%
+#
+#  Położenie panelu (góra/dół/lewo/prawo) i tray (ikony/nazwy) ustawia się
+#  w Ustawieniach → Wygląd → Panel, nie w motywie.

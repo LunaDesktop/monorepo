@@ -1,12 +1,26 @@
 //! Style instalowane z plików (`*.theme`) — tokeny motywu bez rekompilacji.
 //!
-//! Format jest prosty i liniowy (`klucz = wartość`, `#` to komentarz), w duchu plików
-//! językowych `libluna-i18n`. Klucze są **nazwane kropkowo**, np. `colors.text`,
-//! `spacing.md`, `radius.small`, `typography.body.size`, `metrics.button.height`,
-//! a `__name__` to nazwa wyświetlana stylu. Nieznane klucze są ignorowane (zgodność wprzód).
+//! Obsługiwane są **dwa** zapisy, które można łączyć w jednym pliku:
 //!
-//! Katalogi wyszukiwania (kolejność = priorytet):
-//! `~/.config/luna/themes`, `~/.local/share/luna/themes`, `/usr/share/luna/themes`.
+//! 1. Czytelny dla człowieka (sekcje + myślniki), np.
+//!    ```text
+//!    ::Name - RedLuna
+//!    panel:
+//!    -color-bar: red
+//!    -round: false
+//!    -float: true
+//!    -transparent: 40%
+//!    ```
+//! 2. Dotychczasowy `klucz = wartość` (`colors.text = #eceff4`, `radius.small = 4`).
+//!
+//! W sekcji `panel` dostępne są: `color-bar`, `round`, `float`, `transparent`
+//! (procent przezroczystości) albo `opacity` (procent krycia). Kolory można
+//! podawać jako `#rrggbb`, `#rrggbbaa` lub nazwy (`red`, `teal`, `black`…).
+//!
+//! Nieznane klucze są ignorowane (zgodność w przód). Katalogi wyszukiwania
+//! (kolejność = priorytet): `~/.config/luna/themes`, `~/.local/share/luna/themes`,
+//! `<prefix>/share/luna/themes` (np. `/usr/local` i `/usr`), a w drzewie źródeł
+//! dodatkowo `luna/themes` i `examples/luna/themes`.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -27,21 +41,63 @@ impl ThemePatch {
     /// Parsuje styl z tekstu (nieznane klucze są zachowane, ale ignorowane przy nakładaniu).
     pub fn parse(src: &str) -> Self {
         let mut patch = ThemePatch::default();
-        for line in src.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
+        let mut section = String::new();
+        for raw in src.lines() {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with("//") {
                 continue;
             }
-            let Some((key, value)) = line.split_once('=') else {
+            // `::Name - RedLuna` / `::Name: RedLuna`
+            if let Some(rest) = line.strip_prefix("::") {
+                if let Some(name) = parse_display_name(rest) {
+                    patch.name = Some(name);
+                }
+                continue;
+            }
+            // Nagłówek sekcji: `panel:` albo `[panel]`.
+            if let Some(inner) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                section = inner.trim().to_ascii_lowercase();
+                continue;
+            }
+            if let Some(head) = line.strip_suffix(':') {
+                let head = head.trim();
+                if !head.is_empty() && !head.contains([':', '=']) {
+                    section = head.to_ascii_lowercase();
+                    continue;
+                }
+            }
+            let Some((key, value)) = split_pair(line) else {
                 continue;
             };
-            let key = key.trim();
-            let value = value.trim();
-            if key == "__name__" {
-                patch.name = Some(value.to_owned());
-            } else {
-                patch.entries.insert(key.to_owned(), value.to_owned());
+            let key = key.trim().trim_start_matches('-').trim();
+            let value = strip_inline_comment(value.trim());
+            if key.is_empty() || value.is_empty() {
+                continue;
             }
+            if key == "__name__" || key.eq_ignore_ascii_case("name") {
+                patch.name = Some(value.to_owned());
+                continue;
+            }
+            // Klucze z kropką są globalne tylko wtedy, gdy zaczynają się od znanej
+            // sekcji tokenów (`colors.*`, `metrics.*`…). Dzięki temu w sekcji można
+            // pisać zarówno `-body.size: 14`, jak i `colors.text = white`.
+            let global_dotted = [
+                "colors.",
+                "syntax.",
+                "typography.",
+                "metrics.",
+                "spacing.",
+                "radius.",
+                "panel.",
+            ]
+            .iter()
+            .any(|prefix| key.starts_with(prefix));
+            let full = if section.is_empty() || global_dotted {
+                key.to_owned()
+            } else {
+                format!("{section}.{key}")
+            };
+            patch.entries.insert(normalize_key(&full), value.to_owned());
         }
         patch
     }
@@ -90,19 +146,58 @@ impl ThemePatch {
         for (key, value) in &self.entries {
             apply_entry(theme, key, value);
         }
+        // `color-bar` ma spójnie trafić także do nagłówków okien libLuny,
+        // chyba że styl jawnie ustawia własny `colors.headerbar_bg`.
+        if let Some(color) = theme.panel.color {
+            if !self.entries.contains_key("colors.headerbar_bg") {
+                theme.colors.headerbar_bg = color;
+            }
+        }
     }
 }
 
 fn apply_entry(theme: &mut Theme, key: &str, value: &str) {
     if let Some(field) = key.strip_prefix("colors.") {
-        if let Some(color) = Color::from_hex(value) {
+        if let Some(color) = parse_color(value) {
             set_color(&mut theme.colors, field, color);
         }
         return;
     }
     if let Some(field) = key.strip_prefix("syntax.") {
-        if let Some(color) = Color::from_hex(value) {
+        if let Some(color) = parse_color(value) {
             set_syntax_color(&mut theme.syntax, field, color);
+        }
+        return;
+    }
+    if let Some(field) = key.strip_prefix("panel.") {
+        match field {
+            "color" => {
+                if let Some(color) = parse_color(value) {
+                    theme.panel.color = Some(color);
+                }
+            }
+            "round" => {
+                if let Some(on) = parse_bool(value) {
+                    theme.panel.round = Some(on);
+                }
+            }
+            "float" => {
+                if let Some(on) = parse_bool(value) {
+                    theme.panel.float = Some(on);
+                }
+            }
+            // `transparent: 40%` = 40% przezroczystości → krycie 60%.
+            "transparent" => {
+                if let Some(transparent) = parse_fraction(value) {
+                    theme.panel.opacity = Some((1.0 - transparent).clamp(0.0, 1.0));
+                }
+            }
+            "opacity" => {
+                if let Some(opacity) = parse_fraction(value) {
+                    theme.panel.opacity = Some(opacity);
+                }
+            }
+            _ => {}
         }
         return;
     }
@@ -114,6 +209,25 @@ fn apply_entry(theme: &mut Theme, key: &str, value: &str) {
         };
     }
     match key {
+        // Czytelne aliasy: jeden promień/odstęp rozkładany na skalę.
+        "radius.base" => {
+            if let Ok(n) = value.parse::<f64>() {
+                let n = n.max(0.0);
+                theme.radius.small = (n * 0.6).max(1.0);
+                theme.radius.medium = n.max(1.0);
+                theme.radius.large = (n * 1.4).max(n);
+            }
+        }
+        "spacing.base" => {
+            if let Ok(n) = value.parse::<f64>() {
+                let n = n.max(1.0);
+                theme.spacing.xs = (n * 0.5).max(1.0);
+                theme.spacing.sm = (n * 0.75).max(1.0);
+                theme.spacing.md = n;
+                theme.spacing.lg = (n * 1.5).max(n);
+                theme.spacing.xl = (n * 2.0).max(n);
+            }
+        }
         "spacing.xs" => set_f64!(theme.spacing.xs),
         "spacing.sm" => set_f64!(theme.spacing.sm),
         "spacing.md" => set_f64!(theme.spacing.md),
@@ -141,10 +255,138 @@ fn apply_entry(theme: &mut Theme, key: &str, value: &str) {
             if let Some(a) = Accent::from_name(value) {
                 theme.colors.accent = a.color();
                 theme.colors.accent_fg = a.foreground();
+            } else if let Some(color) = parse_color(value) {
+                // Dowolny kolor akcentu — tekst dobieramy według jasności.
+                theme.colors.accent = color;
+                theme.colors.accent_fg = if luminance(color) > 0.6 {
+                    Color::from_rgba8(0x2e, 0x2e, 0x2e, 0xff)
+                } else {
+                    Color::WHITE
+                };
             }
         }
         _ => {}
     }
+}
+
+/// Nazwa wyświetlana z wiersza `::Name - RedLuna`.
+fn parse_display_name(rest: &str) -> Option<String> {
+    let rest = rest.trim();
+    let rest = rest
+        .strip_prefix("Name")
+        .or_else(|| rest.strip_prefix("name"))
+        .unwrap_or(rest);
+    let name = rest.trim_start_matches([' ', '-', ':', '—']).trim();
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
+/// Dzieli wiersz na klucz i wartość po pierwszym `=` albo `:`.
+fn split_pair(line: &str) -> Option<(&str, &str)> {
+    let eq = line.find('=');
+    let colon = line.find(':');
+    let index = match (eq, colon) {
+        (Some(e), Some(c)) => e.min(c),
+        (Some(e), None) => e,
+        (None, Some(c)) => c,
+        (None, None) => return None,
+    };
+    Some((&line[..index], &line[index + 1..]))
+}
+
+/// Usuwa komentarz na końcu wartości (`red  # opis`), nie ruszając `#rrggbb`.
+fn strip_inline_comment(value: &str) -> &str {
+    let mut cut = value.len();
+    for marker in [" #", "\t#", " //"] {
+        if let Some(index) = value.find(marker) {
+            cut = cut.min(index);
+        }
+    }
+    value[..cut].trim()
+}
+
+/// Ujednolica czytelne nazwy (`color-bar`, `background`…) na klucze motywu.
+fn normalize_key(key: &str) -> String {
+    let lower = key.trim().to_ascii_lowercase();
+    match lower.as_str() {
+        "panel.color" | "panel.color-bar" | "panel.color_bar" | "panel.bar-color"
+        | "panel.bar_color" | "panel.bar" | "color-bar" | "bar-color" => "panel.color".to_owned(),
+        "panel.round" | "panel.rounded" | "round" | "rounded" => "panel.round".to_owned(),
+        "panel.float" | "panel.floating" | "panel.detached" | "float" | "floating" => {
+            "panel.float".to_owned()
+        }
+        "panel.transparent" | "panel.transparency" | "transparent" | "transparency" => {
+            "panel.transparent".to_owned()
+        }
+        "panel.opacity" | "opacity" => "panel.opacity".to_owned(),
+        "background" | "window-background" => "colors.window_bg".to_owned(),
+        "view-background" => "colors.view_bg".to_owned(),
+        "card-background" => "colors.card_bg".to_owned(),
+        "text" | "text-color" => "colors.text".to_owned(),
+        "dim-text" | "dim-text-color" => "colors.dim_text".to_owned(),
+        "border" | "border-color" => "colors.border".to_owned(),
+        "headerbar-color" | "header-color" => "colors.headerbar_bg".to_owned(),
+        "radius" | "rounding" => "radius.base".to_owned(),
+        "spacing" => "spacing.base".to_owned(),
+        _ => lower,
+    }
+}
+
+fn parse_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" | "1" | "tak" => Some(true),
+        "false" | "no" | "off" | "0" | "nie" => Some(false),
+        _ => None,
+    }
+}
+
+/// `40%` → 0.40, `0.4` → 0.40, `40` → 0.40.
+fn parse_fraction(value: &str) -> Option<f32> {
+    let value = value.trim();
+    let number = |text: &str| text.trim().parse::<f32>().ok();
+    if let Some(percent) = value.strip_suffix('%') {
+        return number(percent).map(|n| (n / 100.0).clamp(0.0, 1.0));
+    }
+    let n = number(value)?;
+    Some(if n > 1.0 {
+        (n / 100.0).clamp(0.0, 1.0)
+    } else {
+        n.clamp(0.0, 1.0)
+    })
+}
+
+/// Kolor z `#rrggbb[aa]` albo nazwy (`red`, `teal`, `black`…).
+fn parse_color(value: &str) -> Option<Color> {
+    Color::from_hex(value).or_else(|| named_color(value))
+}
+
+fn named_color(value: &str) -> Option<Color> {
+    let color = match value.trim().to_ascii_lowercase().as_str() {
+        "transparent" | "none" => Color::TRANSPARENT,
+        "black" => Color::BLACK,
+        "white" => Color::WHITE,
+        "gray" | "grey" => Color::from_rgba8(0x80, 0x80, 0x80, 0xff),
+        "silver" => Color::from_rgba8(0xc0, 0xc0, 0xc0, 0xff),
+        "red" => Color::from_rgba8(0xe6, 0x2d, 0x42, 0xff),
+        "orange" => Color::from_rgba8(0xed, 0x5b, 0x00, 0xff),
+        "yellow" => Color::from_rgba8(0xc8, 0x88, 0x00, 0xff),
+        "lime" => Color::from_rgba8(0x00, 0xff, 0x00, 0xff),
+        "green" => Color::from_rgba8(0x3a, 0x94, 0x4a, 0xff),
+        "teal" | "cyan" => Color::from_rgba8(0x21, 0x90, 0xa4, 0xff),
+        "blue" => Color::from_rgba8(0x35, 0x84, 0xe4, 0xff),
+        "navy" => Color::from_rgba8(0x00, 0x00, 0x80, 0xff),
+        "purple" => Color::from_rgba8(0x91, 0x41, 0xac, 0xff),
+        "magenta" => Color::from_rgba8(0xff, 0x00, 0xff, 0xff),
+        "pink" => Color::from_rgba8(0xd5, 0x61, 0x99, 0xff),
+        "brown" => Color::from_rgba8(0xa5, 0x2a, 0x2a, 0xff),
+        "slate" => Color::from_rgba8(0x6f, 0x83, 0x96, 0xff),
+        _ => return None,
+    };
+    Some(color)
+}
+
+/// Względna jasność (do wyboru koloru tekstu na akcencie).
+fn luminance(color: Color) -> f32 {
+    0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b
 }
 
 fn set_color(colors: &mut ColorScheme, field: &str, color: Color) {
@@ -213,7 +455,25 @@ pub fn search_dirs() -> Vec<PathBuf> {
                 .join("themes"),
         );
     }
+    // Instalacja ze źródeł domyślnie trafia do `/usr/local`, a nie `/usr`.
+    dirs.push(PathBuf::from("/usr/local/share/luna/themes"));
     dirs.push(PathBuf::from("/usr/share/luna/themes"));
+    // Obok binarki (`<prefix>/bin/../share/luna/themes`) oraz w drzewie źródeł:
+    // `target/release/luna-settings` → wystarczy przejść kilka katalogów w górę.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(bin) = exe.parent() {
+            if let Some(prefix) = bin.parent() {
+                dirs.push(prefix.join("share").join("luna").join("themes"));
+            }
+            let mut current = Some(bin);
+            for _ in 0..4 {
+                let Some(dir) = current else { break };
+                dirs.push(dir.join("luna").join("themes"));
+                dirs.push(dir.join("examples").join("luna").join("themes"));
+                current = dir.parent();
+            }
+        }
+    }
     dirs
 }
 
@@ -338,5 +598,92 @@ nieznany.klucz = cokolwiek
         assert_eq!(theme.colors.text, Color::from_hex("#010203").unwrap());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    const RED_LUNA: &str = "\
+::Name - RedLuna
+appearance: dark
+panel:
+-color-bar: red
+-round: false
+-float: true
+-transparent: 40%
+";
+
+    #[test]
+    fn parses_friendly_theme_syntax() {
+        let patch = ThemePatch::parse(RED_LUNA);
+        assert_eq!(patch.name(), Some("RedLuna"));
+
+        let theme = patch.build(Theme::light());
+        assert_eq!(
+            theme.panel.color,
+            Some(Color::from_rgba8(0xe6, 0x2d, 0x42, 0xff))
+        );
+        assert_eq!(theme.panel.round, Some(false));
+        assert_eq!(theme.panel.float, Some(true));
+        let opacity = theme.panel.opacity.expect("krycie");
+        assert!((opacity - 0.6).abs() < 1e-6, "opacity = {opacity}");
+        // Bez jawnego `colors.headerbar_bg` kolor paska trafia też do nagłówków.
+        assert_eq!(theme.colors.headerbar_bg, theme.panel.color.unwrap());
+    }
+
+    #[test]
+    fn explicit_headerbar_color_wins_over_bar_color() {
+        let patch = ThemePatch::parse("panel:\n-color-bar: red\ncolors.headerbar_bg = #112233\n");
+        let theme = patch.build(Theme::light());
+        assert_eq!(
+            theme.panel.color,
+            Some(Color::from_rgba8(0xe6, 0x2d, 0x42, 0xff))
+        );
+        assert_eq!(
+            theme.colors.headerbar_bg,
+            Color::from_hex("#112233").unwrap()
+        );
+    }
+
+    #[test]
+    fn friendly_aliases_and_named_colors() {
+        let patch = ThemePatch::parse(
+            "background: teal\ntext: white\nborder: #123456\nradius: 10\nspacing: 12\nopacity: 80%\n",
+        );
+        let theme = patch.build(Theme::light());
+        assert_eq!(theme.colors.window_bg, named_color("teal").unwrap());
+        assert_eq!(theme.colors.text, Color::WHITE);
+        assert_eq!(theme.colors.border, Color::from_hex("#123456").unwrap());
+        assert_eq!(theme.radius.medium, 10.0);
+        assert_eq!(theme.spacing.md, 12.0);
+        // `opacity` to krycie, `transparent` to jego odwrotność.
+        assert_eq!(theme.panel.opacity, Some(0.8));
+    }
+
+    #[test]
+    fn fractions_accept_percent_and_fraction() {
+        assert!((parse_fraction("40%").unwrap() - 0.4).abs() < 1e-6);
+        assert!((parse_fraction("0.4").unwrap() - 0.4).abs() < 1e-6);
+        assert!((parse_fraction("40").unwrap() - 0.4).abs() < 1e-6);
+        assert_eq!(parse_fraction("abc"), None);
+    }
+
+    #[test]
+    fn sections_prefix_dotted_subkeys() {
+        let patch = ThemePatch::parse(
+            "typography:\n-body.size: 16\nmetrics:\n-button.height: 40\ncolors:\n-text: white\n",
+        );
+        let theme = patch.build(Theme::light());
+        assert_eq!(theme.typography.body.size, 16.0);
+        assert_eq!(theme.metrics.button.height, 40.0);
+        assert_eq!(theme.colors.text, Color::WHITE);
+    }
+
+    #[test]
+    fn inline_comments_do_not_break_values() {
+        let patch = ThemePatch::parse(
+            "colors:\n-text: #112233  # opis\npanel:\n-round: false # bez zaokrągleń\n-transparent: 40% // przezroczystość\n",
+        );
+        let theme = patch.build(Theme::light());
+        assert_eq!(theme.colors.text, Color::from_hex("#112233").unwrap());
+        assert_eq!(theme.panel.round, Some(false));
+        assert_eq!(theme.panel.opacity, Some(0.6));
     }
 }

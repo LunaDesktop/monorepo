@@ -18,7 +18,10 @@ use std::time::Instant;
 
 use libluna_core::civil::CivilDate;
 use libluna_core::clock_state::{self, ClockActivity};
-use libluna_core::{ButtonState, Event, IconSettings, PointerButton, Rect, ThemePreference};
+use libluna_core::{
+    ButtonState, Event, IconSettings, PanelLook, PanelPosition, PanelSettings, PointerButton, Rect,
+    ThemePreference,
+};
 use libluna_i18n::date_format::DateFormat;
 use libluna_platform::{run, AppConfig, Frame, InputRegion, LayerConfig};
 use libluna_widgets::{Hover, IconName, PaintCtx};
@@ -36,6 +39,8 @@ use luna::theme_schedule::ThemeSchedule;
 
 /// Wysokość powierzchni „chrome” (pasek + launcher + OSD/powiadomienia).
 const CHROME_H: u32 = 680;
+/// Szerokość powierzchni „chrome” dla pionowego panelu (mieści launcher i popupy).
+const CHROME_W: u32 = 1000;
 
 /// O ile pikseli przewijamy listę/siatkę launchera za jeden ząbek kółka.
 /// ~64 px to około jeden wiersz listy — jedno kliknięcie kółka = jeden wiersz.
@@ -49,13 +54,27 @@ fn main() -> Result<(), Box<dyn Error>> {
     let system_dark = std::env::var("LUNA_SYSTEM_DARK")
         .map(|v| !v.is_empty() && v != "0")
         .unwrap_or(false);
+    // Położenie panelu jest znane przed utworzeniem powierzchni — warstwa musi
+    // zarezerwować miejsce na właściwej krawędzi. Zmiana w Ustawieniach wymaga
+    // ponownego uruchomienia powłoki (robimy to automatycznie, patrz niżej).
+    let mut panel_settings = PanelSettings::load();
+    // Wygląd macOS wymaga globalnego menu i docka — do tego czasu ignorujemy
+    // zapisaną wartość, żeby panel nie udawał nieukończonego docka.
+    if !panel_settings.look.available() {
+        panel_settings.look = PanelLook::Luna;
+    }
+    let panel_position = panel_settings.position;
+    let layer = match panel_position {
+        PanelPosition::Top => LayerConfig::top_chrome("luna-shell", THICKNESS as u32, CHROME_H),
+        PanelPosition::Bottom => {
+            LayerConfig::bottom_chrome("luna-shell", THICKNESS as u32, CHROME_H)
+        }
+        PanelPosition::Left => LayerConfig::left_chrome("luna-shell", THICKNESS as u32, CHROME_W),
+        PanelPosition::Right => LayerConfig::right_chrome("luna-shell", THICKNESS as u32, CHROME_W),
+    };
     let cfg = AppConfig::new("Luna Shell")
         .app_id("eu.paganlinux.Luna.Shell")
-        .layer(LayerConfig::top_chrome(
-            "luna-shell",
-            THICKNESS as u32,
-            CHROME_H,
-        ))
+        .layer(layer)
         .transparent(true)
         .system_dark(system_dark)
         // Esc zamyka launcher/menu; nie może kończyć powłoki.
@@ -210,11 +229,38 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut stat_frames = 0u64;
     let mut stat_ms = 0.0f64;
     let mut stat_report = Instant::now();
+    // Zmiana krawędzi panelu wymaga nowej powierzchni warstwowej — po zapisie
+    // z Ustawień uruchamiamy nową powłokę i kończymy bieżącą.
+    let restart = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let restart_flag = restart.clone();
+    let mut panel_checked = Instant::now();
 
-    run(cfg, move |frame: &mut Frame| {
+    let result = run(cfg, move |frame: &mut Frame| {
         if toplevels.is_none() {
             toplevels = luna::toplevels::Toplevels::spawn(Some(frame.waker()));
         }
+        // Ustawienia panelu czytamy najwyżej raz na sekundę — wygląd zmienia się
+        // od razu, a krawędź wymaga restartu powierzchni.
+        if panel_checked.elapsed() >= std::time::Duration::from_secs(1) {
+            panel_checked = Instant::now();
+            let fresh = PanelSettings::load();
+            if fresh.position != panel_position {
+                restart_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                frame.close();
+                return;
+            }
+            panel_settings.look = if fresh.look.available() {
+                fresh.look
+            } else {
+                PanelLook::Luna
+            };
+            // Styl tray’a działa na żywo (bez restartu) — wcześniej zmiana
+            // „Ikona i nazwa” była widoczna dopiero po ponownym zalogowaniu.
+            panel_settings.tray = fresh.tray;
+        }
+        let panel_look = panel_settings.look;
+        // Etykiety tray’a mają sens tylko na poziomym pasku (w pionie nie ma miejsca).
+        state.tray_labels = panel_settings.tray.labels() && panel_position.is_horizontal();
         let dt = frame.delta_time();
         let t_frame = Instant::now();
 
@@ -357,7 +403,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         let size = frame.size;
         let theme = &frame.theme;
         let text = frame.text;
-        let bar = Rect::from_xywh(0.0, 0.0, size.width, THICKNESS);
+        let bar = if theme.panel.float.unwrap_or(panel_look == PanelLook::MacOs) {
+            panel::floating_bar(size, THICKNESS, panel_position)
+        } else {
+            panel::bar_rect(size, THICKNESS, panel_position)
+        };
+        // Obszar bez paska: launcher, OSD, powiadomienia i widget zegara.
+        let content = panel::content_rect(size, THICKNESS, panel_position);
 
         // Język mógł zmienić się w Ustawieniach — odbuduj etykiety, które są cachowane.
         let language = libluna_i18n::locale().language().to_owned();
@@ -418,7 +470,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let clock_widget_rect = if animating_popup == ActivePopup::None || target_progress <= 0.0 {
             clock_activity
                 .as_ref()
-                .and_then(|activity| clock_widget::visible_rect(frame.size, activity, clock_now))
+                .and_then(|activity| clock_widget::visible_rect_in(content, activity, clock_now))
         } else {
             None
         };
@@ -596,12 +648,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         launcher.caret_visible =
             ((Instant::now().duration_since(caret_epoch).as_millis() / 530) % 2) == 0;
 
-        let lw = LAUNCHER_W.min((size.width - 80.0).max(320.0));
-        let larea = Rect::from_xywh((size.width - lw) / 2.0, THICKNESS + 24.0, lw, LAUNCHER_H);
+        let lw = LAUNCHER_W.min((content.width() - 80.0).max(320.0));
+        let larea = Rect::from_xywh(
+            content.x() + (content.width() - lw) / 2.0,
+            content.y() + 24.0,
+            lw,
+            LAUNCHER_H,
+        );
 
         // Prostokąty przycisków paska
-        let burger = panel::burger_rect(bar, &frame.theme);
-        let clock_r = panel::clock_rect(bar, &frame.theme, text, &state);
+        let burger = panel::burger_rect_at(bar, panel_position, &frame.theme);
+        let clock_r = panel::clock_rect_at(bar, panel_position, &frame.theme, text, &state);
 
         // Tekst do schowka z menu aplikacji — kopiujemy **po** zdarzeniach, żeby nie
         // kolidować z pożyczonym motywem/sceną bieżącej klatki.
@@ -819,7 +876,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
                     } else if animating_popup == ActivePopup::Calendar && target_progress > 0.0 {
                         // 2) Kółko nad kalendarzem zmienia miesiąc (w górę = następny).
-                        let crect = panel::calendar_popup_rect(bar, &frame.theme);
+                        let crect = panel::calendar_popup_rect_at(
+                            bar,
+                            panel_position,
+                            &frame.theme,
+                            text,
+                            &state,
+                        );
                         if crect.contains(se.position) && dir != 0.0 {
                             // W dół (dodatnie) → następny miesiąc.
                             if dir > 0.0 {
@@ -840,7 +903,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
                     } else {
                         // 3) Kółko nad pigułką głośności na pasku reguluje dźwięk
-                        let toggles = panel::toggle_rects(bar, &frame.theme, text, &state);
+                        let toggles =
+                            panel::toggle_rects_at(bar, panel_position, &frame.theme, text, &state);
                         let vol_idx = state
                             .toggles
                             .iter()
@@ -856,7 +920,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
 
                         // 4) Kółko nad kropkami przestrzeni roboczych przełącza pulpit
-                        let ws_rects = panel::workspace_rects(bar, &frame.theme, text, &state);
+                        let ws_rects = panel::workspace_rects_at(
+                            bar,
+                            panel_position,
+                            &frame.theme,
+                            text,
+                            &state,
+                        );
                         let is_ws_area = ws_rects.iter().any(|r| r.contains(se.position));
                         if is_ws_area && dir != 0.0 {
                             if let Some(ws) = &workspaces {
@@ -918,8 +988,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Event::PointerMotion { position, .. }
                     if animating_popup == ActivePopup::Notifications && target_progress > 0.0 =>
                 {
-                    let nrect =
-                        panel::notification_center_rect(bar, &frame.theme, notes.history_len());
+                    let nrect = panel::notification_center_rect_at(
+                        bar,
+                        panel_position,
+                        &frame.theme,
+                        notes.history_len(),
+                    );
                     notify_hover = match panel::notification_center_hit(
                         nrect,
                         &frame.theme,
@@ -1004,8 +1078,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Event::PointerButton(pe)
                     if pe.state == ButtonState::Pressed && pe.button == PointerButton::Right =>
                 {
-                    if let Some(hit) = panel::tray_at(bar, &frame.theme, text, &state, pe.position)
-                    {
+                    if let Some(hit) = panel::tray_at_at(
+                        bar,
+                        panel_position,
+                        &frame.theme,
+                        text,
+                        &state,
+                        pe.position,
+                    ) {
                         match hit {
                             panel::TrayHit::Overflow => {
                                 animating_popup = ActivePopup::Tray;
@@ -1013,23 +1093,32 @@ fn main() -> Result<(), Box<dyn Error>> {
                             }
                             panel::TrayHit::Icon(i) => {
                                 if let Some(item) = state.tray.get(i).cloned() {
-                                    let anchor =
-                                        panel::tray_layout(bar, &frame.theme, text, &state)
-                                            .icons
-                                            .iter()
-                                            .find(|(_, index)| *index == i)
-                                            .map(|(rect, _)| *rect)
-                                            .unwrap_or_else(|| {
-                                                Rect::from_xywh(
-                                                    pe.position.x - 11.0,
-                                                    bar.y(),
-                                                    panel::TRAY_ICON,
-                                                    THICKNESS,
-                                                )
-                                            });
+                                    let anchor = panel::tray_layout_at(
+                                        bar,
+                                        panel_position,
+                                        &frame.theme,
+                                        text,
+                                        &state,
+                                    )
+                                    .icons
+                                    .iter()
+                                    .find(|(_, index)| *index == i)
+                                    .map(|(rect, _)| *rect)
+                                    .unwrap_or_else(|| {
+                                        Rect::from_xywh(
+                                            pe.position.x - 11.0,
+                                            bar.y(),
+                                            panel::TRAY_ICON,
+                                            THICKNESS,
+                                        )
+                                    });
                                     if let Some(rows) = tray_menu_for(&tray_slot, &item) {
-                                        let rect =
-                                            panel::tray_context_rect(anchor, &rows, &frame.theme);
+                                        let rect = panel::tray_context_rect_at(
+                                            anchor,
+                                            panel_position,
+                                            &rows,
+                                            &frame.theme,
+                                        );
                                         tray_context = Some(TrayContextState { item, rows, rect });
                                         animating_popup = ActivePopup::TrayContext;
                                         target_progress = 1.0;
@@ -1047,8 +1136,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                             }
                         }
                     } else {
-                        let idx =
-                            panel::task_at(bar, &frame.theme, text, &state.tasks, pe.position);
+                        let idx = panel::task_at_at(
+                            bar,
+                            panel_position,
+                            &frame.theme,
+                            text,
+                            &state,
+                            pe.position,
+                        );
                         if let Some(i) = idx {
                             if let Some(task) = state.tasks.get(i) {
                                 let first = if task.minimized {
@@ -1079,8 +1174,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                                         task.title, actions, labels
                                     );
                                 }
-                                let rects =
-                                    panel::task_rects(bar, &frame.theme, text, &state.tasks);
+                                let rects = panel::task_rects_at(
+                                    bar,
+                                    panel_position,
+                                    &frame.theme,
+                                    text,
+                                    &state,
+                                );
                                 let anchor = rects.get(i).copied().unwrap_or_else(|| {
                                     Rect::from_xywh(
                                         pe.position.x - 40.0,
@@ -1089,8 +1189,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                                         bar.height(),
                                     )
                                 });
-                                let rect =
-                                    panel::task_menu_rect(anchor, bar, actions.len(), &frame.theme);
+                                let rect = panel::task_menu_rect_at(
+                                    anchor,
+                                    bar,
+                                    panel_position,
+                                    actions.len(),
+                                    &frame.theme,
+                                );
                                 task_menu = Some(TaskMenuState {
                                     task: i,
                                     title: task.title.clone(),
@@ -1148,15 +1253,28 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
                         continue;
                     }
-                    let in_bar = pos.y >= bar.y() && pos.y <= bar.bottom();
-                    let is_burger = in_bar && pos.x >= bar.x() && pos.x <= burger.right() + 8.0;
-                    let is_clock =
-                        in_bar && pos.x >= clock_r.x() - 4.0 && pos.x <= clock_r.right() + 4.0;
+                    let in_bar = if panel_position.is_vertical() {
+                        pos.x >= bar.x() && pos.x <= bar.right()
+                    } else {
+                        pos.y >= bar.y() && pos.y <= bar.bottom()
+                    };
+                    let is_burger = in_bar
+                        && if panel_position.is_vertical() {
+                            pos.y >= burger.y() - 4.0 && pos.y <= burger.bottom() + 4.0
+                        } else {
+                            pos.x >= bar.x() && pos.x <= burger.right() + 8.0
+                        };
+                    let is_clock = in_bar
+                        && if panel_position.is_vertical() {
+                            pos.y >= clock_r.y() - 4.0 && pos.y <= clock_r.bottom() + 4.0
+                        } else {
+                            pos.x >= clock_r.x() - 4.0 && pos.x <= clock_r.right() + 4.0
+                        };
                     let clicked_indicator = in_bar
-                        .then(|| panel::indicator_at(bar, theme, pos))
+                        .then(|| panel::indicator_at_at(bar, panel_position, theme, pos))
                         .flatten();
                     let security_chip =
-                        panel::security_chip_rect(bar, clock_r, theme, text, &state);
+                        panel::security_chip_rect_at(bar, panel_position, theme, text, &state);
                     let is_security = in_bar && security_chip.is_some_and(|r| r.contains(pos));
 
                     // Gdy któreś menu jest otwarte (lub animowane)
@@ -1201,17 +1319,28 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 handled = true;
                             }
                             ActivePopup::Tray => {
-                                if let Some(index) =
-                                    panel::tray_menu_hit(bar, &frame.theme, text, &state, pos)
-                                {
+                                if let Some(index) = panel::tray_menu_hit_at(
+                                    bar,
+                                    panel_position,
+                                    &frame.theme,
+                                    text,
+                                    &state,
+                                    pos,
+                                ) {
                                     if let Some(item) = state.tray.get(index).cloned() {
                                         with_tray(&tray_slot, |bus| {
                                             bus.activate(&item, pos.x as i32, pos.y as i32)
                                         });
                                     }
                                     target_progress = 0.0;
-                                } else if panel::tray_menu_rect(bar, &frame.theme, text, &state)
-                                    .contains(pos)
+                                } else if panel::tray_menu_rect_at(
+                                    bar,
+                                    panel_position,
+                                    &frame.theme,
+                                    text,
+                                    &state,
+                                )
+                                .contains(pos)
                                 {
                                     // Klik w puste miejsce karty overflow nie zamyka
                                     // panelu (spójnie z menu taskbara).
@@ -1233,7 +1362,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                             ActivePopup::Quick => {
-                                let qrect = panel::quick_panel_rect(bar, &frame.theme);
+                                let qrect =
+                                    panel::quick_panel_rect_at(bar, panel_position, &frame.theme);
                                 if let Some(hit) = panel::quick_hit(qrect, &frame.theme, pos) {
                                     if stats {
                                         eprintln!("luna-shell: quick {:?}", hit);
@@ -1466,7 +1596,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                             ActivePopup::Wifi => {
-                                let wrect = panel::wifi_popup_rect(bar, &frame.theme, text, &state);
+                                let wrect = panel::wifi_popup_rect_at(
+                                    bar,
+                                    panel_position,
+                                    &frame.theme,
+                                    text,
+                                    &state,
+                                );
                                 if wrect.contains(pos) {
                                     let conn = state
                                         .toggles
@@ -1526,7 +1662,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                             ActivePopup::Calendar => {
-                                let crect = panel::calendar_popup_rect(bar, &frame.theme);
+                                let crect = panel::calendar_popup_rect_at(
+                                    bar,
+                                    panel_position,
+                                    &frame.theme,
+                                    text,
+                                    &state,
+                                );
                                 if crect.contains(pos) {
                                     if let Some(act) = panel::calendar_popup_hit(
                                         crect,
@@ -1570,8 +1712,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                             ActivePopup::Notifications => {
-                                let nrect = panel::notification_center_rect(
+                                let nrect = panel::notification_center_rect_at(
                                     bar,
+                                    panel_position,
                                     &frame.theme,
                                     notes.history_len(),
                                 );
@@ -1625,8 +1768,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                             ActivePopup::Volume => {
-                                let vrect = panel::volume_popup_rect(
+                                let vrect = panel::volume_popup_rect_at(
                                     bar,
+                                    panel_position,
                                     &frame.theme,
                                     sound_sources.len(),
                                 );
@@ -1740,9 +1884,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                                         }
                                     }
                                 }
-                            } else if let Some(hit) =
-                                panel::tray_at(bar, &frame.theme, text, &state, pos)
-                            {
+                            } else if let Some(hit) = panel::tray_at_at(
+                                bar,
+                                panel_position,
+                                &frame.theme,
+                                text,
+                                &state,
+                                pos,
+                            ) {
                                 match hit {
                                     panel::TrayHit::Overflow => {
                                         animating_popup = ActivePopup::Tray;
@@ -1756,16 +1905,26 @@ fn main() -> Result<(), Box<dyn Error>> {
                                         }
                                     }
                                 }
-                            } else if let Some(i) =
-                                panel::task_at(bar, &frame.theme, text, &state.tasks, pos)
-                            {
+                            } else if let Some(i) = panel::task_at_at(
+                                bar,
+                                panel_position,
+                                &frame.theme,
+                                text,
+                                &state,
+                                pos,
+                            ) {
                                 if let Some(tl) = &toplevels {
                                     tl.activate(i);
                                 }
                                 target_progress = 0.0;
-                            } else if let Some(i) =
-                                panel::workspace_at(bar, &frame.theme, text, &state, pos)
-                            {
+                            } else if let Some(i) = panel::workspace_at_at(
+                                bar,
+                                panel_position,
+                                &frame.theme,
+                                text,
+                                &state,
+                                pos,
+                            ) {
                                 if let Some(ws) = &workspaces {
                                     ws.activate(i);
                                 }
@@ -1824,7 +1983,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                         } else if let Some(hit) =
-                            panel::tray_at(bar, &frame.theme, text, &state, pos)
+                            panel::tray_at_at(bar, panel_position, &frame.theme, text, &state, pos)
                         {
                             match hit {
                                 panel::TrayHit::Overflow => {
@@ -1840,24 +1999,29 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                         } else if let Some(i) =
-                            panel::task_at(bar, &frame.theme, text, &state.tasks, pos)
+                            panel::task_at_at(bar, panel_position, &frame.theme, text, &state, pos)
                         {
                             if let Some(tl) = &toplevels {
                                 tl.activate(i);
                             }
-                        } else if let Some(i) =
-                            panel::workspace_at(bar, &frame.theme, text, &state, pos)
-                        {
+                        } else if let Some(i) = panel::workspace_at_at(
+                            bar,
+                            panel_position,
+                            &frame.theme,
+                            text,
+                            &state,
+                            pos,
+                        ) {
                             if let Some(ws) = &workspaces {
                                 ws.activate(i);
                             }
                         } else {
                             // Obsługa toastów powiadomień
                             let area = Rect::from_xywh(
-                                0.0,
-                                THICKNESS + 8.0,
-                                size.width,
-                                size.height - THICKNESS,
+                                content.x(),
+                                content.y() + 8.0,
+                                content.width(),
+                                content.height().max(1.0),
                             );
                             if let Some((item, ak)) = notes.action_at(area, pos, &frame.theme, text)
                             {
@@ -1924,9 +2088,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Event::PointerButton(pe)
                     if pe.state == ButtonState::Pressed && pe.button == PointerButton::Middle =>
                 {
-                    if let Some(panel::TrayHit::Icon(i)) =
-                        panel::tray_at(bar, &frame.theme, text, &state, pe.position)
-                    {
+                    if let Some(panel::TrayHit::Icon(i)) = panel::tray_at_at(
+                        bar,
+                        panel_position,
+                        &frame.theme,
+                        text,
+                        &state,
+                        pe.position,
+                    ) {
                         if let Some(item) = state.tray.get(i).cloned() {
                             with_tray(&tray_slot, |bus| {
                                 bus.secondary_activate(
@@ -1936,9 +2105,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 )
                             });
                         }
-                    } else if let Some(i) =
-                        panel::task_at(bar, &frame.theme, text, &state.tasks, pe.position)
-                    {
+                    } else if let Some(i) = panel::task_at_at(
+                        bar,
+                        panel_position,
+                        &frame.theme,
+                        text,
+                        &state,
+                        pe.position,
+                    ) {
                         if let Some(tl) = &toplevels {
                             tl.close(i);
                         }
@@ -1971,7 +2145,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else {
             clock_activity
                 .as_ref()
-                .and_then(|activity| clock_widget::visible_rect(frame.size, activity, clock_now))
+                .and_then(|activity| clock_widget::visible_rect_in(content, activity, clock_now))
         };
         if clock_widget_rect_now.is_none() {
             clock_widget_hover = false;
@@ -1995,16 +2169,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             // region wejścia musi obejmować **tylko** pasek i ewentualne toasty.
             // Bez tego przezroczysty pas do 680 px pożerał kliknięcia okien pod nim
             // (nieklikalne menu Zed, przyciski tytułu Firefoksa itd.).
-            let mut rects = vec![Rect::from_xywh(0.0, 0.0, frame.size.width, THICKNESS)];
+            let mut rects = vec![bar];
             if let Some(widget) = clock_widget_rect_now {
                 rects.push(widget);
             }
             if notes.visible() {
                 let area = Rect::from_xywh(
-                    0.0,
-                    THICKNESS + 8.0,
-                    frame.size.width,
-                    frame.size.height - THICKNESS,
+                    content.x(),
+                    content.y() + 8.0,
+                    content.width(),
+                    content.height().max(1.0),
                 );
                 rects.push(notes.stack_rect(area));
             }
@@ -2090,11 +2264,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         let panel_hover = (
             hp.is_some_and(|p| burger.contains(p)),
             hp.is_some_and(|p| clock_r.contains(p)),
-            hp.is_some_and(|p| panel::indicator_at(bar, theme, p).is_some()),
-            hp.and_then(|p| panel::task_at(bar, theme, text, &state.tasks, p)),
-            hp.and_then(|p| panel::workspace_at(bar, theme, text, &state, p)),
-            hp.and_then(|p| panel::indicator_at(bar, theme, p)),
-            hp.and_then(|p| panel::tray_at(bar, theme, text, &state, p)),
+            hp.is_some_and(|p| panel::indicator_at_at(bar, panel_position, theme, p).is_some()),
+            hp.and_then(|p| panel::task_at_at(bar, panel_position, theme, text, &state, p)),
+            hp.and_then(|p| panel::workspace_at_at(bar, panel_position, theme, text, &state, p)),
+            hp.and_then(|p| panel::indicator_at_at(bar, panel_position, theme, p)),
+            hp.and_then(|p| panel::tray_at_at(bar, panel_position, theme, text, &state, p)),
         );
         let launcher_open = animating_popup == ActivePopup::Launcher && target_progress > 0.0;
         let launcher_view_hover = if launcher_open {
@@ -2109,16 +2283,23 @@ fn main() -> Result<(), Box<dyn Error>> {
             && hp.is_some_and(|p| panel::launcher_search_clear_at(larea, theme, text, p));
         let quick_hover: Option<panel::QuickHit> =
             if animating_popup == ActivePopup::Quick && target_progress > 0.0 {
-                hp.and_then(|p| panel::quick_hit(panel::quick_panel_rect(bar, theme), theme, p))
+                hp.and_then(|p| {
+                    panel::quick_hit(
+                        panel::quick_panel_rect_at(bar, panel_position, theme),
+                        theme,
+                        p,
+                    )
+                })
             } else {
                 None
             };
-        let tray_hover: Option<usize> =
-            if animating_popup == ActivePopup::Tray && target_progress > 0.0 {
-                hp.and_then(|p| panel::tray_menu_hit(bar, theme, text, &state, p))
-            } else {
-                None
-            };
+        let tray_hover: Option<usize> = if animating_popup == ActivePopup::Tray
+            && target_progress > 0.0
+        {
+            hp.and_then(|p| panel::tray_menu_hit_at(bar, panel_position, theme, text, &state, p))
+        } else {
+            None
+        };
         let tray_context_hover: Option<usize> =
             if animating_popup == ActivePopup::TrayContext && target_progress > 0.0 {
                 tray_context.as_ref().and_then(|ctx| {
@@ -2129,7 +2310,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             };
         let wifi_hover: Option<WifiAction> =
             if animating_popup == ActivePopup::Wifi && target_progress > 0.0 {
-                let wrect = panel::wifi_popup_rect(bar, theme, text, &state);
+                let wrect = panel::wifi_popup_rect_at(bar, panel_position, theme, text, &state);
                 let conn = state
                     .toggles
                     .iter()
@@ -2140,7 +2321,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 None
             };
         let security_chip_hover = hp.is_some_and(|p| {
-            panel::security_chip_rect(bar, clock_r, theme, text, &state)
+            panel::security_chip_rect_at(bar, panel_position, theme, text, &state)
                 .is_some_and(|r| r.contains(p))
         });
         let security_details_hover = if security_details {
@@ -2260,19 +2441,21 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let _ = std::fs::remove_file(&trigger);
                 if let Some(item) = state.tray.first().cloned() {
                     if let Some(rows) = tray_menu_for(&tray_slot, &item) {
-                        let anchor = panel::tray_layout(bar, theme, text, &state)
-                            .icons
-                            .first()
-                            .map(|(r, _)| *r)
-                            .unwrap_or_else(|| {
-                                Rect::from_xywh(
-                                    bar.right() - 80.0,
-                                    bar.y(),
-                                    panel::TRAY_ICON,
-                                    THICKNESS,
-                                )
-                            });
-                        let rect = panel::tray_context_rect(anchor, &rows, theme);
+                        let anchor =
+                            panel::tray_layout_at(bar, panel_position, theme, text, &state)
+                                .icons
+                                .first()
+                                .map(|(r, _)| *r)
+                                .unwrap_or_else(|| {
+                                    Rect::from_xywh(
+                                        bar.right() - 80.0,
+                                        bar.y(),
+                                        panel::TRAY_ICON,
+                                        THICKNESS,
+                                    )
+                                });
+                        let rect =
+                            panel::tray_context_rect_at(anchor, panel_position, &rows, theme);
                         tray_context = Some(TrayContextState { item, rows, rect });
                         animating_popup = ActivePopup::TrayContext;
                         target_progress = 1.0;
@@ -2291,7 +2474,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         // w połowie ekranu („cień na pół ekranu”). Pełnoekranowe przygaszenie wymaga
         // powierzchni na cały ekran — do zrobienia osobno.
 
-        panel::paint_panel(&state, &hover, &mut ctx, bar);
+        if panel_position.is_vertical() {
+            panel::paint_panel_vertical(&state, &hover, &mut ctx, bar, panel_look);
+        } else {
+            panel::paint_panel_styled(&state, &hover, &mut ctx, bar, panel_look);
+        }
 
         // Rysowanie wysuniętego popupu/launchera z płynnym ruchem (slide)
         if anim_progress > 0.001 {
@@ -2313,7 +2500,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
                 ActivePopup::Wifi => {
                     let slide = (1.0 - anim_progress) * -12.0;
-                    let wrect = panel::wifi_popup_rect(bar, &frame.theme, text, &state);
+                    let wrect =
+                        panel::wifi_popup_rect_at(bar, panel_position, &frame.theme, text, &state);
                     let cur_wrect = Rect::from_xywh(
                         wrect.x(),
                         wrect.y() + slide,
@@ -2342,7 +2530,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
                 ActivePopup::Calendar => {
                     let slide = (1.0 - anim_progress) * -12.0;
-                    let crect = panel::calendar_popup_rect(bar, &frame.theme);
+                    let crect = panel::calendar_popup_rect_at(
+                        bar,
+                        panel_position,
+                        &frame.theme,
+                        text,
+                        &state,
+                    );
                     let cur_crect = Rect::from_xywh(
                         crect.x(),
                         crect.y() + slide,
@@ -2367,8 +2561,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
                 ActivePopup::Notifications => {
                     let slide = (1.0 - anim_progress) * -10.0;
-                    let nrect =
-                        panel::notification_center_rect(bar, &frame.theme, notes.history_len());
+                    let nrect = panel::notification_center_rect_at(
+                        bar,
+                        panel_position,
+                        &frame.theme,
+                        notes.history_len(),
+                    );
                     let cur = Rect::from_xywh(
                         nrect.x(),
                         nrect.y() + slide,
@@ -2385,7 +2583,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
                 ActivePopup::Volume => {
                     let slide = (1.0 - anim_progress) * -10.0;
-                    let vrect = panel::volume_popup_rect(bar, &frame.theme, sound_sources.len());
+                    let vrect = panel::volume_popup_rect_at(
+                        bar,
+                        panel_position,
+                        &frame.theme,
+                        sound_sources.len(),
+                    );
                     let cur = Rect::from_xywh(
                         vrect.x(),
                         vrect.y() + slide,
@@ -2409,7 +2612,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
                 ActivePopup::Quick => {
                     let slide = (1.0 - anim_progress) * -10.0;
-                    let qrect = panel::quick_panel_rect(bar, &frame.theme);
+                    let qrect = panel::quick_panel_rect_at(bar, panel_position, &frame.theme);
                     let cur = Rect::from_xywh(
                         qrect.x(),
                         qrect.y() + slide,
@@ -2482,7 +2685,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
                 ActivePopup::Tray => {
                     let slide = (1.0 - anim_progress) * -8.0;
-                    let rect = panel::tray_menu_rect(bar, &frame.theme, text, &state);
+                    let rect =
+                        panel::tray_menu_rect_at(bar, panel_position, &frame.theme, text, &state);
                     let cur =
                         Rect::from_xywh(rect.x(), rect.y() + slide, rect.width(), rect.height());
                     panel::paint_tray_menu(&mut ctx, cur, &state, tray_hover);
@@ -2512,7 +2716,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             let w = 340.0;
             osd.paint(
                 &mut ctx,
-                Rect::from_xywh((size.width - w) / 2.0, THICKNESS + 16.0, w, 72.0),
+                Rect::from_xywh(
+                    content.x() + (content.width() - w) / 2.0,
+                    content.y() + 16.0,
+                    w,
+                    72.0,
+                ),
             );
         }
         if !popup_open {
@@ -2522,7 +2731,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         notes.paint(
             &mut ctx,
-            Rect::from_xywh(0.0, THICKNESS + 8.0, size.width, size.height - THICKNESS),
+            Rect::from_xywh(
+                content.x(),
+                content.y() + 8.0,
+                content.width(),
+                content.height().max(1.0),
+            ),
         );
 
         // Modal zgody — rysowany jako ostatni, nad launcherem i powiadomieniami.
@@ -2651,7 +2865,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                 stat_report = Instant::now();
             }
         }
-    })
+    });
+    if restart.load(std::sync::atomic::Ordering::Relaxed) {
+        if let Ok(exe) = std::env::current_exe() {
+            let _ = std::process::Command::new(exe).spawn();
+        }
+    }
+    result
 }
 
 /// Uchwyt do usługi powiadomień, wypełniany raz w wątku tła (patrz `main`).

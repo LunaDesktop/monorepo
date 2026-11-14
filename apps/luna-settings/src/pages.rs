@@ -7,7 +7,8 @@
 use std::path::{Path, PathBuf};
 
 use libluna_core::{
-    Accent, GreeterSettings, IconTheme, LockWallpaper, OutputMode, ThemePreference,
+    Accent, GreeterSettings, IconTheme, LockWallpaper, OutputMode, PanelLook, PanelPosition,
+    ThemePreference, TrayStyle,
 };
 use libluna_i18n::{tr, tr_args};
 use libluna_widgets::IconName;
@@ -272,6 +273,13 @@ pub enum Action {
     SetDesktopLabels(bool),
     /// Bok ikony pulpitu (48/64/80/96 px).
     SetDesktopIconSize(u32),
+    // — Panel —
+    /// Krawędź ekranu, do której przyklejony jest panel (góra/dół/lewa/prawa).
+    SetPanelPosition(libluna_core::PanelPosition),
+    /// Wygląd panelu (klasyczny Luna albo pływający, jak w macOS).
+    SetPanelLook(libluna_core::PanelLook),
+    /// Sposób pokazywania tray’a: same ikony albo ikona + nazwa.
+    SetTrayStyle(libluna_core::TrayStyle),
     /// Ustawia strefę systemową przez `pkexec timedatectl` (wymaga autoryzacji).
     ApplySystemTimezone,
     /// Włącza/wyłącza synchronizację czasu (NTP) w systemie.
@@ -309,6 +317,8 @@ pub enum Action {
     SetNightLight(u8),
     /// Układa monitory poziomo i zapisuje pozycje.
     AutoArrangeMonitors,
+    /// Przywraca domyślne ustawienia ekranów (natywny tryb, auto-układ, bez night lightu).
+    ResetDisplays,
     // — Wejście (klawiatura i mysz) —
     SetRepeatDelay(u32),
     SetRepeatRate(u32),
@@ -380,6 +390,8 @@ pub enum PickerKind {
     ColorProfile,
     /// Domyślna aplikacja dla kategorii (`SettingsApp::default_app_target`).
     DefaultApp,
+    /// Styl wyglądu z katalogów `luna/themes` (`SettingsApp::styles`).
+    Style,
 }
 
 /// Do czego należy wybrany akcent.
@@ -646,24 +658,18 @@ fn appearance(app: &SettingsApp) -> Vec<Group> {
     ];
 
     if !app.styles.is_empty() {
-        let mut options = vec![tr("Default")];
-        let mut actions = vec![Action::SetStyle(0)];
-        let mut selected = 0;
-        for (i, style) in app.styles.iter().enumerate() {
-            options.push(style.name.clone());
-            actions.push(Action::SetStyle(i + 1));
-            if app.style.as_deref() == Some(style.id.as_str()) {
-                selected = i + 1;
-            }
-        }
+        // Style są plikami `.theme` z katalogów użytkownika/systemu, więc lista
+        // bywa długa — wygodniej wybrać ją pickerem niż segmentami.
+        let current = app
+            .style
+            .as_deref()
+            .and_then(|id| app.styles.iter().find(|style| style.id == id))
+            .map(|style| style.name.clone())
+            .unwrap_or_else(|| tr("Default"));
         theme_rows.push(row(
             tr("Style"),
-            Control::Segmented {
-                options,
-                selected,
-                actions,
-            },
-            Action::None,
+            Control::Select { value: current },
+            Action::OpenPicker(PickerKind::Style),
         ));
     }
 
@@ -801,10 +807,68 @@ fn appearance(app: &SettingsApp) -> Vec<Group> {
         Action::None,
     ));
 
+    let panel_rows = vec![
+        row_sub(
+            tr("Position"),
+            tr("Where the panel sits on the screen"),
+            Control::Segmented {
+                options: vec![tr("Top"), tr("Bottom"), tr("Left"), tr("Right")],
+                selected: PanelPosition::ALL
+                    .iter()
+                    .position(|position| *position == app.panel.position)
+                    .unwrap_or(0),
+                actions: PanelPosition::ALL
+                    .iter()
+                    .map(|position| Action::SetPanelPosition(*position))
+                    .collect(),
+            },
+            Action::None,
+        ),
+        row_sub(
+            tr("Panel look"),
+            if PanelLook::MacOs.available() {
+                tr("A full-width bar or a floating rounded dock")
+            } else {
+                tr(
+                    "The Luna bar is available now — the macOS-style floating dock is coming in a later version",
+                )
+            },
+            Control::Segmented {
+                options: vec![tr("Luna"), tr("macOS")],
+                selected: match app.panel.look {
+                    PanelLook::Luna => 0,
+                    PanelLook::MacOs => 1,
+                },
+                actions: vec![
+                    Action::SetPanelLook(PanelLook::Luna),
+                    Action::SetPanelLook(PanelLook::MacOs),
+                ],
+            },
+            Action::None,
+        ),
+        row_sub(
+            tr("Tray"),
+            tr("Show only icons or icon with the application name"),
+            Control::Segmented {
+                options: vec![tr("Icons"), tr("Icon and name")],
+                selected: match app.panel.tray {
+                    TrayStyle::Icons => 0,
+                    TrayStyle::IconsAndLabels => 1,
+                },
+                actions: vec![
+                    Action::SetTrayStyle(TrayStyle::Icons),
+                    Action::SetTrayStyle(TrayStyle::IconsAndLabels),
+                ],
+            },
+            Action::None,
+        ),
+    ];
+
     vec![
         group(tr("Theme"), theme_rows),
         group(tr("Wallpaper"), wallpaper_rows),
         group(tr("Desktop"), desktop_rows),
+        group(tr("Panel"), panel_rows),
         group(
             tr("Icons"),
             vec![
@@ -2011,6 +2075,18 @@ fn displays(app: &SettingsApp) -> Vec<Group> {
         group(tr("Color"), color_rows),
         color_profiles_group(app),
         group(tr("Brightness"), vec![brightness]),
+        group(
+            tr("Defaults"),
+            vec![row_sub(
+                tr("Restore defaults"),
+                tr("Native resolution, automatic layout and no night light"),
+                Control::Button {
+                    label: tr("Restore"),
+                    suggested: false,
+                },
+                Action::ResetDisplays,
+            )],
+        ),
         info_group(
             tr("Configuration"),
             vec![
@@ -2951,7 +3027,7 @@ fn about(app: &SettingsApp) -> Vec<Group> {
                 ),
                 info_row(
                     tr("Built with libLuna — no GTK, no Qt."),
-                    "github.com/mijsys/libLuna",
+                    "github.com/LunaDesktop/libLuna",
                 ),
             ],
         ),
@@ -2966,7 +3042,11 @@ fn about(app: &SettingsApp) -> Vec<Group> {
                         tr("Moon egg"),
                         tr("Mokosz watches over your desktop. Five clicks well spent."),
                     ),
-                    value_row(tr("Secret code"), "LUNA-5-MOKOSZ"),
+                    value_row(tr("Secret code"), libluna_core::egg::CODE),
+                    value_row(
+                        tr("Where"),
+                        tr("Files — rename something to it · Terminal — type it and press Enter"),
+                    ),
                 ],
             ),
         );
@@ -4048,6 +4128,52 @@ mod tests {
             assert_eq!(content.len() + info.len(), all.len(), "{page:?}");
             assert!(content.iter().all(|group| !group.info), "{page:?}");
             assert!(info.iter().all(|group| group.info), "{page:?}");
+        }
+    }
+
+    #[test]
+    fn appearance_page_offers_panel_position_and_look() {
+        let app = app_with(Page::Appearance);
+        let groups = groups(&app);
+        let titles = row_titles(&groups);
+        assert!(titles.iter().any(|title| title == &tr("Position")));
+        assert!(titles.iter().any(|title| title == &tr("Panel look")));
+
+        // Obie kontrolki mają komplet akcji (cztery krawędzie, dwa wyglądy).
+        let mut positions = 0;
+        let mut looks = 0;
+        let mut trays = 0;
+        for group in &groups {
+            for row in &group.rows {
+                if let Control::Segmented { actions, .. } = &row.control {
+                    positions += actions
+                        .iter()
+                        .filter(|action| matches!(action, Action::SetPanelPosition(_)))
+                        .count();
+                    looks += actions
+                        .iter()
+                        .filter(|action| matches!(action, Action::SetPanelLook(_)))
+                        .count();
+                    trays += actions
+                        .iter()
+                        .filter(|action| matches!(action, Action::SetTrayStyle(_)))
+                        .count();
+                }
+            }
+        }
+        assert_eq!(positions, PanelPosition::ALL.len());
+        assert_eq!(looks, PanelLook::ALL.len());
+        assert_eq!(trays, TrayStyle::ALL.len());
+
+        // Dopóki dock macOS jest zablokowany, podpowiedź musi to zapowiadać.
+        if !PanelLook::MacOs.available() {
+            let hint = groups
+                .iter()
+                .flat_map(|group| &group.rows)
+                .find(|row| row.title == tr("Panel look"))
+                .and_then(|row| row.subtitle.as_deref())
+                .unwrap_or_default();
+            assert!(hint.contains("macOS"), "{hint}");
         }
     }
 }

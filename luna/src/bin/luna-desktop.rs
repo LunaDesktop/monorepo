@@ -17,13 +17,15 @@
 use std::time::{Duration, Instant};
 
 use libluna_core::desktop::{self, DesktopEntry, DesktopItemKind, DesktopSettings};
-use libluna_core::{ButtonState, Event, Point, PointerButton, Rect, ScrollEvent, Size, Theme};
+use libluna_core::{
+    ButtonState, Event, PanelSettings, Point, PointerButton, Rect, ScrollEvent, Size, Theme,
+};
 use libluna_i18n::tr;
 use libluna_platform::{run, AppConfig, Frame, InputRegion, LayerConfig};
 use libluna_render::TextEngine;
 use libluna_widgets::PaintCtx;
 use luna::desktop as view;
-use luna::panel::THICKNESS;
+use luna::panel::{self, THICKNESS};
 
 /// Margines pulpitu względem krawędzi ekranu.
 const MARGIN: f64 = 16.0;
@@ -66,6 +68,8 @@ struct Press {
 
 struct DesktopApp {
     settings: DesktopSettings,
+    /// Położenie paska (góra/dół/lewo/prawo) — ikony nie mogą wchodziç pod panel.
+    panel: PanelSettings,
     positions: desktop::DesktopPositions,
     entries: Vec<DesktopEntry>,
     next_scan: Instant,
@@ -89,6 +93,7 @@ impl DesktopApp {
         Self {
             positions: desktop::load_positions(),
             settings,
+            panel: PanelSettings::load(),
             entries: Vec::new(),
             next_scan: Instant::now(),
             settings_stamp: settings_stamp(),
@@ -103,13 +108,14 @@ impl DesktopApp {
         }
     }
 
-    /// Obszar siatki (pod paskiem Luny, z marginesami).
+    /// Obszar siatki (obok paska Luny, z marginesami).
     fn area(&self, size: Size) -> Rect {
+        let content = panel::content_rect(size, THICKNESS, self.panel.position);
         Rect::from_xywh(
-            MARGIN,
-            THICKNESS + MARGIN,
-            (size.width - 2.0 * MARGIN).max(1.0),
-            (size.height - THICKNESS - 2.0 * MARGIN).max(1.0),
+            content.x() + MARGIN,
+            content.y() + MARGIN,
+            (content.width() - 2.0 * MARGIN).max(1.0),
+            (content.height() - 2.0 * MARGIN).max(1.0),
         )
     }
 
@@ -148,6 +154,8 @@ impl DesktopApp {
             self.positions = desktop::load_positions();
             self.settings_stamp = stamp;
         }
+        // Położenie panelu może się zmienić bez restartu pulpitu.
+        self.panel = PanelSettings::load();
         self.entries = desktop::scan(&self.settings.folders);
         self.next_scan = Instant::now() + RESCAN_EVERY;
     }

@@ -15,7 +15,8 @@ use libluna_core::shortcuts::{Binding, ShortcutAction, ShortcutSettings};
 use libluna_core::theme_file::StyledTheme;
 use libluna_core::{
     Accent, DisplaySettings, GreeterSettings, IconSet, IconSettings, InputSettings, LockSettings,
-    OutputMode, Point, Rect, RegionSettings, ThemePreference, ThemeSettings, WorkspaceLayout,
+    OutputMode, PanelLook, PanelSettings, Point, Rect, RegionSettings, ThemePreference,
+    ThemeSettings, WorkspaceLayout,
 };
 use libluna_i18n::{set_locale, tr, tr_args, Locale};
 use libluna_platform::{run as run_app, AppConfig, Frame};
@@ -565,6 +566,8 @@ pub struct SettingsApp {
     pub languages: Vec<(String, String)>,
 
     pub icons: IconSettings,
+    /// Ustawienia panelu (`~/.config/luna/panel.conf`).
+    pub panel: PanelSettings,
     /// Ustawienia ikon pulpitu (`~/.config/luna/desktop.conf`).
     pub desktop: libluna_core::desktop::DesktopSettings,
     /// Zestawy ikon freedesktop wykryte w systemie.
@@ -809,6 +812,7 @@ impl SettingsApp {
             language,
             languages,
             icons,
+            panel: PanelSettings::load(),
             desktop: libluna_core::desktop::DesktopSettings::load(),
             icon_sets: libluna_core::icons::external_icon_sets(),
             lock: LockSettings::load(),
@@ -895,6 +899,12 @@ impl SettingsApp {
             paste_requested: false,
             paste_target: None,
         };
+        // Zapamiętany wcześniej wygląd macOS nie jest jeszcze obsługiwany —
+        // wracamy do Luny, żeby panel nie udawał nieukończonego docka.
+        if !app.panel.look.available() {
+            app.panel.look = PanelLook::Luna;
+            let _ = app.panel.save();
+        }
         app.rebuild_nav();
         app
     }
@@ -1302,6 +1312,17 @@ impl SettingsApp {
                     })
                     .collect()
             }
+            PickerKind::Style => {
+                let mut items = vec![PickerItem {
+                    label: tr("Default"),
+                    value: String::new(),
+                }];
+                items.extend(self.styles.iter().map(|style| PickerItem {
+                    label: style.name.clone(),
+                    value: style.id.clone(),
+                }));
+                items
+            }
             PickerKind::Resolution => {
                 let Some(monitor) = self.selected_monitor() else {
                     return Vec::new();
@@ -1404,6 +1425,12 @@ impl SettingsApp {
                 .default_app_target
                 .and_then(|index| self.defaults.current.get(index).cloned().flatten())
                 .unwrap_or_default(),
+            PickerKind::Style => self
+                .style
+                .as_deref()
+                .filter(|id| self.styles.iter().any(|style| style.id == *id))
+                .unwrap_or_default()
+                .to_owned(),
             PickerKind::Resolution => self
                 .selected_resolution()
                 .map(|(width, height)| format!("{width}x{height}"))
@@ -1456,6 +1483,10 @@ impl SettingsApp {
             PickerKind::Refresh => self.set_monitor_refresh(&item.value),
             PickerKind::ColorProfile => self.on_action(Action::SetColorProfile(item.value.clone())),
             PickerKind::DefaultApp => self.on_action(Action::SetDefaultApp(item.value.clone())),
+            PickerKind::Style => {
+                let index = self.styles.iter().position(|style| style.id == item.value);
+                self.on_action(Action::SetStyle(index.map(|index| index + 1).unwrap_or(0)));
+            }
         }
     }
 
@@ -1623,6 +1654,15 @@ impl SettingsApp {
             Err(err) => {
                 self.show_status(format!("{}: {err}", tr("Could not save desktop settings")))
             }
+        }
+    }
+
+    /// Zapisuje położenie i wygląd panelu — powłoka podchwytuje zmianę
+    /// przy następnej klatce (bez wylogowania).
+    fn save_panel_settings(&mut self) {
+        match self.panel.save() {
+            Ok(()) => self.show_status(tr("Panel settings saved")),
+            Err(err) => self.show_status(format!("{}: {err}", tr("Could not save panel settings"))),
         }
     }
 
@@ -1936,6 +1976,55 @@ impl SettingsApp {
             x += monitor.width.max(1) as i32;
         }
         self.save_monitor_layout();
+    }
+
+    /// Przywraca domyślne ustawienia ekranów: natywny tryb każdego monitora,
+    /// automatyczny układ poziomy i brak night lightu. Zapisuje konfigurację
+    /// i przekazuje zmiany Selene na żywo.
+    pub fn reset_displays(&mut self) {
+        self.displays = DisplaySettings::default();
+        if let Err(err) = self.displays.save() {
+            self.show_status(format!("{}: {err}", tr("Could not save display settings")));
+            return;
+        }
+        self.night_light_dirty = false;
+        self.night_light_saved_at = std::time::Instant::now();
+        self.monitor_drag = None;
+
+        // Tryb natywny na żywo (Selene wykona modeset i odbuduje bufory).
+        for monitor in &self.monitors {
+            control_send(&format!("output-mode {} auto", monitor.name));
+        }
+
+        // Domyślny układ: poziomo od lewej do prawej. Pozycji nie zapisujemy
+        // w pliku — brak wpisu oznacza układ automatyczny.
+        let mut x = 0;
+        let positions: Vec<(String, i32, i32)> = self
+            .monitors
+            .iter()
+            .map(|monitor| {
+                // Po powrocie do trybu natywnego szerokość to zwykle największy
+                // dostępny tryb, a nie aktualnie ustawiony.
+                let width = monitor
+                    .modes
+                    .iter()
+                    .map(|mode| u32::from(mode.width))
+                    .max()
+                    .unwrap_or(monitor.width)
+                    .max(1) as i32;
+                let position = (monitor.name.clone(), x, 0);
+                x += width;
+                position
+            })
+            .collect();
+        for (name, x, y) in positions {
+            control_send(&format!("output-position {name} {x} {y}"));
+        }
+        control_send("night-light 0");
+
+        // Nowe tryby pojawią się w migawce po modesecie — odśwież w następnej klatce.
+        self.monitors_next = std::time::Instant::now();
+        self.show_status(tr("Display settings restored"));
     }
 
     /// Wybiera wpis w przeglądarce tapet (katalog otwiera się od razu, plik
@@ -2533,6 +2622,33 @@ impl SettingsApp {
                 self.desktop.grid = (size as f32 + 32.0).max(80.0);
                 self.save_desktop_settings();
             }
+            Action::SetPanelPosition(position) => {
+                self.panel.position = position;
+                self.save_panel_settings();
+            }
+            Action::SetPanelLook(look) => {
+                // Wygląd macOS wymaga globalnego menu i docka na dole — dopóki
+                // ich nie ma, nie pozwalamy go włączyć (segment jest wyszarzony).
+                if !look.available() {
+                    self.show_status(tr(
+                        "The macOS look needs a global menu and a bottom dock — coming in a later version",
+                    ));
+                    return;
+                }
+                self.panel.look = look;
+                self.save_panel_settings();
+            }
+            Action::SetTrayStyle(tray) => {
+                self.panel.tray = tray;
+                self.save_panel_settings();
+                // Na pionowym pasku nie ma miejsca na nazwy — pokazujemy
+                // wyjaśnienie zamiast zostawiać użytkownika z „nic się nie stało”.
+                if tray.labels() && !self.panel.position.is_horizontal() {
+                    self.show_status(tr(
+                        "Tray labels are shown only when the panel is horizontal",
+                    ));
+                }
+            }
             Action::SelectMonitor(index) => {
                 if index < self.monitors.len() {
                     self.selected_monitor = index;
@@ -2540,6 +2656,7 @@ impl SettingsApp {
             }
             Action::SetNightLight(percent) => self.set_night_light(percent),
             Action::AutoArrangeMonitors => self.auto_arrange_monitors(),
+            Action::ResetDisplays => self.reset_displays(),
             Action::SetGreeterWallpaperPath(path) => {
                 if !path.is_file() {
                     self.show_status(tr("The selected file does not exist"));
@@ -2918,6 +3035,12 @@ impl SettingsApp {
             self.about_clicks = 0;
             if !self.easter_egg {
                 self.easter_egg = true;
+                // Znacznik w `$XDG_STATE_HOME` — dzięki niemu Pliki i Terminal
+                // wiedzą, że kod został już odkryty. W trybie demo/testów nie
+                // piszemy do prawdziwego katalogu stanu.
+                if !self.demo {
+                    libluna_core::egg::unlock();
+                }
                 self.show_status(tr("You found the moon egg"));
             }
         }
@@ -3429,6 +3552,53 @@ mod tests {
     }
 
     #[test]
+    fn style_picker_selects_a_theme_from_the_catalog() {
+        let mut app = app();
+        app.styles = vec![
+            StyledTheme {
+                id: "nord".to_owned(),
+                name: "Nord".to_owned(),
+                path: PathBuf::from("/tmp/nord.theme"),
+            },
+            StyledTheme {
+                id: "redluna".to_owned(),
+                name: "RedLuna".to_owned(),
+                path: PathBuf::from("/tmp/redluna.theme"),
+            },
+        ];
+        app.style = None;
+        app.open_picker(PickerKind::Style);
+        let items = app.picker_filtered();
+        assert_eq!(items.first().map(|item| item.value.as_str()), Some(""));
+        let index = items
+            .iter()
+            .position(|item| item.value == "redluna")
+            .expect("RedLuna");
+        app.picker.as_mut().expect("picker").selected = index;
+        app.apply_picker();
+        assert_eq!(app.style.as_deref(), Some("redluna"));
+
+        // Powrót do domyślnego stylu (pozycja z pustym `id`).
+        app.open_picker(PickerKind::Style);
+        let index = app
+            .picker_filtered()
+            .iter()
+            .position(|item| item.value.is_empty())
+            .expect("Default");
+        app.picker.as_mut().expect("picker").selected = index;
+        app.apply_picker();
+        assert_eq!(app.style, None);
+    }
+
+    #[test]
+    fn macos_panel_look_is_locked() {
+        let mut app = app();
+        assert!(app.panel.look.available());
+        app.on_action(Action::SetPanelLook(PanelLook::MacOs));
+        assert_eq!(app.panel.look, PanelLook::Luna);
+    }
+
+    #[test]
     fn workspace_editor_starts_with_current_name() {
         let mut app = app();
         app.workspace_layout.set_name(0, Some("Kod"));
@@ -3754,6 +3924,75 @@ mod tests {
 
         std::env::remove_var("LUNA_DISPLAYS_CONF");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn reset_displays_clears_mode_layout_and_night_light() {
+        let _env = lock_displays_env();
+        use crate::pages::Monitor;
+        use libluna_core::{DisplaySettings, OutputMode};
+
+        let dir = std::env::temp_dir().join(format!(
+            "luna-settings-reset-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("displays.conf");
+        std::env::set_var("LUNA_DISPLAYS_CONF", &path);
+        // Nie wysyłaj komend do prawdziwej sesji użytkownika.
+        let previous_runtime = std::env::var_os("XDG_RUNTIME_DIR");
+        std::env::set_var("XDG_RUNTIME_DIR", &dir);
+
+        let mut app = app();
+        app.displays
+            .set_mode("eDP-1", Some(OutputMode::new(1280, 720, 60)));
+        app.displays.set_position("eDP-1", Some((320, 0)));
+        app.displays.night_light = 45;
+        app.monitors = vec![
+            Monitor {
+                name: "eDP-1".to_owned(),
+                connected: true,
+                enabled: true,
+                width: 1920,
+                height: 1080,
+                refresh: 60,
+                x: 320,
+                y: 0,
+                modes: vec![OutputMode::new(1920, 1080, 60)],
+            },
+            Monitor {
+                name: "HDMI-A-1".to_owned(),
+                connected: true,
+                enabled: true,
+                width: 2560,
+                height: 1440,
+                refresh: 60,
+                x: 2240,
+                y: 0,
+                modes: vec![OutputMode::new(2560, 1440, 60)],
+            },
+        ];
+
+        app.reset_displays();
+
+        assert_eq!(app.displays, DisplaySettings::default(), "stan w pamięci");
+        assert_eq!(app.displays.night_light, 0);
+        assert!(!app.night_light_dirty);
+        assert_eq!(
+            DisplaySettings::load(),
+            DisplaySettings::default(),
+            "plik konfiguracji"
+        );
+        assert_eq!(app.status.message(), tr("Display settings restored"));
+
+        std::env::remove_var("LUNA_DISPLAYS_CONF");
+        match previous_runtime {
+            Some(value) => std::env::set_var("XDG_RUNTIME_DIR", value),
+            None => std::env::remove_var("XDG_RUNTIME_DIR"),
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

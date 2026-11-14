@@ -1,0 +1,28 @@
+# Styl „RedLuna” — przykład czytelnego formatu motywu.
+#
+# Można łączyć oba zapisy:
+#   - globalne klucze `klucz = wartość` (pełna kontrola nad libLuną),
+#   - sekcję `panel:` z myślnikami (wygląd paska).
+#
+# Kolory: `#rrggbb`, `#rrggbbaa` albo nazwy (`red`, `teal`, `black`…).
+# `transparent` to procent przezroczystości (40% = krycie 60%).
+
+::Name - RedLuna
+appearance = dark
+
+colors.card_bg = #2a1518
+colors.view_bg = #1d0f11
+colors.window_bg = #1d0f11
+colors.text = #ffe8ea
+colors.dim_text = #c9a3a8
+colors.border = #5a2a30
+accent = red
+
+radius: 10
+spacing: 12
+
+panel:
+-color-bar: red
+-round: false
+-float: true
+-transparent: 40%

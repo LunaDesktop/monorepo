@@ -1,0 +1,58 @@
+/* Polkit rule for Luna Store (and PaganOS package manager)
+ *
+ * Allows active local users in administrative groups (wheel or sudo) to
+ * synchronize package repository metadata and download updates without
+ * prompting for an administrator password.
+ *
+ * Full system upgrades and package installations/removals continue to require
+ * administrative authorization.
+ */
+polkit.addRule(function(action, subject) {
+    if (action.id === "org.freedesktop.policykit.exec") {
+        var prog = action.lookup("program");
+        var cmd = action.lookup("command_line") || "";
+
+        if ((subject.isInGroup("wheel") || subject.isInGroup("sudo"))) {
+            // pag (Pagan Linux Package Manager)
+            // allow: pag sync, pag update (refresh indexes), pag download (fetch to cache)
+            if (prog === "/usr/bin/pag" || prog === "/bin/pag") {
+                if (cmd.match(/^(\/usr)?\/bin\/pag\s+(sync|update|download\b)/)) {
+                    return polkit.Result.YES;
+                }
+            }
+
+            // APT (Debian / Ubuntu)
+            // allow: apt-get update, apt update
+            if (prog === "/usr/bin/apt-get" || prog === "/bin/apt-get" ||
+                prog === "/usr/bin/apt" || prog === "/bin/apt") {
+                if (cmd.match(/^(\/usr)?\/bin\/apt(-get)?\s+update\b/)) {
+                    return polkit.Result.YES;
+                }
+            }
+
+            // Pacman (Arch Linux / derivatives)
+            // allow: pacman -Sy, pacman -Syy (sync databases), pacman -Sw (download only)
+            if (prog === "/usr/bin/pacman" || prog === "/bin/pacman") {
+                if (cmd.match(/^(\/usr)?\/bin\/pacman\s+-(Sy|Syy|Sw|Syuw|Syw)\b/)) {
+                    return polkit.Result.YES;
+                }
+            }
+
+            // DNF (Fedora / RHEL)
+            // allow: dnf makecache, dnf check-update, dnf download
+            if (prog === "/usr/bin/dnf" || prog === "/bin/dnf") {
+                if (cmd.match(/^(\/usr)?\/bin\/dnf\s+(makecache|check-update|download\b)/)) {
+                    return polkit.Result.YES;
+                }
+            }
+
+            // Emerge (Gentoo)
+            // allow: emerge --sync
+            if (prog === "/usr/bin/emerge" || prog === "/bin/emerge") {
+                if (cmd.match(/^(\/usr)?\/bin\/emerge\s+--sync\b/)) {
+                    return polkit.Result.YES;
+                }
+            }
+        }
+    }
+});

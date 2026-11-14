@@ -92,6 +92,8 @@ pub struct PanelState {
     pub unseen: usize,
     /// Pozycje system traya (StatusNotifierItem).
     pub tray: Vec<TrayItem>,
+    /// Czy przy ikonach traya rysować też nazwy (`panel.conf: tray = labels`).
+    pub tray_labels: bool,
     /// Wskaźniki bezpieczeństwa (mikrofon/kamera/sieć).
     pub security: SecurityIndicators,
     /// Wskaźnik, którego panel jest aktualnie otwarty (podświetlenie akcentem).
@@ -253,6 +255,7 @@ impl PanelState {
             notifications: 0,
             unseen: 0,
             tray: Vec::new(),
+            tray_labels: false,
             security: SecurityIndicators::default(),
             active_indicator: None,
         }
@@ -1105,8 +1108,10 @@ pub fn quick_button_rect(bar: Rect, theme: &Theme, text: &TextEngine, state: &Pa
 pub const TRAY_ICON: f64 = 22.0;
 /// Odstęp między ikonami tray’a.
 const TRAY_GAP: f64 = 4.0;
-/// Ile ikon mieści się przed przyciskiem Quick, zanim pojawi się overflow.
+/// Ile ikon tray’a mieści się przed przyciskiem Quick, zanim pojawi się overflow.
 pub const TRAY_VISIBLE_MAX: usize = 4;
+/// Maksimum ikon, gdy obok ikony rysujemy też nazwę (szersze pozycje).
+pub const TRAY_VISIBLE_MAX_LABELS: usize = 2;
 /// Wysokość wiersza w menu overflow.
 const TRAY_ROW_H: f64 = 34.0;
 
@@ -1120,22 +1125,81 @@ pub struct TrayLayout {
     pub hidden_from: usize,
 }
 
-fn tray_hidden_from(total: usize) -> usize {
-    if total > TRAY_VISIBLE_MAX {
-        TRAY_VISIBLE_MAX - 1
+fn tray_hidden_from(total: usize, labels: bool) -> usize {
+    let max = if labels {
+        TRAY_VISIBLE_MAX_LABELS
+    } else {
+        TRAY_VISIBLE_MAX
+    };
+    if total > max {
+        max - 1
     } else {
         total
     }
 }
 
 /// Ikony tray’a leżą bezpośrednio na lewo od grupy wskaźników.
+///
+/// Gdy `PanelState::tray_labels` jest włączone, każda pozycja dostaje też
+/// nazwę aplikacji (przyciętą, by nie wypychać zegara i wskaźników).
+///
+/// Tray **nigdy** nie wchodzi na zegar ani na chip wskaźników prywatności:
+/// lewa granica jest wyliczana z `clock_rect`/`security_chip_rect`, a gdy ikony
+/// się nie mieszczą, nadmiar trafia do przycisku overflow (zamiast nachodzić
+/// na środek paska).
 pub fn tray_layout(bar: Rect, theme: &Theme, text: &TextEngine, state: &PanelState) -> TrayLayout {
-    let _ = text;
-    let right = indicator_rects(bar, theme)[0].x() - theme.spacing.md;
-    let cy = bar.center().y;
+    let t = theme;
+    // Prawa granica: na lewo od kropek przestrzeni (tray nie może ich zasłaniać).
+    let right = workspace_rects(bar, t, text, state)
+        .first()
+        .map(|r| r.x())
+        .unwrap_or_else(|| indicator_rects(bar, t)[0].x())
+        - t.spacing.md;
+    // Lewa granica: zegar i (jeśli widoczny) chip mikrofon/kamera/sieć.
+    let clock = clock_rect(bar, t, text, state);
+    let mut left_limit = clock.right() + t.spacing.md;
+    if let Some(chip) = security_chip_rect(bar, clock, t, text, state) {
+        left_limit = left_limit.max(chip.right() + t.spacing.md);
+    }
+    let available = (right - left_limit).max(0.0);
+
     let total = state.tray.len();
-    let overflow = total > TRAY_VISIBLE_MAX;
-    let visible = tray_hidden_from(total);
+    let labels = state.tray_labels;
+    let label_width = |index: usize| -> f64 {
+        if !labels {
+            return 0.0;
+        }
+        let Some(item) = state.tray.get(index) else {
+            return 0.0;
+        };
+        let caption = theme.typography.caption.size;
+        let width = text
+            .measure(item.label(), caption, weight::NORMAL)
+            .width
+            .min(96.0);
+        (width + theme.spacing.xs).max(0.0)
+    };
+
+    // Tyle pozycji pokazujemy domyślnie (z rezerwacją slotu na overflow).
+    let mut visible = tray_hidden_from(total, labels);
+    while visible > 0 {
+        let needs_overflow = visible < total;
+        let icons_width: f64 = (0..visible).map(|i| TRAY_ICON + label_width(i)).sum();
+        let gaps = (visible.saturating_sub(1)) as f64 * TRAY_GAP;
+        let overflow_width = if needs_overflow {
+            TRAY_ICON + TRAY_GAP
+        } else {
+            0.0
+        };
+        if icons_width + gaps + overflow_width <= available {
+            break;
+        }
+        visible -= 1;
+    }
+    // Overflow tylko wtedy, gdy naprawdę coś ukrywamy i mieści się na pasku.
+    let overflow = visible < total && available >= TRAY_ICON;
+
+    let cy = bar.center().y;
     let mut icons = Vec::with_capacity(visible);
     let mut x = right;
     let overflow_rect = if overflow {
@@ -1151,7 +1215,8 @@ pub fn tray_layout(bar: Rect, theme: &Theme, text: &TextEngine, state: &PanelSta
         None
     };
     for i in (0..visible).rev() {
-        let r = Rect::from_xywh(x - TRAY_ICON, cy - TRAY_ICON / 2.0, TRAY_ICON, TRAY_ICON);
+        let width = TRAY_ICON + label_width(i);
+        let r = Rect::from_xywh(x - width, cy - TRAY_ICON / 2.0, width, TRAY_ICON);
         icons.push((r, i));
         x = r.x() - TRAY_GAP;
     }
@@ -1224,7 +1289,7 @@ pub fn tray_menu_hit(
     if !rect.contains(p) {
         return None;
     }
-    let hidden_from = tray_hidden_from(state.tray.len());
+    let hidden_from = tray_hidden_from(state.tray.len(), state.tray_labels);
     let hidden = state.tray.len().saturating_sub(hidden_from).min(8);
     let inner = Rect::from_xywh(
         rect.x() + 6.0,
@@ -1254,23 +1319,46 @@ fn paint_tray_icon(ctx: &mut PaintCtx, icon: &TrayIcon, rect: Rect) {
     }
 }
 
-fn paint_tray_item(ctx: &mut PaintCtx, item: &TrayItem, rect: Rect, hovered: bool) {
+fn paint_tray_item(
+    ctx: &mut PaintCtx,
+    item: &TrayItem,
+    rect: Rect,
+    hovered: bool,
+    label: Option<&str>,
+) {
+    let t = ctx.theme;
     if hovered {
-        ctx.scene.fill_rounded_rect(
-            rect,
-            ctx.theme.radius.small,
-            libluna_widgets::hover_fill(ctx.theme),
-        );
+        ctx.scene
+            .fill_rounded_rect(rect, t.radius.small, libluna_widgets::hover_fill(t));
     }
+    // Przy etykiecie ikona siedzi przy prawej krawędzi pozycji, a nazwa po lewej.
+    let icon_rect = if label.is_some() {
+        Rect::from_xywh(rect.right() - TRAY_ICON, rect.y(), TRAY_ICON, rect.height())
+    } else {
+        rect
+    };
     let inner = Rect::from_xywh(
-        rect.x() + 2.0,
-        rect.y() + 2.0,
-        rect.width() - 4.0,
-        rect.height() - 4.0,
+        icon_rect.x() + 2.0,
+        icon_rect.y() + 2.0,
+        (icon_rect.width() - 4.0).max(1.0),
+        (icon_rect.height() - 4.0).max(1.0),
     );
     paint_tray_icon(ctx, &item.icon, inner);
+    if let Some(label) = label {
+        let caption = t.typography.caption.size;
+        let max = (rect.width() - TRAY_ICON - t.spacing.xs).max(0.0);
+        let text = ellipsize(label, max, caption, weight::NORMAL, ctx.text);
+        ctx.label_left(
+            rect.x() + 2.0,
+            rect.center().y,
+            &text,
+            caption,
+            weight::NORMAL,
+            t.colors.text,
+        );
+    }
     if item.status == TrayStatus::NeedsAttention {
-        let dot = Rect::from_xywh(rect.right() - 6.0, rect.bottom() - 6.0, 5.0, 5.0);
+        let dot = Rect::from_xywh(icon_rect.right() - 6.0, icon_rect.bottom() - 6.0, 5.0, 5.0);
         ctx.scene
             .fill_rounded_rect(dot, 2.5, ctx.theme.colors.accent);
     }
@@ -1283,7 +1371,7 @@ pub fn paint_tray_menu(ctx: &mut PaintCtx, rect: Rect, state: &PanelState, hover
         .fill_rounded_rect(rect, t.radius.medium, t.colors.card_bg);
     ctx.scene
         .stroke_rounded_rect(rect, t.radius.medium, 1.0, t.colors.border);
-    let hidden_from = tray_hidden_from(state.tray.len());
+    let hidden_from = tray_hidden_from(state.tray.len(), state.tray_labels);
     let x = rect.x() + 6.0;
     let y = rect.y() + 6.0;
     let w = rect.width() - 12.0;
@@ -4234,16 +4322,61 @@ fn paint_task_button(ctx: &mut PaintCtx, rect: Rect, task: &Task, icon_only: boo
 
 /// Rysuje panel górny w zadanym prostokącie.
 pub fn paint_panel(panel: &PanelState, hover: &Hover, ctx: &mut PaintCtx, rect: Rect) {
+    paint_panel_styled(panel, hover, ctx, rect, PanelLook::Luna);
+}
+
+/// Rysuje panel w wybranym wyglądzie (Luna = płaski, macOS = pływająca karta).
+pub fn paint_panel_styled(
+    panel: &PanelState,
+    hover: &Hover,
+    ctx: &mut PaintCtx,
+    rect: Rect,
+    look: PanelLook,
+) {
+    let t = ctx.theme;
+    // Styl z pliku `.theme` może nadpisać wygląd wybrany w Ustawieniach.
+    let rounded = t.panel.round.unwrap_or(matches!(look, PanelLook::MacOs));
+    let bar_bg = t.panel.color.unwrap_or(t.colors.headerbar_bg);
+    let bar_bg = match t.panel.opacity {
+        Some(opacity) => bar_bg.with_alpha(bar_bg.a * opacity.clamp(0.0, 1.0)),
+        None => bar_bg,
+    };
+    if rounded {
+        // Miękki cień + zaokrąglona karta, jak pływający dock.
+        ctx.scene.fill_rounded_rect(
+            Rect::from_xywh(rect.x() + 2.0, rect.y() + 4.0, rect.width(), rect.height()),
+            t.radius.medium,
+            Color::rgba(0.0, 0.0, 0.0, 0.18),
+        );
+        ctx.scene.fill_rounded_rect(rect, t.radius.medium, bar_bg);
+        ctx.scene
+            .stroke_rounded_rect(rect, t.radius.medium, 1.0, t.colors.border);
+    } else {
+        // Pływający, ale kanciasty pasek też powinien odciąć się od pulpitu.
+        if t.panel.float == Some(true) {
+            ctx.scene.fill_rounded_rect(
+                Rect::from_xywh(rect.x() + 2.0, rect.y() + 4.0, rect.width(), rect.height()),
+                t.radius.small,
+                Color::rgba(0.0, 0.0, 0.0, 0.18),
+            );
+        }
+        ctx.scene.fill_rect(rect, bar_bg);
+        ctx.scene.fill_rect(
+            Rect::from_xywh(rect.x(), rect.bottom() - 1.0, rect.width(), 1.0),
+            t.colors.border,
+        );
+        ctx.scene.fill_rect(
+            Rect::from_xywh(rect.x(), rect.y(), rect.width(), 1.0),
+            t.colors.border,
+        );
+    }
+    paint_panel_items(panel, hover, ctx, rect);
+}
+
+fn paint_panel_items(panel: &PanelState, hover: &Hover, ctx: &mut PaintCtx, rect: Rect) {
     let t = ctx.theme;
     let cy = rect.center().y;
     let body = t.typography.body.size;
-
-    // Tło + dolna krawędź oddzielająca od pulpitu.
-    ctx.scene.fill_rect(rect, t.colors.headerbar_bg);
-    ctx.scene.fill_rect(
-        Rect::from_xywh(rect.x(), rect.bottom() - 1.0, rect.width(), 1.0),
-        t.colors.border,
-    );
 
     // ── Lewa grupa: sam burger (ikona Menu) + separator + tytuł okna ──
     let burger = burger_rect(rect, t);
@@ -4314,7 +4447,8 @@ pub fn paint_panel(panel: &PanelState, hover: &Hover, ctx: &mut PaintCtx, rect: 
     let tray = tray_layout(rect, t, ctx.text, panel);
     for (r, i) in &tray.icons {
         if let Some(item) = panel.tray.get(*i) {
-            paint_tray_item(ctx, item, *r, hover.is_hovered_within(*r, 3.0));
+            let label = panel.tray_labels.then(|| item.label());
+            paint_tray_item(ctx, item, *r, hover.is_hovered_within(*r, 3.0), label);
         }
     }
     if let Some(r) = tray.overflow {
@@ -7096,6 +7230,36 @@ mod tests {
     }
 
     #[test]
+    fn tray_labels_widen_items_and_keep_hit_testing() {
+        let theme = Theme::light();
+        let text = TextEngine::system();
+        let bar = Rect::from_xywh(0.0, 0.0, 1920.0, THICKNESS);
+        let mut st = PanelState::sample();
+        st.tray = (0..3).map(tray_item).collect();
+        st.tray_labels = true;
+        let layout = tray_layout(bar, &theme, &text, &st);
+        // Przy etykietach mieści się mniej pozycji, a każda jest szersza niż ikona.
+        assert_eq!(layout.icons.len(), TRAY_VISIBLE_MAX_LABELS - 1);
+        assert!(layout
+            .icons
+            .iter()
+            .all(|(rect, _)| rect.width() > TRAY_ICON));
+        let (rect, index) = layout.icons[0];
+        assert_eq!(
+            tray_at(bar, &theme, &text, &st, rect.center()),
+            Some(TrayHit::Icon(index))
+        );
+        // Bez etykiet ta sama liczba pozycji mieści się w całości.
+        st.tray_labels = false;
+        let plain = tray_layout(bar, &theme, &text, &st);
+        assert_eq!(plain.icons.len(), 3);
+        assert!(plain
+            .icons
+            .iter()
+            .all(|(rect, _)| rect.width() == TRAY_ICON));
+    }
+
+    #[test]
     fn tray_overflow_menu_lists_hidden_items() {
         let theme = Theme::light();
         let text = TextEngine::system();
@@ -7107,5 +7271,1086 @@ mod tests {
         let hidden_from = TRAY_VISIBLE_MAX - 1;
         let p = Point::new(rect.x() + 20.0, rect.y() + 6.0 + TRAY_ROW_H * 0.5);
         assert_eq!(tray_menu_hit(bar, &theme, &text, &st, p), Some(hidden_from));
+    }
+}
+
+// ─── Położenie panelu: góra / dół / lewa / prawa krawędź ─────────────────────
+
+pub use libluna_core::{PanelLook, PanelPosition};
+
+/// Prostokąt paska na wskazanej krawędzi powierzchni `size`.
+pub fn bar_rect(size: Size, thickness: f64, position: PanelPosition) -> Rect {
+    match position {
+        PanelPosition::Top => Rect::from_xywh(0.0, 0.0, size.width, thickness),
+        PanelPosition::Bottom => Rect::from_xywh(
+            0.0,
+            (size.height - thickness).max(0.0),
+            size.width,
+            thickness,
+        ),
+        PanelPosition::Left => Rect::from_xywh(0.0, 0.0, thickness, size.height),
+        PanelPosition::Right => Rect::from_xywh(
+            (size.width - thickness).max(0.0),
+            0.0,
+            thickness,
+            size.height,
+        ),
+    }
+}
+
+/// Pływający pasek (wygląd macOS) — z marginesem od krawędzi ekranu.
+pub fn floating_bar(size: Size, thickness: f64, position: PanelPosition) -> Rect {
+    let inset = 8.0;
+    match position {
+        PanelPosition::Top => Rect::from_xywh(
+            inset,
+            6.0,
+            (size.width - 2.0 * inset).max(1.0),
+            thickness - 6.0,
+        ),
+        PanelPosition::Bottom => Rect::from_xywh(
+            inset,
+            (size.height - thickness - 0.0).max(0.0),
+            (size.width - 2.0 * inset).max(1.0),
+            thickness - 6.0,
+        ),
+        PanelPosition::Left => Rect::from_xywh(
+            6.0,
+            inset,
+            thickness - 6.0,
+            (size.height - 2.0 * inset).max(1.0),
+        ),
+        PanelPosition::Right => Rect::from_xywh(
+            (size.width - thickness).max(0.0),
+            inset,
+            thickness - 6.0,
+            (size.height - 2.0 * inset).max(1.0),
+        ),
+    }
+}
+
+/// Obszar roboczy bez paska (launcher, OSD, powiadomienia, widget zegara).
+pub fn content_rect(size: Size, thickness: f64, position: PanelPosition) -> Rect {
+    match position {
+        PanelPosition::Top => Rect::from_xywh(
+            0.0,
+            thickness,
+            size.width,
+            (size.height - thickness).max(1.0),
+        ),
+        PanelPosition::Bottom => {
+            Rect::from_xywh(0.0, 0.0, size.width, (size.height - thickness).max(1.0))
+        }
+        PanelPosition::Left => Rect::from_xywh(
+            thickness,
+            0.0,
+            (size.width - thickness).max(1.0),
+            size.height,
+        ),
+        PanelPosition::Right => {
+            Rect::from_xywh(0.0, 0.0, (size.width - thickness).max(1.0), size.height)
+        }
+    }
+}
+
+// ── Geometria pionowego paska ────────────────────────────────────────────────
+
+/// Burger na górze pionowego paska.
+pub fn burger_rect_v(bar: Rect, theme: &Theme) -> Rect {
+    let pad = theme.spacing.sm;
+    Rect::from_xywh(bar.center().x - 14.0, bar.y() + pad, 28.0, 28.0)
+}
+
+/// Zegar pod burgerem (w pionie pokazujemy samą godzinę — data się nie mieści).
+pub fn clock_rect_v(bar: Rect, theme: &Theme, text: &TextEngine, state: &PanelState) -> Rect {
+    let size = theme.typography.caption.size;
+    let clock = state.clock.clone();
+    let w = text.measure(&clock, size, weight::MEDIUM).width;
+    let y = burger_rect_v(bar, theme).bottom() + theme.spacing.xs;
+    Rect::from_xywh(bar.center().x - w / 2.0 - 2.0, y, w + 4.0, 18.0)
+}
+
+/// Wskaźniki ułożone od dołu: awatar (najniżej), powiadomienia, sieć, głośność.
+pub fn indicator_rects_v(bar: Rect, theme: &Theme) -> [Rect; 4] {
+    let pad = theme.spacing.sm;
+    let gap = theme.spacing.xs;
+    let mut rects = [Rect::ZERO; 4];
+    let mut bottom = bar.bottom() - pad;
+    for index in (0..IndicatorKind::ALL.len()).rev() {
+        rects[index] = Rect::from_xywh(
+            bar.center().x - INDICATOR_SIZE / 2.0,
+            bottom - INDICATOR_SIZE,
+            INDICATOR_SIZE,
+            INDICATOR_SIZE,
+        );
+        bottom = rects[index].y() - gap;
+    }
+    rects
+}
+
+/// Prostokąt wskazanego wskaźnika na pionowym pasku.
+pub fn indicator_rect_v(bar: Rect, theme: &Theme, kind: IndicatorKind) -> Rect {
+    let index = IndicatorKind::ALL
+        .iter()
+        .position(|k| *k == kind)
+        .unwrap_or(0);
+    indicator_rects_v(bar, theme)[index]
+}
+
+/// Kropki przestrzeni nad wskaźnikami (od dołu).
+pub fn workspace_rects_v(bar: Rect, theme: &Theme, state: &PanelState) -> Vec<Rect> {
+    let d = 7.0;
+    let gap = theme.spacing.xs;
+    let mut bottom = indicator_rects_v(bar, theme)[0].y() - theme.spacing.sm;
+    let mut rects = vec![Rect::ZERO; state.workspaces];
+    for index in (0..state.workspaces).rev() {
+        let dot = Rect::from_xywh(bar.center().x - d / 2.0, bottom - d, d, d);
+        rects[index] = dot;
+        bottom = dot.y() - gap;
+    }
+    rects
+}
+
+/// Ikony tray’a nad kropkami przestrzeni (od dołu).
+///
+/// Górna granica zależy od zegara i wskaźników prywatności rysowanych pod nim —
+/// przy krótkim pasku lub wielu ikonach nadmiar trafia do overflow, zamiast
+/// wchodzić na zegar.
+pub fn tray_layout_v(bar: Rect, theme: &Theme, state: &PanelState) -> TrayLayout {
+    let total = state.tray.len();
+    let mut visible = tray_hidden_from(total, false);
+    let mut bottom = match workspace_rects_v(bar, theme, state).first().copied() {
+        Some(first) => first.y() - theme.spacing.sm,
+        None => indicator_rects_v(bar, theme)[0].y() - theme.spacing.md,
+    };
+
+    // Górna granica: zegar + ewentualne kropki bezpieczeństwa pod nim.
+    let clock = clock_rect_v(bar, theme, &TextEngine::none(), state);
+    let mut top_limit = clock.bottom() + theme.spacing.sm;
+    if state.security.any() {
+        let count = security_icon_count(&state.security);
+        top_limit = top_limit.max(clock.bottom() + 4.0 + count as f64 * 16.0);
+    }
+    let available = (bottom - top_limit).max(0.0);
+
+    while visible > 0 {
+        let needs_overflow = visible < total;
+        let height = visible as f64 * TRAY_ICON
+            + (visible.saturating_sub(1)) as f64 * TRAY_GAP
+            + if needs_overflow {
+                TRAY_ICON + TRAY_GAP
+            } else {
+                0.0
+            };
+        if height <= available {
+            break;
+        }
+        visible -= 1;
+    }
+    let overflow = visible < total && available >= TRAY_ICON;
+
+    let mut icons = Vec::with_capacity(visible);
+    let mut overflow_rect = None;
+    if overflow {
+        let r = Rect::from_xywh(
+            bar.center().x - TRAY_ICON / 2.0,
+            bottom - TRAY_ICON,
+            TRAY_ICON,
+            TRAY_ICON,
+        );
+        overflow_rect = Some(r);
+        bottom = r.y() - TRAY_GAP;
+    }
+    for index in (0..visible).rev() {
+        let r = Rect::from_xywh(
+            bar.center().x - TRAY_ICON / 2.0,
+            bottom - TRAY_ICON,
+            TRAY_ICON,
+            TRAY_ICON,
+        );
+        icons.push((r, index));
+        bottom = r.y() - TRAY_GAP;
+    }
+    icons.reverse();
+    TrayLayout {
+        icons,
+        overflow: overflow_rect,
+        hidden_from: visible,
+    }
+}
+
+/// Górna krawędź bloku tray’a (albo wskaźników, gdy tray jest pusty).
+fn tray_top_v(bar: Rect, theme: &Theme, state: &PanelState) -> f64 {
+    let layout = tray_layout_v(bar, theme, state);
+    layout
+        .overflow
+        .or_else(|| layout.icons.first().map(|(r, _)| *r))
+        .map(|r| r.y())
+        .unwrap_or_else(|| {
+            workspace_rects_v(bar, theme, state)
+                .first()
+                .map(|r| r.y())
+                .unwrap_or_else(|| indicator_rects_v(bar, theme)[0].y())
+        })
+}
+
+/// Przyciski okien na pionowym pasku (tylko ikony).
+pub fn task_rects_v(bar: Rect, theme: &Theme, state: &PanelState) -> Vec<Rect> {
+    let cap = theme.metrics.button.height.max(26.0);
+    let gap = theme.spacing.xs;
+    let mut y = clock_rect_v(bar, theme, &TextEngine::none(), state).bottom() + theme.spacing.sm;
+    let limit = tray_top_v(bar, theme, state) - theme.spacing.sm;
+    let mut rects = Vec::new();
+    for _ in &state.tasks {
+        if y + cap > limit {
+            break;
+        }
+        rects.push(Rect::from_xywh(bar.center().x - cap / 2.0, y, cap, cap));
+        y += cap + gap;
+    }
+    rects
+}
+
+/// Rysuje pionowy pasek (lewa/prawa krawędź).
+pub fn paint_panel_vertical(
+    panel: &PanelState,
+    hover: &Hover,
+    ctx: &mut PaintCtx,
+    rect: Rect,
+    look: PanelLook,
+) {
+    let t = ctx.theme;
+    let rounded = t.panel.round.unwrap_or(matches!(look, PanelLook::MacOs));
+    let bar_bg = t.panel.color.unwrap_or(t.colors.headerbar_bg);
+    let bar_bg = match t.panel.opacity {
+        Some(opacity) => bar_bg.with_alpha(bar_bg.a * opacity.clamp(0.0, 1.0)),
+        None => bar_bg,
+    };
+    if rounded {
+        ctx.scene.fill_rounded_rect(
+            Rect::from_xywh(rect.x() + 3.0, rect.y() + 3.0, rect.width(), rect.height()),
+            t.radius.medium,
+            Color::rgba(0.0, 0.0, 0.0, 0.18),
+        );
+        ctx.scene.fill_rounded_rect(rect, t.radius.medium, bar_bg);
+        ctx.scene
+            .stroke_rounded_rect(rect, t.radius.medium, 1.0, t.colors.border);
+    } else {
+        if t.panel.float == Some(true) {
+            ctx.scene.fill_rounded_rect(
+                Rect::from_xywh(rect.x() + 3.0, rect.y() + 3.0, rect.width(), rect.height()),
+                t.radius.small,
+                Color::rgba(0.0, 0.0, 0.0, 0.18),
+            );
+        }
+        ctx.scene.fill_rect(rect, bar_bg);
+        let left = Rect::from_xywh(rect.x(), rect.y(), 1.0, rect.height());
+        let right = Rect::from_xywh(rect.right() - 1.0, rect.y(), 1.0, rect.height());
+        ctx.scene.fill_rect(left, t.colors.border);
+        ctx.scene.fill_rect(right, t.colors.border);
+    }
+
+    // Burger.
+    let burger = burger_rect_v(rect, t);
+    ctx.scene.fill_rounded_rect(
+        burger,
+        t.radius.small,
+        if hover.is_hovered(burger) {
+            libluna_widgets::hover_fill(t)
+        } else {
+            t.colors.shade
+        },
+    );
+    let isz = burger.width() * 0.64;
+    panel_icon(
+        ctx,
+        IconName::Menu,
+        Rect::from_xywh(
+            burger.center().x - isz / 2.0,
+            burger.center().y - isz / 2.0,
+            isz,
+            isz,
+        ),
+        t.colors.text,
+    );
+
+    // Zegar (sama godzina).
+    let clock_r = clock_rect_v(rect, t, ctx.text, panel);
+    if hover.is_hovered(clock_r) {
+        ctx.scene
+            .fill_rounded_rect(clock_r, t.radius.small, libluna_widgets::hover_fill(t));
+    }
+    ctx.label_center(
+        clock_r.center().x,
+        clock_r.center().y,
+        &panel.clock,
+        t.typography.caption.size,
+        weight::MEDIUM,
+        t.colors.text,
+    );
+
+    // Wskaźniki bezpieczeństwa pod zegarem (małe kropki).
+    if panel.security.any() {
+        let mut y = clock_r.bottom() + 4.0;
+        let mut icons: Vec<(IconName, Color)> = Vec::new();
+        if panel.security.microphone {
+            icons.push((IconName::Microphone, t.colors.error));
+        }
+        if panel.security.camera {
+            icons.push((IconName::Camera, t.colors.warning));
+        }
+        if panel.security.network {
+            icons.push((IconName::Globe, t.colors.accent));
+        }
+        for (icon, color) in icons {
+            let r = Rect::from_xywh(rect.center().x - 7.0, y, 14.0, 14.0);
+            panel_icon(ctx, icon, r, color);
+            y += 16.0;
+        }
+    }
+
+    // Okna — tylko ikony.
+    for (r, task) in task_rects_v(rect, t, panel).iter().zip(panel.tasks.iter()) {
+        paint_task_button(ctx, *r, task, true, hover.is_hovered(*r));
+    }
+
+    // Tray (w pionie tylko ikony — nazwa się nie mieści).
+    let tray = tray_layout_v(rect, t, panel);
+    for (r, i) in &tray.icons {
+        if let Some(item) = panel.tray.get(*i) {
+            paint_tray_item(ctx, item, *r, hover.is_hovered_within(*r, 3.0), None);
+        }
+    }
+    if let Some(r) = tray.overflow {
+        ctx.scene.fill_rounded_rect(
+            r,
+            t.radius.small,
+            if hover.is_hovered_within(r, 3.0) {
+                libluna_widgets::hover_fill(t)
+            } else {
+                t.colors.shade
+            },
+        );
+        panel_icon(ctx, IconName::ChevronRight, r, t.colors.text);
+    }
+
+    // Kropki przestrzeni.
+    for (i, dot) in workspace_rects_v(rect, t, panel).iter().enumerate() {
+        if hover.is_hovered_within(*dot, 4.0) {
+            let bubble = Rect::from_xywh(
+                dot.x() - 4.0,
+                dot.y() - 4.0,
+                dot.width() + 8.0,
+                dot.height() + 8.0,
+            );
+            ctx.scene
+                .fill_rounded_rect(bubble, 7.0, libluna_widgets::hover_fill(t));
+        }
+        let color = if i == panel.current_ws {
+            t.colors.accent
+        } else {
+            t.colors.dim_text
+        };
+        ctx.scene.fill_rounded_rect(*dot, dot.width() / 2.0, color);
+    }
+
+    // Wskaźniki na dole.
+    for (kind, r) in IndicatorKind::ALL.iter().zip(indicator_rects_v(rect, t)) {
+        let active = panel.active_indicator == Some(*kind);
+        let hovered = hover.is_hovered_within(r, 2.0);
+        if active || hovered {
+            ctx.scene.fill_rounded_rect(
+                r,
+                t.radius.small,
+                if active {
+                    t.colors.shade
+                } else {
+                    libluna_widgets::hover_fill(t)
+                },
+            );
+        }
+        let fg = if active {
+            t.colors.accent
+        } else {
+            t.colors.text
+        };
+        if let Some(icon) = kind.icon() {
+            let size = 16.0;
+            panel_icon(
+                ctx,
+                icon,
+                Rect::from_xywh(
+                    r.center().x - size / 2.0,
+                    r.center().y - size / 2.0,
+                    size,
+                    size,
+                ),
+                fg,
+            );
+        } else {
+            let avatar = Rect::from_xywh(r.center().x - 10.0, r.center().y - 10.0, 20.0, 20.0);
+            ctx.scene.fill_rounded_rect(
+                avatar,
+                10.0,
+                if active {
+                    t.colors.accent
+                } else {
+                    t.colors.shade
+                },
+            );
+            let initial = panel
+                .user
+                .chars()
+                .next()
+                .map(|c| c.to_uppercase().to_string())
+                .unwrap_or_else(|| "?".to_owned());
+            ctx.label_center(
+                avatar.center().x,
+                avatar.center().y,
+                &initial,
+                t.typography.caption.size,
+                weight::BOLD,
+                if active {
+                    t.colors.accent_fg
+                } else {
+                    t.colors.text
+                },
+            );
+        }
+        if *kind == IndicatorKind::Notifications && panel.unseen > 0 {
+            let dot = Rect::from_xywh(r.right() - 9.0, r.y() + 3.0, 6.0, 6.0);
+            ctx.scene.fill_rounded_rect(dot, 3.0, t.colors.accent);
+        }
+    }
+}
+
+// ── Wersje funkcji świadome krawędzi (dla powłoki) ───────────────────────────
+
+/// Burger na wskazanej krawędzi.
+pub fn burger_rect_at(bar: Rect, position: PanelPosition, theme: &Theme) -> Rect {
+    if position.is_vertical() {
+        burger_rect_v(bar, theme)
+    } else {
+        burger_rect(bar, theme)
+    }
+}
+
+/// Zegar na wskazanej krawędzi.
+pub fn clock_rect_at(
+    bar: Rect,
+    position: PanelPosition,
+    theme: &Theme,
+    text: &TextEngine,
+    state: &PanelState,
+) -> Rect {
+    if position.is_vertical() {
+        clock_rect_v(bar, theme, text, state)
+    } else {
+        clock_rect(bar, theme, text, state)
+    }
+}
+
+/// Wskaźnik pod punktem (dowolna krawędź).
+pub fn indicator_at_at(
+    bar: Rect,
+    position: PanelPosition,
+    theme: &Theme,
+    p: Point,
+) -> Option<IndicatorKind> {
+    if position.is_vertical() {
+        if p.x < bar.x() || p.x > bar.right() {
+            return None;
+        }
+        indicator_rects_v(bar, theme)
+            .iter()
+            .position(|r| r.contains(p))
+            .map(|i| IndicatorKind::ALL[i])
+    } else {
+        indicator_at(bar, theme, p)
+    }
+}
+
+/// Kropki przestrzeni (dowolna krawędź).
+pub fn workspace_rects_at(
+    bar: Rect,
+    position: PanelPosition,
+    theme: &Theme,
+    text: &TextEngine,
+    state: &PanelState,
+) -> Vec<Rect> {
+    if position.is_vertical() {
+        workspace_rects_v(bar, theme, state)
+    } else {
+        workspace_rects(bar, theme, text, state)
+    }
+}
+
+/// Kropka przestrzeni pod punktem (dowolna krawędź).
+pub fn workspace_at_at(
+    bar: Rect,
+    position: PanelPosition,
+    theme: &Theme,
+    text: &TextEngine,
+    state: &PanelState,
+    p: Point,
+) -> Option<usize> {
+    if position.is_vertical() {
+        if p.x < bar.x() || p.x > bar.right() {
+            return None;
+        }
+        workspace_rects_v(bar, theme, state)
+            .iter()
+            .position(|r| r.contains(p))
+    } else {
+        workspace_at(bar, theme, text, state, p)
+    }
+}
+
+/// Przyciski okien (dowolna krawędź).
+pub fn task_rects_at(
+    bar: Rect,
+    position: PanelPosition,
+    theme: &Theme,
+    text: &TextEngine,
+    state: &PanelState,
+) -> Vec<Rect> {
+    if position.is_vertical() {
+        task_rects_v(bar, theme, state)
+    } else {
+        task_rects(bar, theme, text, &state.tasks)
+    }
+}
+
+/// Okno pod punktem (dowolna krawędź).
+pub fn task_at_at(
+    bar: Rect,
+    position: PanelPosition,
+    theme: &Theme,
+    text: &TextEngine,
+    state: &PanelState,
+    p: Point,
+) -> Option<usize> {
+    if position.is_vertical() {
+        if p.x < bar.x() || p.x > bar.right() {
+            return None;
+        }
+        task_rects_v(bar, theme, state)
+            .iter()
+            .position(|r| r.contains(p))
+    } else {
+        task_at(bar, theme, text, &state.tasks, p)
+    }
+}
+
+/// Pigułki przełączników (w pionie nie ma ich na pasku — panel ma wskaźniki).
+pub fn toggle_rects_at(
+    bar: Rect,
+    position: PanelPosition,
+    theme: &Theme,
+    text: &TextEngine,
+    state: &PanelState,
+) -> Vec<Rect> {
+    if position.is_vertical() {
+        Vec::new()
+    } else {
+        toggle_rects(bar, theme, text, state)
+    }
+}
+
+/// Chip wskaźników bezpieczeństwa (w pionie rysujemy je jako kropki pod zegarem).
+pub fn security_chip_rect_at(
+    bar: Rect,
+    position: PanelPosition,
+    theme: &Theme,
+    text: &TextEngine,
+    state: &PanelState,
+) -> Option<Rect> {
+    if position.is_vertical() {
+        None
+    } else {
+        let clock = clock_rect(bar, theme, text, state);
+        security_chip_rect(bar, clock, theme, text, state)
+    }
+}
+
+/// Rozmieszczenie tray’a (dowolna krawędź).
+pub fn tray_layout_at(
+    bar: Rect,
+    position: PanelPosition,
+    theme: &Theme,
+    text: &TextEngine,
+    state: &PanelState,
+) -> TrayLayout {
+    if position.is_vertical() {
+        tray_layout_v(bar, theme, state)
+    } else {
+        tray_layout(bar, theme, text, state)
+    }
+}
+
+/// Ikona tray’a pod punktem (dowolna krawędź).
+pub fn tray_at_at(
+    bar: Rect,
+    position: PanelPosition,
+    theme: &Theme,
+    text: &TextEngine,
+    state: &PanelState,
+    p: Point,
+) -> Option<TrayHit> {
+    if position.is_vertical() {
+        if p.x < bar.x() || p.x > bar.right() {
+            return None;
+        }
+        tray_layout_v(bar, theme, state)
+            .icons
+            .iter()
+            .find(|(r, _)| r.contains(p))
+            .map(|(_, index)| TrayHit::Icon(*index))
+            .or_else(|| {
+                tray_layout_v(bar, theme, state)
+                    .overflow
+                    .filter(|r| r.contains(p))
+                    .map(|_| TrayHit::Overflow)
+            })
+    } else {
+        tray_at(bar, theme, text, state, p)
+    }
+}
+
+// ── Popupy: kotwiczenie do właściwej krawędzi ───────────────────────────────
+
+/// Umieszcza popup obok paska, wyrównany do `anchor`.
+fn place_popup(
+    bar: Rect,
+    position: PanelPosition,
+    anchor: Rect,
+    width: f64,
+    height: f64,
+    margin: f64,
+) -> Rect {
+    match position {
+        PanelPosition::Top => {
+            let x = (anchor.center().x - width / 2.0).clamp(
+                bar.x() + 8.0,
+                (bar.right() - width - 8.0).max(bar.x() + 8.0),
+            );
+            Rect::from_xywh(x, bar.bottom() + margin, width, height)
+        }
+        PanelPosition::Bottom => {
+            let x = (anchor.center().x - width / 2.0).clamp(
+                bar.x() + 8.0,
+                (bar.right() - width - 8.0).max(bar.x() + 8.0),
+            );
+            Rect::from_xywh(x, bar.y() - height - margin, width, height)
+        }
+        PanelPosition::Left => {
+            let y = (anchor.center().y - height / 2.0).clamp(
+                bar.y() + 8.0,
+                (bar.bottom() - height - 8.0).max(bar.y() + 8.0),
+            );
+            Rect::from_xywh(bar.right() + margin, y, width, height)
+        }
+        PanelPosition::Right => {
+            let y = (anchor.center().y - height / 2.0).clamp(
+                bar.y() + 8.0,
+                (bar.bottom() - height - 8.0).max(bar.y() + 8.0),
+            );
+            Rect::from_xywh(bar.x() - width - margin, y, width, height)
+        }
+    }
+}
+
+/// Odwraca popup policzony dla górnego paska, gdy pasek jest na dole.
+fn flip_for_bottom(rect: Rect, bar: Rect, position: PanelPosition) -> Rect {
+    if position == PanelPosition::Bottom {
+        let margin = rect.y() - bar.bottom();
+        Rect::from_xywh(
+            rect.x(),
+            bar.y() - rect.height() - margin,
+            rect.width(),
+            rect.height(),
+        )
+    } else {
+        rect
+    }
+}
+
+pub fn calendar_popup_rect_at(
+    bar: Rect,
+    position: PanelPosition,
+    theme: &Theme,
+    text: &TextEngine,
+    state: &PanelState,
+) -> Rect {
+    if position.is_vertical() {
+        let anchor = clock_rect_v(bar, theme, text, state);
+        place_popup(bar, position, anchor, 320.0, 424.0, 6.0)
+    } else {
+        flip_for_bottom(calendar_popup_rect(bar, theme), bar, position)
+    }
+}
+
+pub fn wifi_popup_rect_at(
+    bar: Rect,
+    position: PanelPosition,
+    theme: &Theme,
+    text: &TextEngine,
+    state: &PanelState,
+) -> Rect {
+    if position.is_vertical() {
+        let anchor = indicator_rect_v(bar, theme, IndicatorKind::Network);
+        place_popup(bar, position, anchor, 290.0, 270.0, 6.0)
+    } else {
+        flip_for_bottom(wifi_popup_rect(bar, theme, text, state), bar, position)
+    }
+}
+
+pub fn volume_popup_rect_at(
+    bar: Rect,
+    position: PanelPosition,
+    theme: &Theme,
+    sources: usize,
+) -> Rect {
+    if position.is_vertical() {
+        let anchor = indicator_rect_v(bar, theme, IndicatorKind::Volume);
+        let h = 170.0 + sources as f64 * VOLUME_SOURCE_ROW_H;
+        place_popup(bar, position, anchor, 300.0, h, 6.0)
+    } else {
+        flip_for_bottom(volume_popup_rect(bar, theme, sources), bar, position)
+    }
+}
+
+pub fn notification_center_rect_at(
+    bar: Rect,
+    position: PanelPosition,
+    theme: &Theme,
+    count: usize,
+) -> Rect {
+    if position.is_vertical() {
+        let anchor = indicator_rect_v(bar, theme, IndicatorKind::Notifications);
+        let max_rows = ((NOTIFICATIONS_H - NOTIFY_HEADER_H - theme.spacing.md) / NOTIFY_ROW_H)
+            .floor()
+            .max(0.0) as usize;
+        let visible = count.min(max_rows);
+        let h = (NOTIFY_HEADER_H + visible as f64 * NOTIFY_ROW_H + theme.spacing.md)
+            .clamp(NOTIFICATIONS_MIN_H, NOTIFICATIONS_H);
+        place_popup(bar, position, anchor, NOTIFICATIONS_W, h, 6.0)
+    } else {
+        flip_for_bottom(notification_center_rect(bar, theme, count), bar, position)
+    }
+}
+
+pub fn quick_panel_rect_at(bar: Rect, position: PanelPosition, theme: &Theme) -> Rect {
+    if position.is_vertical() {
+        let anchor = indicator_rect_v(bar, theme, IndicatorKind::User);
+        place_popup(bar, position, anchor, QUICK_W, QUICK_H, 6.0)
+    } else {
+        flip_for_bottom(quick_panel_rect(bar, theme), bar, position)
+    }
+}
+
+pub fn power_menu_rect_at(bar: Rect, position: PanelPosition, theme: &Theme, items: usize) -> Rect {
+    if position.is_vertical() {
+        let anchor = indicator_rect_v(bar, theme, IndicatorKind::User);
+        let h = items as f64 * POWER_ITEM_H + 12.0;
+        place_popup(bar, position, anchor, POWER_MENU_W, h, 6.0)
+    } else {
+        flip_for_bottom(power_menu_rect(bar, theme, items), bar, position)
+    }
+}
+
+pub fn session_menu_rect_at(bar: Rect, position: PanelPosition, theme: &Theme) -> Rect {
+    if position.is_vertical() {
+        let anchor = indicator_rect_v(bar, theme, IndicatorKind::User);
+        let h = crate::power::ITEM_COUNT as f64 * POWER_ITEM_H + 12.0;
+        place_popup(bar, position, anchor, 210.0, h, 6.0)
+    } else {
+        flip_for_bottom(session_menu_rect(bar, theme), bar, position)
+    }
+}
+
+pub fn task_menu_rect_at(
+    anchor: Rect,
+    bar: Rect,
+    position: PanelPosition,
+    items: usize,
+    theme: &Theme,
+) -> Rect {
+    if position.is_vertical() {
+        let h = items as f64 * TASK_MENU_ITEM_H + 12.0;
+        place_popup(bar, position, anchor, 240.0, h, 4.0)
+    } else {
+        flip_for_bottom(task_menu_rect(anchor, bar, items, theme), bar, position)
+    }
+}
+
+pub fn tray_menu_rect_at(
+    bar: Rect,
+    position: PanelPosition,
+    theme: &Theme,
+    text: &TextEngine,
+    state: &PanelState,
+) -> Rect {
+    if position.is_vertical() {
+        let layout = tray_layout_v(bar, theme, state);
+        let Some(anchor) = layout
+            .overflow
+            .or_else(|| layout.icons.last().map(|(r, _)| *r))
+        else {
+            return Rect::ZERO;
+        };
+        let hidden = state.tray.len().saturating_sub(layout.hidden_from);
+        let rows = hidden.min(8) as f64;
+        place_popup(bar, position, anchor, 260.0, 12.0 + rows * TRAY_ROW_H, 6.0)
+    } else {
+        flip_for_bottom(tray_menu_rect(bar, theme, text, state), bar, position)
+    }
+}
+
+pub fn tray_menu_hit_at(
+    bar: Rect,
+    position: PanelPosition,
+    theme: &Theme,
+    text: &TextEngine,
+    state: &PanelState,
+    p: Point,
+) -> Option<usize> {
+    let rect = tray_menu_rect_at(bar, position, theme, text, state);
+    if !rect.contains(p) {
+        return None;
+    }
+    let hidden_from = tray_hidden_from(state.tray.len(), state.tray_labels);
+    let hidden = state.tray.len().saturating_sub(hidden_from).min(8);
+    let inner = Rect::from_xywh(
+        rect.x() + 6.0,
+        rect.y() + 6.0,
+        rect.width() - 12.0,
+        hidden as f64 * TRAY_ROW_H,
+    );
+    if !inner.contains(p) {
+        return None;
+    }
+    let row = ((p.y - inner.y()) / TRAY_ROW_H).floor() as usize;
+    (row < hidden).then_some(hidden_from + row)
+}
+
+pub fn tray_context_rect_at(
+    anchor: Rect,
+    position: PanelPosition,
+    rows: &[TrayMenuRow],
+    theme: &Theme,
+) -> Rect {
+    let pad = theme.spacing.sm;
+    let h = 2.0 * pad + rows.iter().map(tray_menu_row_h).sum::<f64>();
+    if position.is_vertical() {
+        Rect::from_xywh(anchor.right() + 6.0, anchor.y(), TRAY_MENU_W, h)
+    } else {
+        tray_context_rect(anchor, rows, theme)
+    }
+}
+
+#[cfg(test)]
+mod panel_edge_tests {
+    use super::*;
+
+    #[test]
+    fn bar_sits_on_the_chosen_edge() {
+        let size = Size::new(1920.0, 1080.0);
+        let top = bar_rect(size, THICKNESS, PanelPosition::Top);
+        assert_eq!((top.x(), top.y()), (0.0, 0.0));
+        assert_eq!(top.width(), 1920.0);
+        let bottom = bar_rect(size, THICKNESS, PanelPosition::Bottom);
+        assert_eq!(bottom.bottom(), 1080.0);
+        let left = bar_rect(size, THICKNESS, PanelPosition::Left);
+        assert_eq!(left.width(), THICKNESS);
+        assert_eq!(left.height(), 1080.0);
+        let right = bar_rect(size, THICKNESS, PanelPosition::Right);
+        assert_eq!(right.right(), 1920.0);
+    }
+
+    #[test]
+    fn content_leaves_room_for_the_bar() {
+        let size = Size::new(1920.0, 1080.0);
+        let top = content_rect(size, THICKNESS, PanelPosition::Top);
+        assert_eq!(top.y(), THICKNESS);
+        assert_eq!(top.height(), 1080.0 - THICKNESS);
+        let bottom = content_rect(size, THICKNESS, PanelPosition::Bottom);
+        assert_eq!(bottom.y(), 0.0);
+        assert_eq!(bottom.bottom(), 1080.0 - THICKNESS);
+        let left = content_rect(size, THICKNESS, PanelPosition::Left);
+        assert_eq!(left.x(), THICKNESS);
+        let right = content_rect(size, THICKNESS, PanelPosition::Right);
+        assert_eq!(right.width(), 1920.0 - THICKNESS);
+    }
+
+    #[test]
+    fn vertical_items_stay_inside_the_bar_and_do_not_overlap() {
+        let theme = Theme::dark();
+        let text = TextEngine::system();
+        let bar = Rect::from_xywh(0.0, 0.0, THICKNESS, 1080.0);
+        let mut st = PanelState::sample();
+        st.workspaces = 4;
+        st.tray = Vec::new();
+
+        let burger = burger_rect_v(bar, &theme);
+        let clock = clock_rect_v(bar, &theme, &text, &st);
+        assert!(burger.y() >= bar.y());
+        assert!(clock.y() >= burger.bottom());
+
+        let indicators = indicator_rects_v(bar, &theme);
+        for pair in indicators.windows(2) {
+            assert!(pair[0].bottom() <= pair[1].y(), "wskaźniki nachodzą");
+        }
+        assert!(indicators[3].bottom() <= bar.bottom());
+        assert!(indicators[0].x() >= bar.x());
+
+        let dots = workspace_rects_v(bar, &theme, &st);
+        assert_eq!(dots.len(), 4);
+        assert!(dots.last().unwrap().bottom() <= indicators[0].y());
+    }
+
+    #[test]
+    fn popups_open_away_from_the_edge() {
+        let theme = Theme::dark();
+        let text = TextEngine::system();
+        let st = PanelState::sample();
+        let size = Size::new(1920.0, 1080.0);
+
+        let top = bar_rect(size, THICKNESS, PanelPosition::Top);
+        let p = wifi_popup_rect_at(top, PanelPosition::Top, &theme, &text, &st);
+        assert!(p.y() >= top.bottom());
+
+        let bottom = bar_rect(size, THICKNESS, PanelPosition::Bottom);
+        let p = wifi_popup_rect_at(bottom, PanelPosition::Bottom, &theme, &text, &st);
+        assert!(p.bottom() <= bottom.y());
+
+        let left = bar_rect(size, THICKNESS, PanelPosition::Left);
+        let p = wifi_popup_rect_at(left, PanelPosition::Left, &theme, &text, &st);
+        assert!(p.x() >= left.right());
+        assert!(p.bottom() <= size.height);
+
+        let right = bar_rect(size, THICKNESS, PanelPosition::Right);
+        let p = wifi_popup_rect_at(right, PanelPosition::Right, &theme, &text, &st);
+        assert!(p.right() <= right.x());
+    }
+
+    #[test]
+    fn floating_bar_is_inset_from_the_screen_edge() {
+        let size = Size::new(1920.0, 1080.0);
+        let bar = floating_bar(size, THICKNESS, PanelPosition::Top);
+        assert!(bar.x() > 0.0);
+        assert!(bar.right() < size.width);
+        assert!(bar.height() < THICKNESS);
+    }
+
+    #[test]
+    fn tray_labels_widen_items_and_show_overflow_sooner() {
+        let theme = Theme::dark();
+        let text = TextEngine::system();
+        let bar = Rect::from_xywh(0.0, 0.0, 1920.0, THICKNESS);
+        let mut state = PanelState::sample();
+        state.tray = (0..3)
+            .map(|i| TrayItem {
+                service: format!(":1.{i}"),
+                path: "/StatusNotifierItem".to_owned(),
+                id: format!("app{i}"),
+                title: format!("Application {i}"),
+                status: TrayStatus::Active,
+                icon: TrayIcon::None,
+                menu: None,
+            })
+            .collect();
+
+        state.tray_labels = false;
+        let icons_only = tray_layout(bar, &theme, &text, &state);
+        assert_eq!(icons_only.icons.len(), 3);
+        assert!(icons_only.overflow.is_none());
+
+        state.tray_labels = true;
+        let labelled = tray_layout(bar, &theme, &text, &state);
+        // Przy etykietach wchodzi tylko jedna ikona + overflow.
+        assert_eq!(labelled.icons.len(), 1);
+        assert!(labelled.overflow.is_some());
+        assert!(labelled.icons[0].0.width() > TRAY_ICON);
+    }
+
+    fn tray_item(i: usize) -> TrayItem {
+        TrayItem {
+            service: format!(":1.{i}"),
+            path: "/StatusNotifierItem".to_owned(),
+            id: format!("app{i}"),
+            title: format!("Application {i}"),
+            status: TrayStatus::Active,
+            icon: TrayIcon::None,
+            menu: None,
+        }
+    }
+
+    #[test]
+    fn tray_never_overlaps_clock_on_narrow_bar() {
+        let theme = Theme::light();
+        let text = TextEngine::system();
+        // Wąski pasek (VM/mały ekran) + etykiety = najgorszy przypadek.
+        let bar = Rect::from_xywh(0.0, 0.0, 640.0, THICKNESS);
+        let mut st = PanelState::sample();
+        st.tray = (0..6).map(tray_item).collect();
+        st.tray_labels = true;
+
+        let clock = clock_rect(bar, &theme, &text, &st);
+        let layout = tray_layout(bar, &theme, &text, &st);
+        let mut rects: Vec<Rect> = layout.icons.iter().map(|(r, _)| *r).collect();
+        if let Some(overflow) = layout.overflow {
+            rects.push(overflow);
+        }
+        assert!(layout.overflow.is_some(), "nadmiar musi trafić do overflow");
+        assert!(!rects.is_empty());
+        for r in &rects {
+            assert!(
+                r.x() >= clock.right(),
+                "tray ({}, {}) wchodzi na zegar ({}, {})",
+                r.x(),
+                r.right(),
+                clock.x(),
+                clock.right()
+            );
+        }
+        // Tray nie może też zasłaniać kropek przestrzeni roboczych.
+        if let Some(first_dot) = workspace_rects(bar, &theme, &text, &st).first() {
+            for r in &rects {
+                assert!(
+                    r.right() <= first_dot.x(),
+                    "tray ({}) wchodzi na kropki przestrzeni ({})",
+                    r.right(),
+                    first_dot.x()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn vertical_tray_never_overlaps_clock() {
+        let theme = Theme::light();
+        let text = TextEngine::system();
+        // Krótki pionowy pasek + więcej ikon, niż się mieści.
+        let bar = Rect::from_xywh(0.0, 0.0, 58.0, 280.0);
+        let mut st = PanelState::sample();
+        st.tray = (0..6).map(tray_item).collect();
+
+        let clock = clock_rect_v(bar, &theme, &text, &st);
+        let layout = tray_layout_v(bar, &theme, &st);
+        let mut rects: Vec<Rect> = layout.icons.iter().map(|(r, _)| *r).collect();
+        if let Some(overflow) = layout.overflow {
+            rects.push(overflow);
+        }
+        assert!(layout.overflow.is_some(), "nadmiar musi trafić do overflow");
+        assert!(!rects.is_empty());
+        for r in &rects {
+            assert!(
+                r.y() >= clock.bottom(),
+                "tray (y={}) wchodzi na zegar (bottom={})",
+                r.y(),
+                clock.bottom()
+            );
+        }
     }
 }

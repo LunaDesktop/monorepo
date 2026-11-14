@@ -15,7 +15,7 @@ edition = "2021"
 license = "MPL-2.0"
 rust-version = "1.80"
 authors = ["Patryk Szkudlarek / libLuna contributors"]
-repository = "https://github.com/mijsys/libLuna"
+repository = "https://github.com/LunaDesktop/libLuna"
 
 [workspace.dependencies]
 libluna-core = { path = "crates/libluna-core", version = "0.0.9" }

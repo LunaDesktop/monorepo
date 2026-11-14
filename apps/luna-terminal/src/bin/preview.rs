@@ -4,9 +4,11 @@
 //! → `docs/images/luna-terminal.png`.
 
 use std::error::Error;
+use std::time::{Duration, Instant};
 
 use libluna_core::{Color, Size, Theme};
 use libluna_render::{Scene, SoftwareRenderer, TextEngine};
+use luna_terminal::app::EggState;
 use luna_terminal::prefs::Prefs;
 use luna_terminal::term::Terminal;
 use luna_terminal::ui::{self, SelectionView, ViewState};
@@ -62,6 +64,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         settings_hover: false,
         font_size: FONT,
         prefs: &prefs,
+        egg: None,
     };
 
     let mut scene = Scene::new();
@@ -79,5 +82,46 @@ fn main() -> Result<(), Box<dyn Error>> {
     let png = renderer.encode_png().ok_or("failed to encode PNG")?;
     std::fs::write("docs/images/luna-terminal-settings.png", png)?;
     println!("saved docs/images/luna-terminal-settings.png ({W}x{H})");
+
+    // Scena księżycowego jajka — w połowie cyklu podziękowań, żeby były widoczne.
+    // `LUNA_EGG_PREVIEW=<nazwa języka>` pozwala sprawdzić shaping wybranego pisma.
+    let (offset, path) = match std::env::var("LUNA_EGG_PREVIEW").ok().as_deref() {
+        Some(language) => {
+            let index = libluna_core::egg::THANKS
+                .iter()
+                .position(|entry| entry.language == language)
+                .unwrap_or(0);
+            (
+                index as f64 * 2.8 + 1.4,
+                "docs/images/luna-terminal-egg-lang.png",
+            )
+        }
+        None => (1.4, "docs/images/luna-terminal-egg.png"),
+    };
+    let egg = EggState::at(Instant::now() - Duration::from_secs_f64(offset));
+    let view = ViewState {
+        term: &term,
+        title,
+        tabs: &tabs,
+        active_tab: 0,
+        tab_hover: None,
+        tab_scroll: 0.0,
+        selection: Some(SelectionView {
+            start: (0, 12),
+            end: (0, 26),
+        }),
+        hover: None,
+        plus_hover: false,
+        settings_hover: false,
+        font_size: FONT,
+        prefs: &prefs,
+        egg: Some(&egg),
+    };
+    let mut scene = Scene::new();
+    ui::paint(&mut scene, &theme, &text, size, &view);
+    renderer.draw(&scene, 1.0, Color::from_rgba8(0x10, 0x12, 0x18, 0xff));
+    let png = renderer.encode_png().ok_or("failed to encode PNG")?;
+    std::fs::write(path, png)?;
+    println!("saved {path} ({W}x{H})");
     Ok(())
 }

@@ -1,16 +1,19 @@
 //! Pętla aplikacji terminala: PTY, wejście, zakładki, schowek, tytuł okna i rysowanie.
 
+use std::cell::RefCell;
 use std::error::Error;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use libluna_core::style::weight;
 use libluna_core::{
-    ButtonState, Event, KeyEvent, Point, PointerButton, Rect, Size, Theme, ThemeSettings,
+    ButtonState, Color, Event, KeyEvent, Point, PointerButton, Rect, Size, Theme, ThemeSettings,
     WindowEvent,
 };
 use libluna_i18n::{set_locale, Locale};
 use libluna_platform::{run as run_app, AppConfig, Frame, WakeHandle};
-use libluna_render::TextEngine;
+use libluna_render::{ImageData, ShapedText, TextEngine};
 use libluna_widgets::{
     ControlsSide, HeaderBar, Menu, MenuEntry, Tab as WidgetTab, TabBar, WindowControl,
 };
@@ -64,6 +67,97 @@ enum ContextAction {
     Settings,
 }
 
+/// Odkryte księżycowe jajko: scena z animacją i podziękowaniami.
+pub struct EggState {
+    pub opened: Instant,
+    /// Silnik kształtowania tworzony przy pierwszym rysunku (skan fontów).
+    shaped: RefCell<Option<ShapedText>>,
+    /// Ostatnio wyrenderowane podziękowania (nazwa języka + treść).
+    art: RefCell<Option<EggArt>>,
+}
+
+/// Wyrenderowane napisy jednego języka. Klucz obejmuje indeks, krycie i metryki,
+/// żeby animacja nie składała tekstu w każdej klatce.
+struct EggArt {
+    key: (usize, u8, u32, u32),
+    name: Option<Arc<ImageData>>,
+    body: Option<Arc<ImageData>>,
+}
+
+impl EggState {
+    pub fn new() -> Self {
+        Self::at(Instant::now())
+    }
+
+    pub fn at(opened: Instant) -> Self {
+        Self {
+            opened,
+            shaped: RefCell::new(None),
+            art: RefCell::new(None),
+        }
+    }
+
+    /// Obrazy podziękowań dla języka `index` przy kryciu `alpha`.
+    ///
+    /// Tekst składany jest przez `cosmic-text` (shaping, bidi, fallback), więc
+    /// arabski, dewanagari, tajski czy CJK wychodzą poprawnie. Krycie jest
+    /// kwantyzowane do 1/16, żeby cache nie rósł z każdą klatką animacji.
+    pub fn art(
+        &self,
+        index: usize,
+        alpha: f32,
+        px: f32,
+        max_width: f32,
+    ) -> (Option<Arc<ImageData>>, Option<Arc<ImageData>>) {
+        let step = (alpha.clamp(0.0, 1.0) * 16.0).round() as u8;
+        if step == 0 {
+            return (None, None);
+        }
+        let index = index % libluna_core::egg::THANKS.len();
+        let key = (index, step, px.to_bits(), max_width.round() as u32);
+        let cached = self
+            .art
+            .borrow()
+            .as_ref()
+            .filter(|art| art.key == key)
+            .map(|art| (art.name.clone(), art.body.clone()));
+        if let Some(pair) = cached {
+            return pair;
+        }
+
+        let a = step as f32 / 16.0;
+        let entry = &libluna_core::egg::THANKS[index];
+        let mut shaped = self.shaped.borrow_mut();
+        let shaped = shaped.get_or_insert_with(ShapedText::new);
+        let name = shaped.render_centered(
+            entry.language,
+            px * 0.85,
+            weight::MEDIUM,
+            Color::rgba(0.62, 0.70, 0.86, a),
+            max_width,
+        );
+        let body = shaped.render_centered(
+            &libluna_core::egg::thanks_block(entry),
+            px,
+            weight::NORMAL,
+            Color::rgba(0.92, 0.94, 1.0, a),
+            max_width,
+        );
+        *self.art.borrow_mut() = Some(EggArt {
+            key,
+            name: name.clone(),
+            body: body.clone(),
+        });
+        (name, body)
+    }
+}
+
+impl Default for EggState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Otwarte menu kontekstowe: widget, jego prostokąt i akcje wierszy.
 struct ContextMenu {
     menu: Menu,
@@ -96,6 +190,10 @@ pub struct App {
     pending_minimize: bool,
     pending_maximize: bool,
     pending_move: bool,
+    /// Ostatnio wpisane znaki (bez Entera) — do rozpoznania sekretnego kodu.
+    typed: String,
+    /// Scena księżycowego jajka (otwarta kodem wpisanym w terminalu).
+    egg: Option<EggState>,
 }
 
 impl App {
@@ -125,6 +223,8 @@ impl App {
             pending_minimize: false,
             pending_maximize: false,
             pending_move: false,
+            typed: String::new(),
+            egg: None,
         }
     }
 
@@ -493,6 +593,20 @@ impl App {
             return;
         }
 
+        // Scena jajka przechwytuje klawiaturę; Esc ją zamyka.
+        if self.egg.is_some() {
+            if ke.keysym == 0xff1b {
+                self.egg = None;
+                frame.request_frame();
+            }
+            return;
+        }
+
+        // Skróty z Ctrl/Alt przerywają wpisywanie kodu.
+        if ctrl || ke.modifiers.alt {
+            self.typed.clear();
+        }
+
         if ctrl && shift {
             match ke.keysym {
                 0x43 | 0x63 => {
@@ -588,6 +702,14 @@ impl App {
             }
         }
 
+        // Enter po wpisaniu sekretnego kodu otwiera scenę zamiast iść do PTY.
+        if self.note_typed(ke) {
+            self.selection = None;
+            self.dragging = false;
+            frame.request_frame();
+            return;
+        }
+
         // Każde wpisanie klawisza wraca do bieżącego ekranu i czyści zaznaczenie.
         let application_cursor = self.pane().term.application_cursor;
         if let Some(bytes) = encode_key(ke, application_cursor) {
@@ -599,6 +721,49 @@ impl App {
         }
         self.selection = None;
         self.dragging = false;
+    }
+
+    /// Śledzi wpisany wiersz. Gdy Enter zamyka dokładnie sekretny kod, zamiast
+    /// wysłać go do powłoki otwiera scenę jajka (zwraca `true`).
+    fn note_typed(&mut self, ke: &KeyEvent) -> bool {
+        if ke.state != ButtonState::Pressed {
+            return false;
+        }
+        match ke.keysym {
+            // Enter i Enter numeryczny.
+            0xff0d | 0xff8d => {
+                let hit = libluna_core::egg::matches(&self.typed);
+                self.typed.clear();
+                if hit {
+                    self.egg = Some(EggState::new());
+                    libluna_core::egg::unlock();
+                    return true;
+                }
+                false
+            }
+            // Backspace cofa znak; ruch kursora, Tab i Delete kończą wpisywanie.
+            0xff08 => {
+                self.typed.pop();
+                false
+            }
+            0xff09 | 0xff1b | 0xff50 | 0xff51 | 0xff52 | 0xff53 | 0xff54 | 0xff55 | 0xff56
+            | 0xff57 | 0xffff => {
+                self.typed.clear();
+                false
+            }
+            _ => {
+                if let Some(text) = ke.text.as_deref() {
+                    if !text.is_empty() && !text.chars().all(char::is_control) {
+                        self.typed.push_str(text);
+                        let len = self.typed.chars().count();
+                        if len > 96 {
+                            self.typed = self.typed.chars().skip(len - 96).collect();
+                        }
+                    }
+                }
+                false
+            }
+        }
     }
 
     fn handle_events(
@@ -1106,6 +1271,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             settings_hover: app.hover_settings,
             font_size: app.prefs.font_size,
             prefs: &app.prefs,
+            egg: app.egg.as_ref(),
         };
         ui::paint(frame.scene, &theme, frame.text, frame.size, &view);
         if app.settings_open {
@@ -1120,6 +1286,10 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         }
         if let Some(menu) = &app.context_menu {
             ui::paint_context_menu(frame.scene, &theme, frame.text, &menu.menu, menu.panel);
+        }
+        // Scena jajka ma własną animację (gwiazdy, pulsujący księżyc).
+        if app.egg.is_some() {
+            frame.request_frame_after(Duration::from_millis(33));
         }
     })
 }
@@ -1461,6 +1631,49 @@ mod tests {
             });
         }
         app
+    }
+
+    #[test]
+    fn typed_secret_code_opens_the_moon_egg() {
+        let state = std::env::temp_dir().join(format!(
+            "luna-terminal-egg-state-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&state);
+        std::env::set_var("XDG_STATE_HOME", &state);
+        let mut app = app_with_panes(1);
+        for ch in libluna_core::egg::CODE.chars() {
+            let text = ch.to_string();
+            assert!(
+                !app.note_typed(&key(ch as u32, Some(&text))),
+                "wpisywanie nie otwiera sceny"
+            );
+        }
+        assert!(app.egg.is_none(), "Enter jeszcze nie padł");
+        assert!(
+            app.note_typed(&key(0xff0d, Some("\r"))),
+            "Enter rozpoznaje kod"
+        );
+        assert!(app.egg.is_some(), "scena jajka otwarta");
+        assert!(
+            state.join("luna").join("moon-egg").is_file(),
+            "znacznik odkrycia"
+        );
+
+        std::env::remove_var("XDG_STATE_HOME");
+        let _ = std::fs::remove_dir_all(state);
+    }
+
+    #[test]
+    fn ordinary_command_goes_to_the_shell() {
+        let mut app = app_with_panes(1);
+        for ch in "ls -la".chars() {
+            let text = ch.to_string();
+            let _ = app.note_typed(&key(ch as u32, Some(&text)));
+        }
+        assert!(!app.note_typed(&key(0xff0d, Some("\r"))));
+        assert!(app.egg.is_none());
     }
 
     #[test]

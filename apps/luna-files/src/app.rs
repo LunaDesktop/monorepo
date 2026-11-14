@@ -504,6 +504,33 @@ impl App {
         );
     }
 
+    /// Pokazuje księżycowe jajko, gdy użytkownik nazwie plik sekretnym kodem.
+    ///
+    /// Plik nie powstaje — samo wpisanie kodu jest gestem, a podziękowania
+    /// (i pełna lista języków w Terminalu) są nagrodą.
+    pub fn show_egg(&mut self) {
+        libluna_core::egg::unlock();
+        let mut body = String::new();
+        body.push_str(&tr("You found the moon egg"));
+        body.push('\n');
+        body.push_str(&tr(
+            "Mokosz watches over your desktop. Five clicks well spent.",
+        ));
+        body.push_str("\n\n");
+        for entry in libluna_core::egg::THANKS.iter().take(3) {
+            body.push_str(entry.language);
+            body.push_str(": ");
+            body.push_str(&libluna_core::egg::thanks_line(entry));
+            body.push_str("\n\n");
+        }
+        body.push_str(&tr("Type the code in the Terminal to see all languages."));
+        self.about = Some(
+            AlertDialog::new(tr("Moon egg"), body)
+                .width(560.0)
+                .button(tr("Done")),
+        );
+    }
+
     /// Tworzy archiwum ZIP z podanych elementów w katalogu `dir`.
     pub fn compress(&mut self, items: Vec<PathBuf>, dir: &Path) {
         if items.is_empty() {

@@ -18,6 +18,21 @@ const ROW_H: f64 = 54.0;
 
 /// Prostokąt widgetu (albo `None`, gdy nie powinien być widoczny).
 pub fn visible_rect(size: Size, activity: &ClockActivity, now: i64) -> Option<Rect> {
+    // Zgodność ze starym API (pasek na górze).
+    visible_rect_in(
+        Rect::from_xywh(
+            0.0,
+            THICKNESS,
+            size.width,
+            (size.height - THICKNESS).max(1.0),
+        ),
+        activity,
+        now,
+    )
+}
+
+/// Prostokąt widgetu w obszarze roboczym (bez paska — dowolna krawędź).
+pub fn visible_rect_in(area: Rect, activity: &ClockActivity, now: i64) -> Option<Rect> {
     if !activity.should_show_widget(now) {
         return None;
     }
@@ -27,8 +42,8 @@ pub fn visible_rect(size: Size, activity: &ClockActivity, now: i64) -> Option<Re
     }
     let height = PAD * 2.0 + rows as f64 * ROW_H;
     Some(Rect::from_xywh(
-        (size.width - WIDTH - MARGIN).max(MARGIN),
-        THICKNESS + 12.0,
+        (area.right() - WIDTH - MARGIN).max(area.x() + MARGIN),
+        area.y() + 12.0,
         WIDTH,
         height,
     ))

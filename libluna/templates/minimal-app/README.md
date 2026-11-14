@@ -25,7 +25,7 @@ i skopiuje `src/main.rs`.
    [dependencies]
    libluna = { path = "../libluna/crates/libluna" }
    # lub:
-   # libluna = { git = "https://github.com/mijsys/libLuna.git" }
+   # libluna = { git = "https://github.com/LunaDesktop/libLuna.git" }
    ```
 3. Podmień `__APP_NAME__` na nazwę pakietu.
 

@@ -709,6 +709,17 @@ fn row_is_clickable(row: &pages::Row) -> bool {
     }
 }
 
+/// Czy segment jest zablokowany w tej wersji (np. wygląd macOS)?
+///
+/// Zablokowane segmenty są wyszarzone i nie reagują na podświetlenie;
+/// kliknięcie nadal trafia do akcji, żeby pokazać wyjaśnienie.
+fn segment_locked(actions: &[Action], index: usize) -> bool {
+    matches!(
+        actions.get(index),
+        Some(Action::SetPanelLook(look)) if !look.available()
+    )
+}
+
 /// Przycisk dialogu z podświetleniem wyliczonym z pozycji kursora.
 fn dialog_button(
     app: &SettingsApp,
@@ -807,13 +818,27 @@ fn paint_row(
             Slider::new(*value).paint(ctx, control);
         }
         Control::Segmented {
-            options, selected, ..
+            options,
+            selected,
+            actions,
         } => {
             let mut switcher = ViewSwitcher::new(options.clone());
             switcher.set_selected(*selected);
-            let hover = pointer.and_then(|p| switcher.index_at(control, p));
+            let hover = pointer
+                .and_then(|p| switcher.index_at(control, p))
+                .filter(|index| !segment_locked(actions, *index));
             switcher.set_hovered(hover);
             switcher.paint(ctx, control);
+            // Wyszarzenie segmentów, których nie da się jeszcze włączyć.
+            for (index, segment) in switcher.segments(control).iter().enumerate() {
+                if segment_locked(actions, index) {
+                    ctx.scene.fill_rounded_rect(
+                        *segment,
+                        theme.radius.small,
+                        Color::rgba(0.5, 0.5, 0.5, 0.45),
+                    );
+                }
+            }
         }
         Control::Accents { selected, .. } => {
             for (index, swatch) in accent_rects(control, &theme).iter().enumerate() {
@@ -1656,6 +1681,7 @@ fn paint_picker(app: &SettingsApp, ctx: &mut PaintCtx, size: Size) {
         pages::PickerKind::Refresh => tr("Refresh rate"),
         pages::PickerKind::ColorProfile => tr("Color profile"),
         pages::PickerKind::DefaultApp => tr("Default application"),
+        pages::PickerKind::Style => tr("Style"),
     };
     ctx.label_left(
         lay.title.x(),

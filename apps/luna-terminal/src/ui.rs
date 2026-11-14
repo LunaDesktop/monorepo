@@ -354,6 +354,8 @@ pub struct ViewState<'a> {
     pub settings_hover: bool,
     pub font_size: f64,
     pub prefs: &'a Prefs,
+    /// Odkryte księżycowe jajko (scena rysowana nad terminalem).
+    pub egg: Option<&'a crate::app::EggState>,
 }
 
 /// Rysuje terminal. Zwraca policzony układ (żeby pętla mogła dopasować PTY).
@@ -424,7 +426,239 @@ pub fn paint(
     }
 
     ctx.scene.pop_clip();
+
+    if let Some(egg) = view.egg {
+        paint_egg(&mut ctx, size, egg);
+    }
     lay
+}
+
+/// Scena księżycowego jajka: nocne niebo, księżyc i podziękowania w kolejnych
+/// językach. Animacja jest deterministyczna (czas + hash), więc nie potrzebuje
+/// generatora liczb losowych.
+fn paint_egg(ctx: &mut PaintCtx, size: Size, egg: &crate::app::EggState) {
+    let t = egg.opened.elapsed().as_secs_f64();
+    let theme = *ctx.theme;
+
+    let full = Rect::from_xywh(0.0, 0.0, size.width, size.height);
+    ctx.scene
+        .fill_rect(full, Color::rgba(0.01, 0.02, 0.05, 0.90));
+
+    let w = (size.width * 0.80)
+        .clamp(360.0, 720.0)
+        .min((size.width - 20.0).max(180.0));
+    let h = (size.height * 0.82)
+        .clamp(300.0, 620.0)
+        .min((size.height - 20.0).max(160.0));
+    let panel = Rect::from_xywh((size.width - w) / 2.0, (size.height - h) / 2.0, w, h);
+    let radius = theme.radius.large.max(14.0);
+    ctx.scene
+        .fill_rounded_rect(panel, radius, Color::from_rgba8(0x0d, 0x11, 0x1f, 0xf5));
+    let glow = (0.35 + 0.30 * (((t * 1.4).sin() * 0.5 + 0.5) as f32)).clamp(0.2, 0.8);
+    ctx.scene
+        .stroke_rounded_rect(panel, radius, 1.0, Color::rgba(0.72, 0.82, 1.0, glow));
+
+    ctx.scene.push_clip(panel.deflate(Insets::splat(2.0)));
+    let inner = panel.deflate(Insets::splat(20.0));
+    let moonlight = Color::from_rgba8(0xf4, 0xf1, 0xe6, 0xff);
+    let dim = Color::from_rgba8(0x9f, 0xac, 0xc6, 0xff);
+
+    // Geometria sceny — gwiazdy muszą omijać pas tekstu.
+    let title_size = (theme.typography.title.size * 0.85).clamp(18.0, 28.0);
+    let moon = moon_art();
+    let art_size = (inner.width() / 24.0).clamp(9.0, 18.0);
+    let line_h = art_size * 1.06;
+    let art_top = inner.y() + title_size * 2.9;
+    let art_h = moon.len() as f64 * line_h;
+    let text_top = art_top + art_h + 32.0;
+    let text_bottom = panel.bottom() - 30.0;
+
+    // Gwiazdy: pozycja z hasha, jasność pulsuje w czasie.
+    for i in 0..52u32 {
+        let hx = hash(i * 2 + 1);
+        let hy = hash(i * 2 + 2);
+        let x = inner.x() + hx * inner.width();
+        let y = inner.y() + hy * inner.height();
+        if (text_top..text_bottom).contains(&y) {
+            continue;
+        }
+        let phase = t * (0.7 + hx * 1.9) + hy * 6.283;
+        let alpha = 0.12 + 0.55 * ((phase.sin() * 0.5 + 0.5) as f32);
+        let ch = if i % 11 == 0 { "*" } else { "·" };
+        ctx.label_left(
+            x,
+            y,
+            ch,
+            9.0 + 5.0 * hy,
+            weight::NORMAL,
+            Color::rgba(1.0, 1.0, 1.0, alpha),
+        );
+    }
+
+    // Spadająca gwiazda co 3,4 s.
+    let shot = (t % 3.4) / 0.85;
+    if shot < 1.0 {
+        let start = Point::new(inner.right() - 10.0, inner.y() + 24.0);
+        let span = 150.0;
+        let head = Point::new(start.x - span * shot, start.y + span * 0.42 * shot);
+        for k in 0..9 {
+            let back = k as f64 * 7.0;
+            let p = Point::new(head.x + back, head.y - back * 0.42);
+            if p.x < inner.x() || p.y > inner.bottom() {
+                break;
+            }
+            let alpha = ((1.0 - k as f32 / 9.0) * (1.0 - shot as f32) * 0.85) as f32;
+            ctx.scene.stroke_line(
+                Point::new(p.x + 3.5, p.y - 1.5),
+                p,
+                2.0 - k as f64 * 0.16,
+                Color::rgba(1.0, 0.95, 0.78, alpha),
+            );
+        }
+    }
+
+    // Tytuł.
+    ctx.label_center(
+        panel.center().x,
+        inner.y() + title_size * 0.7,
+        &libluna_i18n::tr("Moon egg"),
+        title_size,
+        weight::BOLD,
+        moonlight,
+    );
+    ctx.label_center(
+        panel.center().x,
+        inner.y() + title_size * 1.9,
+        &libluna_i18n::tr("Mokosz watches over your desktop. Five clicks well spent."),
+        theme.typography.caption.size,
+        weight::NORMAL,
+        dim,
+    );
+
+    // Księżyc — proporcje komórek są ~2:1, stąd szeroka siatka.
+    let pulse = 0.55 + 0.45 * (((t * 1.1).sin() * 0.5 + 0.5) as f32);
+    for (row, line) in moon.iter().enumerate() {
+        let cy = art_top + row as f64 * line_h;
+        let wave = 0.72 + 0.28 * (((t * 1.6) - row as f64 * 0.22).sin() * 0.5 + 0.5) as f32;
+        ctx.label_center(
+            panel.center().x,
+            cy,
+            line,
+            art_size,
+            weight::BOLD,
+            Color::rgba(0.96, 0.93, 0.76, (pulse * wave).clamp(0.25, 1.0)),
+        );
+    }
+
+    // Odkryty kod — przypomnienie, co się właśnie stało.
+    ctx.label_center(
+        panel.center().x,
+        art_top + moon.len() as f64 * line_h + 16.0,
+        libluna_core::egg::CODE,
+        theme.typography.caption.size + 1.0,
+        weight::MEDIUM,
+        Color::rgba(0.98, 0.95, 0.78, 0.75),
+    );
+
+    // Podziękowania: jeden język co 2,8 s, z łagodnym wejściem i wyjściem.
+    // Tekst jest kształtowany przez cosmic-text (bidi, łączenie liter, fallback).
+    let cycle = 2.8;
+    let index = ((t / cycle) as usize) % libluna_core::egg::THANKS.len();
+    let phase = (t % cycle) / cycle;
+    let alpha = fade(phase);
+
+    let body_size = theme.typography.body.size.clamp(12.0, 16.0);
+    let mut y = art_top + moon.len() as f64 * line_h + 44.0;
+    let (name, body) = egg.art(
+        index,
+        alpha,
+        body_size as f32,
+        (inner.width() - 12.0) as f32,
+    );
+    if let Some(name) = name {
+        let w = name.width as f64;
+        let h = name.height as f64;
+        ctx.scene
+            .image(Rect::from_xywh(panel.center().x - w / 2.0, y, w, h), name);
+        y += h + 2.0;
+    }
+    if let Some(body) = body {
+        let w = body.width as f64;
+        let h = body.height as f64;
+        ctx.scene
+            .image(Rect::from_xywh(panel.center().x - w / 2.0, y, w, h), body);
+    }
+
+    // Stopka: licznik języków i wyjście.
+    let footer_y = panel.bottom() - 16.0;
+    ctx.label_left(
+        inner.x(),
+        footer_y,
+        &libluna_i18n::tr("Esc closes this"),
+        theme.typography.caption.size,
+        weight::NORMAL,
+        dim,
+    );
+    ctx.label_right(
+        inner.right(),
+        footer_y,
+        &format!("{}/{}", index + 1, libluna_core::egg::THANKS.len()),
+        theme.typography.caption.size,
+        weight::NORMAL,
+        dim,
+    );
+
+    ctx.scene.pop_clip();
+}
+
+/// Wartość `0..1` z liczby — powtarzalna „losowość” bez zależności.
+fn hash(n: u32) -> f64 {
+    let mut x = n.wrapping_mul(747_796_405).wrapping_add(2_891_336_453);
+    x = ((x >> ((x >> 28).wrapping_add(4))) ^ x).wrapping_mul(277_803_737);
+    x = (x >> 22) ^ x;
+    x as f64 / u32::MAX as f64
+}
+
+/// Łagodne wejście i wyjście w cyklu podziękowań.
+fn fade(phase: f64) -> f32 {
+    let p = phase as f32;
+    let enter = (p / 0.16).min(1.0);
+    let leave = ((1.0 - p) / 0.16).min(1.0);
+    enter.min(leave).clamp(0.0, 1.0)
+}
+
+/// Sierpowaty księżyc z bloków — 11 wierszy, proporcje dopasowane do komórek
+/// znaków (szersze niż wyższe).
+fn moon_art() -> Vec<String> {
+    const ROWS: i32 = 11;
+    const COLS: i32 = 23;
+    let cx = (COLS - 1) as f64 / 2.0;
+    let cy = (ROWS - 1) as f64 / 2.0;
+    let r = 5.3;
+    let mut out = Vec::with_capacity(ROWS as usize);
+    for y in 0..ROWS {
+        let mut line = String::with_capacity(COLS as usize);
+        for x in 0..COLS {
+            let dx = (x as f64 - cx) / 2.1;
+            let dy = y as f64 - cy;
+            let d = (dx * dx + dy * dy).sqrt();
+            // Cień: okrąg przesunięty w prawo i do góry.
+            let sx = dx - 1.55;
+            let sy = dy + 1.0;
+            let shadow = (sx * sx + sy * sy).sqrt() <= r * 0.95;
+            if d > r || shadow {
+                line.push(' ');
+            } else if d > r - 0.8 {
+                line.push('░');
+            } else if (x * 7 + y * 11) % 13 == 0 {
+                line.push('·');
+            } else {
+                line.push('█');
+            }
+        }
+        out.push(line);
+    }
+    out
 }
 
 fn header_button(ctx: &mut PaintCtx, rect: Rect, name: IconName, hover: bool) {
@@ -960,6 +1194,7 @@ mod tests {
             settings_hover: false,
             font_size: 14.0,
             prefs,
+            egg: None,
         }
     }
 

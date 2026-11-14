@@ -910,6 +910,23 @@ pub struct Theme {
     pub colors: ColorScheme,
     pub syntax: SyntaxColors,
     pub appearance: Appearance,
+    /// Wygląd paska panelu opisany w stylu (`[panel]` w pliku `.theme`).
+    pub panel: PanelTheme,
+}
+
+/// Wygląd panelu sterowany stylem (`panel` w pliku `.theme`).
+///
+/// `None` = „zostaw wybór użytkownika” (Ustawienia → Wygląd → Panel).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct PanelTheme {
+    /// Kolor paska (`color-bar`). Domyślnie `colors.headerbar_bg`.
+    pub color: Option<Color>,
+    /// Zaokrąglony pasek (`round`) — domyślnie zależny od wyglądu panelu.
+    pub round: Option<bool>,
+    /// Pływający pasek (`float`) — nie zajmuje całej krawędzi.
+    pub float: Option<bool>,
+    /// Krycie tła paska (`transparent`/`opacity`), `0.0..=1.0`.
+    pub opacity: Option<f32>,
 }
 
 impl Theme {
@@ -922,6 +939,12 @@ impl Theme {
             colors: ColorScheme::light(),
             syntax: SyntaxColors::light(),
             appearance: Appearance::Light,
+            panel: PanelTheme {
+                color: None,
+                round: None,
+                float: None,
+                opacity: None,
+            },
         }
     }
 
@@ -934,6 +957,12 @@ impl Theme {
             colors: ColorScheme::dark(),
             syntax: SyntaxColors::dark(),
             appearance: Appearance::Dark,
+            panel: PanelTheme {
+                color: None,
+                round: None,
+                float: None,
+                opacity: None,
+            },
         }
     }
 

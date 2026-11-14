@@ -246,6 +246,35 @@ gen_uuid() {
     fi
 }
 
+# Hash hasła liczymy sami, a wpis w /etc/shadow ustawia `usermod -p`.
+# `chpasswd` z tego obrazu kończy się kodem 0, ale NIE zmienia wpisu —
+# konto zostawało zablokowane (`user:!:`) i każde logowanie było odrzucane.
+hash_password() {
+    if command -v openssl >/dev/null 2>&1; then
+        printf '%s' "$1" | openssl passwd -6 -stdin
+        return 0
+    fi
+    if command -v perl >/dev/null 2>&1; then
+        _salt=$(gen_uuid | cut -c1-16)
+        perl -e 'print crypt($ARGV[0], "\$6\$" . $ARGV[1] . "\$"), "\n"' \
+             "$1" "$_salt"
+        return 0
+    fi
+    return 1
+}
+
+set_password() {
+    _user=$1
+    _hash=$(hash_password "$2") || die "cannot hash password (openssl/perl missing)"
+    [ -n "$_hash" ] || die "empty password hash for $_user"
+    chroot "$TARGET" usermod -p "$_hash" "$_user" >/dev/null 2>&1 \
+        || die "usermod -p failed for $_user"
+    _stored=$(chroot "$TARGET" awk -F: -v u="$_user" '$1==u {print $2}' /etc/shadow 2>/dev/null)
+    case "$_stored" in
+        ''|'!'|'*'|'!*') die "password for $_user was not stored in /etc/shadow" ;;
+    esac
+}
+
 cleanup() {
     set +e
     if [ "$LUKS_OPEN" = 1 ]; then
@@ -550,32 +579,54 @@ if [ "$FILESYSTEM" = btrfs ]; then
     btrfs subvolume list "$TARGET" >/dev/null 2>&1 || true
 fi
 
-GROUPS=""
+# UWAGA: nazwa `GROUPS` to zmienna specjalna basha (tablica gid-ów procesu) —
+# jej przypisanie jest ignorowane, a `"$GROUPS"` daje gid roota (0). Dlatego
+# USER_GROUPS, nie GROUPS (kiedyś kończyło się `useradd -G 0`).
+USER_GROUPS=""
 for group in sudo wheel video render input audio networkmanager lp scanner bluetooth; do
     if chroot "$TARGET" getent group "$group" >/dev/null 2>&1; then
-        GROUPS="${GROUPS:+$GROUPS,}$group"
+        USER_GROUPS="${USER_GROUPS:+$USER_GROUPS,}$group"
     fi
 done
 SHELL_BIN=/bin/sh
 if [ -x "$TARGET/bin/bash" ]; then SHELL_BIN=/bin/bash; fi
 
 step "Creating user $USERNAME"
-if [ -n "$GROUPS" ]; then
-    chroot "$TARGET" useradd -m -s "$SHELL_BIN" -G "$GROUPS" -c "$FULL_NAME" "$USERNAME"
+if [ -n "$USER_GROUPS" ]; then
+    chroot "$TARGET" useradd -m -s "$SHELL_BIN" -G "$USER_GROUPS" -c "$FULL_NAME" "$USERNAME"
 else
     chroot "$TARGET" useradd -m -s "$SHELL_BIN" -c "$FULL_NAME" "$USERNAME"
 fi
-printf '%s:%s\n' "$USERNAME" "$USER_PASSWORD" | chroot "$TARGET" chpasswd
+
+# Kontrola: użytkownik ma być w grupach z listy i NIE w grupie root.
+_have=$(chroot "$TARGET" id -nG "$USERNAME" 2>/dev/null || true)
+case " $_have " in
+    *" root "*) die "user $USERNAME was added to the root group (GROUPS collision?)" ;;
+esac
+if [ -n "$USER_GROUPS" ]; then
+    _old_ifs=$IFS
+    IFS=',
+    '
+    for _g in $USER_GROUPS; do
+        [ -n "$_g" ] || continue
+        case " $_have " in
+            *" $_g "*) ;;
+            *) die "user $USERNAME is not in group $_g" ;;
+        esac
+    done
+    IFS=$_old_ifs
+fi
+set_password "$USERNAME" "$USER_PASSWORD"
 
 case "$ROOT_MODE" in
     locked)
         chroot "$TARGET" passwd -l root >/dev/null 2>&1 || true
         ;;
     same)
-        printf 'root:%s\n' "$USER_PASSWORD" | chroot "$TARGET" chpasswd
+        set_password root "$USER_PASSWORD"
         ;;
     custom)
-        printf 'root:%s\n' "$ROOT_PASSWORD" | chroot "$TARGET" chpasswd
+        set_password root "$ROOT_PASSWORD"
         ;;
 esac
 

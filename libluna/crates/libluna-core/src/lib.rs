@@ -22,6 +22,7 @@ pub mod color;
 pub mod config;
 pub mod desktop;
 pub mod display;
+pub mod egg;
 pub mod equalizer;
 pub mod event;
 pub mod geometry;
@@ -33,6 +34,7 @@ pub mod input;
 pub mod lock;
 pub mod motion;
 pub mod os;
+pub mod panel_settings;
 pub mod region;
 pub mod runtime;
 pub mod scale;
@@ -59,13 +61,14 @@ pub use input::{
 pub use lock::{LockSettings, LockWallpaper};
 pub use motion::{lerp, Animation, Easing};
 pub use os::name as os_name;
+pub use panel_settings::{PanelLook, PanelPosition, PanelSettings, TrayStyle};
 pub use region::RegionSettings;
 pub use scale::Scale;
 pub use shortcuts::{Binding, ShortcutAction, ShortcutProfile, ShortcutSettings};
 pub use style::{
     ActionRowMetrics, AvatarMetrics, BannerMetrics, BarMetrics, BottomSheetMetrics, ButtonMetrics,
     CardMetrics, CheckMetrics, ContainerMetrics, DropDownMetrics, EntryMetrics, GroupMetrics,
-    HeaderBarMetrics, ItemViewMetrics, MenuMetrics, Metrics, NavMetrics, PagerMetrics,
+    HeaderBarMetrics, ItemViewMetrics, MenuMetrics, Metrics, NavMetrics, PagerMetrics, PanelTheme,
     PathBarMetrics, RadioMetrics, Radius, ScrollViewMetrics, SegmentedMetrics, ShortcutMetrics,
     SliderMetrics, Spacing, SpinnerMetrics, SplitMetrics, StatusPageMetrics, StepperMetrics,
     SwitchMetrics, SyntaxColors, TabsMetrics, Theme, ToastMetrics, TooltipMetrics, Typography,

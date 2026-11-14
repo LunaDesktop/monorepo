@@ -224,6 +224,63 @@ impl LayerConfig {
         }
     }
 
+    /// Powierzchnia „chrome” przy dolnej krawędzi (pasek + obszar nad nim).
+    pub fn bottom_chrome(namespace: impl Into<String>, bar: u32, total: u32) -> Self {
+        let anchor = if total == 0 {
+            Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT
+        } else {
+            Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT
+        };
+        Self {
+            namespace: namespace.into(),
+            layer: Layer::Top,
+            anchor,
+            size: (0, total),
+            margin: (0, 0, 0, 0),
+            exclusive_zone: bar as i32,
+            keyboard: true,
+            keyboard_exclusive: false,
+        }
+    }
+
+    /// Powierzchnia „chrome” przy lewej krawędzi (pionowy pasek + obszar po prawej).
+    pub fn left_chrome(namespace: impl Into<String>, bar: u32, total: u32) -> Self {
+        let anchor = if total == 0 {
+            Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT
+        } else {
+            Anchor::LEFT | Anchor::TOP | Anchor::BOTTOM
+        };
+        Self {
+            namespace: namespace.into(),
+            layer: Layer::Top,
+            anchor,
+            size: (total, 0),
+            margin: (0, 0, 0, 0),
+            exclusive_zone: bar as i32,
+            keyboard: true,
+            keyboard_exclusive: false,
+        }
+    }
+
+    /// Powierzchnia „chrome” przy prawej krawędzi (pionowy pasek + obszar po lewej).
+    pub fn right_chrome(namespace: impl Into<String>, bar: u32, total: u32) -> Self {
+        let anchor = if total == 0 {
+            Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT
+        } else {
+            Anchor::RIGHT | Anchor::TOP | Anchor::BOTTOM
+        };
+        Self {
+            namespace: namespace.into(),
+            layer: Layer::Top,
+            anchor,
+            size: (total, 0),
+            margin: (0, 0, 0, 0),
+            exclusive_zone: bar as i32,
+            keyboard: true,
+            keyboard_exclusive: false,
+        }
+    }
+
     /// Tło pulpitu: pełnoekranowa powierzchnia **pod oknami**, bez rezerwacji
     /// miejsca i bez fokusu klawiatury.
     ///

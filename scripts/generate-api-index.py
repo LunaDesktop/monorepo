@@ -25,7 +25,11 @@ ROOT = Path(__file__).resolve().parent.parent
 CRATES_DIR = ROOT / "libluna" / "crates"
 OUT = ROOT / "web" / "luna.paganlinux.eu" / "assets" / "api-data.js"
 OUT_EN = OUT.with_name("api-data-en.js")
-GITHUB = "https://github.com/mijsys/libLuna/blob/main"
+# Samodzielne repozytorium libLuny ma inne drzewo niż to monorepo:
+# lokalnie `libluna/crates/*`, w repo GitHub `crates/*`. Linki do źródeł
+# muszą prowadzić do właściwego pliku, a nie do nieistniejącej ścieżki.
+GITHUB = "https://github.com/LunaDesktop/libLuna/blob/main"
+GITHUB_PREFIX = "libluna/"
 
 CRATE_ORDER = [
     "libluna",
@@ -66,6 +70,24 @@ def module_path(crate_dir: Path, file: Path) -> str:
     if parts and parts[-1] in {"lib", "mod"}:
         parts.pop()
     return "::".join(parts) if parts else "(root)"
+
+
+def public_source(source: str) -> str:
+    """Ścieżka w repozytorium GitHub (`libluna/crates/...` → `crates/...`)."""
+    return source[len(GITHUB_PREFIX):] if source.startswith(GITHUB_PREFIX) else source
+
+
+def package_version() -> str:
+    """Wersja workspace'u libLuny (crate'y dziedziczą ją przez `version.workspace`)."""
+    for manifest in (CRATES_DIR.parent / "Cargo.toml", CRATES_DIR / "libluna" / "Cargo.toml"):
+        try:
+            text = manifest.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        match = re.search(r'^version\s*=\s*"([^"]+)"', text, re.M)
+        if match:
+            return match.group(1)
+    return "0.0.0"
 
 
 def trim_doc(lines: list[str]) -> str:
@@ -229,12 +251,7 @@ def main() -> None:
         seen.add(key)
         unique.append(item)
 
-    version = "0.0.4"
-    cargo = CRATES_DIR / "libluna" / "Cargo.toml"
-    if cargo.exists():
-        match = re.search(r'^version\s*=\s*"([^"]+)"', cargo.read_text(encoding="utf-8"), re.M)
-        if match:
-            version = match.group(1)
+    version = package_version()
 
     unique.sort(
         key=lambda item: (
@@ -257,9 +274,9 @@ def main() -> None:
                 "owner": item.owner,
                 "signature": item.signature,
                 "doc": item.doc,
-                "source": item.source,
+                "source": public_source(item.source),
                 "line": item.line,
-                "url": f"{GITHUB}/{item.source}#L{item.line}",
+                "url": f"{GITHUB}/{public_source(item.source)}#L{item.line}",
             }
             for item in unique
         ],
