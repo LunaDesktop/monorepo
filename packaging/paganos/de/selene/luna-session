@@ -46,12 +46,32 @@ if [ "$SELENE_BACKEND" = "drm" ]; then
     export SELENE_INPUT
 fi
 
+# GPU: **opt-in**. Domyślnie ścieżka wyjścia zostaje CPU — GPU w trybie DRM
+# nie jest jeszcze zweryfikowane na tyle, by włączać je z automatu (wahania
+# klatek, zachowanie przy zmianie trybu). Włączanie:
+#
+#   LUNA_GPU=1 luna-session        # albo wpis w środowisku sesji
+#
+# UWAGA: bez `LUNA_GPU=1` Selene nie ogłasza `zwp_linux_dmabuf_v1`, więc klienty
+# (GTK4, Chromium, Flatpak) zostają na `wl_shm`/softwarze — dokładnie tak, jak
+# przed dodaniem `feedback` dmabufa.
+if [ -n "${LUNA_GPU:-}" ]; then
+    export LUNA_GPU
+fi
+
 # Diagnostyka wydajności (fps DRM + tempo kursora w Selene, fps powłoki w luna-shell).
 # Domyślnie **włączona**, bo log sesji jest trwały i tylko wtedy da się po fakcie ustalić,
 # gdzie znikają klatki. Wyłącz jawnie wolnym zerem:  SELENE_STATS=0 LUNA_STATS=0 luna-session
 : "${SELENE_STATS:=1}"
 : "${LUNA_STATS:=1}"
 export SELENE_STATS LUNA_STATS
+
+# Binarki zainstalowane przez użytkownika (np. `install -m755 ... ~/.local/bin`)
+# mają pierwszeństwo przed systemowymi — pozwala to testować/aktualizować Lunę
+# bez roota, a sesja zawsze uruchamia najnowszą powłokę i kompozytor. Robimy to
+# **przed** logiem, żeby `command -v selene` pokazywał faktycznie uruchomiony plik
+# (wcześniej log twierdził `"/usr/bin/selene"`, a proces brał starszy z `~/.local/bin`).
+export PATH="$HOME/.local/bin:$PATH"
 
 # Trwały log sesji: LightDM trzyma tylko 2 pliki `.xsession-errors` i obraca je przy
 # każdym starcie sesji, przez co logi Luny przepadają. Piszemy do stałego pliku w
@@ -74,10 +94,6 @@ fi
 
 # Kompozytor w tle, a po nim powłoka Luna (panel/OSD).
 rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-# Binarki zainstalowane przez użytkownika (np. `install -m755 ... ~/.local/bin`)
-# mają pierwszeństwo przed systemowymi — pozwala to testować/aktualizować Lunę
-# bez roota, a sesja zawsze uruchamia najnowszą powłokę i kompozytor.
-export PATH="$HOME/.local/bin:$PATH"
 ts() { printf '%s luna-session: %s\n' "$(date +%H:%M:%S)" "$*"; }
 # `locale -a` wypisuje `pl_PL.utf8`, a my używamy tagów typu `pl_PL.UTF-8`.
 # Porównujemy po usunięciu myślników i wielkości liter.
@@ -243,12 +259,39 @@ export ELECTRON_OZONE_PLATFORM_HINT="auto"
 # aplikacji Javy (IDE, narzędzia AWT/Swing) potrafią się źle rysować albo nie pojawiać.
 export _JAVA_AWT_WM_NONREPARENTING=1
 
+# Motyw kursora dla X11/Xwayland. Xwayland bez motywu zgłasza wbudowany
+# `X_cursor` („X”) dla okien bez własnego kursora — a tak zachowuje się m.in.
+# Zed. Wybieramy pierwszy motyw, który **naprawdę** ma pliki kursorów
+# (`Pagan-Cursors` bywa pustym opakowaniem z samym `Inherits`), oraz ustawiamy
+# `XCURSOR_PATH`, bo libXcursor domyślnie nie zagląda do /usr/local/share/icons.
+if [ -z "${XCURSOR_PATH:-}" ]; then
+    XCURSOR_PATH="${HOME:-}/.icons:${HOME:-}/.local/share/icons:/usr/local/share/icons:/usr/share/icons:/usr/share/pixmaps"
+    export XCURSOR_PATH
+fi
+if [ -z "${XCURSOR_THEME:-}" ]; then
+    for theme in Pagan-Cursors Adwaita DMZ-Black DMZ-White; do
+        for dir in "${HOME:-}/.icons" "${HOME:-}/.local/share/icons" /usr/local/share/icons /usr/share/icons; do
+            if [ -d "$dir/$theme/cursors" ] && [ -n "$(ls -A "$dir/$theme/cursors" 2>/dev/null)" ]; then
+                XCURSOR_THEME="$theme"
+                break 2
+            fi
+        done
+    done
+    if [ -n "${XCURSOR_THEME:-}" ]; then
+        export XCURSOR_THEME
+    fi
+fi
+if [ -z "${XCURSOR_SIZE:-}" ]; then
+    XCURSOR_SIZE=24
+    export XCURSOR_SIZE
+fi
+
 # Aktualizacja środowiska aktywacji D-Bus i systemd (wymagane m.in. dla xdg-desktop-portal)
 if command -v dbus-update-activation-environment >/dev/null 2>&1; then
-    dbus-update-activation-environment --systemd WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_SESSION_DESKTOP MOZ_ENABLE_WAYLAND QT_QPA_PLATFORM GDK_BACKEND _JAVA_AWT_WM_NONREPARENTING 2>/dev/null || true
+    dbus-update-activation-environment --systemd WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_SESSION_DESKTOP MOZ_ENABLE_WAYLAND QT_QPA_PLATFORM GDK_BACKEND XCURSOR_THEME XCURSOR_SIZE XCURSOR_PATH _JAVA_AWT_WM_NONREPARENTING 2>/dev/null || true
 fi
 if command -v systemctl >/dev/null 2>&1; then
-    systemctl --user import-environment WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_SESSION_DESKTOP MOZ_ENABLE_WAYLAND QT_QPA_PLATFORM GDK_BACKEND _JAVA_AWT_WM_NONREPARENTING 2>/dev/null || true
+    systemctl --user import-environment WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_SESSION_DESKTOP MOZ_ENABLE_WAYLAND QT_QPA_PLATFORM GDK_BACKEND XCURSOR_THEME XCURSOR_SIZE XCURSOR_PATH _JAVA_AWT_WM_NONREPARENTING 2>/dev/null || true
 
     # `graphical-session.target` ma `RefuseManualStart=yes` — wciągamy go
     # zależnością z własnego targetu. Usługi portali
@@ -256,34 +299,102 @@ if command -v systemctl >/dev/null 2>&1; then
     systemctl --user start luna-session.target >/dev/null 2>&1 || true
 fi
 
-# Portal XDG (aplikacje GTK4/flatpak): startujemy jawnie, z poprawnym środowiskiem sesji.
-# Bez tego aktywacja D-Bus bywała bez WAYLAND_DISPLAY/XDG_CURRENT_DESKTOP, a aplikacje
-# czekały ~25 s na odpowiedź („Cannot get portal … Przekroczono czas oczekiwania”).
+# Portal XDG (aplikacje GTK4/flatpak/Steam): startujemy jawnie, z poprawnym
+# środowiskiem sesji. Bez tego aktywacja D-Bus bywała bez WAYLAND_DISPLAY /
+# XDG_CURRENT_DESKTOP, a aplikacje czekały ~25 s na odpowiedź („Cannot get portal …
+# Przekroczono czas oczekiwania”).
 #
-# Uwaga: sam frontend `xdg-desktop-portal` nie wystarczy — potrzebny jest backend
-# (`xdg-desktop-portal-gtk`), który wybiera `luna-portals.conf`. Gdy backend jest
-# niekompletny (np. brak `libgnome-desktop-3.so.20` w PaganOS), frontend zawiesza się
-# na aktywacji backendu i **każde** żądanie portalu kończy się timeoutem. Wtedy lepiej
-# nie uruchamiać portalu wcale: D-Bus odpowiada błędem od razu, a GTK nie czeka 25 s.
+# Frontend `xdg-desktop-portal` sam nic nie robi — każde żądanie kieruje do backendu
+# wybranego przez `luna-portals.conf`:
+#   * `gtk`  — FileChooser, Settings, Notification, Print, Access, …
+#   * `wlr`  — ScreenCast i Screenshot (Selene implementuje `wlr-screencopy`).
+# Backendy sprawdzamy **osobno**. Wcześniej brak jednej biblioteki GTK wyłączał
+# cały portal, więc nawet poprawny backend wlr nie mógł udostępnić ekranu.
 portal_bin=""
-for p in /usr/lib/xdg-desktop-portal /usr/libexec/xdg-desktop-portal; do
+for p in /usr/libexec/xdg-desktop-portal /usr/lib/xdg-desktop-portal; do
     if [ -x "$p" ]; then portal_bin="$p"; break; fi
 done
-portal_backend_ok=1
-if [ -n "$portal_bin" ] && command -v ldd >/dev/null 2>&1; then
-    for backend in /usr/lib/xdg-desktop-portal-gtk /usr/libexec/xdg-desktop-portal-gtk; do
-        if [ -x "$backend" ] && ldd "$backend" 2>/dev/null | grep -q 'not found'; then
-            portal_backend_ok=0
-            missing="$(ldd "$backend" 2>/dev/null | grep 'not found' | sed 's/^[[:space:]]*//' | tr '\n' ' ')"
-            break
-        fi
-    done
+
+# Wynik: `ok`, `uszkodzony` (brakuje bibliotek) albo `brak`.
+portal_gtk=brak
+portal_gtk_missing=""
+for backend in /usr/libexec/xdg-desktop-portal-gtk /usr/lib/xdg-desktop-portal-gtk; do
+    [ -x "$backend" ] || continue
+    portal_gtk=ok
+    if command -v ldd >/dev/null 2>&1; then
+        portal_gtk_missing="$(ldd "$backend" 2>/dev/null | sed -n 's/^[[:space:]]*\([^[:space:]]*\) => not found.*/\1/p' | tr '\n' ' ')"
+        [ -n "$portal_gtk_missing" ] && portal_gtk=uszkodzony
+    fi
+    break
+done
+portal_wlr=brak
+portal_wlr_missing=""
+for backend in /usr/libexec/xdg-desktop-portal-wlr /usr/lib/xdg-desktop-portal-wlr; do
+    [ -x "$backend" ] || continue
+    portal_wlr=ok
+    if command -v ldd >/dev/null 2>&1; then
+        portal_wlr_missing="$(ldd "$backend" 2>/dev/null | sed -n 's/^[[:space:]]*\([^[:space:]]*\) => not found.*/\1/p' | tr '\n' ' ')"
+        [ -n "$portal_wlr_missing" ] && portal_wlr=uszkodzony
+    fi
+    break
+done
+
+case "$portal_gtk" in
+    uszkodzony)
+        ts "portal/gtk: uszkodzony backend (brak: $portal_gtk_missing)"
+        ts "  → okna wyboru plików/Ustawienia pójdą przez inny backend albo bez portalu"
+        ;;
+    brak)
+        ts "portal/gtk: brak pakietu xdg-desktop-portal-gtk"
+        ;;
+esac
+case "$portal_wlr" in
+    uszkodzony)
+        ts "portal/wlr: uszkodzony backend (brak: $portal_wlr_missing) — ScreenCast nie zadziała"
+        ;;
+    brak)
+        ts "portal/wlr: brak xdg-desktop-portal-wlr — udostępnianie ekranu (OBS, Discord, Meet) nie zadziała"
+        ts "  sudo pag install xdg-desktop-portal-wlr"
+        ;;
+esac
+
+# Mapowanie ScreenCast → wlr. Starsze wydania pakietu Luny dostarczały
+# `luna-portals.conf` tylko z `default=gtk`, więc mimo zainstalowanego backendu
+# wlr każde udostępnienie ekranu kończyło się błędem. Dopisujemy mapowanie
+# wyłącznie w configu użytkownika i tylko wtedy, gdy systemowy plik go nie ma;
+# gdy pakiet zostanie zaktualizowany, nasz plik zniknie sam.
+portal_conf=/usr/share/xdg-desktop-portal/luna-portals.conf
+portal_conf_ok=0
+portal_conf_generated=0
+if [ -r "$portal_conf" ] && grep -q 'ScreenCast=wlr' "$portal_conf"; then
+    portal_conf_ok=1
 fi
+user_portal_dir="${XDG_CONFIG_HOME:-$HOME/.config}/xdg-desktop-portal"
+user_portal_conf="$user_portal_dir/luna-portals.conf"
+if [ "$portal_conf_ok" = 1 ]; then
+    if [ -r "$user_portal_conf" ] && grep -q 'wygenerowane przez luna-session' "$user_portal_conf"; then
+        rm -f "$user_portal_conf" 2>/dev/null || true
+    fi
+elif [ "$portal_wlr" = ok ]; then
+    if [ ! -e "$user_portal_conf" ]; then
+        mkdir -p "$user_portal_dir" 2>/dev/null || true
+        cat >"$user_portal_conf" <<'PORTAL_CONF'
+# wygenerowane przez luna-session — pakiet nie dostarczył mapowania ScreenCast
+[preferred]
+default=gtk;
+org.freedesktop.impl.portal.ScreenCast=wlr;
+org.freedesktop.impl.portal.Screenshot=wlr;
+PORTAL_CONF
+        ts "uzupełniam $user_portal_conf (stary luna-portals.conf bez ScreenCast=wlr)"
+        portal_conf_generated=1
+    fi
+fi
+
 if [ -z "$portal_bin" ]; then
     ts "xdg-desktop-portal: brak frontendu — aplikacje użyją własnych okien"
-elif [ "$portal_backend_ok" = 0 ]; then
-    ts "xdg-desktop-portal: backend GTK niekompletny ($missing) — pomijam portal"
-    ts "  (napraw pakiet xdg-desktop-portal-gtk, aby włączyć portale; na razie GTK bez portali)"
+elif [ "$portal_gtk" != ok ] && [ "$portal_wlr" != ok ]; then
+    ts "xdg-desktop-portal: żaden backend nie jest kompletny — pomijam portal"
+    ts "  Flatpak/Steam bez portalu nie uruchomi gier (timeout org.freedesktop.portal.Flatpak)"
     export GTK_USE_PORTAL=0
     if [ -n "${GDK_DEBUG:-}" ]; then
         export GDK_DEBUG="$GDK_DEBUG,no-portals"
@@ -292,8 +403,61 @@ elif [ "$portal_backend_ok" = 0 ]; then
     fi
 else
     portal_log="${log_dir:-${XDG_STATE_HOME:-$HOME/.local/state}/luna}/portal.log"
-    "$portal_bin" >"$portal_log" 2>&1 &
-    ts "uruchamiam xdg-desktop-portal ($portal_bin, log: $portal_log)"
+    portal_started=0
+    # Preferujemy usługę systemd: ma własny cgroup i nie zostawia sieroty po sesji.
+    if command -v systemctl >/dev/null 2>&1; then
+        if systemctl --user start xdg-desktop-portal.service >>"$portal_log" 2>&1; then
+            portal_started=1
+        fi
+    fi
+    if [ "$portal_started" = 0 ]; then
+        "$portal_bin" >>"$portal_log" 2>&1 &
+    fi
+    ts "uruchamiam xdg-desktop-portal (gtk=$portal_gtk wlr=$portal_wlr, log: $portal_log)"
+    # Backendy startujemy jawnie — usługa aktywowana przez D-Bus dostaje środowisko
+    # z chwili aktywacji, a nie z chwili startu sesji (np. po restarcie D-Busa).
+    if command -v systemctl >/dev/null 2>&1; then
+        [ "$portal_gtk" = ok ] && systemctl --user start xdg-desktop-portal-gtk.service >>"$portal_log" 2>&1 || true
+        if [ "$portal_wlr" = ok ]; then
+            if ! systemctl --user start xdg-desktop-portal-wlr.service >>"$portal_log" 2>&1; then
+                ts "portal/wlr: usługa nie wystartowała — sprawdź log: $portal_log"
+            fi
+        fi
+        # Frontend cache'uje `luna-portals.conf` przy starcie — po wygenerowaniu
+        # brakującego mapowania trzeba go przeładować, inaczej ScreenCast nadal
+        # trafiałby do backendu GTK.
+        if [ "$portal_conf_generated" = 1 ]; then
+            systemctl --user restart xdg-desktop-portal.service >>"$portal_log" 2>&1 || true
+        fi
+    fi
+    # Backend GTK jest uszkodzony, ale wlr działa: nie każmy aplikacjom GTK
+    # czekać na portal, który i tak nie obsłuży wyboru pliku.
+    if [ "$portal_gtk" != ok ]; then
+        export GTK_USE_PORTAL=0
+        if [ -n "${GDK_DEBUG:-}" ]; then
+            GDK_DEBUG="$GDK_DEBUG,no-portals"
+        else
+            GDK_DEBUG="no-portals"
+        fi
+        export GDK_DEBUG
+    fi
+    # Dowód, że frontend i backend GTK naprawdę odpowiadają. Bez tego usterka
+    # portalu ujawnia się dopiero po 25 s w aplikacji (jak w RapidRAW).
+    # `Settings.Read` obsługuje backend GTK — przy jego braku test nie ma sensu.
+    if [ "$portal_gtk" != ok ]; then
+        ts "portal/Settings: backend gtk niedostępny — pomijam test Settings.Read"
+    elif command -v gdbus >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
+        portal_reply="$(timeout 3 gdbus call --session \
+            --dest org.freedesktop.portal.Desktop \
+            --object-path /org/freedesktop/portal/desktop \
+            --method org.freedesktop.portal.Settings.Read \
+            org.freedesktop.appearance color-scheme 2>/dev/null || true)"
+        if [ -n "$portal_reply" ]; then
+            ts "portal odpowiada (Settings.Read: $portal_reply)"
+        else
+            ts "UWAGA: portal nie odpowiedział w 3 s — sprawdź $portal_log"
+        fi
+    fi
 fi
 # Aplikacje uruchamiane przez D-Bus (zsynchronizuj też środowisko aktywacji).
 if command -v dbus-update-activation-environment >/dev/null 2>&1; then
@@ -396,8 +560,8 @@ fi
 # Powitanie: „Co nowego” i (na obrazie live) skrót do instalatora.
 #
 # Okno pokazuje się przy każdym logowaniu, chyba że użytkownik zaznaczył
-# w nim „Nie uruchamiaj ponownie po zalogowaniu”. Wtedy w welcome.conf
-# leży autostart = false i ten blok je pomija. Plik można usunąć, żeby
+# w nim „Nie uruchamiaj ponownie po zalogowaniu”. Wtedy w `welcome.conf`
+# leży `autostart = false` i ten blok je pomija. Plik można usunąć, żeby
 # przywrócić powitanie.
 if command -v luna-welcome >/dev/null 2>&1; then
     welcome_conf=""

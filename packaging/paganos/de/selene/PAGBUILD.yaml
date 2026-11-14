@@ -20,6 +20,7 @@ depends:
 - dejavu-ttf
 - xdg-desktop-portal
 - xdg-desktop-portal-gtk
+- xdg-desktop-portal-wlr
 makedepends:
 - rustc
 source:
@@ -29,7 +30,7 @@ source:
 - selene.desktop
 sha256sums:
 - __TARBALL_SHA256__
-- 0205bed9740ec5ef016fb6d19e21823908d67ad75c389937aaf00a477def0ebe
+- 264502f26b798a23d153df86161022dbfca79de3025f600e890f63d25762bb85
 - 3ca502d380f46f8f3d36d32ac37cafac3f26c8cc631761ab6878e745c62b1063
 - __DESKTOP_SHA256__
 build: |
@@ -41,6 +42,9 @@ build: |
   # Skrypt sesji + wpis wyboru sesji (SDDM/GDM → /usr/share/wayland-sessions).
   install -Dm755 ../luna-session "${PKGDIR}/usr/bin/luna-session"
   install -Dm644 ../selene.desktop "${PKGDIR}/usr/share/wayland-sessions/selene.desktop"
+  # Target sesji: portale mają Requisite=graphical-session.target.
+  install -Dm644 ../luna-session.target \
+      "${PKGDIR}/usr/lib/systemd/user/luna-session.target"
 
   # Tłumaczenia kompozytora (doładowywane w runtime z /usr/share/luna/i18n).
   install -d "${PKGDIR}/usr/share/luna/i18n"

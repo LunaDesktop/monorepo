@@ -365,6 +365,7 @@ esac
 # gdy pakiet zostanie zaktualizowany, nasz plik zniknie sam.
 portal_conf=/usr/share/xdg-desktop-portal/luna-portals.conf
 portal_conf_ok=0
+portal_conf_generated=0
 if [ -r "$portal_conf" ] && grep -q 'ScreenCast=wlr' "$portal_conf"; then
     portal_conf_ok=1
 fi
@@ -385,6 +386,7 @@ org.freedesktop.impl.portal.ScreenCast=wlr;
 org.freedesktop.impl.portal.Screenshot=wlr;
 PORTAL_CONF
         ts "uzupełniam $user_portal_conf (stary luna-portals.conf bez ScreenCast=wlr)"
+        portal_conf_generated=1
     fi
 fi
 
@@ -421,10 +423,30 @@ else
                 ts "portal/wlr: usługa nie wystartowała — sprawdź log: $portal_log"
             fi
         fi
+        # Frontend cache'uje `luna-portals.conf` przy starcie — po wygenerowaniu
+        # brakującego mapowania trzeba go przeładować, inaczej ScreenCast nadal
+        # trafiałby do backendu GTK.
+        if [ "$portal_conf_generated" = 1 ]; then
+            systemctl --user restart xdg-desktop-portal.service >>"$portal_log" 2>&1 || true
+        fi
+    fi
+    # Backend GTK jest uszkodzony, ale wlr działa: nie każmy aplikacjom GTK
+    # czekać na portal, który i tak nie obsłuży wyboru pliku.
+    if [ "$portal_gtk" != ok ]; then
+        export GTK_USE_PORTAL=0
+        if [ -n "${GDK_DEBUG:-}" ]; then
+            GDK_DEBUG="$GDK_DEBUG,no-portals"
+        else
+            GDK_DEBUG="no-portals"
+        fi
+        export GDK_DEBUG
     fi
     # Dowód, że frontend i backend GTK naprawdę odpowiadają. Bez tego usterka
     # portalu ujawnia się dopiero po 25 s w aplikacji (jak w RapidRAW).
-    if command -v gdbus >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
+    # `Settings.Read` obsługuje backend GTK — przy jego braku test nie ma sensu.
+    if [ "$portal_gtk" != ok ]; then
+        ts "portal/Settings: backend gtk niedostępny — pomijam test Settings.Read"
+    elif command -v gdbus >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
         portal_reply="$(timeout 3 gdbus call --session \
             --dest org.freedesktop.portal.Desktop \
             --object-path /org/freedesktop/portal/desktop \
