@@ -297,10 +297,10 @@ impl Dispatch<wl_surface::WlSurface, SurfaceData> for State {
                 *data.input.lock_or_recover() = rects;
             }
             wl_surface::Request::Commit => {
-                // Wywołaj oczekujące frame-callbacki.
-                let now = state.time_ms();
+                // Frame-callbacki idą dopiero po prezentacji (wątek wyjścia):
+                // klient ma rysować z tempem ekranu, a nie w pętli bez ograniczeń.
                 for cb in data.frames.lock_or_recover().drain(..) {
-                    let _ = cb.send_event(wl_callback::Event::Done { callback_data: now });
+                    state.present.frame_after_present(cb);
                 }
                 // Powierzchnia kursora (`wl_pointer.set_cursor`) nie ma roli okna —
                 // jej commit tylko podmienia obraz kursora.

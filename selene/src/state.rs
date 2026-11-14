@@ -718,8 +718,9 @@ pub struct State {
 
 impl Default for State {
     fn default() -> Self {
+        let start = Instant::now();
         Self {
-            start: Instant::now(),
+            start,
             drm_backend: false,
             serial: 0,
             clients: 0,
@@ -795,7 +796,7 @@ impl Default for State {
             display_request: Arc::new(Mutex::new(None)),
             position_request: Arc::new(Mutex::new(None)),
             vt_request: Arc::new(Mutex::new(None)),
-            present: crate::present::PresentQueue::new(),
+            present: crate::present::PresentQueue::new(start),
             power_saver: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             idle: IdleSettings::default(),
             idle_last_input: Instant::now(),
