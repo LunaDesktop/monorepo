@@ -589,7 +589,7 @@ for group in sudo wheel video render input audio networkmanager lp scanner bluet
     fi
 done
 SHELL_BIN=/bin/sh
-if [ -x "$TARGET/bin/bash" ]; then SHELL_BIN=/bin/bash; fi
+if [ -x "$TARGET/bin/zsh" ]; then SHELL_BIN=/bin/zsh; elif [ -x "$TARGET/bin/bash" ]; then SHELL_BIN=/bin/bash; fi
 
 step "Creating user $USERNAME"
 if [ -n "$USER_GROUPS" ]; then
