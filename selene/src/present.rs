@@ -110,9 +110,47 @@ impl PresentQueue {
         }
     }
 
-    /// Czy coś czeka na zwolnienie/wysłanie (wątek wyjścia może wymusić klatkę).
-    pub fn has_pending(&self) -> bool {
-        !self.pending.lock_or_recover().is_empty()
+    /// Czy czeka bufor do zwolnienia (wymaga prezentacji nowej klatki).
+    pub fn has_pending_releases(&self) -> bool {
+        self.pending
+            .lock_or_recover()
+            .iter()
+            .any(|(_, item)| matches!(item, Item::Release(..)))
+    }
+
+    /// Czy czeka frame-callback (można go oddać w tempie odświeżania).
+    pub fn has_pending_frames(&self) -> bool {
+        self.pending
+            .lock_or_recover()
+            .iter()
+            .any(|(_, item)| matches!(item, Item::Frame(_)))
+    }
+
+    /// Oddaje frame-callbacki bez wymuszania nowej klatki.
+    ///
+    /// Używane, gdy scena się nie zmieniła: klient potrzebuje tylko sygnału
+    /// „możesz rysować następną klatkę”. Wymuszanie wtedy pełnego renderu obu
+    /// monitorów zrzucało kompozytor do kilkunastu fps (widoczne migotanie).
+    pub fn tick_frames(&self) {
+        let due: Vec<Item> = {
+            let mut pending = self.pending.lock_or_recover();
+            let mut due = Vec::new();
+            let mut index = 0;
+            while index < pending.len() {
+                if matches!(pending[index].1, Item::Frame(_)) {
+                    due.push(pending.swap_remove(index).1);
+                } else {
+                    index += 1;
+                }
+            }
+            due
+        };
+        let now = self.start.elapsed().as_millis() as u32;
+        for item in due {
+            if let Item::Frame(callback) = item {
+                let _ = callback.send_event(wl_callback::Event::Done { callback_data: now });
+            }
+        }
     }
 
     #[cfg(test)]
@@ -129,7 +167,8 @@ mod tests {
     fn queue_starts_empty_and_counts_presentations() {
         let queue = PresentQueue::new(std::time::Instant::now());
         assert_eq!(queue.pending_len(), 0);
-        assert!(!queue.has_pending());
+        assert!(!queue.has_pending_releases());
+        assert!(!queue.has_pending_frames());
         queue.mark_submitted();
         queue.presented();
         assert_eq!(queue.presented.load(Ordering::Acquire), 1);

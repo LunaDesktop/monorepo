@@ -974,10 +974,11 @@ pub fn spawn_drm(
                 }
             }
 
-            // Zwalniane bufory czekają na prezentację. Gdy nic się nie zmieniło
+            // Zwolnienia buforów czekają na prezentację. Gdy scena się nie zmieniła
             // (np. okno jest na innej przestrzeni), wymuś klatkę — inaczej klient
-            // nigdy nie dostanie `wl_buffer.release` i stanie.
-            if !any_changed && present.has_pending() {
+            // nigdy nie dostanie `wl_buffer.release` i stanie. Callbacki NIE wymuszają
+            // pełnego renderu obu monitorów — inaczej animacje zbijały fps do ~13.
+            if !any_changed && present.has_pending_releases() {
                 for value in changed.iter_mut() {
                     *value = true;
                 }
@@ -985,7 +986,13 @@ pub fn spawn_drm(
             }
 
             if !any_changed && !cur_changed {
-                std::thread::sleep(Duration::from_millis(2));
+                if present.has_pending_frames() {
+                    // Pacing ~60 Hz bez przerysowywania pulpitu.
+                    std::thread::sleep(Duration::from_millis(16));
+                    present.tick_frames();
+                } else {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
                 continue;
             }
             last_cur = cur;
