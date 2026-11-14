@@ -1118,7 +1118,9 @@ pub fn operations(
                     let install_scope = flatpak_install_scope(&scope, selected_remote.as_deref());
                     let mut command = vec![
                         "install".to_owned(),
-                        "--noninteractive".to_owned(),
+                        // Bez `--noninteractive`: ta flaga blokuje interaktywny polkit,
+                        // więc instalacja/aktualizacja systemowa kończyła się
+                        // „Flatpak system operation Deploy not allowed for user”.
                         "-y".to_owned(),
                     ];
                     command.extend(install_scope);
@@ -1135,11 +1137,7 @@ pub fn operations(
                     }]
                 }
                 OpKind::Remove => {
-                    let mut command = vec![
-                        "uninstall".to_owned(),
-                        "--noninteractive".to_owned(),
-                        "-y".to_owned(),
-                    ];
+                    let mut command = vec!["uninstall".to_owned(), "-y".to_owned()];
                     command.extend(scope);
                     command.push(id.to_owned());
                     vec![Operation {
@@ -1149,11 +1147,7 @@ pub fn operations(
                     }]
                 }
                 OpKind::Update => {
-                    let mut command = vec![
-                        "update".to_owned(),
-                        "--noninteractive".to_owned(),
-                        "-y".to_owned(),
-                    ];
+                    let mut command = vec!["update".to_owned(), "-y".to_owned()];
                     command.extend(scope);
                     command.push(id.to_owned());
                     vec![Operation {
@@ -1163,11 +1157,7 @@ pub fn operations(
                     }]
                 }
                 OpKind::UpdateAll => {
-                    let mut command = vec![
-                        "update".to_owned(),
-                        "--noninteractive".to_owned(),
-                        "-y".to_owned(),
-                    ];
+                    let mut command = vec!["update".to_owned(), "-y".to_owned()];
                     command.extend(scope);
                     vec![Operation {
                         program: "flatpak".into(),
@@ -1938,6 +1928,31 @@ mod tests {
         .unwrap();
         assert!(!flatpak[0].privileged);
         assert!(flatpak[0].args.iter().any(|arg| arg == "flathub"));
+        // `--noninteractive` blokowało polkit dla instalacji systemowych.
+        assert!(!flatpak[0].args.iter().any(|arg| arg == "--noninteractive"));
+    }
+
+    #[test]
+    fn flatpak_operations_keep_polkit_interactive() {
+        // `--noninteractive` wyłącza interaktywną autoryzację polkit, przez co
+        // aktualizacja aplikacji systemowych (np. RapidRAW) kończyła się kodem 1.
+        for kind in [
+            OpKind::Install,
+            OpKind::Remove,
+            OpKind::Update,
+            OpKind::UpdateAll,
+        ] {
+            let ops = operations(
+                &repo(BackendKind::Flatpak),
+                kind,
+                "io.github.CyberTimon.RapidRAW",
+                Some("flathub"),
+            )
+            .unwrap();
+            assert_eq!(ops.len(), 1);
+            assert!(!ops[0].args.iter().any(|arg| arg == "--noninteractive"));
+            assert!(ops[0].args.iter().any(|arg| arg == "-y"));
+        }
     }
 
     #[test]
