@@ -6,6 +6,8 @@
 
 ![Tryb naukowy](images/calculator-scientific.png)
 
+![Tryb naukowy w wąskim oknie](images/calculator-scientific-narrow.png)
+
 ![Menu aplikacji](images/calculator-menu.png)
 
 ![Ustawienia](images/calculator-settings.png)
@@ -76,4 +78,4 @@ cargo run --manifest-path apps/luna-calculator/Cargo.toml --bin preview
 ```
 
 Wejście z wpisu `eu.luna.Calculator.desktop`; podglądy headless trafiają do
-`docs/images/calculator-{standard,scientific,menu,history,settings,about}.png`.
+`docs/images/calculator-{standard,scientific,scientific-narrow,menu,history,settings,about}.png`.

@@ -34,6 +34,9 @@ wykonuje się lokalnie w aplikacji — bez GTK, bez bazy danych i bez sieci.
   (`Standard`/`Naukowy`), zapisywane w `~/.config/luna/calculator.conf`.
   Tryb startowy działa przy następnym uruchomieniu; bieżący tryb zmienia
   przełącznik w pasku tytułu.
+- **Responsywność** — standardowy tryb startuje w węższym oknie, naukowy w szerszym;
+  przy wąskim oknie panel naukowy układa się nad standardowym. Długie wyrażenie
+  jest dopasowywane rozmiarem, a potem skracane wielokropkiem od lewej.
 - **Niejawne mnożenie** — `2π`, `3(4+5)` i `2sin(30)` działają bez dodatkowego `×`.
 - **Procent i modulo** — `%` jest postfiksowe (`50%` = `0.5`), a `mod` liczy resztę
   z dzielenia (`7 mod 3` = `1`).

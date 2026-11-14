@@ -232,7 +232,7 @@ fn paint_content(app: &mut App, ctx: &mut PaintCtx, area: Rect) {
             );
             paint_keypad(app, ctx, card, &STANDARD_ROWS);
         }
-        Mode::Scientific => {
+        Mode::Scientific if below.width() >= 760.0 => {
             let left_w = ((below.width() - gap) / 2.0).floor();
             let right_w = (below.width() - left_w - gap).max(0.0);
             let height = below.height().min(520.0);
@@ -241,6 +241,15 @@ fn paint_content(app: &mut App, ctx: &mut PaintCtx, area: Rect) {
             let right = Rect::from_xywh(below.x() + left_w + gap, y, right_w, height);
             paint_keypad(app, ctx, left, &SCIENTIFIC_ROWS);
             paint_keypad(app, ctx, right, &STANDARD_ROWS);
+        }
+        Mode::Scientific => {
+            // Wąskie okno: panel naukowy nad standardowym zamiast dwóch kolumn.
+            let sci_h = ((below.height() - gap) * 0.56).floor();
+            let std_h = (below.height() - gap - sci_h).max(0.0);
+            let upper = Rect::from_xywh(below.x(), below.y(), below.width(), sci_h);
+            let lower = Rect::from_xywh(below.x(), upper.bottom() + gap, below.width(), std_h);
+            paint_keypad(app, ctx, upper, &SCIENTIFIC_ROWS);
+            paint_keypad(app, ctx, lower, &STANDARD_ROWS);
         }
     }
 }

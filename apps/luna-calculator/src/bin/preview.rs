@@ -66,6 +66,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         "calculator-scientific.png",
     )?;
 
+    let mut narrow = App::new();
+    narrow.mode = Mode::Scientific;
+    narrow.expression = "sin(30)+√(16)".to_owned();
+    save(
+        &mut narrow,
+        STANDARD,
+        &light,
+        &text,
+        "calculator-scientific-narrow.png",
+    )?;
+
     let mut settings = App::with_prefs(Prefs {
         angle: AngleMode::Radians,
         start_mode: Mode::Scientific,
