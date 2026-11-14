@@ -15,7 +15,8 @@ use libluna_i18n::{tr, tr_args};
 use libluna_render::{Scene, TextEngine};
 use libluna_widgets::{
     clipboard_command, paint_icon, sidebar_icon, AlertDialog, Button, ButtonVariant, ControlsSide,
-    HeaderBar, IconName, PaintCtx, Spinner, TextClipboardCommand, ViewMode, WindowControl,
+    HeaderBar, IconName, PaintCtx, ScrollDrag, Spinner, TextClipboardCommand, ViewMode,
+    WindowControl,
 };
 
 use crate::app::{source_icon, App, OpRecord, Page};
@@ -1674,9 +1675,10 @@ pub fn handle_events(
     text: &TextEngine,
 ) {
     let lay = layout(size, theme, app.sidebar_visible, app.select_mode);
-    app.scroll
-        .set_content_height(items_content_height(app, app.view.len(), &lay));
-    app.scroll.set_offset(app.scroll.offset(), lay.viewport);
+    app.scroll.configure(
+        lay.viewport,
+        items_content_height(app, app.view.len(), &lay),
+    );
 
     // Modalne okna informacyjne (O aplikacji, Konfiguracja, potwierdzenie
     // aktualizacji) oraz okno hasła administratora pochłaniają całe wejście.
@@ -1693,6 +1695,9 @@ pub fn handle_events(
         match event {
             Event::PointerMotion { position, .. } => {
                 app.pointer = Some(*position);
+                if matches!(app.scroll.handle_pointer(event, theme), ScrollDrag::Moved) {
+                    continue;
+                }
                 app.hover_control = HeaderBar::new()
                     .controls(ControlsSide::Right)
                     .control_at(lay.header, theme, *position);
@@ -1759,18 +1764,25 @@ pub fn handle_events(
             Event::PointerButton(button) if button.state == ButtonState::Pressed => {
                 match button.button {
                     PointerButton::Left => {
-                        handle_click(app, &lay, size, theme, text, button.position)
+                        if !matches!(
+                            app.scroll.handle_pointer(event, theme),
+                            ScrollDrag::Captured
+                        ) {
+                            handle_click(app, &lay, size, theme, text, button.position);
+                        }
                     }
                     PointerButton::Back => app.go_back(),
                     PointerButton::Forward => app.go_forward(),
                     _ => {}
                 }
             }
+            Event::PointerButton(button) if button.state == ButtonState::Released => {
+                app.scroll.handle_pointer(event, theme);
+            }
             Event::Scroll(scroll)
                 if lay.viewport.contains(scroll.position) && !app.sheet.is_open() =>
             {
-                app.scroll
-                    .on_scroll(scroll.notches_y() * SCROLL_STEP, lay.viewport);
+                app.scroll.handle_wheel(event);
             }
             Event::Key(key) if key.state == ButtonState::Pressed => {
                 handle_key(app, key, &lay, theme);

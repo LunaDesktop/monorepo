@@ -1,10 +1,10 @@
-# Luna Clock — zegar, minutnik, stoper i kalendarz
+# Luna Time — zegar, minutnik, stoper i kalendarz
 
 ![Zegar — ciemny motyw](images/clock-clock.png)
 
 ![Kalendarz z wydarzeniami i świętami](images/clock-calendar.png)
 
-`luna-clock` to lekka aplikacja środowiska Luna na libLunie: cztery strony
+`luna-clock` (nazwa wyświetlana: **Czas**) to lekka aplikacja środowiska Luna na libLunie: cztery strony
 robocze (Zegar, Minutnik, Stoper, Kalendarz) oraz Ustawienia. Nie wymaga
 GTK, nie uruchamia usług w tle i nie wysyła żadnych danych.
 

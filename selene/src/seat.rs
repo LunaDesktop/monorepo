@@ -951,6 +951,10 @@ fn pointer_motion(state: &mut State, handle: &DisplayHandle, pos: Point) {
     let pos = crate::pointer_constraints::filter_motion(state, pos);
     state.pointer_pos = (pos.x, pos.y);
     state.pointer_seen = true;
+    // Paleta zrzutów: ruch tylko podświetla opcję albo rozciąga zaznaczanie.
+    if crate::screenshot::pointer_motion(state, pos) {
+        return;
+    }
     if state.overview_on() {
         // W podglądzie ruch myszy tylko aktualizuje „ducha” przeciąganego okna.
         state.move_overview_drag((pos.x, pos.y));
@@ -1044,6 +1048,10 @@ fn pointer_button(
     if st == ButtonState::Pressed {
         // Ograniczenia `oneshot` kończą się na pierwszym przycisku.
         crate::pointer_constraints::button_pressed(state);
+    }
+    // Paleta zrzutów: klik w opcję, start/koniec zaznaczania obszaru.
+    if crate::screenshot::pointer_button(state, pos, button, st) {
+        return;
     }
     // W trybie podglądu: przeciąganie kafelka, wybór przestrzeni albo zamknięcie.
     if state.overview_on() {
@@ -1328,7 +1336,7 @@ fn debug_part(state: &State, slot: usize, what: &str) {
     eprintln!("selene/win: klik {what} slot={slot} {geometry:?}");
 }
 
-fn pointer_leave(state: &mut State) {
+pub(crate) fn pointer_leave(state: &mut State) {
     if let Some((_, surface)) = state.pointer_focus.clone() {
         if let Some(ptr) = pointer_for(state, &surface) {
             let serial = state.next_serial();
@@ -2528,16 +2536,6 @@ fn notify_xwm_focus(state: &State, slot: usize) {
     }
 }
 
-/// Zgłasza żądanie zrzutu ekranu (realizuje je wątek wyjścia).
-fn request_screenshot(state: &mut State) {
-    state
-        .screenshot
-        .store(true, std::sync::atomic::Ordering::Relaxed);
-    if std::env::var("SELENE_STATS").is_ok() {
-        eprintln!("selene: żądanie zrzutu ekranu");
-    }
-}
-
 fn keyboard_key(state: &mut State, keysym: u32, keycode: u32, st: ButtonState) {
     state.note_activity();
     // Ctrl+Alt+F1…F12: przełączenie wirtualnego terminala. Jądro nie widzi tych
@@ -2571,15 +2569,20 @@ fn keyboard_key(state: &mut State, keysym: u32, keycode: u32, st: ButtonState) {
     // To samo dotyczy aktywnego inhibitora skrótów: klient (gra, emulator, zdalny
     // pulpit) świadomie przejmuje Super/Alt+Tab, więc kompozytor ich nie zjada.
     if !state.locked && !crate::keyboard_shortcuts_inhibit::shortcuts_inhibited(state) {
+        // Paleta zrzutów (`Super+F12`) ma pierwszeństwo przed skrótami pulpitu:
+        // Esc zamyka, strzałki wybierają, Enter robi zrzut.
+        if crate::screenshot::handle_key(state, keysym, st) {
+            return;
+        }
         // Escape zamyka podgląd (Super+Tab) i nie trafia do klienta.
         if keysym == 0xff1b && state.overview_on() {
             state.set_overview(false);
             return;
         }
-        // `Print` — zrzut ekranu bez modyfikatora (alternatywa dla Super+F12).
+        // `Print` — paleta zrzutu ekranu (alternatywa dla Super+F12).
         if keysym == 0xff61 {
             if st == ButtonState::Pressed {
-                request_screenshot(state);
+                crate::screenshot::open(state);
             }
             return;
         }
@@ -2789,7 +2792,7 @@ fn window_shortcut(state: &mut State, keysym: u32, st: ButtonState) -> bool {
                 switch_workspace(state, index);
             }
         }
-        ShortcutAction::Screenshot => request_screenshot(state),
+        ShortcutAction::Screenshot => crate::screenshot::open(state),
         ShortcutAction::Logout => {
             // Kończymy kompozytor (sesję), więc menedżer logowania wraca do greetera.
             println!("{}", libluna_i18n::tr("logging out"));

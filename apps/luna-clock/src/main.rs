@@ -1,4 +1,4 @@
-//! `luna-clock` — zegar i kalendarz środowiska Luna.
+//! `luna-clock` — czas i kalendarz środowiska Luna (Luna Time).
 
 use std::error::Error;
 

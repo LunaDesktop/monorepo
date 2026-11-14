@@ -335,6 +335,44 @@ pub struct Overview {
     /// Trzymamy to razem z modelem rysowania, żeby wątek wyjścia widział zmianę
     /// bez dodatkowej synchronizacji.
     pub blanked: bool,
+    /// Paleta zrzutu ekranu (`Super+F12`); `None` = zamknięta.
+    pub shot: Option<ShotUi>,
+}
+
+/// Stan palety zrzutu ekranu (współdzielony z wątkami wyjścia).
+///
+/// Wszystko jest `Copy`, bo wątek renderujący kopiuje model raz na klatkę.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShotUi {
+    /// Zaznaczona opcja: `0` = wszystkie monitory, `1..=monitors` = numer
+    /// monitora, `monitors + 1` = zaznaczanie obszaru.
+    pub selected: usize,
+    /// Liczba monitorów w chwili otwarcia palety (etykiety i trafienia).
+    pub monitors: usize,
+    /// Opcja pod kursorem (podświetlenie).
+    pub hover: Option<usize>,
+    /// Tryb zaznaczania obszaru — pastylka jest wtedy schowana.
+    pub selecting: bool,
+    /// Prostokąt zaznaczania w globalnych pikselach: `(start, bieżący)`.
+    pub area: Option<(Point, Point)>,
+    /// Obrys monitora odpowiadającego zaznaczonej opcji (globalnie).
+    pub highlight: Option<Rect>,
+    /// Pozycja pastylki (globalnie) — rysuje ją tylko monitor, który ją zawiera.
+    pub pill: Rect,
+}
+
+impl Default for ShotUi {
+    fn default() -> Self {
+        Self {
+            selected: 0,
+            monitors: 1,
+            hover: None,
+            selecting: false,
+            area: None,
+            highlight: None,
+            pill: Rect::from_xywh(0.0, 0.0, 0.0, 0.0),
+        }
+    }
 }
 
 /// Który róg ekranu jest aktualnie „przytrzymywany” kursorem.
@@ -674,6 +712,8 @@ pub struct State {
     /// Żądanie przełączenia VT (`Ctrl+Alt+F1…F12`) — obsługuje wątek wyjścia DRM
     /// (musi zwolnić master przed przełączeniem i odzyskać go po powrocie).
     pub vt_request: Arc<Mutex<Option<u32>>>,
+    /// Kolejka `wl_buffer.release` — zwalniana po prezentacji klatki.
+    pub present: Arc<crate::present::PresentQueue>,
 }
 
 impl Default for State {
@@ -755,6 +795,7 @@ impl Default for State {
             display_request: Arc::new(Mutex::new(None)),
             position_request: Arc::new(Mutex::new(None)),
             vt_request: Arc::new(Mutex::new(None)),
+            present: crate::present::PresentQueue::new(),
             power_saver: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             idle: IdleSettings::default(),
             idle_last_input: Instant::now(),

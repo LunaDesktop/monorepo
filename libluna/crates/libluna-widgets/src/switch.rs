@@ -3,17 +3,23 @@
 use libluna_core::{Color, Point, Rect, Theme};
 
 use crate::ctx::PaintCtx;
+use crate::focus::paint_focus_ring;
 
 /// Przełącznik. Widget immediate: trzyma stan „wł.” i podświetlenie.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Switch {
     on: bool,
     hovered: bool,
+    focused: bool,
 }
 
 impl Switch {
     pub fn new(on: bool) -> Self {
-        Self { on, hovered: false }
+        Self {
+            on,
+            hovered: false,
+            focused: false,
+        }
     }
 
     pub fn is_on(&self) -> bool {
@@ -26,6 +32,15 @@ impl Switch {
 
     pub fn set_hovered(&mut self, hovered: bool) {
         self.hovered = hovered;
+    }
+
+    /// Pierścień fokusu (nawigacja `Tab`).
+    pub fn set_focused(&mut self, focused: bool) {
+        self.focused = focused;
+    }
+
+    pub fn focused(&self) -> bool {
+        self.focused
     }
 
     pub fn size(&self, theme: &Theme) -> (f64, f64) {
@@ -67,6 +82,10 @@ impl Switch {
             knob_r,
             Color::WHITE,
         );
+
+        if self.focused {
+            paint_focus_ring(ctx, rect, rect.height() / 2.0);
+        }
     }
 }
 

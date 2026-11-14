@@ -11,6 +11,12 @@ cargo test
 cargo run --bin welcome-render -- --live --dark /tmp/welcome.png
 ```
 
+## Wygląd
+
+Nowoczesny ekran powitalny: karta z „zorzą” i księżycem, kafelki startowe
+(3 w rzędzie, w kolumnie przy wąskim oknie) oraz timeline nowości z pigułkami
+wersji. Podglądy: `docs/images/luna-welcome-dark.png` i `luna-welcome-light.png`.
+
 ## Zachowanie
 
 - **Wykrywanie live ISO** sprawdza standardowe znaczniki live-boot/casper,

@@ -295,6 +295,12 @@ Start a player = Uruchom odtwarzacz
 Lock screen = Zablokuj ekran
 Lock = Zablokuj
 Log out = Wyloguj
+Screenshot = Zrzut ekranu
+Screenshot saved = Utworzono zrzut ekranu
+Open location = Otwórz lokalizację
+All monitors = Wszystkie monitory
+Select area = Zaznacz obszar
+Drag to select an area · Esc to cancel = Przeciągnij, aby zaznaczyć obszar · Esc anuluje
 Restart = Uruchom ponownie
 Reboot = Restart
 Power off = Wyłącz
@@ -1778,3 +1784,18 @@ Enabled — boot loader is not signed; disable Secure Boot or enroll keys after 
 The macOS look needs a global menu and a bottom dock — coming in a later version = Wygląd macOS wymaga globalnego menu i docka na dole — pojawi się w kolejnej wersji
 Tray labels are shown only when the panel is horizontal = Nazwy w trayu są widoczne tylko przy poziomym panelu
 The Luna bar is available now — the macOS-style floating dock is coming in a later version = Pasek Luny jest już dostępny — pływający dock w stylu macOS pojawi się w kolejnej wersji
+
+# --- Luna Time / Luna Calculator ---
+Time = Czas
+Calculator = Kalkulator
+Standard = Standardowy
+Scientific = Naukowy
+Type an expression = Wpisz wyrażenie
+Invalid expression = Nieprawidłowe wyrażenie
+Division by zero = Dzielenie przez zero
+Unknown function = Nieznana funkcja
+Missing parenthesis = Brakujący nawias
+Unexpected character = Nieoczekiwany znak
+Expression is too complex = Wyrażenie jest zbyt złożone
+Factorial needs a non-negative integer = Silnia wymaga nieujemnej liczby całkowitej
+Result is not a number = Wynik nie jest liczbą

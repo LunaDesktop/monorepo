@@ -28,9 +28,11 @@ mod pointer_constraints;
 mod pointer_ext;
 mod pointer_warp;
 mod popup;
+mod present;
 mod primary_selection;
 mod protocols;
 mod screencopy;
+mod screenshot;
 mod seat;
 mod shell;
 mod shm;
@@ -310,6 +312,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             Arc::clone(&state.ws_current),
             Arc::clone(&state.overview),
             Arc::clone(&state.screenshot),
+            Arc::clone(&state.present),
             Arc::clone(&state.night_light),
             Arc::clone(&state.power_saver),
             Arc::clone(&state.outputs),
@@ -327,6 +330,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             Arc::clone(&state.ws_current),
             Arc::clone(&state.overview),
             Arc::clone(&state.screenshot),
+            Arc::clone(&state.present),
             ws_count,
             1280,
             800,

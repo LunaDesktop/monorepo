@@ -104,7 +104,8 @@ luna/                        # meta-repozytorium (dev + integracja)
     luna-files/              # menedżer plików Luna Files
     luna-media/              # przeglądarka obrazów i filmów (ffmpeg)
     luna-editor/             # edytor tekstu i kodu z podświetlaniem składni
-    luna-clock/              # zegar, minutnik, stoper, strefy i prywatny kalendarz
+    luna-clock/              # czas: zegar, minutnik, stoper, strefy i prywatny kalendarz
+    luna-calculator/         # kalkulator standardowy i naukowy
     luna-settings/          # centrum ustawień środowiska i systemu
     luna-store/              # sklep: pacman/pag/apt/dnf/emerge/Flatpak + aktualizacje
     luna-welcome/            # powitanie, nowości i skrót do instalatora (live ISO)
@@ -124,7 +125,8 @@ luna/                        # meta-repozytorium (dev + integracja)
 
 Mapowanie pojęć GTK/GDK/Gsk/libadwaita → libLuna: [`docs/architecture.md`](docs/architecture.md).
 Plan dalszej pracy: [`docs/roadmap.md`](docs/roadmap.md).
-Zegar i kalendarz: [`docs/clock.md`](docs/clock.md).
+Czas i kalendarz: [`docs/clock.md`](docs/clock.md).
+Kalkulator: [`docs/calculator.md`](docs/calculator.md).
 Centrum ustawień: [`docs/settings.md`](docs/settings.md).
 Sklep z oprogramowaniem: [`docs/store.md`](docs/store.md).
 Powitanie i instalacja: [`docs/welcome.md`](docs/welcome.md), [`docs/installer.md`](docs/installer.md).
@@ -517,6 +519,10 @@ XDG_CONFIG_HOME="$PWD/examples" cargo run --manifest-path apps/luna-demo/Cargo.t
   **Animacje wcielone w widgety**: przejścia `Stack` (slide/fade przez `StackTransition`),
   płynny `Revealer`, `Toast` (wjazd + fade), `BottomSheet` (wysuwanie), `Pager` (animowane
   przyciąganie do strony) — sterowane z aplikacji przez `advance(dt, …)`.
+- `libluna-widgets` — **spójne zachowanie**: `ScrollArea` (przewijanie kółkiem, klawiaturą
+  i przeciąganiem „kciuka” — jeden typ dla list w aplikacjach) oraz `FocusModel`
+  (`Tab`/`Shift+Tab`, aktywacja Enter/spacją, pierścień fokusu z `paint_focus_ring`;
+  wzorcowe użycie w Luna Welcome).
 - `libluna-widgets::layout`: **dwuprzebiegowy układ** (retencyjne drzewo `measure`/`allocate`) —
   [`Node`] (`VBox`/`HBox`, `Padding`, `Expanded`, `Center`, `Spacer`, `Label`, `Fixed`),
   [`Constraints`](min/max) i [`Layout`](`desired_size`/`fit`). Liście pochłaniają nadmiar
@@ -601,6 +607,15 @@ tryb alternatywny (`vim`, `less`, `htop`), zakładki, zaznaczanie i schowek
 Szczegóły: [`docs/terminal.md`](docs/terminal.md).
 
 ![Luna Terminal](docs/images/luna-terminal.png)
+
+Kalkulator (`luna-calculator`) — tryb standardowy i naukowy w jednym oknie:
+cztery działania, procenty, nawiasy, trygonometria, logarytmy, potęgi, silnia,
+`π`/`e`, `DEG`/`RAD` i notacja naukowa. Parser i podgląd wyniku działają
+lokalnie, bez sieci. Szczegóły: [`docs/calculator.md`](docs/calculator.md).
+
+![Luna Calculator — standard](docs/images/calculator-standard.png)
+
+![Luna Calculator — naukowy](docs/images/calculator-scientific.png)
 
 Edytor tekstu i kodu (`luna-editor`) — lekki edytor na `CodeView` z libLuny:
 zakładki w headerbarze, numery linii, podświetlanie składni (Rust, TOML, JSON,

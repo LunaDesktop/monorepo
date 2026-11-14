@@ -225,4 +225,8 @@ Dlatego kolejność to **damage → mniej komend → ewentualnie GPU**.
 - `SELENE_STATS=1` — kompozytor: FPS wyjścia i tempo kursora.
   W trybie DRM wypisuje też rozbicie klatki: `render`, `present`, `wait_flip`.
 - `scripts/session-smoke.sh` — poprawność przepływu (nie wydajność).
-- Zrzuty: `Print` / `Super+F12` w Selene; podglądy headless renderują do PNG.
+- Zrzuty: `Print` / `Super+F12` otwierają w Selene paletę (wszystkie monitory,
+  numer monitora, zaznaczenie obszaru); pliki lądują w `~/Pictures/Screenshots`,
+  a po zapisie Luna pokazuje powiadomienie z nazwą pliku (albo folderu);
+  kliknięcie toasta lub „Otwórz lokalizację” uruchamia menedżer plików w folderze zrzutu.
+  Podglądy headless renderują do PNG.

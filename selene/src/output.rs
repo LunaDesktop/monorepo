@@ -6,9 +6,12 @@
 //! (page-flip). Wejście w trybie DRM (evdev) jest kolejnym krokiem.
 
 use std::os::unix::net::UnixStream;
+use std::sync::Arc;
 use std::time::Duration;
 
+use libluna_core::style::weight;
 use libluna_core::{Color, Point, Rect, Size, Theme, ThemeSettings};
+use libluna_i18n::tr;
 use libluna_platform::{run, AppConfig, Frame};
 use libluna_render::gpu::GpuRenderer;
 use libluna_render::{
@@ -20,7 +23,7 @@ use crate::drm::{DrmBackend, DrmError, PixelRect};
 use crate::input::{self, Events};
 use crate::monitors::{layout_horizontal, OutputInfo, Outputs};
 use crate::state::{
-    CornerHint, CornerKind, CursorModel, Overview, OverviewModel, ScreenshotModel, Window,
+    CornerHint, CornerKind, CursorModel, Overview, OverviewModel, ScreenshotModel, ShotUi, Window,
     WindowModel, WorkspaceCountModel, WorkspaceModel,
 };
 use crate::sync::LockExt;
@@ -132,6 +135,7 @@ pub fn spawn(
     ws: WorkspaceModel,
     overview: OverviewModel,
     screenshot: ScreenshotModel,
+    present: Arc<crate::present::PresentQueue>,
     ws_count: WorkspaceCountModel,
     width: u32,
     height: u32,
@@ -151,7 +155,15 @@ pub fn spawn(
         // Zrzut nested: trzymamy jeden renderer przez całą sesję — tworzenie
         // kontekstu EGL przy każdym zrzucie to kilkadziesiąt ms i zbędny churn.
         let mut shot: Option<Box<dyn Renderer>> = None;
+        let mut first_frame = true;
         let result = run(config, move |frame: &mut Frame| {
+            // Poprzednia klatka została już pokazana przez nadrzędny kompozytor —
+            // dopiero teraz wolno oddać klientom bufory z tamtej klatki.
+            if first_frame {
+                first_frame = false;
+            } else {
+                present.presented();
+            }
             // Zgłoś bieżący rozmiar monitora (okno może być zmieniane przez rodzica).
             {
                 let mut outs = outputs.lock_or_recover();
@@ -182,6 +194,9 @@ pub fn spawn(
                 &theme,
                 &text,
             );
+            // Klatka zostanie pokazana przez nadrzędny kompozytor po powrocie
+            // z tego callbacku — od teraz liczy się jako „przekazana”.
+            present.mark_submitted();
             // Zrzut ekranu także w trybie nested: kompozytor nie ma tu skanouta,
             // więc kodujemy bieżącą scenę bezpośrednio do PNG.
             if screenshot.swap(false, std::sync::atomic::Ordering::Relaxed) {
@@ -201,7 +216,10 @@ pub fn spawn(
                         .unwrap_or(0);
                     let path = screenshot_dir().join(format!("luna-{stamp}-nested.png"));
                     match std::fs::write(&path, png) {
-                        Ok(()) => eprintln!("selene: zrzut ekranu: {}", path.display()),
+                        Ok(()) => {
+                            eprintln!("selene: zrzut ekranu: {}", path.display());
+                            crate::screenshot::notify_saved(&path);
+                        }
                         Err(e) => eprintln!("selene: nie udało się zapisać zrzutu: {e}"),
                     }
                 }
@@ -318,6 +336,7 @@ pub fn spawn_drm(
     ws: WorkspaceModel,
     overview: OverviewModel,
     screenshot: crate::state::ScreenshotModel,
+    present: Arc<crate::present::PresentQueue>,
     night_light: crate::state::NightLightModel,
     power_saver: crate::state::PowerSaverModel,
     outputs: Outputs,
@@ -620,6 +639,9 @@ pub fn spawn_drm(
                 }
                 ms_wait += t.elapsed().as_secs_f64() * 1000.0;
                 pending_flips = 0;
+                // Flipy się zakończyły — klatki są na ekranie. Dopiero teraz
+                // oddajemy klientom bufory, których już nikt nie skanuje.
+                present.presented();
             }
             // Przełączenie VT (`Ctrl+Alt+F1…F12`). Najpierw oddajemy master DRM —
             // bez tego konsola jądra (fbcon) nie przejmie ekranu i nowy VT jest
@@ -952,6 +974,16 @@ pub fn spawn_drm(
                 }
             }
 
+            // Zwalniane bufory czekają na prezentację. Gdy nic się nie zmieniło
+            // (np. okno jest na innej przestrzeni), wymuś klatkę — inaczej klient
+            // nigdy nie dostanie `wl_buffer.release` i stanie.
+            if !any_changed && present.has_pending() {
+                for value in changed.iter_mut() {
+                    *value = true;
+                }
+                any_changed = true;
+            }
+
             if !any_changed && !cur_changed {
                 std::thread::sleep(Duration::from_millis(2));
                 continue;
@@ -1122,6 +1154,9 @@ pub fn spawn_drm(
                 // Czekanie na flipy przenosimy na początek następnej iteracji
                 // (patrz `pending_flips` wyżej) — tutaj tylko je zapamiętujemy.
                 pending_flips = num_flips;
+                if num_flips > 0 {
+                    present.mark_submitted();
+                }
 
                 frames += 1;
                 if stats && report.elapsed().as_secs_f64() >= 2.0 {
@@ -1146,13 +1181,44 @@ pub fn spawn_drm(
     });
 }
 
-/// Zapisuje bieżące klatki (po jednej na monitor) jako PNG — obsługa `Super+F12`.
+/// Zapisuje surowe RGBA jako PNG w katalogu zrzutów (`luna-<czas>-<nazwa>.png`).
+///
+/// Używane przez paletę (`Super+F12`) — `wlr-screencopy` koduje przez własny
+/// renderer, a tutaj potrzebujemy zapisać gotowy bufor (także sklejony obszar).
+pub(crate) fn write_screenshot_png(
+    name: &str,
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+) -> Option<std::path::PathBuf> {
+    if width == 0 || height == 0 || rgba.len() != width as usize * height as usize * 4 {
+        return None;
+    }
+    let mut scene = Scene::new();
+    scene.image(
+        Rect::from_xywh(0.0, 0.0, width as f64, height as f64),
+        std::sync::Arc::new(ImageData::new(width, height, rgba)),
+    );
+    let mut renderer = SoftwareRenderer::new(width, height);
+    renderer.draw(&scene, 1.0, Color::from_rgba8(0x00, 0x00, 0x00, 0xff));
+    let png = renderer.encode_png()?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let path = screenshot_dir().join(format!("luna-{stamp}-{name}.png"));
+    std::fs::write(&path, png).ok().map(|_| path)
+}
+
+/// Zapisuje bieżące klatki (po jednej na monitor) jako PNG — bezpośredni zrzut
+/// (dawniej `Super+F12`, dziś `luna-control screenshot`).
 pub fn save_screenshots(renderers: &[&dyn Renderer], infos: &[(String, u32, u32, u32)]) {
     let dir = screenshot_dir();
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
+    let mut saved = false;
     for (i, renderer) in renderers.iter().enumerate() {
         let name = infos
             .get(i)
@@ -1161,11 +1227,17 @@ pub fn save_screenshots(renderers: &[&dyn Renderer], infos: &[(String, u32, u32,
         let path = dir.join(format!("luna-{stamp}-{name}.png"));
         match renderer.encode_png() {
             Some(png) => match std::fs::write(&path, png) {
-                Ok(()) => eprintln!("selene: zrzut ekranu: {}", path.display()),
+                Ok(()) => {
+                    eprintln!("selene: zrzut ekranu: {}", path.display());
+                    saved = true;
+                }
                 Err(e) => eprintln!("selene: nie udało się zapisać zrzutu: {e}"),
             },
             None => eprintln!("selene: nie udało się zakodować zrzutu"),
         }
+    }
+    if saved {
+        crate::screenshot::notify_saved(&dir);
     }
 }
 
@@ -1181,7 +1253,7 @@ fn gpu_requested() -> bool {
 
 /// Katalog na zrzuty: `XDG_PICTURES_DIR` → `~/.config/user-dirs.dirs` → `$HOME/Pictures`
 /// (oraz polskie `Obrazy`) → `/tmp`.
-fn screenshot_dir() -> std::path::PathBuf {
+pub(crate) fn screenshot_dir() -> std::path::PathBuf {
     let mut pictures = std::env::var("XDG_PICTURES_DIR")
         .ok()
         .filter(|d| !d.is_empty());
@@ -1329,6 +1401,32 @@ fn output_signature(
     mix(wallpaper_stamp());
     mix(u64::from(overview.on));
     mix(u64::from(overview.blanked));
+    // Paleta zrzutów: każda zmiana zaznaczenia, podświetlenia i prostokąta
+    // musi dać nową klatkę — inaczej wątek wyjścia nie odświeży nakładki.
+    match overview.shot {
+        Some(shot) => {
+            mix(1);
+            mix(shot.selected as u64);
+            mix(shot.monitors as u64);
+            mix(shot.hover.map_or(u64::MAX, |v| v as u64));
+            mix(u64::from(shot.selecting));
+            if let Some((a, b)) = shot.area {
+                mix(a.x.to_bits());
+                mix(a.y.to_bits());
+                mix(b.x.to_bits());
+                mix(b.y.to_bits());
+            }
+            if let Some(r) = shot.highlight {
+                mix(r.x().to_bits());
+                mix(r.y().to_bits());
+                mix(r.width().to_bits());
+                mix(r.height().to_bits());
+            }
+            mix(shot.pill.x().to_bits());
+            mix(shot.pill.y().to_bits());
+        }
+        None => mix(0),
+    }
     if let Some((slot, (px, py))) = overview.drag {
         mix(slot as u64);
         mix(px.to_bits());
@@ -1396,6 +1494,23 @@ fn scene_signature(
     mix(u64::from(overview.on));
     mix(u64::from(overview.blanked));
     mix(wallpaper_stamp());
+    if let Some(shot) = overview.shot {
+        mix(1);
+        mix(shot.selected as u64);
+        mix(shot.monitors as u64);
+        mix(shot.hover.map_or(u64::MAX, |v| v as u64));
+        mix(u64::from(shot.selecting));
+        if let Some((a, b)) = shot.area {
+            mix(a.x.to_bits());
+            mix(a.y.to_bits());
+            mix(b.x.to_bits());
+            mix(b.y.to_bits());
+        }
+        mix(shot.pill.x().to_bits());
+        mix(shot.pill.y().to_bits());
+    } else {
+        mix(0);
+    }
     if let Some((slot, (px, py))) = overview.drag {
         mix(slot as u64);
         mix(px.to_bits());
@@ -1625,6 +1740,11 @@ fn build_scene(
         }
     }
 
+    // Paleta zrzutów (`Super+F12`) — nad oknami i podglądem, pod kursorem.
+    if let Some(shot) = overview.shot {
+        draw_shot_ui(scene, size, ox, oy, shot, theme, text);
+    }
+
     // Kursor rysuje ten monitor, na którym leży (tryb DRM — nikt go za nas nie narysuje).
     // Obraz (strzałka, kształt z motywu albo bufor klienta) pochodzi z `crate::cursor`.
     if let Some(c) = cursor.filter(|_| show_cursor) {
@@ -1647,6 +1767,7 @@ pub(crate) fn capture_output_rgba(
     index: usize,
     overlay_cursor: bool,
     region: Option<(i32, i32, i32, i32)>,
+    hide_ui: bool,
 ) -> Option<(Vec<u8>, u32, u32)> {
     use std::cell::RefCell;
     thread_local! {
@@ -1680,8 +1801,13 @@ pub(crate) fn capture_output_rgba(
         return None;
     }
     let theme = user_theme();
-    let ov = *state.overview.lock_or_recover();
     let ws = *state.ws_current.lock_or_recover();
+    let mut ov = *state.overview.lock_or_recover();
+    // Własne zrzuty palety nie zawierają jej nakładki; screencopy (nagrywanie,
+    // udostępnianie ekranu) widzi dokładnie to, co użytkownik — razem z paletą.
+    if hide_ui {
+        ov.shot = None;
+    }
     let ws_count = state
         .ws_count_model
         .load(std::sync::atomic::Ordering::Relaxed);
@@ -1859,6 +1985,157 @@ fn draw_corner_hint(
         (0.48, 0.10 + 0.12 * progress),
     ] {
         scene.fill_circle(center, radius * scale, accent.scale_alpha(alpha));
+    }
+}
+
+/// Paleta zrzutu ekranu: pastylka z opcjami, podświetlenie monitora i prostokąt
+/// zaznaczania. Rysowana tylko na monitorze, na którym leży pastylka (reszta
+/// dostaje przyciemnienie i podświetlenie), dzięki czemu działa na wielu ekranach.
+fn draw_shot_ui(
+    scene: &mut Scene,
+    size: Size,
+    ox: f64,
+    oy: f64,
+    ui: ShotUi,
+    theme: &Theme,
+    text: &TextEngine,
+) {
+    let colors = theme.colors;
+    let own = Rect::from_xywh(ox, oy, size.width, size.height);
+    let mut ctx = PaintCtx::new(scene, theme, text);
+
+    // Przyciemnienie pulpitu — pastylka i zaznaczenie muszą być czytelne na każdym tle.
+    let dim = if ui.selecting { 0x66 } else { 0x33 };
+    ctx.scene.fill_rect(
+        Rect::from_size(size),
+        Color::from_rgba8(0x00, 0x00, 0x00, dim),
+    );
+
+    if let Some(hl) = ui.highlight.filter(|rect| rect.intersects(&own)) {
+        let local = Rect::from_xywh(
+            hl.x() - ox + 6.0,
+            hl.y() - oy + 6.0,
+            (hl.width() - 12.0).max(1.0),
+            (hl.height() - 12.0).max(1.0),
+        );
+        ctx.scene
+            .stroke_rounded_rect(local, theme.radius.large, 3.0, colors.accent);
+    }
+
+    if let Some((a, b)) = ui.area {
+        let rect = Rect::from_xywh(
+            a.x.min(b.x) - ox,
+            a.y.min(b.y) - oy,
+            (a.x - b.x).abs(),
+            (a.y - b.y).abs(),
+        );
+        if rect.width() > 0.0 && rect.height() > 0.0 {
+            ctx.scene
+                .fill_rounded_rect(rect, 4.0, colors.accent.with_alpha(0.14));
+            ctx.scene.stroke_rounded_rect(rect, 4.0, 2.0, colors.accent);
+            let label = format!(
+                "{} × {}",
+                rect.width().round() as i64,
+                rect.height().round() as i64
+            );
+            let pill = Rect::from_xywh(rect.x(), (rect.y() - 28.0).max(4.0), 92.0, 22.0);
+            ctx.scene.fill_rounded_rect(pill, 11.0, colors.accent);
+            ctx.label_center(
+                pill.center().x,
+                pill.center().y,
+                &label,
+                theme.typography.caption.size,
+                weight::MEDIUM,
+                colors.accent_fg,
+            );
+        }
+    }
+
+    if ui.selecting {
+        let hint = tr("Drag to select an area · Esc to cancel");
+        let body = theme.typography.body.size;
+        let width = (ctx.measure(&hint, body, weight::MEDIUM) + 40.0).min(size.width - 24.0);
+        let pill = Rect::from_xywh(
+            own.center().x - width / 2.0,
+            own.bottom() - 72.0,
+            width,
+            40.0,
+        );
+        ctx.scene.fill_rounded_rect(pill, 20.0, colors.card_bg);
+        ctx.scene
+            .stroke_rounded_rect(pill, 20.0, 1.0, colors.border);
+        ctx.label_center(
+            pill.center().x,
+            pill.center().y,
+            &hint,
+            body,
+            weight::MEDIUM,
+            colors.text,
+        );
+        return;
+    }
+
+    if !ui.pill.intersects(&own) {
+        return;
+    }
+    let pill = Rect::from_xywh(
+        ui.pill.x() - ox,
+        ui.pill.y() - oy,
+        ui.pill.width(),
+        ui.pill.height(),
+    );
+    // Podpis nad pastylką — od razu wiadomo, do czego służą cyfry.
+    let caption = tr("Screenshot");
+    let caption_size = theme.typography.caption.size;
+    let caption_w = ctx.measure(&caption, caption_size, weight::MEDIUM) + 22.0;
+    let caption_rect = Rect::from_xywh(
+        pill.center().x - caption_w / 2.0,
+        pill.y() - 30.0,
+        caption_w,
+        22.0,
+    );
+    ctx.scene
+        .fill_rounded_rect(caption_rect, 11.0, colors.card_bg);
+    ctx.scene
+        .stroke_rounded_rect(caption_rect, 11.0, 1.0, colors.border);
+    ctx.label_center(
+        caption_rect.center().x,
+        caption_rect.center().y,
+        &caption,
+        caption_size,
+        weight::MEDIUM,
+        colors.dim_text,
+    );
+    ctx.scene
+        .fill_rounded_rect(pill, pill.height() / 2.0, colors.card_bg);
+    ctx.scene
+        .stroke_rounded_rect(pill, pill.height() / 2.0, 1.0, colors.border);
+
+    let body = theme.typography.body.size;
+    for (index, chip) in crate::screenshot::chip_rects(ui.pill, ui.monitors) {
+        let chip = Rect::from_xywh(chip.x() - ox, chip.y() - oy, chip.width(), chip.height());
+        let selected = index == ui.selected;
+        let hovered = ui.hover == Some(index);
+        if selected {
+            ctx.scene
+                .fill_rounded_rect(chip, chip.height() / 2.0, colors.accent);
+        } else if hovered {
+            ctx.scene
+                .fill_rounded_rect(chip, chip.height() / 2.0, colors.shade);
+        }
+        let fg = if selected {
+            colors.accent_fg
+        } else {
+            colors.text
+        };
+        ctx.label_center(
+            chip.center().x,
+            chip.center().y,
+            &crate::screenshot::chip_label(index, ui.monitors),
+            body,
+            weight::MEDIUM,
+            fg,
+        );
     }
 }
 
@@ -2566,5 +2843,80 @@ mod tests {
             "render 1080p + sparse panel: {:.2} ms/klatke",
             t.elapsed().as_secs_f64() * 1000.0 / n as f64
         );
+    }
+
+    #[test]
+    fn shot_palette_and_area_selection_render() {
+        use crate::screenshot::pill_rect;
+        use std::sync::{Arc, Mutex};
+        let model: WindowModel = Arc::new(Mutex::new(Vec::new()));
+        let theme = Theme::dark();
+        let size = Size::new(1280.0, 800.0);
+        let pill = pill_rect(Rect::from_size(size), 2);
+        let palette = ShotUi {
+            selected: 1,
+            monitors: 2,
+            hover: Some(2),
+            selecting: false,
+            area: None,
+            highlight: Some(Rect::from_xywh(0.0, 0.0, 640.0, 400.0)),
+            pill,
+        };
+        let accent = |scene: &Scene| {
+            scene.commands().iter().any(|command| {
+                matches!(command, DrawCommand::FillRoundedRect { color, .. } if *color == theme.colors.accent)
+            })
+        };
+        let mut scene = Scene::new();
+        build_scene(
+            &mut scene,
+            size,
+            0.0,
+            0.0,
+            &model,
+            0,
+            1,
+            Overview {
+                shot: Some(palette),
+                ..Overview::default()
+            },
+            true,
+            None,
+            true,
+            &theme,
+            &TextEngine::none(),
+        );
+        assert!(
+            accent(&scene),
+            "zaznaczony chip i obrys monitora rysują się akcentem"
+        );
+
+        let selecting = ShotUi {
+            selecting: true,
+            area: Some((Point::new(100.0, 100.0), Point::new(400.0, 300.0))),
+            hover: None,
+            highlight: None,
+            ..palette
+        };
+        let mut scene = Scene::new();
+        build_scene(
+            &mut scene,
+            size,
+            0.0,
+            0.0,
+            &model,
+            0,
+            1,
+            Overview {
+                shot: Some(selecting),
+                ..Overview::default()
+            },
+            true,
+            None,
+            true,
+            &theme,
+            &TextEngine::none(),
+        );
+        assert!(accent(&scene), "prostokąt zaznaczania rysuje się akcentem");
     }
 }

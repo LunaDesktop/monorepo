@@ -4,17 +4,20 @@
 use libluna_core::{Color, Insets, Point, Rect, Theme};
 
 use crate::ctx::PaintCtx;
+use crate::focus::paint_focus_ring;
 
 /// Suwak; `rect` oznacza tor (cienki pasek), a uchwyt rysowany jest ponad niego.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Slider {
     value: f64,
+    focused: bool,
 }
 
 impl Slider {
     pub fn new(value: f64) -> Self {
         Self {
             value: value.clamp(0.0, 1.0),
+            focused: false,
         }
     }
 
@@ -24,6 +27,15 @@ impl Slider {
 
     pub fn set_value(&mut self, value: f64) {
         self.value = value.clamp(0.0, 1.0);
+    }
+
+    /// Pierścień fokusu (nawigacja `Tab`) rysowany wokół uchwytu.
+    pub fn set_focused(&mut self, focused: bool) {
+        self.focused = focused;
+    }
+
+    pub fn focused(&self) -> bool {
+        self.focused
     }
 
     /// Wartość dla pozycji wskaźnika (0..1) względem toru.
@@ -61,6 +73,10 @@ impl Slider {
         ctx.scene.fill_rounded_rect(knob, knob_r, Color::WHITE);
         ctx.scene
             .stroke_rounded_rect(knob, knob_r, 1.0, colors.border);
+
+        if self.focused {
+            paint_focus_ring(ctx, knob, knob_r);
+        }
     }
 }
 

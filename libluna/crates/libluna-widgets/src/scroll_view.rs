@@ -81,18 +81,32 @@ impl ScrollView {
     /// Czy punkt trafia w „kciuk” (z tolerancją grubości).
     pub fn thumb_at(&self, viewport: Rect, theme: &Theme, p: Point) -> bool {
         self.thumb_rect(viewport, theme)
-            .is_some_and(|t| t.inflate(luna_insets(theme)).contains(p))
+            .is_some_and(|t| t.inflate(grab_insets(theme)).contains(p))
     }
 
     /// Rozpoczyna przeciąganie „kciuka” (jeśli punkt w niego trafia).
+    ///
+    /// Pasek jest cienki, więc chwytamy także **obok** kciuka (patrz
+    /// [`grab_insets`]). Klik w tor poza kciukiem przesuwa go od razu w to
+    /// miejsce — tak jak w GTK.
     pub fn begin_drag(&mut self, p: Point, viewport: Rect, theme: &Theme) -> bool {
-        match self.thumb_rect(viewport, theme) {
-            Some(t) if t.contains(p) => {
-                self.drag_grab = Some(p.y - t.y());
-                true
-            }
-            _ => false,
+        let Some(t) = self.thumb_rect(viewport, theme) else {
+            return false;
+        };
+        let zone = t.inflate(grab_insets(theme));
+        if zone.contains(p) {
+            // Chwytamy za miejsce, w które trafiliśmy, żeby kciuk nie skoczył.
+            self.drag_grab = Some((p.y - t.y()).clamp(0.0, t.height()));
+            return true;
         }
+        let in_track_x =
+            p.x >= zone.x() && p.x <= viewport.right() + theme.metrics.scrollview.margin.max(0.0);
+        if in_track_x && p.y >= viewport.y() && p.y <= viewport.bottom() {
+            self.drag_grab = Some(t.height() / 2.0);
+            self.drag_to(p, viewport, theme);
+            return true;
+        }
+        false
     }
 
     /// Aktualizuje przeciąganie „kciuka”.
@@ -126,8 +140,11 @@ impl ScrollView {
     }
 }
 
-fn luna_insets(theme: &Theme) -> libluna_core::Insets {
-    libluna_core::Insets::new(0.0, theme.metrics.scrollview.thickness, 0.0, 4.0)
+/// Obszar chwytu wokół kciuka. Pasek ma kilka pikseli, więc dokładamy zapas
+/// **w lewo** (tam leży treść) i po 2 px u góry/dołu.
+fn grab_insets(theme: &Theme) -> libluna_core::Insets {
+    let m = theme.metrics.scrollview;
+    libluna_core::Insets::new(2.0, m.margin.max(2.0), 2.0, m.thickness.max(6.0) + 4.0)
 }
 
 #[cfg(test)]
@@ -180,5 +197,30 @@ mod tests {
         s.drag_to(Point::new(t.center().x, 500.0), viewport(), &theme);
         assert_eq!(s.offset(), s.max_offset(viewport()));
         s.end_drag();
+    }
+
+    #[test]
+    fn grab_accepts_points_next_to_the_thin_thumb() {
+        let theme = Theme::light();
+        let mut s = ScrollView::new();
+        s.set_content_height(200.0);
+        let t = s.thumb_rect(viewport(), &theme).unwrap();
+        // 8 px w lewo od paska — wciąż traktujemy jak chwyt za kciuk.
+        assert!(s.begin_drag(Point::new(t.x() - 8.0, t.center().y), viewport(), &theme));
+    }
+
+    #[test]
+    fn click_on_empty_track_jumps_towards_that_position() {
+        let theme = Theme::light();
+        let mut s = ScrollView::new();
+        s.set_content_height(400.0);
+        let t = s.thumb_rect(viewport(), &theme).unwrap();
+        // Klik przy dolnej krawędzi toru → kciuk wędruje na dół.
+        assert!(s.begin_drag(
+            Point::new(t.center().x, viewport().bottom() - 2.0),
+            viewport(),
+            &theme
+        ));
+        assert!(s.offset() > s.max_offset(viewport()) * 0.8);
     }
 }

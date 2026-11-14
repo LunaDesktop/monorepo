@@ -33,9 +33,12 @@ pub struct SurfaceData {
     /// **podwójnym** zwolnieniem bufora — GTK pada wtedy na asercji cairo
     /// (`cairo_surface_destroy`). Zwolnienie musi być dokładnie raz na `attach`.
     pub release_needed: Mutex<bool>,
-    /// Poprzedni bufor `dmabuf` tej powierzchni — zwalniamy go przy **następnym**
-    /// commicie, gdy GPU na pewno skończyło czytać poprzednią klatkę.
-    pub pending_dmabuf_release: Mutex<Option<wl_buffer::WlBuffer>>,
+    /// Poprzedni bufor `dmabuf` tej powierzchni i numer `attach`, przy którym go
+    /// odłożono. Oddajemy go **po prezentacji** klatki, która go zastąpiła —
+    /// wcześniej klient mógłby nadpisać bufor wciąż skanowany (migotanie).
+    pub pending_dmabuf_release: Mutex<Option<(wl_buffer::WlBuffer, u64)>>,
+    /// Licznik `attach` — pozwala zwalniać bufor dmabuf tylko raz na nową klatkę.
+    pub attach_gen: Mutex<u64>,
     /// Slot okna w modelu (przydzielany przy pierwszym commicie).
     pub slot: Mutex<Option<usize>>,
     /// Powiązana powierzchnia warstwowa (`wlr-layer-shell`), jeśli klient ją utworzył.
@@ -98,6 +101,7 @@ impl SurfaceData {
             buffer: Mutex::new(None),
             release_needed: Mutex::new(false),
             pending_dmabuf_release: Mutex::new(None),
+            attach_gen: Mutex::new(0),
             slot: Mutex::new(None),
             layer: Mutex::new(None),
             toplevel: Mutex::new(None),
@@ -252,15 +256,24 @@ impl Dispatch<wl_surface::WlSurface, SurfaceData> for State {
                 let mut need = data.release_needed.lock_or_recover();
                 // Poprzedni, jeszcze nieoddany bufor oddajemy klientowi teraz — inaczej
                 // jego pula buforów się wyczerpuje i aplikacja staje.
+                // Wyjątek: `dmabuf` — jego zwolnienie odkłada `composite()` i wysyła
+                // dopiero po prezentacji (inaczej klient rysuje w bufor na ekranie).
                 if *need {
                     if let Some(prev) = cur.take() {
-                        let _ = prev.send_event(wl_buffer::Event::Release);
-                        // Jawna synchronizacja: dopiero teraz bufor jest naprawdę wolny.
-                        crate::syncobj::release_buffer(data, &prev);
+                        let is_dmabuf = prev
+                            .data::<BufferData>()
+                            .map(|b| b.dmabuf.is_some())
+                            .unwrap_or(false);
+                        if !is_dmabuf {
+                            let _ = prev.send_event(wl_buffer::Event::Release);
+                            // Jawna synchronizacja: dopiero teraz bufor jest naprawdę wolny.
+                            crate::syncobj::release_buffer(data, &prev);
+                        }
                     }
                 }
                 *need = buffer.is_some();
                 *cur = buffer;
+                *data.attach_gen.lock_or_recover() += 1;
             }
             wl_surface::Request::SetInputRegion { region } => {
                 // `None` = cała powierzchnia; inaczej migawka prostokątów regionu.
@@ -483,13 +496,17 @@ fn wants_ssd(is_x11: bool, is_popup: bool, deco: Option<crate::decoration::DecoM
 /// Czy klient oczekuje, że **kompozytor** narysuje pasek tytułu, mimo że nie
 /// negocjował `zxdg_toplevel_decoration_v1`.
 ///
-/// Firefox (i pochodne: Zen, LibreWolf, Waterfox, Thunderbird, Floorp) pod
+/// Firefox (i część forków: LibreWolf, Waterfox, Thunderbird, Floorp) pod
 /// Waylandem wyłącza własny pasek tytułu i nie rysuje przycisków okna — zostawia
 /// tylko zakładki i pasek adresu. Bufor ma przy tym marginesy cieni CSD (np.
 /// 24×22 px), więc wygląda jak zwykłe CSD, ale bez naszego SSD okna nie da się
 /// zamknąć ani przesunąć myszą. Uzupełniamy więc brakujący pasek.
 ///
-/// Wyłączenie (gdyby jakaś wersja przeglądarki rysowała własne kontrolki):
+/// **Zen Browser to wyjątek**: ma własny pasek i pokazuje kontrolki okna przy
+/// najechaniu na górę okna. Dokładanie SSD dawało podwójne przyciski i migotanie
+/// przy pokazywaniu/ukrywaniu kontrolek Zen, więc zostawiamy mu CSD.
+///
+/// Wyłączenie całości (gdyby jakaś wersja przeglądarki rysowała własne kontrolki):
 /// `SELENE_BROWSER_SSD=0`.
 fn expects_system_titlebar(app_id: &str, title: &str) -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -503,7 +520,6 @@ fn expects_system_titlebar(app_id: &str, title: &str) -> bool {
     }
     let id = app_id.to_ascii_lowercase();
     const IDS: &[&str] = &[
-        "zen",
         "firefox",
         "librewolf",
         "waterfox",
@@ -512,7 +528,7 @@ fn expects_system_titlebar(app_id: &str, title: &str) -> bool {
         "floorp",
         "thunderbird",
     ];
-    // `app_id` bywa dłuższe (`zen-beta`, `firefox-esr`, `org.mozilla.firefox`).
+    // `app_id` bywa dłuższe (`firefox-esr`, `org.mozilla.firefox`).
     if IDS.iter().any(|needle| {
         id == *needle
             || id.starts_with(&format!("{needle}-"))
@@ -523,7 +539,6 @@ fn expects_system_titlebar(app_id: &str, title: &str) -> bool {
     // Starsze wersje nie ustawiają `app_id` — wtedy zostaje tytuł okna.
     let title = title.to_ascii_lowercase();
     [
-        "zen browser",
         "mozilla firefox",
         "librewolf",
         "waterfox",
@@ -968,16 +983,24 @@ fn composite(
         crate::seat::send_configure(state, slot, f64::from(w), f64::from(h));
     }
     // Pozwól klientowi ponownie użyć bufora — **raz na `attach`**, nie na każdy `commit`.
-    // Dla `dmabuf` zwalniamy bufor **następny** raz: GPU czyta poprzednią klatkę
-    // jeszcze po `commit`, więc natychmiastowy `release` dałby tearing.
+    // Bufor `dmabuf` oddaje wątek wyjścia dopiero po prezentacji nowej klatki:
+    // wcześniej klient nadpisywałby bufor wciąż skanowany (migotanie w Zen/Firefoksie).
     if dmabuf.is_some() {
-        let old = data
-            .pending_dmabuf_release
-            .lock_or_recover()
-            .replace(buffer.clone());
-        if let Some(old) = old {
-            let _ = old.send_event(wl_buffer::Event::Release);
-            crate::syncobj::release_buffer(data, &old);
+        let gen = *data.attach_gen.lock_or_recover();
+        let old = {
+            let mut pending = data.pending_dmabuf_release.lock_or_recover();
+            match pending.as_ref() {
+                Some((_, stored)) if *stored >= gen => None,
+                _ => pending.replace((buffer.clone(), gen)),
+            }
+        };
+        if let Some((old, _)) = old {
+            // Ten sam bufor ponownie przypięty (statyczne okno) — nie oddajemy go,
+            // bo właśnie jest wyświetlany; klient mógłby go nadpisać.
+            if old.id() != buffer.id() {
+                let point = crate::syncobj::take_release(data, &old);
+                state.present.release_after_present(old, point);
+            }
         }
     } else if data.take_release() {
         let _ = buffer.send_event(wl_buffer::Event::Release);
@@ -1088,15 +1111,23 @@ fn composite_ime_popup(state: &mut State, surface: &wl_surface::WlSurface, data:
         win.image_offset = (0.0, 0.0);
         win.dmabuf = dmabuf.clone();
     }
-    // Zwolnienie bufora — analogicznie do zwykłych okien.
+    // Zwolnienie bufora — analogicznie do zwykłych okien: dmabuf dopiero po
+    // prezentacji, shm od razu (mamy kopię pikseli na CPU).
     if dmabuf.is_some() {
-        let old = data
-            .pending_dmabuf_release
-            .lock_or_recover()
-            .replace(buffer.clone());
-        if let Some(old) = old {
-            let _ = old.send_event(wl_buffer::Event::Release);
-            crate::syncobj::release_buffer(data, &old);
+        let gen = *data.attach_gen.lock_or_recover();
+        let old = {
+            let mut pending = data.pending_dmabuf_release.lock_or_recover();
+            match pending.as_ref() {
+                Some((_, stored)) if *stored >= gen => None,
+                _ => pending.replace((buffer.clone(), gen)),
+            }
+        };
+        if let Some((old, _)) = old {
+            // Ten sam bufor ponownie przypięty — zostawiamy go w obiegu.
+            if old.id() != buffer.id() {
+                let point = crate::syncobj::take_release(data, &old);
+                state.present.release_after_present(old, point);
+            }
         }
     } else if data.take_release() {
         let _ = buffer.send_event(wl_buffer::Event::Release);
@@ -1430,6 +1461,17 @@ mod ssd_tests {
     use crate::decoration::DecoMode;
 
     #[test]
+    fn zen_browser_keeps_its_own_window_controls() {
+        // Zen ma własny pasek i pokazuje kontrolki okna po najechaniu — nasze SSD
+        // dawało podwójne przyciski i migotanie.
+        assert!(!expects_system_titlebar("zen", "Settings — Zen Browser"));
+        assert!(!expects_system_titlebar("", "Settings — Zen Browser"));
+        // Pozostałe forki Firefoksa nadal dostają uzupełniający pasek.
+        assert!(expects_system_titlebar("firefox", "Mozilla Firefox"));
+        assert!(expects_system_titlebar("librewolf", "LibreWolf"));
+    }
+
+    #[test]
     fn popup_never_gets_our_bar() {
         assert!(!wants_ssd(false, true, Some(DecoMode::Server)));
         assert!(!wants_ssd(true, true, None));
@@ -1437,10 +1479,9 @@ mod ssd_tests {
 
     #[test]
     fn firefox_family_gets_system_titlebar() {
-        // Zen/Firefox nie rysują własnych przycisków okna pod Waylandem — bez
-        // naszego SSD okna nie da się zamknąć ani przesunąć myszą.
-        assert!(expects_system_titlebar("zen", "Zen Browser"));
-        assert!(expects_system_titlebar("zen-beta", ""));
+        // Firefox i większość forków nie rysują własnych przycisków okna pod
+        // Waylandem — bez naszego SSD okna nie da się zamknąć ani przesunąć myszą.
+        // (Wyjątkiem jest Zen — patrz `zen_browser_keeps_its_own_window_controls`.)
         assert!(expects_system_titlebar("firefox", ""));
         assert!(expects_system_titlebar("org.mozilla.firefox", ""));
         assert!(expects_system_titlebar("", "Strona — Mozilla Firefox"));

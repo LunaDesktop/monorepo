@@ -291,17 +291,22 @@ pub fn remember_release(data: &SurfaceData, buffer: &WlBuffer, point: Point) {
     points.push((id, point));
 }
 
+/// Wyciąga punkt `release` przypisany do bufora (bez sygnalizowania).
+///
+/// Wątek wyjścia sygnalizuje go dopiero po prezentacji — dopiero wtedy klient
+/// może bezpiecznie nadpisać bufor.
+pub fn take_release(data: &SurfaceData, buffer: &WlBuffer) -> Option<Point> {
+    let id = buffer.id().protocol_id();
+    let mut points = data.release_points.lock_or_recover();
+    points
+        .iter()
+        .position(|(buffer_id, _)| *buffer_id == id)
+        .map(|index| points.remove(index).1)
+}
+
 /// Sygnalizuje punkt `release` przypisany do właśnie oddawanego bufora.
 pub fn release_buffer(data: &SurfaceData, buffer: &WlBuffer) {
-    let id = buffer.id().protocol_id();
-    let point = {
-        let mut points = data.release_points.lock_or_recover();
-        points
-            .iter()
-            .position(|(buffer_id, _)| *buffer_id == id)
-            .map(|index| points.remove(index).1)
-    };
-    if let Some(point) = point {
+    if let Some(point) = take_release(data, buffer) {
         signal_release(point);
     }
 }
@@ -431,5 +436,15 @@ mod tests {
         assert_eq!(combine_point(0, 2), 2);
         assert_eq!(combine_point(1, 2), 0x0000_0001_0000_0002);
         assert_eq!(combine_point(u32::MAX, u32::MAX), u64::MAX);
+    }
+}
+
+#[cfg(test)]
+mod send_probe {
+    #[test]
+    fn wayland_resources_are_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<wayland_server::protocol::wl_buffer::WlBuffer>();
+        assert_send::<wayland_server::protocol::wl_callback::WlCallback>();
     }
 }

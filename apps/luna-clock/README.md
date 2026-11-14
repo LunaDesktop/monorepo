@@ -1,7 +1,9 @@
-# Luna Clock (`luna-clock`)
+# Luna Time (`luna-clock`)
 
 Zegar lokalny i światowy, minutnik, stoper oraz prywatny kalendarz środowiska
-Luna na libLunie.
+Luna na libLunie. Nazwa wyświetlana w launcherze i pasku tytułu to **Czas**
+(ang. **Time**); binarka i App ID pozostały jako `luna-clock` / `eu.luna.Clock`
+dla zgodności z panelem.
 
 ```sh
 cargo run                       # bieżący dzień

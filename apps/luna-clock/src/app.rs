@@ -622,7 +622,7 @@ impl App {
     }
 
     pub fn window_title(&self) -> String {
-        tr("Clock")
+        tr("Time")
     }
 
     pub fn country_code(&self) -> &str {
@@ -1115,7 +1115,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     // Znacznik działającej aplikacji — panel nie pokazuje wtedy dublującego widgetu.
     app.persist_activity(true);
 
-    let config = AppConfig::new(tr("Clock"))
+    let config = AppConfig::new(tr("Time"))
         .app_id("eu.luna.Clock")
         .initial_size(1120, 760)
         .settings(settings)

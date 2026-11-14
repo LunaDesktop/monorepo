@@ -14,7 +14,8 @@ use libluna_render::{Scene, TextEngine};
 use libluna_widgets::{
     clipboard_command, icon, AlertDialog, Button, ButtonVariant, ControlsSide, Dialog,
     Entry as TextEntry, HeaderBar, IconName, Menu, MenuEntry, PaintCtx, PathBar, PreferencesDialog,
-    Switch, Tab, TabBar, TextClipboardCommand, TextInput, ViewMode, ViewSwitcher, WindowControl,
+    ScrollDrag, Switch, Tab, TabBar, TextClipboardCommand, TextInput, ViewMode, ViewSwitcher,
+    WindowControl,
 };
 
 use crate::app::{
@@ -1714,6 +1715,25 @@ pub fn handle_events(
             } => {
                 let p = *position;
                 app.pointer = Some(p);
+                let mut scrolled = false;
+                for index in 0..app.panes.len() {
+                    if !app.panes[index].scroll.is_dragging() {
+                        continue;
+                    }
+                    let pr = pane_rects(app, &lay, index, theme);
+                    let rows = file_rows(&app.panes[index], pr.items);
+                    let content = app.panes[index].view.content_height(rows, theme);
+                    let pane = &mut app.panes[index];
+                    pane.scroll.configure(rows, content);
+                    pane.scroll.drag(p, theme);
+                    let offset = pane.scroll.offset();
+                    pane.view.set_scroll(offset);
+                    scrolled = true;
+                    break;
+                }
+                if scrolled {
+                    continue;
+                }
                 // Przeciąganie plików ma pierwszeństwo nad podświetleniami.
                 if let Some(drag) = &mut app.drag {
                     drag.copy = modifiers.ctrl;
@@ -2055,6 +2075,16 @@ fn on_left_press(
         }
         app.active = i;
         let pr = pane_rects(app, lay, i, theme);
+        let rows = file_rows(&app.panes[i], pr.items);
+        // Pasek przewijania ma pierwszeństwo przed klikaniem w zawartość.
+        {
+            let content = app.panes[i].view.content_height(rows, theme);
+            let pane = &mut app.panes[i];
+            pane.scroll.configure(rows, content);
+            if pane.scroll.press(p, theme) == ScrollDrag::Captured {
+                return;
+            }
+        }
         // Klik w nagłówek kolumny sortuje (tak jak w Nautilusie).
         if app.panes[i].view.mode() == ViewMode::List
             && p.y < pr.items.y() + list::HEADER_H
@@ -2082,7 +2112,6 @@ fn on_left_press(
             }
             return;
         }
-        let rows = file_rows(&app.panes[i], pr.items);
         if rows.contains(p) {
             let index = hit_index(&app.panes[i], rows, p, theme);
             let Some(index) = index else {
@@ -2147,6 +2176,13 @@ fn on_left_release(
     size: Size,
     theme: &Theme,
 ) {
+    if app
+        .panes
+        .iter_mut()
+        .any(|pane| pane.scroll.release() == ScrollDrag::Captured)
+    {
+        return;
+    }
     let Some(drag) = app.drag.take() else {
         return;
     };
@@ -3804,6 +3840,61 @@ mod tests {
         }
         assert!(target.exists(), "plik powinien zostać przeniesiony");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn dragging_the_scrollbar_scrolls_the_list() {
+        let dir = std::env::temp_dir().join(format!(
+            "luna-files-scrollbar-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..80 {
+            std::fs::write(dir.join(format!("plik-{i:03}.txt")), "x").unwrap();
+        }
+
+        let mut app = App::new(dir.clone());
+        let theme = Theme::light();
+        let text = TextEngine::system();
+        let size = Size::new(1120.0, 720.0);
+        let lay = layout(&app, size, &theme, &text);
+        let pr = pane_rects(&app, &lay, 0, &theme);
+        let rows = file_rows(&app.panes[0], pr.items);
+        let mut scroll = app.panes[0].scroll;
+        scroll.set_content_height(app.panes[0].view.content_height(rows, &theme));
+        let thumb = scroll.thumb_rect(rows, &theme).expect("pasek przewijania");
+        assert_eq!(app.panes[0].view.scroll(), 0.0);
+
+        let press = Event::PointerButton(libluna_core::PointerEvent {
+            position: thumb.center(),
+            button: PointerButton::Left,
+            state: ButtonState::Pressed,
+            modifiers: Modifiers::default(),
+        });
+        let end = Point::new(thumb.center().x, rows.bottom() - 2.0);
+        let drag = Event::PointerMotion {
+            position: end,
+            modifiers: Modifiers::default(),
+        };
+        let release = Event::PointerButton(libluna_core::PointerEvent {
+            position: end,
+            button: PointerButton::Left,
+            state: ButtonState::Released,
+            modifiers: Modifiers::default(),
+        });
+        handle_events(&mut app, &[press, drag, release], size, &theme, &text);
+
+        assert!(
+            app.panes[0].view.scroll() > 0.0,
+            "przeciągnięcie paska powinno przewinąć listę"
+        );
+        assert!(
+            !app.panes[0].scroll.is_dragging(),
+            "przeciąganie zakończone"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn open_with_demo() -> OpenWithDialog {

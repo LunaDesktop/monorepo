@@ -1,4 +1,4 @@
-//! Luna Clock — zegar, minutnik, stoper i kalendarz środowiska Luna.
+//! Luna Time — zegar, minutnik, stoper i kalendarz środowiska Luna.
 //!
 //! Aplikacja jest całkowicie lokalna: wydarzenia mieszkają w pliku użytkownika,
 //! a święta liczymy z wbudowanego zestawu reguł. Nie wysyłamy żadnych danych

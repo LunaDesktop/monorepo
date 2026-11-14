@@ -4,6 +4,30 @@
 //! (krzywe [`Easing`] i interpolację [`lerp`]), a stan animacji trzyma aplikacja — zgodnie
 //! z modelem immediate. Dzięki temu przejścia w `Stack`, odsłanianie `Revealer` czy
 //! pojawianie się `Toast` płynnie sterują się prostą postępu `t` (0..1).
+//!
+//! ## Ograniczenie animacji
+//!
+//! Ustawienie dostępności `reduce_motion` wyłącza ruch **w całym procesie**:
+//! [`ThemeSettings::resolve_themed`](crate::ThemeSettings::resolve_themed) woła
+//! [`set_reduce_motion`], a [`Animation`] natychmiast przeskakuje do wartości docelowej.
+//! Flaga jest per-wątek (interfejs jest jednowątkowy), więc testy nie wpływają na siebie.
+
+use std::cell::Cell;
+
+thread_local! {
+    /// Czy w bieżącym wątku animacje mają być natychmiastowe.
+    static REDUCE_MOTION: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Włącza/wyłącza natychmiastowe przejścia w bieżącym wątku.
+pub fn set_reduce_motion(enabled: bool) {
+    REDUCE_MOTION.with(|flag| flag.set(enabled));
+}
+
+/// Czy animacje są ograniczone (`reduce_motion`).
+pub fn reduce_motion() -> bool {
+    REDUCE_MOTION.with(Cell::get)
+}
 
 /// Krzywa wygładzania (easing) przebiegu animacji.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -103,7 +127,13 @@ impl Animation {
     }
 
     /// Rozpoczyna płynne przejście do `to` (od bieżącej wartości).
+    ///
+    /// Przy `reduce_motion` przejście jest natychmiastowe.
     pub fn animate_to(&mut self, to: f64) {
+        if reduce_motion() {
+            self.jump_to(to);
+            return;
+        }
         self.from = self.value();
         self.to = to;
         self.progress = 0.0;
@@ -125,7 +155,7 @@ impl Animation {
         if !self.is_animating() {
             return false;
         }
-        if duration <= 0.0 {
+        if reduce_motion() || duration <= 0.0 {
             self.progress = 1.0;
         } else {
             self.progress = (self.progress + dt / duration).min(1.0);
@@ -202,5 +232,24 @@ mod tests {
         // Zerowy czas trwania: pierwszy krok domyka animację.
         assert!(!a.advance(0.0, 0.0));
         assert_eq!(a.value(), 5.0);
+    }
+
+    #[test]
+    fn reduced_motion_snaps_to_target() {
+        set_reduce_motion(true);
+        let mut a = Animation::new(Easing::EaseInOut);
+        a.animate_to(0.75);
+        assert_eq!(a.value(), 0.75, "start od razu w celu");
+        assert!(!a.is_animating());
+
+        set_reduce_motion(false);
+        let mut b = Animation::new(Easing::Linear);
+        b.animate_to(1.0);
+        assert!(b.is_animating());
+        // Włączenie ograniczenia w trakcie domyka animację przy najbliższym kroku.
+        set_reduce_motion(true);
+        assert!(!b.advance(0.1, 1.0));
+        assert_eq!(b.value(), 1.0);
+        set_reduce_motion(false);
     }
 }

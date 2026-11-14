@@ -13,7 +13,7 @@ use libluna_i18n::{set_locale, tr, tr_args};
 use libluna_platform::{run as run_app, AppConfig, Frame};
 use libluna_widgets::{
     AlertDialog, BottomSheet, Entry, EntryIcon, IconName, Menu, MenuEntry, NavEntry, NavList,
-    PasswordEntry, ScrollView, StatusIcon, StatusPage, Toast, ViewMode, WindowControl,
+    PasswordEntry, ScrollArea, StatusIcon, StatusPage, Toast, ViewMode, WindowControl,
 };
 
 use crate::backends::valid_package;
@@ -136,7 +136,7 @@ pub struct App {
     pub select_mode: bool,
     /// Klucze zaznaczonych pakietów (`Package::key`).
     pub selection: HashSet<String>,
-    pub scroll: ScrollView,
+    pub scroll: ScrollArea,
     pub packages: Vec<Package>,
     pub view: Vec<usize>,
     pub data_version: u64,
@@ -253,7 +253,7 @@ impl App {
             search_active: false,
             select_mode: false,
             selection: HashSet::new(),
-            scroll: ScrollView::new(),
+            scroll: ScrollArea::new(),
             packages: Vec::new(),
             view: Vec::new(),
             data_version: 0,
@@ -864,7 +864,7 @@ impl App {
         // Nowa strona czyści wyszukiwanie — pole nie zostaje z nieaktualnym filtrem.
         self.search.clear();
         self.search.set_focused(false);
-        self.scroll = ScrollView::new();
+        self.scroll = ScrollArea::new();
         self.dirty = true;
         self.select_nav();
         self.sync_view();
@@ -902,11 +902,11 @@ impl App {
             ViewMode::Grid => ViewMode::List,
             ViewMode::List => ViewMode::Grid,
         };
-        self.scroll = ScrollView::new();
+        self.scroll = ScrollArea::new();
     }
 
     pub fn on_query_changed(&mut self) {
-        self.scroll = ScrollView::new();
+        self.scroll = ScrollArea::new();
         self.dirty = true;
         // Bez tego nowy filtr byłby widoczny dopiero po następnym wyniku
         // z wątku — a przy samym wpisywaniu żaden wynik nie nadchodzi.

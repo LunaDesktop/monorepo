@@ -270,8 +270,9 @@ fn handle(state: &mut State, line: &str) {
             }
             None => eprintln!("selene/control: x11 display=- wm=false managed=0 windows=0"),
         },
-        // `screenshot` — zapis klatek wszystkich monitorów (Super+F12).
+        // `screenshot` — zapis klatek wszystkich monitorów (bez palety; do skryptów).
         "screenshot" => {
+            crate::screenshot::close(state);
             if std::env::var("SELENE_STATS").is_ok() {
                 eprintln!("selene/control: zrzut ekranu");
             }
@@ -279,6 +280,8 @@ fn handle(state: &mut State, line: &str) {
                 .screenshot
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
+        // `screenshot-ui` — otwiera paletę zrzutów (jak Super+F12).
+        "screenshot-ui" => crate::screenshot::open(state),
         // `night-light <0..100>` — siła ciepłej korekty gamma.
         "night-light" => {
             if let Ok(percent) = rest.parse::<u8>() {

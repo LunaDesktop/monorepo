@@ -11,7 +11,7 @@ use libluna_platform::{run as run_app, AppConfig, Frame};
 use libluna_render::ImageData;
 use libluna_widgets::{
     AlertDialog, Entry as TextEntry, IconName, ItemView, Menu, NavEntry, NavList, PaintCtx,
-    ScrollView, SearchEntry, Toast, ViewMode, WindowControl,
+    ScrollArea, SearchEntry, Toast, ViewMode, WindowControl,
 };
 
 use crate::model::{format_mtime, human_size, now_secs, DirView, Entry, Kind, SortKey};
@@ -93,7 +93,7 @@ pub struct PendingProperties {
 pub struct Pane {
     pub dir: DirView,
     pub view: ItemView,
-    pub scroll: ScrollView,
+    pub scroll: ScrollArea,
     pub tabs: Vec<PathBuf>,
     pub tab: usize,
     pub back: Vec<PathBuf>,
@@ -122,7 +122,7 @@ impl Pane {
             search_active: false,
             preview: false,
             preview_cache: None,
-            scroll: ScrollView::new(),
+            scroll: ScrollArea::new(),
             dir,
             view,
         }
@@ -156,7 +156,7 @@ impl Pane {
                 self.view.set_selected(Some(pos));
             }
         }
-        self.scroll = ScrollView::new();
+        self.scroll = ScrollArea::new();
         self.preview_cache = None;
     }
 

@@ -46,7 +46,7 @@ struct Chrome {
 fn chrome(size: Size, theme: &Theme, text: &TextEngine) -> Chrome {
     let header = Rect::from_xywh(0.0, 0.0, size.width, theme.metrics.headerbar.height);
     let header_bar = HeaderBar::new()
-        .title(libluna_i18n::tr("Clock"))
+        .title(libluna_i18n::tr("Time"))
         .title_align(TitleAlign::Start)
         .controls(ControlsSide::Right);
     let available = header_bar.controls_layout(header, theme).content;
@@ -55,7 +55,7 @@ fn chrome(size: Size, theme: &Theme, text: &TextEngine) -> Chrome {
     // w pozostałej części paska (jak AdwViewSwitcher w headerbarze).
     let title_width = text
         .measure(
-            &libluna_i18n::tr("Clock"),
+            &libluna_i18n::tr("Time"),
             theme.typography.body.size,
             weight::BOLD,
         )
@@ -245,7 +245,7 @@ pub fn paint(app: &mut App, scene: &mut Scene, size: Size, theme: &Theme, text: 
         .fill_rect(Rect::from_size(size), theme.colors.window_bg);
 
     HeaderBar::new()
-        .title(libluna_i18n::tr("Clock"))
+        .title(libluna_i18n::tr("Time"))
         .title_align(TitleAlign::Start)
         .controls(ControlsSide::Right)
         .paint(&mut ctx, layout.header, app.controls_hover);

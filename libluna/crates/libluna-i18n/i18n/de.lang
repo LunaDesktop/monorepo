@@ -295,6 +295,12 @@ Start a player = Player starten
 Lock screen = Sperrbildschirm
 Lock = Sperren
 Log out = Abmelden
+Screenshot = Bildschirmfoto
+Screenshot saved = Bildschirmfoto gespeichert
+Open location = Speicherort öffnen
+All monitors = Alle Monitore
+Select area = Bereich auswählen
+Drag to select an area · Esc to cancel = Ziehen, um einen Bereich auszuwählen · Esc bricht ab
 Restart = Neu starten
 Reboot = Neustart
 Power off = Ausschalten
@@ -1764,3 +1770,18 @@ Enabled — boot loader is not signed; disable Secure Boot or enroll keys after 
 The macOS look needs a global menu and a bottom dock — coming in a later version = Das macOS-Aussehen benötigt ein globales Menü und ein Dock unten — kommt in einer späteren Version
 Tray labels are shown only when the panel is horizontal = Tray-Beschriftungen werden nur bei einer horizontalen Leiste angezeigt
 The Luna bar is available now — the macOS-style floating dock is coming in a later version = Die Luna-Leiste ist bereits verfügbar — das schwebende Dock im macOS-Stil kommt in einer späteren Version
+
+# --- Luna Time / Luna Calculator ---
+Time = Zeit
+Calculator = Rechner
+Standard = Standard
+Scientific = Wissenschaftlich
+Type an expression = Gib einen Ausdruck ein
+Invalid expression = Ungültiger Ausdruck
+Division by zero = Division durch null
+Unknown function = Unbekannte Funktion
+Missing parenthesis = Fehlende Klammer
+Unexpected character = Unerwartetes Zeichen
+Expression is too complex = Ausdruck ist zu komplex
+Factorial needs a non-negative integer = Fakultät benötigt eine nichtnegative ganze Zahl
+Result is not a number = Ergebnis ist keine Zahl

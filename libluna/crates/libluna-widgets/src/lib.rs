@@ -58,6 +58,8 @@
 //! - Animacje (`libluna-core::motion`): `Easing`/`lerp`/`Animation`; użyte w [`Revealer`],
 //!   [`Toast`] i przejściach [`Stack`] ([`StackTransition`]).
 //! - [`FlowBox`], [`SpinButton`], [`EmojiChooser`], [`NavigationRail`] — kolejne widgety libLuny.
+//! - [`FocusModel`] — nawigacja klawiaturą (`Tab`/`Shift+Tab`) i pierścień fokusu
+//!   ([`paint_focus_ring`]).
 //! - [`Hover`] — śledzenie kursora i spójne podświetlanie elementów (panel, launcher, listy).
 //! - [`Viewport`], [`WindowHandle`] — pomocniki okna/obszaru (GTK4).
 //! - Aliasy w duchu GTK4: [`Carousel`] = [`Pager`], [`ScrolledWindow`] = [`ScrollView`],
@@ -100,6 +102,7 @@ pub mod entries;
 pub mod entry;
 pub mod expander;
 pub mod flow_box;
+pub mod focus;
 pub mod header_bar;
 pub mod helpers;
 pub mod hover;
@@ -121,6 +124,7 @@ pub mod popover;
 pub mod preferences;
 pub mod radio_group;
 pub mod rows;
+pub mod scroll_area;
 pub mod scroll_view;
 pub mod scrollbar;
 pub mod search_bar;
@@ -175,6 +179,7 @@ pub use entries::{EditableLabel, PasswordEntry};
 pub use entry::{Entry, EntryIcon, TextInput};
 pub use expander::Expander;
 pub use flow_box::FlowBox;
+pub use focus::{is_activate_key, paint_focus_ring, FocusModel};
 pub use header_bar::{ControlsLayout, ControlsSide, HeaderBar, TitleAlign, WindowControl};
 pub use helpers::{
     BreakpointBin, ButtonContent, Clamp, ToolbarRects, ToolbarView, WindowHandle, WindowTitle,
@@ -203,6 +208,7 @@ pub use popover::{Popover, PopoverPlacement};
 pub use preferences::{PreferencesGroup, PreferencesPage};
 pub use radio_group::RadioGroup;
 pub use rows::{Row, RowRects, RowSuffix};
+pub use scroll_area::{ScrollArea, ScrollDrag, SCROLL_STEP};
 pub use scroll_view::ScrollView;
 /// `ScrolledWindow` — nazwa [`ScrollView`] w duchu GTK4.
 pub use scroll_view::ScrollView as ScrolledWindow;

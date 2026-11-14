@@ -11,7 +11,8 @@ use libluna_i18n::{tr, tr_args};
 use libluna_render::{Scene, TextEngine};
 use libluna_widgets::{
     paint_icon, Assistant, Banner, BannerKind, Button, ButtonVariant, ControlsSide, Entry,
-    HeaderBar, IconName, PaintCtx, Popover, PopoverPlacement, ProgressBar, Spinner, WindowControl,
+    HeaderBar, IconName, PaintCtx, Popover, PopoverPlacement, ProgressBar, ScrollDrag, Spinner,
+    WindowControl,
 };
 
 use crate::app::{App, Hit, PickerKind, Step};
@@ -1521,43 +1522,61 @@ pub fn handle_events(
     text: &TextEngine,
 ) {
     let lay = layout(app, size, theme, text);
-    app.scroll.set_content_height(lay.content_height);
-    app.scroll.set_offset(lay.offset, lay.viewport);
+    app.scroll.configure(lay.viewport, lay.content_height);
     if let (Some(picker_layout), Some(picker)) = (&lay.picker, &mut app.picker) {
         picker
             .scroll
-            .set_content_height(picker_layout.content_height);
-        picker
-            .scroll
-            .set_offset(picker_layout.offset, picker_layout.list);
+            .configure(picker_layout.list, picker_layout.content_height);
     }
 
     for event in events {
         match event {
             Event::PointerMotion { position, .. } => {
                 app.pointer = Some(*position);
+                let mut dragging = false;
+                if let Some(picker) = &mut app.picker {
+                    dragging = matches!(
+                        picker.scroll.handle_pointer(event, theme),
+                        ScrollDrag::Moved
+                    );
+                }
+                if dragging || matches!(app.scroll.handle_pointer(event, theme), ScrollDrag::Moved)
+                {
+                    continue;
+                }
                 app.hover = hit_test(app, &lay, theme, *position);
             }
             Event::PointerLeave => {
                 app.pointer = None;
                 app.hover = None;
             }
-            Event::Scroll(scroll) => {
-                if let (Some(picker_layout), Some(picker)) = (&lay.picker, &mut app.picker) {
-                    if picker_layout.list.contains(scroll.position) {
-                        picker
-                            .scroll
-                            .on_scroll(scroll.notches_y() * SCROLL_STEP, picker_layout.list);
-                    }
-                } else if lay.viewport.contains(scroll.position) {
-                    app.scroll
-                        .on_scroll(scroll.notches_y() * SCROLL_STEP, lay.viewport);
+            Event::Scroll(_) => {
+                let mut handled = false;
+                if let Some(picker) = &mut app.picker {
+                    handled = picker.scroll.handle_wheel(event);
+                }
+                if !handled {
+                    app.scroll.handle_wheel(event);
                 }
             }
             Event::PointerButton(button)
                 if button.button == PointerButton::Left && button.state == ButtonState::Pressed =>
             {
-                handle_click(app, &lay, theme, button.position);
+                let mut grabbed = false;
+                if let Some(picker) = &mut app.picker {
+                    grabbed = picker.scroll.handle_pointer(event, theme) == ScrollDrag::Captured;
+                }
+                if !grabbed && app.scroll.handle_pointer(event, theme) != ScrollDrag::Captured {
+                    handle_click(app, &lay, theme, button.position);
+                }
+            }
+            Event::PointerButton(button) if button.state == ButtonState::Released => {
+                if button.button == PointerButton::Left {
+                    if let Some(picker) = &mut app.picker {
+                        picker.scroll.handle_pointer(event, theme);
+                    }
+                    app.scroll.handle_pointer(event, theme);
+                }
             }
             Event::Key(key) if key.state == ButtonState::Pressed => {
                 handle_key(app, &lay, key);

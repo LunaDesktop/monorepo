@@ -737,6 +737,12 @@ impl App {
                 if hit {
                     self.egg = Some(EggState::new());
                     libluna_core::egg::unlock();
+                    // Kod został już wysłany do powłoki podczas pisania. Ctrl+U
+                    // czyści jej linię, żeby po zamknięciu sceny nie została
+                    // nieuruchomiona komenda `LUNA-5-MOKOSZ`.
+                    if let Some(pty) = &mut self.pane_mut().pty {
+                        let _ = pty.write(b"\x15");
+                    }
                     return true;
                 }
                 false

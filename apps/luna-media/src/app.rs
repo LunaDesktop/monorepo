@@ -279,7 +279,7 @@ pub struct App {
     /// Podkatalogi bieżącego katalogu (pasek folderów nad siatką).
     pub folders: Vec<(String, PathBuf)>,
     pub selected: usize,
-    pub scroll: libluna_widgets::ScrollView,
+    pub scroll: libluna_widgets::ScrollArea,
     pub mode: Mode,
     pub viewer: Viewer,
     pub thumbs: Thumbnails,
@@ -313,7 +313,7 @@ impl App {
             items: Vec::new(),
             folders: Vec::new(),
             selected: 0,
-            scroll: libluna_widgets::ScrollView::new(),
+            scroll: libluna_widgets::ScrollArea::new(),
             mode: Mode::Gallery,
             viewer: Viewer::default(),
             thumbs: Thumbnails::new(),
@@ -358,7 +358,7 @@ impl App {
                     .and_then(|path| self.items.iter().position(|item| &item.path == path))
                     .unwrap_or(0);
                 self.dir = dir;
-                self.scroll = libluna_widgets::ScrollView::new();
+                self.scroll = libluna_widgets::ScrollArea::new();
                 self.last_click = None;
                 self.prefs.last_dir = self.dir.display().to_string();
             }

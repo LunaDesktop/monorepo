@@ -5,7 +5,7 @@ edition = "2021"
 license = "GPL-3.0-or-later"
 rust-version = "1.80"
 authors = ["Patryk Szkudlarek / libLuna contributors"]
-description = "Luna Clock — zegar, minutnik, stoper, strefy czasowe i prywatny kalendarz (libLuna, bez GTK)."
+description = "Luna Time — zegar, minutnik, stoper, strefy czasowe i prywatny kalendarz (libLuna, bez GTK)."
 
 [workspace]
 resolver = "2"

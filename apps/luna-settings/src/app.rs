@@ -22,7 +22,7 @@ use libluna_i18n::{set_locale, tr, tr_args, Locale};
 use libluna_platform::{run as run_app, AppConfig, Frame};
 use libluna_render::wallpaper;
 use libluna_widgets::{
-    BottomSheet, Entry, EntryIcon, NavEntry, NavList, PasswordEntry, ScrollView, Toast,
+    BottomSheet, Entry, EntryIcon, NavEntry, NavList, PasswordEntry, ScrollArea, Toast,
     WindowControl,
 };
 use luna::equalizer::{self, AudioStatus, Equalizer, Preset};
@@ -544,7 +544,7 @@ pub struct SettingsApp {
     pub page: Page,
     pub nav: NavList,
     pub nav_pages: Vec<Option<Page>>,
-    pub scroll: ScrollView,
+    pub scroll: ScrollArea,
 
     /// Stan systemu odpytywany w tle (ta sama implementacja co w pasku Luny).
     pub system: system::Shared,
@@ -588,7 +588,7 @@ pub struct SettingsApp {
     pub wallpaper_picker: Option<WallpaperPicker>,
     /// Panel techniczny („Configuration”/„Information”) otwierany przyciskiem Info.
     pub info_sheet: BottomSheet,
-    pub info_scroll: ScrollView,
+    pub info_scroll: ScrollArea,
     /// Formularz hasła do zmian wymagających uprawnień administratora.
     pub admin: Option<AdminPrompt>,
     /// Czy ekran logowania ma niezapisane zmiany (wybory są szkicem).
@@ -793,7 +793,7 @@ impl SettingsApp {
             page: Page::default(),
             nav: NavList::new(Vec::new()),
             nav_pages: Vec::new(),
-            scroll: ScrollView::new(),
+            scroll: ScrollArea::new(),
             system: system::spawn_light(),
             system_ready: false,
             user: std::env::var("USER")
@@ -827,7 +827,7 @@ impl SettingsApp {
             editor: None,
             wallpaper_picker: None,
             info_sheet: BottomSheet::new(),
-            info_scroll: ScrollView::new(),
+            info_scroll: ScrollArea::new(),
             admin: None,
             greeter_dirty: false,
             dnd: system::dnd(),
@@ -937,8 +937,8 @@ impl SettingsApp {
         if self.page != page {
             self.page = page;
             self.nav_reveal = true;
-            self.scroll = ScrollView::new();
-            self.info_scroll = ScrollView::new();
+            self.scroll = ScrollArea::new();
+            self.info_scroll = ScrollArea::new();
             let selected = self.nav_pages.iter().position(|p| *p == Some(page));
             self.nav.set_selected(selected);
             if page == Page::Network {
@@ -1069,7 +1069,7 @@ impl SettingsApp {
 
     /// Otwiera panel Info z grupami technicznymi bieżącej strony.
     pub fn open_info_sheet(&mut self) {
-        self.info_scroll = ScrollView::new();
+        self.info_scroll = ScrollArea::new();
         self.info_sheet
             .set_title(Some(tr("Configuration and information")));
         self.info_sheet.set_open_animated(true);

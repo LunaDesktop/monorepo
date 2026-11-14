@@ -7,6 +7,7 @@ use libluna_core::style::weight;
 use libluna_core::{Point, Rect, Theme};
 
 use crate::ctx::PaintCtx;
+use crate::focus::paint_focus_ring;
 
 /// Pole wyboru.
 #[derive(Debug, Clone, Default)]
@@ -14,6 +15,7 @@ pub struct CheckButton {
     label: String,
     checked: bool,
     hovered: bool,
+    focused: bool,
 }
 
 impl CheckButton {
@@ -38,6 +40,15 @@ impl CheckButton {
 
     pub fn set_hovered(&mut self, hovered: bool) {
         self.hovered = hovered;
+    }
+
+    /// Pierścień fokusu (nawigacja `Tab`) rysowany wokół kwadratu.
+    pub fn set_focused(&mut self, focused: bool) {
+        self.focused = focused;
+    }
+
+    pub fn focused(&self) -> bool {
+        self.focused
     }
 
     /// Prostokąt kwadratu (checkbox) po lewej stronie wiersza.
@@ -100,6 +111,10 @@ impl CheckButton {
             weight::NORMAL,
             colors.text,
         );
+
+        if self.focused {
+            paint_focus_ring(ctx, b, radius);
+        }
     }
 }
 

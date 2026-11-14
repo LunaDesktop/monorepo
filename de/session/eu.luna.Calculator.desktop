@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=Calculator
+Name[pl]=Kalkulator
+Name[de]=Rechner
+Comment=Standard and scientific calculator
+Comment[pl]=Kalkulator standardowy i naukowy
+Comment[de]=Standard- und Wissenschaftsrechner
+Exec=luna-calculator
+Icon=accessories-calculator
+Terminal=false
+Categories=Utility;Calculator;
+Keywords=calculator;math;scientific;arithmetic;
+Keywords[pl]=kalkulator;matematyka;naukowy;arytmetyka;
+Keywords[de]=Rechner;Mathematik;Wissenschaftlich;Arithmetik;

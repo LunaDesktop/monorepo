@@ -628,6 +628,15 @@ pub struct ContainerMetrics {
     pub hit_pad: f64,
 }
 
+/// Geometria pierścienia fokusu klawiaturowego.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FocusMetrics {
+    /// Grubość obwódki.
+    pub width: f64,
+    /// Odstęp obwódki od kontrolki.
+    pub offset: f64,
+}
+
 /// Geometria kontrolek („component metrics”) — rozmiary i paddingi w pikselach logicznych.
 ///
 /// Widgety nie mają już własnych stałych rozmiarów: czytają je z motywu, dzięki czemu
@@ -666,6 +675,7 @@ pub struct Metrics {
     pub group: GroupMetrics,
     pub bar: BarMetrics,
     pub container: ContainerMetrics,
+    pub focus: FocusMetrics,
 }
 
 impl Metrics {
@@ -837,6 +847,10 @@ impl Metrics {
                 separator: 1.0,
                 hit_pad: 4.0,
             },
+            focus: FocusMetrics {
+                width: 2.0,
+                offset: 2.0,
+            },
         }
     }
 }
@@ -910,6 +924,8 @@ pub struct Theme {
     pub colors: ColorScheme,
     pub syntax: SyntaxColors,
     pub appearance: Appearance,
+    /// Animacje ograniczone ustawieniem dostępności (`reduce_motion`).
+    pub reduce_motion: bool,
     /// Wygląd paska panelu opisany w stylu (`[panel]` w pliku `.theme`).
     pub panel: PanelTheme,
 }
@@ -939,6 +955,7 @@ impl Theme {
             colors: ColorScheme::light(),
             syntax: SyntaxColors::light(),
             appearance: Appearance::Light,
+            reduce_motion: false,
             panel: PanelTheme {
                 color: None,
                 round: None,
@@ -957,6 +974,7 @@ impl Theme {
             colors: ColorScheme::dark(),
             syntax: SyntaxColors::dark(),
             appearance: Appearance::Dark,
+            reduce_motion: false,
             panel: PanelTheme {
                 color: None,
                 round: None,
@@ -982,6 +1000,11 @@ impl Theme {
         settings: &crate::accessibility::AccessibilitySettings,
     ) -> Self {
         let factor = settings.scale_factor();
+        self.reduce_motion = settings.reduce_motion;
+        if settings.high_contrast {
+            // W wysokim kontraście fokus musi być widoczny także na jasnym tle.
+            self.metrics.focus.width = self.metrics.focus.width.max(3.0);
+        }
         if (factor - 1.0).abs() > 0.001 {
             self.typography = self.typography.scaled(factor);
             // Tekst musi się mieścić w kontrolkach o stałej wysokości.
@@ -1060,5 +1083,16 @@ mod tests {
         assert_eq!(contrast.colors.accent, base.colors.accent);
         assert_ne!(contrast.colors.window_bg, base.colors.window_bg);
         assert_eq!(contrast.colors.window_bg, Color::from_rgba8(0, 0, 0, 0xff));
+    }
+
+    #[test]
+    fn reduce_motion_is_carried_by_the_theme() {
+        let settings = crate::accessibility::AccessibilitySettings {
+            text_scale: 100,
+            high_contrast: false,
+            reduce_motion: true,
+        };
+        assert!(Theme::dark().with_accessibility(&settings).reduce_motion);
+        assert!(!Theme::dark().reduce_motion);
     }
 }

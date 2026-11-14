@@ -218,9 +218,13 @@ fn copy(
         let _ = resource.send_event(frame::Event::Failed);
         return;
     }
-    let Some((rgba, width, height)) =
-        crate::output::capture_output_rgba(state, data.output, data.overlay_cursor, data.region)
-    else {
+    let Some((rgba, width, height)) = crate::output::capture_output_rgba(
+        state,
+        data.output,
+        data.overlay_cursor,
+        data.region,
+        false,
+    ) else {
         let _ = resource.send_event(frame::Event::Failed);
         return;
     };

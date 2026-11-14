@@ -8,6 +8,7 @@ use libluna_core::{Color, Point, Rect, Theme};
 use libluna_render::TextEngine;
 
 use crate::ctx::PaintCtx;
+use crate::focus::paint_focus_ring;
 use crate::icon;
 
 /// Wariant wizualny przycisku.
@@ -33,6 +34,7 @@ pub struct Button {
     enabled: bool,
     hovered: bool,
     pressed: bool,
+    focused: bool,
 }
 
 impl Button {
@@ -44,6 +46,7 @@ impl Button {
             enabled: true,
             hovered: false,
             pressed: false,
+            focused: false,
         }
     }
 
@@ -69,6 +72,15 @@ impl Button {
 
     pub fn set_pressed(&mut self, pressed: bool) {
         self.pressed = pressed;
+    }
+
+    /// Pierścień fokusu (nawigacja `Tab`).
+    pub fn set_focused(&mut self, focused: bool) {
+        self.focused = focused;
+    }
+
+    pub fn focused(&self) -> bool {
+        self.focused
     }
 
     pub fn label(&self) -> &str {
@@ -171,6 +183,10 @@ impl Button {
         if self.dropdown {
             let cx = start_x + label_w + m.chevron_gap + m.chevron / 2.0;
             icon::chevron_down(ctx, fg, Point::new(cx, cy), 4.0, 2.0);
+        }
+
+        if self.focused {
+            paint_focus_ring(ctx, rect, radius);
         }
     }
 }

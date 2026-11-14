@@ -14,7 +14,8 @@
 #   bin/luna-security (monitor prywatności: mikrofon/kamera/sieć + zgody aplikacji)
 #   bin/luna-terminal (emulator terminala: PTY + VT100/xterm na libLunie)
 #   bin/luna-media (przeglądarka obrazów i filmów: libLuna + ffmpeg)
-#   bin/luna-clock (zegar, minutnik, stoper, strefy czasowe i kalendarz)
+#   bin/luna-clock (czas: zegar, minutnik, stoper, strefy czasowe i kalendarz)
+#   bin/luna-calculator (kalkulator standardowy i naukowy)
 #
 # Demo/galeria widgetów (`bin/luna-demo`, `bin/luna-gallery`, `bin/luna-showcase`)
 # to dokumentacja dla deweloperów — **nie** instalujemy jej u zwykłych użytkowników.
@@ -94,8 +95,8 @@ Użycie: $prog [opcje]
                    które sesja mogłaby uruchomić zamiast nowej instalacji
   --user           instalacja bez roota do ~/.local (bin, share, aplikacje)
   --only NAME      tylko jeden komponent: base, selene, luna, greeter,
-                   demo, settings, files, media, clock, store, welcome,
-                   installer, editor, terminal, icons
+                   demo, settings, files, media, clock, calculator, store,
+                   welcome, installer, editor, terminal, icons
   --with-demo      doinstaluj demo/galerię widgetów (luna-demo, luna-gallery,
                    luna-showcase). Domyślnie pomijane — to narzędzie dla
                    deweloperów, nie część pulpitu dla zwykłego użytkownika.
@@ -127,8 +128,8 @@ while [ $# -gt 0 ]; do
 done
 
 case "$only" in
-    ""|base|selene|luna|greeter|demo|settings|files|media|clock|store|welcome|installer|editor|terminal|icons) ;;
-    *) echo "nieznany komponent: $only (dozwolone: base, selene, luna, greeter, demo, settings, files, media, clock, store, welcome, installer, editor, terminal, icons)" >&2; exit 2 ;;
+    ""|base|selene|luna|greeter|demo|settings|files|media|clock|calculator|store|welcome|installer|editor|terminal|icons) ;;
+    *) echo "nieznany komponent: $only (dozwolone: base, selene, luna, greeter, demo, settings, files, media, clock, calculator, store, welcome, installer, editor, terminal, icons)" >&2; exit 2 ;;
 esac
 
 # `--only demo` jest równoważne `--with-demo` (wybór komponentu to jawna zgoda).
@@ -266,10 +267,15 @@ files() {
         emit "editor" "$lib/luna-editor" "$dest/bin/luna-editor" "755"
         emit "editor" "$root/de/session/eu.luna.Editor.desktop" "$dest/share/applications/eu.luna.Editor.desktop" "644"
     fi
-    # Zegar i kalendarz Luna Clock.
+    # Czas i kalendarz Luna Time (binarka `luna-clock`).
     if [ "$all" = "all" ] || [ -f "$lib/luna-clock" ]; then
         emit "clock" "$lib/luna-clock" "$dest/bin/luna-clock" "755"
         emit "clock" "$root/de/session/eu.luna.Clock.desktop" "$dest/share/applications/eu.luna.Clock.desktop" "644"
+    fi
+    # Kalkulator standardowy i naukowy Luna Calculator.
+    if [ "$all" = "all" ] || [ -f "$lib/luna-calculator" ]; then
+        emit "calculator" "$lib/luna-calculator" "$dest/bin/luna-calculator" "755"
+        emit "calculator" "$root/de/session/eu.luna.Calculator.desktop" "$dest/share/applications/eu.luna.Calculator.desktop" "644"
     fi
     # Sklep z oprogramowaniem Luna Store (+ domyślny plik repozytoriów, reguła polkit).
     if [ "$all" = "all" ] || [ -f "$lib/luna-store" ]; then
@@ -407,6 +413,7 @@ EOF
             files)    build_dir "$root/apps/luna-files" ;;
             media)    build_dir "$root/apps/luna-media" ;;
             clock)    build_dir "$root/apps/luna-clock" ;;
+            calculator) build_dir "$root/apps/luna-calculator" ;;
             store)    build_dir "$root/apps/luna-store" ;;
             welcome)  build_dir "$root/apps/luna-welcome" ;;
             installer) build_dir "$root/apps/luna-installer" ;;
@@ -422,7 +429,7 @@ EOF
         build_component "$only"
     else
         # Demo pomijamy domyślnie — buduje je dopiero `--with-demo`.
-        for c in selene luna greeter settings files media clock store welcome installer editor terminal; do
+        for c in selene luna greeter settings files media clock calculator store welcome installer editor terminal; do
             build_component "$c"
         done
         if [ "$with_demo" = 1 ]; then
@@ -466,7 +473,7 @@ if [ -f "$lib/selene" ]; then
     # sprawdzamy `luna-shell`, żeby nie zgłaszać fałszywych alarmów o keyring/lock/polkit.
     check_stale "$lib/luna-shell" "$root/luna/src"
     check_stale "$lib/luna-greeter" "$root/luna-greeter/src"
-    for app in files media settings store editor terminal clock welcome installer; do
+    for app in files media settings store editor terminal clock calculator welcome installer; do
         check_stale "$lib/luna-$app" "$root/apps/luna-$app/src"
     done
     if [ "$with_demo" = 1 ]; then
@@ -640,7 +647,7 @@ if [ "$destdir" = "" ] && [ "$(id -u)" -eq 0 ]; then
     fi
 fi
 
-managed_bins="selene luna-shell luna-desktop luna-lock luna-keyring luna-polkit luna-eq luna-accounts luna-security luna-greeter luna-greeter-config luna-demo luna-settings luna-files luna-media luna-clock luna-store luna-welcome luna-installer luna-editor luna-terminal luna-session luna-session-gpu"
+managed_bins="selene luna-shell luna-desktop luna-lock luna-keyring luna-polkit luna-eq luna-accounts luna-security luna-greeter luna-greeter-config luna-demo luna-settings luna-files luna-media luna-clock luna-calculator luna-store luna-welcome luna-installer luna-editor luna-terminal luna-session luna-session-gpu"
 
 # ── Inne kopie naszych binarek w PATH ────────────────────────────────────────
 # Typowa pułapka: w /usr/bin leży stary `selene` z poprzedniej instalacji,

@@ -13,7 +13,7 @@ use libluna_core::{
 use libluna_render::{Scene, TextEngine};
 use libluna_widgets::{
     paint_icon, paint_icon_themed, Button, ButtonVariant, ControlsSide, HeaderBar, IconName,
-    MenuButton, PaintCtx, PathBar, ToggleButton, WindowControl,
+    MenuButton, PaintCtx, PathBar, ScrollDrag, ToggleButton, WindowControl,
 };
 
 use crate::app::{display_dir, App, Mode};
@@ -1548,6 +1548,7 @@ pub fn handle_events(
                     );
                 }
                 (PointerButton::Left, ButtonState::Released) => {
+                    app.scroll.release();
                     app.viewer.drag = None;
                     app.pdf_end_selection();
                 }
@@ -1562,6 +1563,10 @@ pub fn handle_events(
             },
             Event::PointerMotion { position, .. } => {
                 app.pointer = Some(*position);
+                if app.scroll.is_dragging() && app.mode == Mode::Gallery {
+                    app.scroll.drag(*position, theme);
+                    continue;
+                }
                 if lay.header.contains(*position) {
                     app.controls_hover = HeaderBar::new()
                         .controls(ControlsSide::Right)
@@ -1589,7 +1594,7 @@ pub fn handle_events(
                 if app.mode == Mode::Gallery {
                     let g = grid_metrics(app.items.len(), lay.grid);
                     if g.area.contains(se.position) {
-                        app.scroll.on_scroll(se.notches_y() * 60.0, g.area);
+                        app.scroll.handle_wheel(event);
                     }
                 } else if app.viewer.image.is_some() && lay.content.contains(se.position) {
                     let factor = (-se.notches_y() * 0.15).exp();
@@ -1617,8 +1622,7 @@ fn sync_metrics(app: &mut App, lay: &Layout) {
         return;
     }
     let g = grid_metrics(app.items.len(), lay.grid);
-    app.scroll.set_content_height(g.content_h);
-    app.scroll.set_offset(app.scroll.offset(), g.area);
+    app.scroll.configure(g.area, g.content_h);
     let (start, end) = g.visible_range(app.scroll.offset());
     let end = end.min(app.items.len());
     let items = &app.items;
@@ -1807,6 +1811,10 @@ fn on_left_press(
 
     // Galeria.
     let g = grid_metrics(app.items.len(), lay.grid);
+    app.scroll.configure(g.area, g.content_h);
+    if app.scroll.press(p, theme) == ScrollDrag::Captured {
+        return;
+    }
     if g.area.contains(p) {
         if let Some(index) = tile_at(app.items.len(), &g, app.scroll.offset(), p) {
             let now = Instant::now();

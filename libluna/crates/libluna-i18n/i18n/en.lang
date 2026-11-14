@@ -296,6 +296,12 @@ Start a player = Start a player
 Lock screen = Lock screen
 Lock = Lock
 Log out = Log out
+Screenshot = Screenshot
+Screenshot saved = Screenshot saved
+Open location = Open location
+All monitors = All monitors
+Select area = Select area
+Drag to select an area · Esc to cancel = Drag to select an area · Esc to cancel
 Restart = Restart
 Reboot = Reboot
 Power off = Power off
@@ -1736,3 +1742,18 @@ Enabled — boot loader is not signed; disable Secure Boot or enroll keys after 
 The macOS look needs a global menu and a bottom dock — coming in a later version = The macOS look needs a global menu and a bottom dock — coming in a later version
 Tray labels are shown only when the panel is horizontal = Tray labels are shown only when the panel is horizontal
 The Luna bar is available now — the macOS-style floating dock is coming in a later version = The Luna bar is available now — the macOS-style floating dock is coming in a later version
+
+# --- Luna Time / Luna Calculator ---
+Time = Time
+Calculator = Calculator
+Standard = Standard
+Scientific = Scientific
+Type an expression = Type an expression
+Invalid expression = Invalid expression
+Division by zero = Division by zero
+Unknown function = Unknown function
+Missing parenthesis = Missing parenthesis
+Unexpected character = Unexpected character
+Expression is too complex = Expression is too complex
+Factorial needs a non-negative integer = Factorial needs a non-negative integer
+Result is not a number = Result is not a number

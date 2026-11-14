@@ -334,7 +334,10 @@ mod tests {
         format.style = DateStyle::Words;
         let october = tr(month_name_key(10));
         assert_eq!(format.date(date), format!("31 {october}"));
-        assert_eq!(format.full(date), format!("{}, 31 {october}", tr("Saturday")));
+        assert_eq!(
+            format.full(date),
+            format!("{}, 31 {october}", tr("Saturday"))
+        );
 
         format.fields = DateFields::DayMonthYear;
         format.order = DateOrder::MonthFirst;

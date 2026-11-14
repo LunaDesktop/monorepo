@@ -67,11 +67,12 @@ pub use scale::Scale;
 pub use shortcuts::{Binding, ShortcutAction, ShortcutProfile, ShortcutSettings};
 pub use style::{
     ActionRowMetrics, AvatarMetrics, BannerMetrics, BarMetrics, BottomSheetMetrics, ButtonMetrics,
-    CardMetrics, CheckMetrics, ContainerMetrics, DropDownMetrics, EntryMetrics, GroupMetrics,
-    HeaderBarMetrics, ItemViewMetrics, MenuMetrics, Metrics, NavMetrics, PagerMetrics, PanelTheme,
-    PathBarMetrics, RadioMetrics, Radius, ScrollViewMetrics, SegmentedMetrics, ShortcutMetrics,
-    SliderMetrics, Spacing, SpinnerMetrics, SplitMetrics, StatusPageMetrics, StepperMetrics,
-    SwitchMetrics, SyntaxColors, TabsMetrics, Theme, ToastMetrics, TooltipMetrics, Typography,
+    CardMetrics, CheckMetrics, ContainerMetrics, DropDownMetrics, EntryMetrics, FocusMetrics,
+    GroupMetrics, HeaderBarMetrics, ItemViewMetrics, MenuMetrics, Metrics, NavMetrics,
+    PagerMetrics, PanelTheme, PathBarMetrics, RadioMetrics, Radius, ScrollViewMetrics,
+    SegmentedMetrics, ShortcutMetrics, SliderMetrics, Spacing, SpinnerMetrics, SplitMetrics,
+    StatusPageMetrics, StepperMetrics, SwitchMetrics, SyntaxColors, TabsMetrics, Theme,
+    ToastMetrics, TooltipMetrics, Typography,
 };
 pub use theme_file::{available as available_themes, StyledTheme, ThemePatch};
 pub use workspaces::{WorkspaceLayout, MAX_WORKSPACES, MIN_WORKSPACES};

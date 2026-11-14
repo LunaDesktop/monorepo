@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
-Name=Clock
-Name[pl]=Zegar
-Name[de]=Uhr
+Name=Time
+Name[pl]=Czas
+Name[de]=Zeit
 Comment=Clock, timer, stopwatch and a private calendar
 Comment[pl]=Zegar, minutnik, stoper i prywatny kalendarz
 Comment[de]=Uhr, Timer, Stoppuhr und ein privater Kalender

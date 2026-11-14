@@ -198,7 +198,7 @@ pub struct PickerItem {
 pub struct Picker {
     pub kind: PickerKind,
     pub query: Entry,
-    pub scroll: libluna_widgets::ScrollView,
+    pub scroll: libluna_widgets::ScrollArea,
     pub selected: usize,
 }
 
@@ -315,7 +315,7 @@ pub struct App {
     pub picker: Option<Picker>,
     pub issues: Vec<Issue>,
     pub confirm_erase: bool,
-    pub scroll: libluna_widgets::ScrollView,
+    pub scroll: libluna_widgets::ScrollArea,
     pub pointer: Option<Point>,
     pub hover: Option<Hit>,
     pub pending: Pending,
@@ -411,7 +411,7 @@ impl App {
             picker: None,
             issues: Vec::new(),
             confirm_erase: false,
-            scroll: libluna_widgets::ScrollView::new(),
+            scroll: libluna_widgets::ScrollArea::new(),
             pointer: None,
             hover: None,
             pending: Pending::default(),
@@ -507,7 +507,7 @@ impl App {
             picker: None,
             issues: Vec::new(),
             confirm_erase: false,
-            scroll: libluna_widgets::ScrollView::new(),
+            scroll: libluna_widgets::ScrollArea::new(),
             pointer: None,
             hover: None,
             pending: Pending::default(),
@@ -1183,7 +1183,7 @@ impl App {
         let mut picker = Picker {
             kind,
             query,
-            scroll: libluna_widgets::ScrollView::new(),
+            scroll: libluna_widgets::ScrollArea::new(),
             selected: 0,
         };
         let items = picker_items_for(self, kind, "");

@@ -49,7 +49,8 @@ wspólną dla tych pakietów.
   **maksymalizacja** i **pełny ekran** (okno ląduje na swoim monitorze), `xdg-decoration`
   (zawsze `server_side`). Skróty: `Super+M` (minimalizuj), `Super+F` (pełny ekran),
   `Super+↑`/`Super+↓` (maksymalizuj/przywróć), `Super+Tab` (przełącz okna),
-  `Super+L` (wyloguj — kończy sesję).
+  `Super+F12` / `Print` (paleta zrzutów: wszystkie monitory, numer monitora,
+  zaznaczenie obszaru), `Super+L` (wyloguj — kończy sesję).
 - **`xdg_popup`**: menu/kontekstowe z pozycjonera (`anchor_rect` + offset), zamknięcie
   kliknięciem poza (`popup_done`).
 - **`wlr-layer-shell`**: panele/docki — kotwice, marginesy, strefa wyłączna, warstwy
@@ -167,7 +168,7 @@ Selene.
   `docs/images/luna-media.png`, `luna-media-viewer.png`, `luna-media-video.png`,
   `luna-media-pdf.png`.
   Szczegóły: [`docs/media.md`](../docs/media.md).
-- **Luna Clock** (`luna-clock`, `apps/luna-clock`) — zegar lokalny i światowy,
+- **Luna Time** (`luna-clock`, `apps/luna-clock`) — zegar lokalny i światowy,
   minutnik, stoper oraz kalendarz z własnymi wydarzeniami, świętami liczącymi się
   offline i automatycznym motywem o wybranych godzinach. Panel czyta ten sam plik
   wydarzeń (kropki i plan dnia) i otwiera aplikację na wybranym dniu; po zamknięciu
@@ -176,6 +177,14 @@ Selene.
   `cargo run --manifest-path apps/luna-clock/Cargo.toml --bin preview` →
   `docs/images/clock-*.png`.
   Szczegóły i prywatność: [`docs/clock.md`](../docs/clock.md).
+- **Luna Calculator** (`luna-calculator`, `apps/luna-calculator`) — kalkulator
+  standardowy i naukowy: cztery działania, procenty, nawiasy, trygonometria,
+  logarytmy, potęgi, silnia, `π`/`e`, `DEG`/`RAD` i notacja naukowa. Wynik jest
+  liczony lokalnie, a podgląd pojawia się jeszcze przed `=`. Wejście z wpisu
+  `eu.luna.Calculator.desktop`; podglądy:
+  `cargo run --manifest-path apps/luna-calculator/Cargo.toml --bin preview` →
+  `docs/images/calculator-*.png`.
+  Szczegóły: [`docs/calculator.md`](../docs/calculator.md).
 - **Wielojęzyczność na żywo**: `libluna-platform` obserwuje `~/.config/luna/locale.conf`,
   przeładowuje katalogi `libluna-i18n`, ustawia `LANGUAGE`/`LANG` i odrysowuje okno;
   aplikacje z cache'owanymi napisami (sidebar, nawigacja, tytuł okna) odświeżają je po

@@ -10,7 +10,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use libluna_core::Point;
-use libluna_widgets::{CheckButton, ScrollView};
+use libluna_widgets::{CheckButton, FocusModel, ScrollArea};
 
 use crate::live::LiveEnvironment;
 use crate::news::{self, Notes};
@@ -55,7 +55,9 @@ pub struct App {
     pub live: LiveEnvironment,
     pub notes: Notes,
     pub version: String,
-    pub scroll: ScrollView,
+    pub scroll: ScrollArea,
+    /// Fokus klawiatury (`Tab`) — akcje ekranu, na końcu checkbox w stopce.
+    pub focus: FocusModel,
     pub pointer: Option<Point>,
     pub hover: Option<Action>,
     pub pending: Pending,
@@ -96,7 +98,8 @@ impl App {
             live,
             notes,
             version,
-            scroll: ScrollView::new(),
+            scroll: ScrollArea::new(),
+            focus: FocusModel::new(),
             pointer: None,
             hover: None,
             pending: Pending::default(),

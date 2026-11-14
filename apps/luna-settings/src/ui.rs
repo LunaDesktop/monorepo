@@ -15,8 +15,8 @@ use libluna_render::wallpaper::decode_png;
 use libluna_render::{ImageData, Scene, TextEngine};
 use libluna_widgets::{
     clipboard_command, hover_fill, paint_icon, ActionRow, Button, ButtonVariant, CheckButton,
-    ControlsSide, Entry, HeaderBar, IconName, PaintCtx, PreferencesGroup, PreferencesPage, Slider,
-    Switch, TextClipboardCommand, TitleAlign, ViewSwitcher, WindowControl,
+    ControlsSide, Entry, HeaderBar, IconName, PaintCtx, PreferencesGroup, PreferencesPage,
+    ScrollDrag, Slider, Switch, TextClipboardCommand, TitleAlign, ViewSwitcher, WindowControl,
 };
 
 use crate::app::{AccountField, AccountForm, SettingsApp, TextPasteTarget};
@@ -32,7 +32,7 @@ fn row_height(theme: &Theme) -> f64 {
     (ROW_H * factor).round()
 }
 /// Przewinięcie za jeden „ząbek” kółka.
-const SCROLL_STEP: f64 = 64.0;
+
 /// Szerokość sidebara.
 const SIDEBAR_W: f64 = 236.0;
 
@@ -1241,9 +1241,10 @@ pub fn handle_events(
     let header_bar = HeaderBar::new().controls(ControlsSide::Right);
     let groups = pages::content_groups(app);
     let page = preferences_page(&groups);
-    app.scroll
-        .set_content_height(page.content_height(row_height(theme), theme));
-    app.scroll.set_offset(app.scroll.offset(), lay.viewport);
+    app.scroll.configure(
+        content_viewport(app, lay.viewport),
+        page.content_height(row_height(theme), theme),
+    );
 
     for event in events {
         match event {
@@ -1254,6 +1255,9 @@ pub fn handle_events(
                 app.hover_control = header_bar.control_at(lay.header, theme, *position);
                 app.info_hover = info_button_rect(&lay, theme).contains(*position);
                 app.pointer = Some(*position);
+                if matches!(app.scroll.handle_pointer(event, theme), ScrollDrag::Moved) {
+                    continue;
+                }
                 let nav_rect = nav_content(app, &lay);
                 app.nav.hover_at(nav_rect, Some(*position), theme);
                 if let Some((kind, track)) = app.drag {
@@ -1277,6 +1281,7 @@ pub fn handle_events(
                 let nav_rect = nav_content(app, &lay);
                 app.nav.hover_at(nav_rect, None, theme);
                 app.drag = None;
+                app.scroll.release();
             }
             Event::PointerButton(button) if button.state == ButtonState::Pressed => {
                 if button.button != PointerButton::Left {
@@ -1319,6 +1324,12 @@ pub fn handle_events(
                 if !lay.viewport.contains(p) {
                     continue;
                 }
+                if matches!(
+                    app.scroll.handle_pointer(event, theme),
+                    ScrollDrag::Captured
+                ) {
+                    continue;
+                }
                 if let Some(hero) = displays_hero_rect(app, lay.viewport) {
                     if hero.contains(p) {
                         let tiles = monitor_tiles(app);
@@ -1342,6 +1353,7 @@ pub fn handle_events(
             }
             Event::PointerButton(button) if button.state == ButtonState::Released => {
                 if button.button == PointerButton::Left {
+                    app.scroll.handle_pointer(event, theme);
                     app.drag = None;
                     app.end_monitor_drag();
                 }
@@ -1353,9 +1365,7 @@ pub fn handle_events(
             Event::Scroll(scroll)
                 if content_viewport(app, lay.viewport).contains(scroll.position) =>
             {
-                let content = content_viewport(app, lay.viewport);
-                app.scroll
-                    .on_scroll(scroll.notches_y() * SCROLL_STEP, content);
+                app.scroll.handle_wheel(event);
             }
             Event::Scroll(_) => {}
             _ => {}
@@ -2458,13 +2468,17 @@ fn handle_info_events(
     let page = preferences_page(&groups);
     let content = info_content_rect(app, size, theme);
     app.info_scroll
-        .set_content_height(page.content_height(row_height(theme), theme));
-    app.info_scroll
-        .set_offset(app.info_scroll.offset(), content);
+        .configure(content, page.content_height(row_height(theme), theme));
 
     for event in events {
         match event {
             Event::PointerMotion { position, .. } => {
+                if matches!(
+                    app.info_scroll.handle_pointer(event, theme),
+                    ScrollDrag::Moved
+                ) {
+                    continue;
+                }
                 app.info_sheet.update_drag(position.y);
             }
             Event::PointerButton(button)
@@ -2478,6 +2492,12 @@ fn handle_info_events(
                 } else if app.info_sheet.drag_zone_at(size, theme, p) {
                     app.info_sheet.begin_drag(p.y);
                 } else if content.contains(p) {
+                    if matches!(
+                        app.info_scroll.handle_pointer(event, theme),
+                        ScrollDrag::Captured
+                    ) {
+                        continue;
+                    }
                     let hits = row_hits(&groups, content, theme, text, app.info_scroll.offset());
                     for hit in hits {
                         handle_click(app, hit, p, theme, text);
@@ -2488,13 +2508,13 @@ fn handle_info_events(
                 if button.state == ButtonState::Released
                     && button.button == PointerButton::Left =>
             {
+                app.info_scroll.handle_pointer(event, theme);
                 if app.info_sheet.end_drag(theme) {
                     app.close_info_sheet();
                 }
             }
             Event::Scroll(scroll) if content.contains(scroll.position) => {
-                app.info_scroll
-                    .on_scroll(scroll.notches_y() * SCROLL_STEP, content);
+                app.info_scroll.handle_wheel(event);
             }
             Event::Key(key) if key.state == ButtonState::Pressed && key.keysym == 0xff1b => {
                 app.close_info_sheet();

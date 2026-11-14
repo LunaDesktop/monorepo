@@ -247,9 +247,14 @@ impl ThemeSettings {
 
     /// Jak [`resolve_base`](Self::resolve_base), ale nakłada też ustawienia
     /// dostępności (skala tekstu, wysoki kontrast) z `accessibility.conf`.
+    ///
+    /// Ustawia też procesową flagę `reduce_motion`, którą czytają animacje
+    /// (`Toast`, `Revealer`, `BottomSheet`, `Stack`).
     pub fn resolve_themed(&self, system_dark: bool) -> Theme {
+        let accessibility = crate::accessibility::AccessibilitySettings::load();
+        crate::motion::set_reduce_motion(accessibility.reduce_motion);
         self.resolve_base(system_dark)
-            .with_accessibility(&crate::accessibility::AccessibilitySettings::load())
+            .with_accessibility(&accessibility)
     }
 
     // --- Trwałość (prosty format `klucz = wartość`) ---

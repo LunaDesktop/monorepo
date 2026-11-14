@@ -16,7 +16,8 @@ zbudować, przetestować i wydać niezależnie od reszty środowiska.
 | `apps/luna-editor/` | `luna-editor` | libluna | edytor kodu z wtyczkami instalowanymi z zewnątrz |
 | `apps/luna-eq/` | `luna-eq` | — (wtyczka LADSPA) | korektor graficzny dla PipeWire |
 | `apps/luna-settings/` | `luna-settings` | libluna, luna | centrum ustawień |
-| `apps/luna-clock/` | `luna-clock` | libluna | zegar, minutnik, stoper i kalendarz |
+| `apps/luna-clock/` | `luna-clock` | libluna | czas: zegar, minutnik, stoper i kalendarz |
+| `apps/luna-calculator/` | `luna-calculator` | libluna | kalkulator standardowy i naukowy |
 | `apps/luna-store/` | `luna-store` | libluna | sklep i aktualizacje (pacman/pag/apt/dnf/emerge/Flatpak) |
 | `apps/luna-terminal/` | `luna-terminal` | libluna | terminal |
 

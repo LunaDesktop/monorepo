@@ -249,12 +249,15 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
 - **Luna Settings** (`apps/luna-settings`) — centrum ustawień środowiska i systemu
   (wygląd, język, dźwięk, ekrany, zasilanie, powiadomienia, informacje o systemie):
   pierwsza wersja działa; plan i zakres w **[`docs/settings.md`](settings.md)**.
-- **Luna Clock** (`apps/luna-clock`) — zegar, minutnik, stoper, strefy czasowe
+- **Luna Time** (`apps/luna-clock`) — zegar, minutnik, stoper, strefy czasowe
   i kalendarz z wydarzeniami, świętami offline i automatycznym motywem;
   panel czyta ten sam plik wydarzeń i otwiera aplikację na wybranym dniu.
   Po zamknięciu aplikacji działający minutnik/stoper trafia do **widgetu pod paskiem**
   (`active.conf` + `luna::clock_widget`), co jest pierwszym krokiem do systemu widgetów.
   Szczegóły i zasady prywatności: **[`docs/clock.md`](clock.md)**.
+- **Luna Calculator** (`apps/luna-calculator`) — kalkulator standardowy i naukowy
+  z lokalnym parserem wyrażeń, trybami `DEG`/`RAD`, podglądem wyniku i obsługą
+  klawiatury. Szczegóły: **[`docs/calculator.md`](calculator.md)**.
 
 ## Później (poza MVP)
 - **Pakiety ikon** (kolejny krok razem z centrum ustawień): manifest `icons.toml`

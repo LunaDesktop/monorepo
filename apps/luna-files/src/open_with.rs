@@ -12,7 +12,7 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use libluna_core::{Point, Rect};
-use libluna_widgets::ScrollView;
+use libluna_widgets::ScrollArea;
 
 /// Wysokość wiersza listy aplikacji (wspólna dla rysowania i trafień).
 pub const ROW_H: f64 = 36.0;
@@ -700,7 +700,7 @@ pub struct OpenWithDialog {
     pub selected: Option<usize>,
     pub remember: bool,
     pub hovered: Option<usize>,
-    pub scroll: ScrollView,
+    pub scroll: ScrollArea,
     /// Ostatni klik wiersza (do wykrycia podwójnego kliknięcia).
     pub last_click: Option<(usize, Instant)>,
 }
@@ -732,7 +732,7 @@ impl OpenWithDialog {
             .iter()
             .position(DesktopApp::available)
             .or_else(|| (!apps.is_empty()).then_some(0));
-        let mut scroll = ScrollView::new();
+        let mut scroll = ScrollArea::new();
         scroll.set_content_height(apps.len() as f64 * ROW_H);
         Self {
             path,

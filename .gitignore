@@ -9,6 +9,8 @@
 /packaging
 /Cargo.lock
 /.tmp/
+/.tmp-*
+/build-target/
 /docs/luna-*.png
 *.wazne
 /docs/*.md
