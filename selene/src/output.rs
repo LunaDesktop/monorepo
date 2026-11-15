@@ -517,7 +517,20 @@ pub fn spawn_drm(
             && std::env::var("SELENE_ZEROCOPY")
                 .map(|v| !v.is_empty() && v != "0")
                 .unwrap_or(true);
-        let mut zerocopy: Vec<bool> = if use_gpu && zerocopy_requested {
+        // Sterownik bez obsługi modyfikatorów w `ADDFB2` (NVIDIA) nie ma jak
+        // przyjąć bufora z EGL — próba kosztowałaby pierwszą klatkę i kończyła
+        // się fallbackiem. Wybieramy od razu ścieżkę, która działa.
+        let zerocopy_possible = zerocopy_requested && backend.supports_fb_modifiers();
+        if use_gpu
+            && zerocopy_requested
+            && !zerocopy_possible
+            && std::env::var("SELENE_STATS").is_ok()
+        {
+            eprintln!(
+                "selene/drm: zero-copy pominięte — sterownik nie przyjmuje modyfikatorów ADDFB2 (render GPU + readback)"
+            );
+        }
+        let mut zerocopy: Vec<bool> = if use_gpu && zerocopy_possible {
             vec![true; sizes.len()]
         } else {
             vec![false; sizes.len()]
@@ -531,11 +544,7 @@ pub fn spawn_drm(
             if std::env::var("SELENE_STATS").is_ok() {
                 eprintln!(
                     "selene/drm: zero-copy {}",
-                    if zerocopy_requested { "tak" } else { "nie" }
-                );
-                eprintln!(
-                    "selene/drm: GBM (zero-copy NVIDIA): {}",
-                    libluna_render::gbm::describe()
+                    if zerocopy_possible { "tak" } else { "nie" }
                 );
             }
         }

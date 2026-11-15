@@ -915,6 +915,17 @@ impl DrmBackend {
         self.outputs.iter().any(|o| o.gamma_size > 0)
     }
 
+    /// Czy `ADDFB2` przyjmie modyfikator bufora — warunek zero-copy przez EGL.
+    ///
+    /// `nvidia-drm` odrzuca **każdy** modyfikator (`EINVAL`, zmierzone na
+    /// sterowniku 615.78.08: `PRIME` przechodzi, `ADDFB2` nie), a liniowego
+    /// bufora z GBM nie da się użyć ani jako celu renderu, ani jako tekstury.
+    /// Zero-copy jest tam więc niewykonalne — zamiast płacić za nieudaną
+    /// pierwszą klatkę i mylący log, od razu wybieramy render GPU + readback.
+    pub fn supports_fb_modifiers(&self) -> bool {
+        !matches!(self.driver.as_deref(), Some("nvidia"))
+    }
+
     /// Czy można używać sprzętowej płaszczyzny kursora.
     ///
     /// Karty wirtualne (qxl, virtio_gpu, bochs, ...) mają płaszczyznę kursora,
