@@ -126,8 +126,9 @@ Zakres (zrobione):
    **tylko** gdy GPU jest włączone i EGL potrafi zaimportować dmabuf.
    `luna-session` włącza GPU **domyślnie** (gdy istnieje `/dev/dri/renderD*`),
    a `LUNA_GPU=0` — albo sesja „Luna (bez GPU)” w greeterze — wymusza czysty CPU.
-2. `feedback` (v4): `format_table` (memfd, 4 B formatu + 8 B modyfikatora na
-   pozycję), `main_device` i jeden tranche (`tranche_target_device`,
+2. `feedback` (v4): `format_table` (memfd, **16 B na wpis**: 4 B formatu,
+   4 B rezerwy i 8 B modyfikatora — bez rezerwy Xwayland przerywa `assert`-em,
+   a Mesa czyta modyfikatory o 4 B za wcześnie), `main_device` i jeden tranche (`tranche_target_device`,
    `tranche_formats`, `tranche_flags=0`, `tranche_done`, `done`). Urządzenie to
    `dev_t` węzła `/dev/dri/renderD*` pasującego do sterownika GPU; `LUNA_RENDER_NODE`
    pozwala wskazać je jawnie (układy hybrydowe). Klienty v1–v3 dostają nadal

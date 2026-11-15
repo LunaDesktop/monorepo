@@ -318,18 +318,28 @@ fn send_feedback(feedback: &ZwpLinuxDmabufFeedbackV1) {
     let _ = feedback.send_event(zwp_linux_dmabuf_feedback_v1::Event::Done);
 }
 
-/// Zapisuje tablicę (4 B formatu + 8 B modyfikatora na pozycję) do `memfd`.
+/// Zapisuje tablicę do `memfd`: **16 B na pozycję** — `format` (4 B), 4 B rezerwy
+/// (`padding`) i `modifier` (8 B).
+///
+/// Protokół `zwp_linux_dmabuf_v1` definiuje wpis właśnie tak (`struct` z uint32,
+/// uint32, uint64 — bez pakowania), więc pominięcie rezerwy jest błędem krytycznym:
+/// Xwayland przerywa `assert`-em `size % sizeof(struct xwl_format_table_entry) == 0`
+/// i **całe X11 nie wstaje**, a klienty Mesa czytają format/modyfikator o 4 B za
+/// wcześnie (dostają losowe modyfikatory — bufory się nie importują albo migoczą).
 fn format_table_fd(pairs: &[(u32, u64)]) -> Option<(OwnedFd, u32)> {
     use std::io::Write;
+    /// Rozmiar wpisu w tablicy z protokołu: format + rezerwa + modyfikator.
+    const ENTRY_SIZE: usize = 16;
     let fd =
         rustix::fs::memfd_create(c"selene-dmabuf-table", rustix::fs::MemfdFlags::CLOEXEC).ok()?;
     let mut file = std::fs::File::from(fd.try_clone().ok()?);
     for (format, modifier) in pairs {
         file.write_all(&format.to_ne_bytes()).ok()?;
+        file.write_all(&[0u8; 4]).ok()?;
         file.write_all(&modifier.to_ne_bytes()).ok()?;
     }
     file.flush().ok()?;
-    Some((fd, (pairs.len() * 12) as u32))
+    Some((fd, (pairs.len() * ENTRY_SIZE) as u32))
 }
 
 /// `dev_t` węzła renderowania, na którym klienci mają alokować bufory.
@@ -496,6 +506,30 @@ impl Dispatch<ZwpLinuxBufferParamsV1, Params> for State {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Tablica w `feedback` musi mieć 16-bajtowe wpisy (`format`, rezerwa, `modifier`).
+    /// Xwayland robi z tego `assert` i bez rezerwy wywala całe X11, a Mesa czyta
+    /// modyfikatory o 4 B za wcześnie (migotanie, odrzucane bufory).
+    #[test]
+    fn format_table_has_16_byte_entries() {
+        use std::io::{Read, Seek, SeekFrom};
+        let pairs = [
+            (0x3432_4241u32, 0x0000_0000_0000_0001u64),
+            (0x3231_564eu32, 0),
+        ];
+        let (fd, size) = format_table_fd(&pairs).expect("memfd");
+        assert_eq!(size as usize, pairs.len() * 16);
+        let mut bytes = vec![0u8; size as usize];
+        let mut file = std::fs::File::from(fd);
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.read_exact(&mut bytes).unwrap();
+        for (index, (format, modifier)) in pairs.iter().enumerate() {
+            let base = index * 16;
+            assert_eq!(&bytes[base..base + 4], &format.to_ne_bytes());
+            assert_eq!(&bytes[base + 4..base + 8], &[0u8; 4]);
+            assert_eq!(&bytes[base + 8..base + 16], &modifier.to_ne_bytes());
+        }
+    }
 
     fn params(_format: u32, stride: u32, modifier: u64) -> Params {
         let p = Params::default();
