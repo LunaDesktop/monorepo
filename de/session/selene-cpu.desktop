@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Luna (bez GPU)
+Name[pl]=Luna (bez GPU)
+Comment=Luna desktop — Selene Wayland compositor, CPU only (compatibility mode)
+Comment[pl]=Środowisko Luna — kompozytor Selene, tylko CPU (tryb zgodności)
+Exec=luna-session-cpu
+TryExec=selene
+Icon=luna
+DesktopNames=Luna

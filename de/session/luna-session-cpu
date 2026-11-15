@@ -1,0 +1,10 @@
+#!/bin/sh
+# PaganOS/Luna: sesja bez GPU (tryb zgodności).
+#
+# `luna-session` włącza GPU samo (dmabuf/EGL). Ten wariant wymusza czystą ścieżkę
+# CPU — przydatny na maszynach wirtualnych, przy sterowniku bez EGL albo przy
+# diagnozie migotania: jeśli obraz jest stabilny tutaj, a nie w sesji „Luna”,
+# problem leży w GPU, nie w kompozytorze.
+set -eu
+export LUNA_GPU=0
+exec luna-session "$@"

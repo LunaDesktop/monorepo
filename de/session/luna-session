@@ -55,17 +55,40 @@ if [ "$SELENE_BACKEND" = "drm" ]; then
     export SELENE_INPUT
 fi
 
-# GPU: **opt-in**. Domyślnie ścieżka wyjścia zostaje CPU — GPU w trybie DRM
-# nie jest jeszcze zweryfikowane na tyle, by włączać je z automatu (wahania
-# klatek, zachowanie przy zmianie trybu). Włączanie:
+# GPU: **domyślnie włączone**. Selene ogłasza wtedy klientom `zwp_linux_dmabuf_v1`
+# i komponuje ich bufory sprzętowo; bez tego klienty (GTK4, Chromium, Flatpak,
+# Firefox/Zen) zostają na `wl_shm` i całym wideo w przeglądarce zajmuje się CPU.
 #
-#   LUNA_GPU=1 luna-session        # albo wpis w środowisku sesji
+# To bezpieczne także bez sprawnego GPU: Selene sprawdza EGL, a gdy go brak —
+# po prostu nie ogłasza dmabufa i zostaje na CPU (log: „GPU niedostępne”).
+# Sesja nigdy nie ginie z powodu GPU. Wyłączenie (diagnostyka, sterownik bez EGL):
 #
-# UWAGA: bez `LUNA_GPU=1` Selene nie ogłasza `zwp_linux_dmabuf_v1`, więc klienty
-# (GTK4, Chromium, Flatpak) zostają na `wl_shm`/softwarze — dokładnie tak, jak
-# przed dodaniem `feedback` dmabufa.
-if [ -n "${LUNA_GPU:-}" ]; then
-    export LUNA_GPU
+#   LUNA_GPU=0 luna-session        # albo sesja „Luna (bez GPU)” w greeterze
+if [ -z "${LUNA_GPU:-}" ]; then
+    if ls /dev/dri/renderD* >/dev/null 2>&1; then
+        LUNA_GPU=1
+    else
+        # Brak węzła renderującego (VM bez 3D, sterownik bez render node) — CPU.
+        LUNA_GPU=0
+    fi
+fi
+export LUNA_GPU
+
+# NVIDIA: VA-API przez NVDEC (pakiet `nvidia-vaapi-driver`). Sterowniki 525+
+# mają zepsuty backend EGL tego drivera, więc jedyną działającą ścieżką jest
+# `direct` (wymaga `nvidia_drm.modeset=1`). Zmienne są obojętne dla innych kart,
+# a `LIBVA_DRIVER_NAME` ustawiamy **tylko** gdy driver naprawdę leży na dysku —
+# inaczej zepsulibyśmy VA-API na Intelu/AMD.
+if [ -e /sys/module/nvidia ] || [ -e /proc/driver/nvidia ]; then
+    : "${NVD_BACKEND:=direct}"
+    export NVD_BACKEND
+    if [ -f /usr/lib/dri/nvidia_drv_video.so ] || [ -f /usr/lib64/dri/nvidia_drv_video.so ]; then
+        : "${LIBVA_DRIVER_NAME:=nvidia}"
+        # Sandbox procesu RDD odcina /dev/nvidia* — bez tego Firefox/Zen nie
+        # zainicjuje VA-API mimo poprawnej konfiguracji.
+        : "${MOZ_DISABLE_RDD_SANDBOX:=1}"
+        export LIBVA_DRIVER_NAME MOZ_DISABLE_RDD_SANDBOX
+    fi
 fi
 
 # Diagnostyka wydajności (fps DRM + tempo kursora w Selene, fps powłoki w luna-shell).
@@ -92,11 +115,11 @@ if mkdir -p "$log_dir" 2>/dev/null; then
     # łatwo testować stary build i szukać błędu, którego już nie ma.
     selene_path="$(command -v selene 2>/dev/null || echo '<brak>')"
     shell_path="$(command -v luna-shell 2>/dev/null || echo '<brak>')"
-    printf '=== luna-session %s ===\nXDG_RUNTIME_DIR=%s SELENE_BACKEND=%s SELENE_INPUT=%s\nselene: %s [%s]\nluna-shell: %s [%s]\nSELENE_STATS=%s LUNA_STATS=%s\n' \
+    printf '=== luna-session %s ===\nXDG_RUNTIME_DIR=%s SELENE_BACKEND=%s SELENE_INPUT=%s\nselene: %s [%s]\nluna-shell: %s [%s]\nSELENE_STATS=%s LUNA_STATS=%s LUNA_GPU=%s\n' \
         "$(date -Is)" "${XDG_RUNTIME_DIR:-<brak>}" "$SELENE_BACKEND" "${SELENE_INPUT:-<brak>}" \
         "$selene_path" "$(stat -c %y "$selene_path" 2>/dev/null | cut -d. -f1 || echo '?')" \
         "$shell_path" "$(stat -c %y "$shell_path" 2>/dev/null | cut -d. -f1 || echo '?')" \
-        "$SELENE_STATS" "$LUNA_STATS" \
+        "$SELENE_STATS" "$LUNA_STATS" "${LUNA_GPU:-<brak>}" \
         >>"$log" 2>/dev/null || true
     exec >>"$log" 2>&1
 fi

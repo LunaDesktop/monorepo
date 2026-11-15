@@ -123,9 +123,9 @@ zgadza się z trybem wyjścia — wcześniej pokazywał wtedy nieodświeżony bu
 Zakres (zrobione):
 1. Global `zwp_linux_dmabuf_v1` **v4** + `zwp_linux_buffer_params_v1`
    (`create` → `created`, `create_immed`, `add`, `destroy`). Global powstaje
-   **tylko** gdy `LUNA_GPU=1` i EGL potrafi zaimportować dmabuf; `luna-session`
-   **nie** włącza GPU sam — zmienną ustawia się w sesji (albo w `Exec=` wpisie
-   `wayland-sessions`, patrz niżej). `LUNA_GPU=0`/brak = czysty CPU.
+   **tylko** gdy GPU jest włączone i EGL potrafi zaimportować dmabuf.
+   `luna-session` włącza GPU **domyślnie** (gdy istnieje `/dev/dri/renderD*`),
+   a `LUNA_GPU=0` — albo sesja „Luna (bez GPU)” w greeterze — wymusza czysty CPU.
 2. `feedback` (v4): `format_table` (memfd, 4 B formatu + 8 B modyfikatora na
    pozycję), `main_device` i jeden tranche (`tranche_target_device`,
    `tranche_formats`, `tranche_flags=0`, `tranche_done`, `done`). Urządzenie to
