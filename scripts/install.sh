@@ -511,6 +511,49 @@ if [ "$keep_old" = 0 ]; then
     remove_installed
 fi
 
+# ── Kontrola świeżości binarek przy --no-build ──────────────────────────────
+# `--no-build` nie kompiluje: kopiuje to, co leży w `target/release`. Gdy źródła
+# są nowsze od binarki, instalator „nie podmienia pakietu” — bo nowego builda
+# po prostu nie ma. Ostrzegamy głośno, zamiast milczeć.
+sources_for() {
+    case "$1" in
+    selene) printf '%s\n' "$root/selene" "$root/libluna" ;;
+    luna-greeter | luna-greeter-config) printf '%s\n' "$root/luna-greeter" "$root/libluna" ;;
+    luna-settings) printf '%s\n' "$root/apps/luna-settings" "$root/luna" "$root/libluna" ;;
+    luna-shell | luna-desktop | luna-panel | luna-apps | luna-lock | luna-keyring | luna-polkit | luna-eq | luna-accounts | luna-security)
+        printf '%s\n' "$root/luna" "$root/libluna"
+        ;;
+    luna-*) printf '%s\n' "$root/apps/$1" "$root/libluna" ;;
+    *) return 0 ;;
+    esac
+}
+
+if [ "$do_build" = 0 ] && [ "$dry_run" = 0 ]; then
+    stale=""
+    while IFS='|' read -r comp src dst mode; do
+        [ -z "$only" ] || [ "$comp" = "$only" ] || continue
+        [ -f "$src" ] || continue
+        case "$src" in "$lib"/*) ;; *) continue ;; esac
+        for dir in $(sources_for "$(basename "$src")"); do
+            [ -d "$dir" ] || continue
+            newer="$(find "$dir" -name '*.rs' -newer "$src" -print -quit 2>/dev/null)"
+            if [ -n "$newer" ]; then
+                stale="$stale
+  $(basename "$src")  ←  ${newer#"$root"/}"
+                break
+            fi
+        done
+    done < <(files)
+    if [ -n "$stale" ]; then
+        say ""
+        say "UWAGA: --no-build kopiuje build starszy od źródeł:$stale"
+        say "  Nowa poprawka NIE zostanie zainstalowana, dopóki nie zbudujesz:"
+        say "    CARGO_TARGET_DIR=$CARGO_TARGET_DIR cargo build --release"
+        say "  (albo uruchom instalator bez --no-build — sam zbuduje)"
+        say ""
+    fi
+fi
+
 step "Kopiowanie nowych plików"
 while IFS='|' read -r comp src dst mode; do
     [ -z "$only" ] || [ "$comp" = "$only" ] || continue
@@ -518,7 +561,14 @@ while IFS='|' read -r comp src dst mode; do
         echo "brak pliku źródłowego: $src" >&2
         exit 1
     fi
-    do_cmd install -D -m "$mode" "$src" "$dst"
+    if [ "$dry_run" = 1 ]; then
+        say "  [dry-run] $src -> $dst"
+    elif ! install -D -m "$mode" "$src" "$dst"; then
+        # Cicha porażka kopiowania była najgorszym przypadkiem: instalator
+        # kończył się „sukcesem”, a w systemie zostawał stary plik.
+        echo "NIE UDAŁO SIĘ zainstalować: $src -> $dst" >&2
+        exit 1
+    fi
 done < <(files)
 
 # Migracja wpisów sesji: w 0.0.20 GPU było domyślne i istniała sesja „Luna (bez
