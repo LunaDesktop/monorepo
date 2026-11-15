@@ -643,6 +643,7 @@ pub fn spawn_drm(
         let mut frames = 0u64;
         let (mut ms_render, mut ms_present, mut ms_wait) = (0.0f64, 0.0f64, 0.0f64);
         let mut report = std::time::Instant::now();
+        let mut present_stats = backend.take_present_stats();
         let mut last_sigs: Vec<Option<u64>> = vec![None; sizes.len()];
         let mut last_cur: Option<Point> = None;
         // Damage (tylko GPU): poprzednia scena per wyjście i prostokąt skopiowany
@@ -655,6 +656,9 @@ pub fn spawn_drm(
         let mut last_present = std::time::Instant::now();
         // Flipy zakolejkowane w poprzedniej iteracji, na które jeszcze nie czekaliśmy.
         let mut pending_flips = 0usize;
+        // Klatki narysowane, ale jeszcze nie pokazane (CRTC czekał na vblank).
+        // Dzięki temu 60 Hz HDMI nie blokuje 75 Hz DP-1.
+        let mut pending_present = vec![false; sizes.len()];
         // Wykrywanie powrotu z uśpienia: pętla po suspendzie wznawia się po
         // wielosekundowej przerwie. Jądro mogło zgubić stan CRTC, a zdarzenia
         // flipów sprzed snu nie dotyczą już nowych klatek.
@@ -677,6 +681,7 @@ pub fn spawn_drm(
                 last_sigs = vec![None; sizes.len()];
                 prev_scene = vec![None; sizes.len()];
                 prev_damage = vec![None; sizes.len()];
+                pending_present = vec![false; sizes.len()];
                 cursor_shown = vec![false; sizes.len()];
                 applied_night = None;
                 applied_power = false;
@@ -740,6 +745,7 @@ pub fn spawn_drm(
                             pending_flips = 0;
                             present.presented();
                         }
+                        pending_present = vec![false; sizes.len()];
                         last_present = std::time::Instant::now();
                         // Modeset zresetował płaszczyznę kursora — ładujemy ją ponownie.
                         hw_cursor =
@@ -849,6 +855,7 @@ pub fn spawn_drm(
                         prev_scene = vec![None; sizes.len()];
                         prev_damage = vec![None; sizes.len()];
                         last_present = std::time::Instant::now();
+                        pending_present = vec![false; sizes.len()];
                         // Modeset odtworzył bufory — zdarzenia flipów sprzed zmiany
                         // trybu nie dotyczą już nowych framebufferów.
                         if pending_flips > 0 {
@@ -1041,6 +1048,14 @@ pub fn spawn_drm(
                 }
             }
 
+            // Wyjście z klatką czekającą na vblank nie renderuje kolejnej — najpierw
+            // musi pokazać tę, inaczej damage opisuje inną zawartość bufora.
+            for (i, pending) in pending_present.iter().enumerate() {
+                if *pending {
+                    changed[i] = false;
+                }
+            }
+
             // Zwolnienia buforów czekają na prezentację. Gdy scena się nie zmieniła
             // (np. okno jest na innej przestrzeni), wymuś klatkę — inaczej klient
             // nigdy nie dostanie `wl_buffer.release` i stanie. Callbacki NIE wymuszają
@@ -1052,14 +1067,16 @@ pub fn spawn_drm(
                 any_changed = true;
             }
 
-            if !any_changed && !cur_changed {
-                if pending_flips > 0 {
+            let any_pending_present = pending_present.iter().any(|p| *p);
+            if !any_changed && !cur_changed && !any_pending_present {
+                if backend.any_flip_pending() {
                     let t = std::time::Instant::now();
-                    backend.wait_flips();
+                    if backend.poll_flips(16) > 0 {
+                        present.presented();
+                    }
                     ms_wait += t.elapsed().as_secs_f64() * 1000.0;
-                    pending_flips = 0;
-                    present.presented();
                 }
+                pending_flips = 0;
                 if present.has_pending_frames() {
                     // Pacing ~60 Hz bez przerysowywania pulpitu; jeśli w międzyczasie
                     // przyjdzie commit lub wejście, wstajemy natychmiast zamiast spać 16 ms.
@@ -1176,24 +1193,25 @@ pub fn spawn_drm(
                 }
                 ms_render += t_render.elapsed().as_secs_f64() * 1000.0;
 
-                // Dopiero teraz czekamy na flipy poprzedniej klatki. Cały render
-                // i readback zdążyły się wykonać **w trakcie** skanowania
-                // poprzedniej klatki, więc nie dokładają się do okresu odświeżania
-                // (wcześniej czekanie stało na początku iteracji i przy 60 Hz
-                // każde opóźnienie renderu kosztowało cały vblank — YouTube spadał
-                // z 60 do 30 klatek).
-                if pending_flips > 0 {
-                    let t = std::time::Instant::now();
-                    backend.wait_flips();
-                    ms_wait += t.elapsed().as_secs_f64() * 1000.0;
-                    // Flipy się zakończyły — klatki są na ekranie. Dopiero teraz
-                    // oddajemy klientom bufory, których już nikt nie skanuje.
+                // Zbierz flipy, które już się zakończyły — bez czekania na
+                // wolniejsze wyjście (to ono decydowało o fps całej sesji).
+                if backend.poll_flips(0) > 0 {
                     present.presented();
                 }
 
                 let mut num_flips = 0;
+                let mut blocked = 0usize;
                 for i in 0..sizes.len() {
-                    if !changed[i] {
+                    if !changed[i] && !pending_present[i] {
+                        continue;
+                    }
+                    if backend.flip_pending(i) {
+                        // CRTC jeszcze skanuje poprzednią klatkę — kolejny
+                        // `PAGE_FLIP` zwróciłby `EBUSY`. Klatka zostaje
+                        // w rendererze, a bufor trzeba będzie skopiować w całości.
+                        pending_present[i] = true;
+                        backend.force_full(i);
+                        blocked += 1;
                         continue;
                     }
                     let t = std::time::Instant::now();
@@ -1248,12 +1266,25 @@ pub fn spawn_drm(
                     ms_present += t.elapsed().as_secs_f64() * 1000.0;
 
                     if flipped {
+                        pending_present[i] = false;
                         num_flips += 1;
+                    } else {
+                        // Nie udało się (np. niezgodny rozmiar ramki) — nie ponawiamy
+                        // w kółko: następna zmiana sceny narysuje wszystko od nowa
+                        // (`present_region` ustawia wtedy `force_full_frames`).
+                        pending_present[i] = false;
                     }
                 }
 
-                // Czekanie na flipy przenosimy na początek następnej iteracji
-                // (patrz `pending_flips` wyżej) — tutaj tylko je zapamiętujemy.
+                // Wszystkie wyjścia czekają na vblank — śpij do najbliższego
+                // zdarzenia zamiast kręcić pętlą albo czekać na wolniejsze.
+                if num_flips == 0 && blocked > 0 {
+                    let t = std::time::Instant::now();
+                    if backend.poll_flips(16) > 0 {
+                        present.presented();
+                    }
+                    ms_wait += t.elapsed().as_secs_f64() * 1000.0;
+                }
                 pending_flips = num_flips;
                 if num_flips > 0 {
                     present.mark_submitted();
@@ -1265,12 +1296,16 @@ pub fn spawn_drm(
                     let frames_f = frames.max(1) as f64;
                     let per_monitor = frames_f * sizes.len() as f64;
                     eprintln!(
-                        "selene/drm: {:.1} klatek/s | render {:.2} ms/klatke, present {:.2} ms, wait_flip {:.2} ms",
+                        "selene/drm: {:.1} klatek/s | render {:.2} ms/klatke, present {:.2} ms, wait_flip {:.2} ms | pełne {}, damage {}, dmabuf {}",
                         frames as f64 / secs,
                         ms_render / frames_f,
                         ms_present / per_monitor.max(1.0),
-                        ms_wait / per_monitor.max(1.0)
+                        ms_wait / per_monitor.max(1.0),
+                        present_stats.0,
+                        present_stats.1,
+                        present_stats.2
                     );
+                    present_stats = backend.take_present_stats();
                     frames = 0;
                     ms_render = 0.0;
                     ms_present = 0.0;

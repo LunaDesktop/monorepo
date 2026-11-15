@@ -872,6 +872,13 @@ pub struct DrmBackend {
     /// Nazwa sterownika karty (`qxl`, `virtio_gpu`, `i915`, …).
     /// Sterowniki wirtualne nie obsługują `XBGR8888` — patrz [`scanout_formats`].
     driver: Option<String>,
+    /// Statystyki prezentacji od ostatniego `take_present_stats`:
+    /// (pełne klatki, kopie z damage, zero-copy). Pełne klatki poza startem
+    /// oznaczają, że `force_full_frames` zadziałał — czyli flipy padają albo
+    /// scena ma widoczny `dmabuf`.
+    stat_full: u64,
+    stat_partial: u64,
+    stat_dmabuf: u64,
 }
 
 impl Drop for DrmBackend {
@@ -959,6 +966,9 @@ impl DrmBackend {
                 fd,
                 outputs,
                 driver,
+                stat_full: 0,
+                stat_partial: 0,
+                stat_dmabuf: 0,
             });
         }
         Err(last)
@@ -1163,28 +1173,32 @@ impl DrmBackend {
         // Framebuffery `dmabuf`, których CRTC już nie skanuje, można oddać dopiero
         // teraz — po odebraniu `FLIP_COMPLETE`.
         self.prune_dmabuf_fbs(idx);
-        let Some((back, fb_id, copied, name, width, height)) = self.outputs.get(idx).map(|out| {
-            let back = (out.front + 1) & 1;
-            let (ptr, pitch) = (out.buffers[back].ptr, out.buffers[back].pitch);
-            let (w, h) = (out.width as usize, out.height as usize);
-            // Po zero-copy, nieudanym flipie lub zmianie trybu historia damage
-            // nie opisuje zawartości tego bufora — kopiujemy całą klatkę.
-            let region = effective_region(out.force_full_frames, region);
-            let copied = match (region, out.swizzle) {
-                (None, true) => swizzle_into(ptr, pitch, rgba, w, h),
-                (None, false) => copy_rows_into(ptr, pitch, rgba, w, h),
-                (Some(r), true) => swizzle_region_into(ptr, pitch, rgba, w, h, r),
-                (Some(r), false) => copy_region_into(ptr, pitch, rgba, w, h, r),
-            };
-            (
-                back,
-                out.buffers[back].fb_id,
-                copied,
-                out.name.clone(),
-                out.width,
-                out.height,
-            )
-        }) else {
+        let Some((back, fb_id, copied, name, width, height, full)) =
+            self.outputs.get(idx).map(|out| {
+                let back = (out.front + 1) & 1;
+                let (ptr, pitch) = (out.buffers[back].ptr, out.buffers[back].pitch);
+                let (w, h) = (out.width as usize, out.height as usize);
+                // Po zero-copy, nieudanym flipie lub zmianie trybu historia damage
+                // nie opisuje zawartości tego bufora — kopiujemy całą klatkę.
+                let forced = out.force_full_frames > 0;
+                let region = effective_region(out.force_full_frames, region);
+                let copied = match (region, out.swizzle) {
+                    (None, true) => swizzle_into(ptr, pitch, rgba, w, h),
+                    (None, false) => copy_rows_into(ptr, pitch, rgba, w, h),
+                    (Some(r), true) => swizzle_region_into(ptr, pitch, rgba, w, h, r),
+                    (Some(r), false) => copy_region_into(ptr, pitch, rgba, w, h, r),
+                };
+                (
+                    back,
+                    out.buffers[back].fb_id,
+                    copied,
+                    out.name.clone(),
+                    out.width,
+                    out.height,
+                    forced || region.is_none(),
+                )
+            })
+        else {
             return false;
         };
         // Rozmiar klatki renderera musi zgadzać się z trybem wyjścia. Gdy się nie
@@ -1213,7 +1227,24 @@ impl DrmBackend {
         out.front = back;
         out.front_dmabuf = false;
         out.force_full_frames = out.force_full_frames.saturating_sub(1);
+        if full {
+            self.stat_full += 1;
+        } else {
+            self.stat_partial += 1;
+        }
         true
+    }
+
+    /// Statystyki prezentacji od poprzedniego wywołania: `(pełne, damage, dmabuf)`.
+    ///
+    /// Diagnostyka: pełne klatki poza rozruchem oznaczają, że `force_full_frames`
+    /// zadziałał (flipy padają, tryb się zmienił) albo scena ma widoczny `dmabuf`.
+    pub fn take_present_stats(&mut self) -> (u64, u64, u64) {
+        let stats = (self.stat_full, self.stat_partial, self.stat_dmabuf);
+        self.stat_full = 0;
+        self.stat_partial = 0;
+        self.stat_dmabuf = 0;
+        stats
     }
 
     /// Czeka, aż wyjście `idx` nie ma oczekującego flipa (z limitem czasu).
@@ -1391,6 +1422,7 @@ impl DrmBackend {
         // Bufory `dumb` nie są już aktualne — dopiero po powrocie na readback
         // trzeba będzie skopiować całą klatkę.
         out.force_full_frames = 2;
+        self.stat_dmabuf += 1;
         true
     }
 
@@ -1398,29 +1430,48 @@ impl DrmBackend {
     ///
     /// Obsługuje wiele monitorów naraz (dopasowując `user_data` do indeksu wyjścia),
     /// `EINTR` na `poll`/`read` oraz bezpieczny limit czasu po suspend/resume.
-    pub fn wait_flips(&mut self) {
-        use rustix::event::{poll, PollFd, PollFlags};
-        use std::time::{Duration, Instant};
+    /// Czy wyjście `idx` czeka jeszcze na `FLIP_COMPLETE`.
+    ///
+    /// Dopóki `true`, nie wolno wysyłać kolejnego `PAGE_FLIP` (jądro zwróci
+    /// `EBUSY`) ani kopiować do bufora, który jest skanowany.
+    pub fn flip_pending(&self, idx: usize) -> bool {
+        self.outputs.get(idx).is_some_and(|out| out.flip_pending)
+    }
 
-        if !self.outputs.iter().any(|o| o.flip_pending) {
-            return;
+    /// Czy jakiekolwiek wyjście czeka na zakończenie flipa.
+    pub fn any_flip_pending(&self) -> bool {
+        self.outputs.iter().any(|out| out.flip_pending)
+    }
+
+    /// Wymusza skopiowanie całej klatki w najbliższych prezentacjach wyjścia.
+    ///
+    /// Wołane, gdy klatka narysowana dla tego wyjścia nie została pokazana
+    /// (CRTC czekał na vblank): zawartość bufora „back” przestaje się zgadzać
+    /// z historią damage.
+    pub fn force_full(&mut self, idx: usize) {
+        if let Some(out) = self.outputs.get_mut(idx) {
+            out.force_full_frames = 2;
         }
-        let deadline = Instant::now() + Duration::from_millis(200);
-        let mut buf = [0u8; 1024];
+    }
 
-        while self.outputs.iter().any(|o| o.flip_pending) {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            let timeout_ms = remaining.as_millis().min(200).max(1) as i32;
-            let mut fds = [PollFd::new(&self.fd, PollFlags::IN)];
-            match poll(&mut fds, timeout_ms) {
-                Ok(0) => break,
-                Ok(_) => {}
-                Err(rustix::io::Errno::INTR) => continue,
-                Err(_) => break,
-            }
+    /// Zbiera zdarzenia flipów, czekając maksymalnie `timeout_ms` na pierwsze.
+    ///
+    /// Zwraca liczbę odebranych zdarzeń `FLIP_COMPLETE` (0 = brak w zadanym
+    /// czasie). Nie czeka na **wszystkie** wyjścia — dzięki temu każde wyjście
+    /// może prezentować z własnym odświeżaniem (75 Hz i 60 Hz jednocześnie).
+    pub fn poll_flips(&mut self, timeout_ms: i32) -> usize {
+        use rustix::event::{poll, PollFd, PollFlags};
+        if !self.any_flip_pending() {
+            return 0;
+        }
+        let mut fds = [PollFd::new(&self.fd, PollFlags::IN)];
+        match poll(&mut fds, timeout_ms) {
+            Ok(0) | Err(_) => return 0,
+            Ok(_) => {}
+        }
+        let mut events = 0usize;
+        let mut buf = [0u8; 1024];
+        loop {
             match rustix::io::read(&self.fd, &mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
@@ -1455,25 +1506,35 @@ impl DrmBackend {
                             if let Some(out) = self.outputs.get_mut(idx) {
                                 out.flip_pending = false;
                             }
+                            events += 1;
                         }
                         offset += len;
                     }
                 }
-                Err(rustix::io::Errno::INTR | rustix::io::Errno::AGAIN) => continue,
+                Err(rustix::io::Errno::INTR | rustix::io::Errno::AGAIN) => break,
                 Err(_) => break,
             }
         }
-        // Timeout albo błąd odczytu: nie wiemy, które flipy się zakończyły.
-        // Zgubione zdarzenie nie może zablokować kompozytora na zawsze, więc
-        // zdejmujemy flagi — ale tylko tam, gdzie flip naprawdę wisiał, i każemy
-        // następnym klatkom iść w całości (stan buforów jest nieznany).
-        // Wcześniej robiliśmy to bezwarunkowo po każdym `wait_flips`, co kasowało
-        // całą optymalizację damage i samo powodowało pełne kopie 8 MB na klatkę.
-        for out in &mut self.outputs {
-            if out.flip_pending {
-                out.force_full_frames = 2;
-                out.flip_pending = false;
+        events
+    }
+
+    pub fn wait_flips(&mut self) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+        while self.any_flip_pending() {
+            if std::time::Instant::now() >= deadline {
+                // Timeout albo zgubione zdarzenie: nie wiemy, co skanuje CRTC.
+                // Zdejmujemy flagi tylko tam, gdzie flip naprawdę wisiał, i każemy
+                // następnym klatkom iść w całości (stan buforów jest nieznany).
+                for out in &mut self.outputs {
+                    if out.flip_pending {
+                        out.force_full_frames = 2;
+                        out.flip_pending = false;
+                    }
+                }
+                return;
             }
+            // Krótkie okna, żeby nie przegapić deadline'u przy zgubionym zdarzeniu.
+            let _ = self.poll_flips(16);
         }
     }
 
