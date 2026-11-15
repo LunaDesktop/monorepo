@@ -263,10 +263,21 @@ i poprzedniej klatki. Scena z widocznym `dmabuf` wymusza pełną klatkę — kli
    byłaby fałszywie zerowa. Kryterium: przy animacji panelu odczyt ≤ 10% klatki.
    Testy: `drm::tests::present_region_*`.
 
-**Pacing (zrobione):** czekanie na flipy przeniesione na początek następnej
-iteracji (`pending_flips`) — render bieżącej klatki nakłada się na skanowanie
-poprzedniej. Wcześniej `present` i `wait_flip` stały obok siebie, więc każda klatka
-płaciła pełny vblank i przy 75 Hz + 60 Hz gubiła terminy (spadki do ~16 kl./s).
+**Pacing (zrobione):** czekanie na flipy stoi **przed prezentacją**, a nie na
+początku iteracji: scena i readback bieżącej klatki liczą się w trakcie skanowania
+poprzedniej, więc opóźnienie renderu nie przepada jako cały vblank (wcześniej
+przy 60 Hz YouTube spadał z 60 do 30 klatek). Po `FLIP_COMPLETE` wątek wyjścia
+budzi pętlę główną (`present_wake`), która natychmiast wysyła klientom
+`wl_buffer.release` i `wl_callback.done` — bez czekania na ruch myszy.
+
+**Spójność buforów przy damage (zrobione):** `DrmOutput::force_full_frames`
+wymusza kopię **całej** klatki po zdarzeniach, które psują historię damage:
+po `present_dmabuf` (zero-copy zmienia framebuffer CRTC), po nieudanym flipie
+i po zmianie trybu/wybudzeniu. Bez tego przeglądarka rysująca mały fragment
+(pasek postępu wideo) dostawała go na starym tle — kwadratowe artefakty i
+mruganie wokół odtwarzacza. Framebuffery `dmabuf` są zwalniane wyłącznie po
+`FLIP_COMPLETE` (`flip_pending == false`): wcześniejsze `RMFB`/`GEM_CLOSE`
+kazało kernelowi skanować zwolnioną pamięć.
 
 **Kontekst EGL per monitor (zrobione):** `Gl::bind()` przed każdym `draw`
 — bez tego drugi monitor rysował w obiekty pierwszego (migotanie i treść w złym

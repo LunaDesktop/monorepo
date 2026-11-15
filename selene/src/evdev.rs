@@ -242,11 +242,15 @@ impl EvdevInput {
     pub fn read_events(&mut self, bounds: (f64, f64)) -> Vec<Event> {
         // Najpierw odczyt (pożyczka współdzielona urządzeń), potem tłumaczenie (mutacja).
         let mut decoded = Vec::new();
-        for dev in &self.devices {
+        let mut dead = Vec::new();
+        for (idx, dev) in self.devices.iter().enumerate() {
             let mut buf = [0u8; std::mem::size_of::<RawEvent>() * 64];
             loop {
                 match rustix::io::read(&dev.fd, &mut buf) {
-                    Ok(0) => break,
+                    Ok(0) => {
+                        dead.push(idx);
+                        break;
+                    }
                     Ok(n) => {
                         for chunk in buf[..n].chunks_exact(std::mem::size_of::<RawEvent>()) {
                             if let Some(ev) = decode(chunk) {
@@ -256,9 +260,23 @@ impl EvdevInput {
                             }
                         }
                     }
-                    Err(_) => break, // EAGAIN lub błąd — kończymy na tym urządzeniu
+                    Err(
+                        rustix::io::Errno::NODEV
+                        | rustix::io::Errno::NXIO
+                        | rustix::io::Errno::IO
+                        | rustix::io::Errno::BADF,
+                    ) => {
+                        // Odłączone urządzenie (np. odpięta mysz USB) — usuwamy,
+                        // żeby `poll()` w pętli głównej nie kręcił się na `POLLHUP`/`POLLERR`.
+                        dead.push(idx);
+                        break;
+                    }
+                    Err(_) => break, // EAGAIN lub EINTR — kończymy na tym urządzeniu
                 }
             }
+        }
+        for idx in dead.into_iter().rev() {
+            self.devices.swap_remove(idx);
         }
         let mut out = Vec::new();
         for (abs, ev) in decoded {

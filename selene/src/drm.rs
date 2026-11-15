@@ -56,6 +56,10 @@ const DRM_FORMAT_XRGB8888: u32 = 0x3432_5258;
 /// Cztery znaki `XBGR8888` (kolejność bajtów R,G,B,X) — **taka sama jak wyjście
 /// tiny-skia**, więc klatkę można skopiować bez przepisywania kanałów.
 const DRM_FORMAT_XBGR8888: u32 = 0x3432_4258;
+/// Cztery znaki `ABGR8888` (kolejność bajtów R,G,B,A) — domyślny eksport `GL_RGBA8` z EGL.
+const DRM_FORMAT_ABGR8888: u32 = 0x3432_4241;
+/// `DRM_FORMAT_MOD_INVALID` — brak jawnego modyfikatora (np. starsze sterowniki EGL).
+const DRM_FORMAT_MOD_INVALID: u64 = 0x00ff_ffff_ffff_ffff;
 /// Cztery znaki `ARGB8888` (kolejność bajtów B,G,R,A) — format kursora.
 const DRM_FORMAT_ARGB8888: u32 = 0x3432_5241;
 /// `DRM_MODE_CURSOR_BO` — ustaw obraz kursora (albo wyłącz, gdy `handle` = 0).
@@ -796,6 +800,58 @@ struct DrmOutput {
     /// Trzymamy je do momentu, gdy flip je zastąpi — wcześniejsze zwolnienie
     /// kazałoby kernelowi skanować zwolnioną pamięć.
     dmabuf_fbs: std::collections::VecDeque<(u32, Vec<u32>)>,
+    /// Czy CRTC skanuje teraz framebuffer z `dmabuf` (zero-copy).
+    ///
+    /// Po udanym `present_dmabuf` bufory `dumb` są nieaktualne, a ostatni fb
+    /// z `dmabuf_fbs` jest skanowany — nie wolno go jeszcze zwalniać.
+    front_dmabuf: bool,
+    /// Czy na tym CRTC wisi flip, na który nie odebraliśmy jeszcze
+    /// `DRM_EVENT_FLIP_COMPLETE`.
+    ///
+    /// Dopóki jest `true`, nie wolno zwalniać framebufferów `dmabuf` (kernel może
+    /// je jeszcze skanować) ani wysyłać kolejnego `PAGE_FLIP` (jądro zwróci
+    /// `EBUSY`). Flaga schodzi dopiero po zdarzeniu z pasującym `user_data`.
+    flip_pending: bool,
+    /// Ile najbliższych prezentacji musi skopiować **całą** klatkę, mimo damage.
+    ///
+    /// Oba bufory `DumbBuffer` są spójne z historią damage tylko wtedy, gdy
+    /// poprzednie klatki przeszły przez `present_region`. Po zero-copy
+    /// (`present_dmabuf` zmienia framebuffer CRTC), po nieudanym flipie i po
+    /// zmianie trybu/wybudzeniu zawartość „back” jest nieaktualna — wtedy damage
+    /// rysowałby nowy fragment na starym tle (kwadratowe artefakty, mruganie
+    /// wokół odtwarzacza wideo). Wartość 2 pokrywa podwójne buforowanie.
+    force_full_frames: u8,
+}
+
+/// Region do skopiowania w `present_region`: `force_full_frames > 0` wymusza całą klatkę.
+///
+/// Damage jest poprawny tylko wtedy, gdy **oba** bufory `dumb` przeszły w poprzednich
+/// klatkach przez `present_region`. Po zero-copy (`present_dmabuf` zmienia framebuffer
+/// CRTC), po nieudanym flipie i po zmianie trybu/wybudzeniu zawartość bufora „back”
+/// jest nieaktualna — wtedy nowy fragment trafiłby na stare tło (kwadratowe artefakty
+/// i mruganie wokół odtwarzacza wideo w przeglądarce).
+fn effective_region(force_full_frames: u8, region: Option<PixelRect>) -> Option<PixelRect> {
+    if force_full_frames > 0 {
+        None
+    } else {
+        region
+    }
+}
+
+/// Ile framebufferów `dmabuf` musi pozostać w kolejce wyjścia.
+///
+/// `None` = nie wolno nic zwalniać: flip jeszcze trwa i kernel może skanować
+/// dowolny z zakolejkowanych buforów. `Some(1)` = CRTC skanuje najnowszy fb
+/// `dmabuf` (starsze wolno oddać). `Some(0)` = CRTC skanuje bufor `dumb`, więc
+/// wszystkie framebuffery `dmabuf` są wolne.
+fn dmabuf_keep(flip_pending: bool, front_dmabuf: bool) -> Option<usize> {
+    if flip_pending {
+        None
+    } else if front_dmabuf {
+        Some(1)
+    } else {
+        Some(0)
+    }
 }
 
 /// Powód, dla którego nie udało się otworzyć wyjścia DRM (do diagnostyki).
@@ -820,6 +876,20 @@ pub struct DrmBackend {
 
 impl Drop for DrmBackend {
     fn drop(&mut self) {
+        let fd = self.fd.as_fd();
+        for out in &mut self.outputs {
+            for (fb, handles) in out.dmabuf_fbs.drain(..) {
+                destroy_fb(fd, fb);
+                release_gem(fd, &handles);
+            }
+            for buf in &out.buffers {
+                destroy_fb(fd, buf.fb_id);
+                destroy_dumb(fd, buf.handle);
+            }
+            if let Some(cur) = out.cursor.take() {
+                destroy_dumb(fd, cur.handle);
+            }
+        }
         // Zwolnij bycie masterem, gdy kończymy.
         let _ = ioctl_none::<DRM_IOCTL_DROP_MASTER, _>(&self.fd);
     }
@@ -950,6 +1020,10 @@ impl DrmBackend {
         let _ = ioctl_none::<DRM_IOCTL_SET_MASTER, _>(&fd);
         let mut ok = true;
         for out in &mut self.outputs {
+            out.flip_pending = false;
+            out.front_dmabuf = false;
+            // Po wybudzeniu zawartość buforów jest nieznana.
+            out.force_full_frames = 2;
             let wanted = OutputMode::new(out.width as u16, out.height as u16, out.hz as u16);
             let Some(mode) = pick_mode(&out.raw_modes, Some(wanted)).copied() else {
                 ok = false;
@@ -1030,12 +1104,16 @@ impl DrmBackend {
         let out = &mut self.outputs[index];
         for old in &out.buffers {
             destroy_fb(fd, old.fb_id);
+            destroy_dumb(fd, old.handle);
         }
         out.width = width;
         out.height = height;
         out.hz = mode.vrefresh;
         out.swizzle = swizzle;
         out.front = 0;
+        out.flip_pending = false;
+        out.front_dmabuf = false;
+        out.force_full_frames = 2;
         out.buffers = [b0, b1];
         // Bufory zero-copy sprzed zmiany trybu nie pasują już do nowego framebuffera.
         for (fb, handles) in out.dmabuf_fbs.drain(..) {
@@ -1043,7 +1121,9 @@ impl DrmBackend {
             release_gem(fd, &handles);
         }
         // Bufor kursora zostanie utworzony na nowo przy następnym ruchu.
-        out.cursor = None;
+        if let Some(cur) = out.cursor.take() {
+            destroy_dumb(fd, cur.handle);
+        }
         Some(index)
     }
 
@@ -1077,46 +1157,131 @@ impl DrmBackend {
     /// ostatnich klatek: bufor docelowy był ostatnio prezentowany dwa flipy temu.
     /// `None` = cała klatka (bezpieczny fallback).
     pub fn present_region(&mut self, idx: usize, rgba: &[u8], region: Option<PixelRect>) -> bool {
-        let fd = &self.fd;
-        let Some(out) = self.outputs.get_mut(idx) else {
+        // Flipy poprzedniej klatki muszą się zakończyć, zanim nadpiszemy bufor,
+        // który kernel jeszcze skanuje (i zanim wyślemy kolejny — inaczej `EBUSY`).
+        self.settle_flips(idx);
+        // Framebuffery `dmabuf`, których CRTC już nie skanuje, można oddać dopiero
+        // teraz — po odebraniu `FLIP_COMPLETE`.
+        self.prune_dmabuf_fbs(idx);
+        let Some((back, fb_id, copied, name, width, height)) = self.outputs.get(idx).map(|out| {
+            let back = (out.front + 1) & 1;
+            let (ptr, pitch) = (out.buffers[back].ptr, out.buffers[back].pitch);
+            let (w, h) = (out.width as usize, out.height as usize);
+            // Po zero-copy, nieudanym flipie lub zmianie trybu historia damage
+            // nie opisuje zawartości tego bufora — kopiujemy całą klatkę.
+            let region = effective_region(out.force_full_frames, region);
+            let copied = match (region, out.swizzle) {
+                (None, true) => swizzle_into(ptr, pitch, rgba, w, h),
+                (None, false) => copy_rows_into(ptr, pitch, rgba, w, h),
+                (Some(r), true) => swizzle_region_into(ptr, pitch, rgba, w, h, r),
+                (Some(r), false) => copy_region_into(ptr, pitch, rgba, w, h, r),
+            };
+            (
+                back,
+                out.buffers[back].fb_id,
+                copied,
+                out.name.clone(),
+                out.width,
+                out.height,
+            )
+        }) else {
             return false;
-        };
-        let back = (out.front + 1) & 1;
-        let (ptr, pitch) = (out.buffers[back].ptr, out.buffers[back].pitch);
-        let (w, h) = (out.width as usize, out.height as usize);
-        let copied = match (region, out.swizzle) {
-            (None, true) => swizzle_into(ptr, pitch, rgba, w, h),
-            (None, false) => copy_rows_into(ptr, pitch, rgba, w, h),
-            (Some(r), true) => swizzle_region_into(ptr, pitch, rgba, w, h, r),
-            (Some(r), false) => copy_region_into(ptr, pitch, rgba, w, h, r),
         };
         // Rozmiar klatki renderera musi zgadzać się z trybem wyjścia. Gdy się nie
         // zgadza (np. renderer został z poprzedniego trybu), **nie wolno** robić
         // page-flipu: pokazalibyśmy nieodświeżony bufor, czyli migotanie.
         if !copied {
+            self.outputs[idx].force_full_frames = 2;
             if std::env::var("SELENE_STATS").is_ok() {
                 eprintln!(
                     "selene/drm: {} pominięty flip — klatka {} B, wyjście {}x{}",
-                    out.name,
+                    name,
                     rgba.len(),
-                    out.width,
-                    out.height
+                    width,
+                    height
                 );
             }
             return false;
         }
+        if !self.queue_page_flip(idx, fb_id) {
+            // Bufor „back” nie trafił na ekran — następna klatka musi być pełna,
+            // inaczej damage narysuje fragment na nieaktualnej zawartości.
+            self.outputs[idx].force_full_frames = 2;
+            return false;
+        }
+        let out = &mut self.outputs[idx];
+        out.front = back;
+        out.front_dmabuf = false;
+        out.force_full_frames = out.force_full_frames.saturating_sub(1);
+        true
+    }
+
+    /// Czeka, aż wyjście `idx` nie ma oczekującego flipa (z limitem czasu).
+    ///
+    /// Normalnie flaga jest już zdjęta przez `wait_flips()` w pętli kompozytora;
+    /// to zabezpieczenie na wypadek zgubionego zdarzenia albo wywołania
+    /// prezentacji poza główną pętlą.
+    fn settle_flips(&mut self, idx: usize) {
+        for _ in 0..2 {
+            if !self.outputs.get(idx).is_some_and(|out| out.flip_pending) {
+                return;
+            }
+            self.wait_flips();
+        }
+    }
+
+    /// Zwalnia framebuffery `dmabuf`, których CRTC już nie skanuje.
+    ///
+    /// Wolno to zrobić **tylko** bez oczekującego flipa: po `FLIP_COMPLETE`
+    /// aktywne są albo bufory `dumb` (wtedy wszystkie fb `dmabuf` są wolne),
+    /// albo ostatni fb `dmabuf` (wtedy wolno zwolnić starsze, nie ten).
+    fn prune_dmabuf_fbs(&mut self, idx: usize) {
+        let Some(keep) = self
+            .outputs
+            .get(idx)
+            .and_then(|out| dmabuf_keep(out.flip_pending, out.front_dmabuf))
+        else {
+            return;
+        };
+        let fd = self.fd.as_fd();
+        let out = &mut self.outputs[idx];
+        while out.dmabuf_fbs.len() > keep {
+            if let Some((fb, handles)) = out.dmabuf_fbs.pop_front() {
+                destroy_fb(fd, fb);
+                release_gem(fd, &handles);
+            }
+        }
+    }
+
+    /// Kolejkuje page-flip na CRTC wyjścia `idx`; przy przejściowym `EBUSY`
+    /// zbiera zaległe zdarzenia flipów i ponawia raz.
+    fn queue_page_flip(&mut self, idx: usize, fb_id: u32) -> bool {
+        let Some(crtc_id) = self.outputs.get(idx).map(|o| o.crtc_id) else {
+            return false;
+        };
         let req = ModePageFlip {
-            crtc_id: out.crtc_id,
-            fb_id: out.buffers[back].fb_id,
+            crtc_id,
+            fb_id,
             flags: DRM_MODE_PAGE_FLIP_EVENT,
             reserved: 0,
             user_data: idx as u64,
         };
-        if ioctl_rw::<ModePageFlip, DRM_IOCTL_MODE_PAGE_FLIP, _>(fd, req).is_err() {
-            return false;
+        match ioctl_rw::<ModePageFlip, DRM_IOCTL_MODE_PAGE_FLIP, _>(&self.fd, req) {
+            Ok(_) => {
+                self.outputs[idx].flip_pending = true;
+                true
+            }
+            Err(rustix::io::Errno::BUSY) => {
+                self.wait_flips();
+                if ioctl_rw::<ModePageFlip, DRM_IOCTL_MODE_PAGE_FLIP, _>(&self.fd, req).is_ok() {
+                    self.outputs[idx].flip_pending = true;
+                    true
+                } else {
+                    false
+                }
+            }
+            Err(_) => false,
         }
-        out.front = back;
-        true
     }
 
     /// Prezentuje klatkę **bez kopiowania przez CPU** (zero-copy skanout).
@@ -1126,8 +1291,7 @@ impl DrmBackend {
     /// ioctlów. Zwraca `false`, gdy sterownik odrzucił bufor — wołający robi wtedy
     /// zwykły readback (`present`), więc zero-copy nigdy nie psuje obrazu.
     pub fn present_dmabuf(&mut self, idx: usize, frame: &ExportedFrame) -> bool {
-        let fd = self.fd.as_fd();
-        let Some(out) = self.outputs.get_mut(idx) else {
+        let Some((out_w, out_h)) = self.outputs.get(idx).map(|o| (o.width, o.height)) else {
             return false;
         };
         let reject = |reason: &str| {
@@ -1139,8 +1303,8 @@ impl DrmBackend {
             }
             false
         };
-        if frame.width != out.width
-            || frame.height != out.height
+        if frame.width != out_w
+            || frame.height != out_h
             || frame.planes.is_empty()
             || frame.planes.len() > 4
         {
@@ -1148,18 +1312,13 @@ impl DrmBackend {
         }
         // Framebuffery z dwóch klatek wstecz są już po flipie (na flipy czekamy
         // na początku iteracji), więc wolno je zwolnić.
-        while out.dmabuf_fbs.len() >= 2 {
-            if let Some((fb, handles)) = out.dmabuf_fbs.pop_front() {
-                destroy_fb(fd, fb);
-                for handle in handles {
-                    let _ = ioctl_w::<GemClose, DRM_IOCTL_GEM_CLOSE, _>(
-                        fd,
-                        GemClose { handle, pad: 0 },
-                    );
-                }
-            }
-        }
+        // Zero-copy też musi poczekać na zakończenie poprzedniego flipa — inaczej
+        // jądro zwróci `EBUSY` i klatka przepadnie. Przy okazji zwalniamy fb,
+        // których CRTC już nie skanuje (tylko po `FLIP_COMPLETE`).
+        self.settle_flips(idx);
+        self.prune_dmabuf_fbs(idx);
 
+        let fd = self.fd.as_fd();
         let mut handles: Vec<u32> = Vec::with_capacity(frame.planes.len());
         for (plane_fd, _offset, _stride) in &frame.planes {
             let request = PrimeHandle {
@@ -1176,16 +1335,18 @@ impl DrmBackend {
             }
         }
 
-        // Bufor liniowy (`modifier == DRM_FORMAT_MOD_LINEAR`) dodajemy bez flagi
-        // `DRM_MODE_FB_MODIFIERS` — `nvidia-drm` zwraca `EINVAL`, gdy flaga jest
-        // ustawiona, nawet dla zera, a bez niej przyjmuje bufor bez zastrzeżeń.
-        let linear = frame.modifier == 0;
+        // Bufor liniowy (`0`) i brak modyfikatora (`DRM_FORMAT_MOD_INVALID` / `u64::MAX`)
+        // dodajemy bez flagi `DRM_MODE_FB_MODIFIERS` — `nvidia-drm` i starsze sterowniki
+        // zwracają `EINVAL`, gdy flaga jest ustawiona dla liniowego lub nieznanego modyfikatora.
+        let has_modifier = frame.modifier != 0
+            && frame.modifier != DRM_FORMAT_MOD_INVALID
+            && frame.modifier != u64::MAX;
         let mut fb_desc = ModeFbCmd2 {
             fb_id: 0,
-            width: out.width,
-            height: out.height,
+            width: out_w,
+            height: out_h,
             pixel_format: frame.fourcc,
-            flags: if linear { 0 } else { 2 },
+            flags: if has_modifier { 2 } else { 0 },
             ..ModeFbCmd2::default()
         };
         for (i, handle) in handles.iter().enumerate() {
@@ -1194,58 +1355,124 @@ impl DrmBackend {
         for (i, (_, offset, stride)) in frame.planes.iter().enumerate() {
             fb_desc.pitches[i] = *stride;
             fb_desc.offsets[i] = *offset;
-            if !linear {
+            if has_modifier {
                 fb_desc.modifier[i] = frame.modifier;
             }
         }
-        let Ok(added) = ioctl_rw::<ModeFbCmd2, DRM_IOCTL_MODE_ADDFB2, _>(fd, fb_desc) else {
-            release_gem(fd, &handles);
-            return reject("ADDFB2");
+        let added = match ioctl_rw::<ModeFbCmd2, DRM_IOCTL_MODE_ADDFB2, _>(fd, fb_desc) {
+            Ok(added) if added.fb_id != 0 => added,
+            _ if frame.fourcc == DRM_FORMAT_ABGR8888 => {
+                // Część sterowników odrzuca format z kanałem alfa (`ABGR8888`) na
+                // płaszczyźnie głównej, ale akceptuje identyczny w pamięci `XBGR8888`.
+                fb_desc.pixel_format = DRM_FORMAT_XBGR8888;
+                match ioctl_rw::<ModeFbCmd2, DRM_IOCTL_MODE_ADDFB2, _>(fd, fb_desc) {
+                    Ok(added) if added.fb_id != 0 => added,
+                    _ => {
+                        release_gem(fd, &handles);
+                        return reject("ADDFB2");
+                    }
+                }
+            }
+            _ => {
+                release_gem(fd, &handles);
+                return reject("ADDFB2");
+            }
         };
-        if added.fb_id == 0 {
-            release_gem(fd, &handles);
-            return reject("ADDFB2 bez fb_id");
-        }
 
-        let req = ModePageFlip {
-            crtc_id: out.crtc_id,
-            fb_id: added.fb_id,
-            flags: DRM_MODE_PAGE_FLIP_EVENT,
-            reserved: 0,
-            user_data: idx as u64,
-        };
-        if ioctl_rw::<ModePageFlip, DRM_IOCTL_MODE_PAGE_FLIP, _>(fd, req).is_err() {
+        if !self.queue_page_flip(idx, added.fb_id) {
+            let fd = self.fd.as_fd();
             destroy_fb(fd, added.fb_id);
             release_gem(fd, &handles);
             return reject("PAGE_FLIP");
         }
+        let out = &mut self.outputs[idx];
         out.dmabuf_fbs.push_back((added.fb_id, handles));
+        out.front_dmabuf = true;
+        // Bufory `dumb` nie są już aktualne — dopiero po powrocie na readback
+        // trzeba będzie skopiować całą klatkę.
+        out.force_full_frames = 2;
         true
     }
 
-    /// Czeka na zakończenie page-flipu (zdarzenie z jądra).
+    /// Czeka na zakończenie wszystkich oczekujących page-flipów (zdarzenia z jądra).
     ///
-    /// Po suspend/resume zdarzenie flipa potrafi nigdy nie przyjść — wcześniej
-    /// `read` na blokującym deskryptorze wisiał wtedy w nieskończoność i ekran
-    /// zostawał czarny. Dlatego czekamy przez `poll` z limitem czasu.
-    pub fn wait_flip(&self) {
+    /// Obsługuje wiele monitorów naraz (dopasowując `user_data` do indeksu wyjścia),
+    /// `EINTR` na `poll`/`read` oraz bezpieczny limit czasu po suspend/resume.
+    pub fn wait_flips(&mut self) {
         use rustix::event::{poll, PollFd, PollFlags};
-        let mut fds = [PollFd::new(&self.fd, PollFlags::IN)];
-        match poll(&mut fds, 200) {
-            Ok(0) => return,
-            Ok(_) => {}
-            Err(_) => return,
+        use std::time::{Duration, Instant};
+
+        if !self.outputs.iter().any(|o| o.flip_pending) {
+            return;
         }
-        let mut buf = [0u8; 32];
-        loop {
+        let deadline = Instant::now() + Duration::from_millis(200);
+        let mut buf = [0u8; 1024];
+
+        while self.outputs.iter().any(|o| o.flip_pending) {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let timeout_ms = remaining.as_millis().min(200).max(1) as i32;
+            let mut fds = [PollFd::new(&self.fd, PollFlags::IN)];
+            match poll(&mut fds, timeout_ms) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(rustix::io::Errno::INTR) => continue,
+                Err(_) => break,
+            }
             match rustix::io::read(&self.fd, &mut buf) {
-                Ok(n) if n >= 8 => {
-                    let ty = u32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]);
-                    if ty == DRM_EVENT_FLIP_COMPLETE {
-                        return;
+                Ok(0) => break,
+                Ok(n) => {
+                    let mut offset = 0usize;
+                    while offset + 8 <= n {
+                        let ty = u32::from_ne_bytes([
+                            buf[offset],
+                            buf[offset + 1],
+                            buf[offset + 2],
+                            buf[offset + 3],
+                        ]);
+                        let len = u32::from_ne_bytes([
+                            buf[offset + 4],
+                            buf[offset + 5],
+                            buf[offset + 6],
+                            buf[offset + 7],
+                        ]) as usize;
+                        if len < 8 || offset + len > n {
+                            break;
+                        }
+                        if ty == DRM_EVENT_FLIP_COMPLETE && len >= 16 {
+                            let idx = u64::from_ne_bytes([
+                                buf[offset + 8],
+                                buf[offset + 9],
+                                buf[offset + 10],
+                                buf[offset + 11],
+                                buf[offset + 12],
+                                buf[offset + 13],
+                                buf[offset + 14],
+                                buf[offset + 15],
+                            ]) as usize;
+                            if let Some(out) = self.outputs.get_mut(idx) {
+                                out.flip_pending = false;
+                            }
+                        }
+                        offset += len;
                     }
                 }
-                _ => return,
+                Err(rustix::io::Errno::INTR | rustix::io::Errno::AGAIN) => continue,
+                Err(_) => break,
+            }
+        }
+        // Timeout albo błąd odczytu: nie wiemy, które flipy się zakończyły.
+        // Zgubione zdarzenie nie może zablokować kompozytora na zawsze, więc
+        // zdejmujemy flagi — ale tylko tam, gdzie flip naprawdę wisiał, i każemy
+        // następnym klatkom iść w całości (stan buforów jest nieznany).
+        // Wcześniej robiliśmy to bezwarunkowo po każdym `wait_flips`, co kasowało
+        // całą optymalizację damage i samo powodowało pełne kopie 8 MB na klatkę.
+        for out in &mut self.outputs {
+            if out.flip_pending {
+                out.force_full_frames = 2;
+                out.flip_pending = false;
             }
         }
     }
@@ -1469,6 +1696,11 @@ fn setup_output(
         swizzle: format == DRM_FORMAT_XRGB8888,
         cursor: None,
         dmabuf_fbs: std::collections::VecDeque::new(),
+        front_dmabuf: false,
+        flip_pending: false,
+        // Pierwsze dwie klatki po starcie zawsze w całości (bufory są świeże,
+        // ale historia damage jeszcze nie istnieje).
+        force_full_frames: 2,
     })
 }
 
@@ -1833,6 +2065,31 @@ mod tests {
                 assert_eq!(v, if inside { 0x11 } else { 0xAA }, "piksel ({x},{y})");
             }
         }
+    }
+
+    /// `force_full_frames` musi wymusić całą klatkę po zero-copy/nieudanym flipie.
+    #[test]
+    fn effective_region_respects_force_full() {
+        let r = PixelRect {
+            x: 10,
+            y: 20,
+            w: 100,
+            h: 50,
+        };
+        assert_eq!(effective_region(0, Some(r)), Some(r));
+        assert_eq!(effective_region(0, None), None);
+        assert_eq!(effective_region(1, Some(r)), None);
+        assert_eq!(effective_region(2, Some(r)), None);
+    }
+
+    /// Nie wolno zwalniać fb `dmabuf`, dopóki flip się nie skończy (kernel może
+    /// je jeszcze skanować). Gdy CRTC skanuje `dumb`, wszystkie są wolne.
+    #[test]
+    fn dmabuf_keep_waits_for_flip_complete() {
+        assert_eq!(dmabuf_keep(true, true), None);
+        assert_eq!(dmabuf_keep(true, false), None);
+        assert_eq!(dmabuf_keep(false, true), Some(1));
+        assert_eq!(dmabuf_keep(false, false), Some(0));
     }
 
     /// Prostokąt wystający poza bufor musi zostać przycięty, a nie wyjść poza pamieć.

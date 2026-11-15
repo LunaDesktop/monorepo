@@ -6,8 +6,52 @@
 //! (page-flip). Wejście w trybie DRM (evdev) jest kolejnym krokiem.
 
 use std::os::unix::net::UnixStream;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
+
+/// Sygnał wybudzania wątku DRM przez pętlę główną (commit klienta, ruch kursora, zmiana okna).
+///
+/// Zastępuje bezczynne budzenie co 2 ms: w spoczynku wątek DRM śpi do 100 ms,
+/// a po zdarzeniu wstaje natychmiast bez opóźnienia kolejnej klatki.
+pub struct RenderWake {
+    seq: Mutex<u64>,
+    cv: Condvar,
+}
+
+impl RenderWake {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            seq: Mutex::new(0),
+            cv: Condvar::new(),
+        })
+    }
+
+    pub fn notify(&self) {
+        let mut seq = self.seq.lock_or_recover();
+        *seq = seq.wrapping_add(1);
+        self.cv.notify_one();
+    }
+
+    /// Czeka maksymalnie `timeout`, aż `seq` zmieni się względem `seen`.
+    /// Zwraca `true`, jeśli nastąpiło wybudzenie przez `notify()`.
+    pub fn wait_timeout(&self, seen: &mut u64, timeout: Duration) -> bool {
+        let guard = self.seq.lock_or_recover();
+        if *guard != *seen {
+            *seen = *guard;
+            return true;
+        }
+        let (guard, _) = self
+            .cv
+            .wait_timeout_while(guard, timeout, |s| *s == *seen)
+            .unwrap_or_else(|e| e.into_inner());
+        if *guard != *seen {
+            *seen = *guard;
+            true
+        } else {
+            false
+        }
+    }
+}
 
 use libluna_core::style::weight;
 use libluna_core::{Color, Point, Rect, Size, Theme, ThemeSettings};
@@ -337,6 +381,7 @@ pub fn spawn_drm(
     overview: OverviewModel,
     screenshot: crate::state::ScreenshotModel,
     present: Arc<crate::present::PresentQueue>,
+    render_wake: Arc<RenderWake>,
     night_light: crate::state::NightLightModel,
     power_saver: crate::state::PowerSaverModel,
     outputs: Outputs,
@@ -614,6 +659,7 @@ pub fn spawn_drm(
         // wielosekundowej przerwie. Jądro mogło zgubić stan CRTC, a zdarzenia
         // flipów sprzed snu nie dotyczą już nowych klatek.
         let mut last_loop = std::time::Instant::now();
+        let mut seen_wake = 0u64;
         loop {
             let now = std::time::Instant::now();
             if now.duration_since(last_loop) > Duration::from_secs(2) {
@@ -624,7 +670,10 @@ pub fn spawn_drm(
                 if !backend.resume() {
                     eprintln!("selene/drm: modeset po wybudzeniu nie powiódł się — próbuję dalej");
                 }
-                pending_flips = 0;
+                if pending_flips > 0 {
+                    pending_flips = 0;
+                    present.presented();
+                }
                 last_sigs = vec![None; sizes.len()];
                 prev_scene = vec![None; sizes.len()];
                 prev_damage = vec![None; sizes.len()];
@@ -652,23 +701,9 @@ pub fn spawn_drm(
                 last_present = now;
             }
             last_loop = now;
-            // Flipy **poprzedniej** klatki zbieramy dopiero teraz: dopiero po nich
-            // wolno pisać do bufora, który był skanowany. Dzięki temu render i
-            // readback bieżącej klatki nakładają się na vblank poprzedniej.
-            // Wcześniej `present` i czekanie stały obok siebie, więc każda klatka
-            // płaciła pełny vblank, a przy dwóch monitorach (75 Hz + 60 Hz) gubiła
-            // terminy — stąd spadki do kilkunastu klatek na sekundę.
-            if pending_flips > 0 {
-                let t = std::time::Instant::now();
-                for _ in 0..pending_flips {
-                    backend.wait_flip();
-                }
-                ms_wait += t.elapsed().as_secs_f64() * 1000.0;
-                pending_flips = 0;
-                // Flipy się zakończyły — klatki są na ekranie. Dopiero teraz
-                // oddajemy klientom bufory, których już nikt nie skanuje.
-                present.presented();
-            }
+            // Flipy **poprzedniej** klatki zbieramy dopiero przed prezentacją
+            // bieżącej (patrz niżej): render i readback nakładają się wtedy na
+            // vblank, a nie dokładają się do okresu klatki.
             // Przełączenie VT (`Ctrl+Alt+F1…F12`). Najpierw oddajemy master DRM —
             // bez tego konsola jądra (fbcon) nie przejmie ekranu i nowy VT jest
             // czarny. Po powrocie robimy pełny modeset; `wait_active` blokuje ten
@@ -701,7 +736,10 @@ pub fn spawn_drm(
                         applied_night = None;
                         applied_power = false;
                         flip_error_logged = false;
-                        pending_flips = 0;
+                        if pending_flips > 0 {
+                            pending_flips = 0;
+                            present.presented();
+                        }
                         last_present = std::time::Instant::now();
                         // Modeset zresetował płaszczyznę kursora — ładujemy ją ponownie.
                         hw_cursor =
@@ -813,7 +851,10 @@ pub fn spawn_drm(
                         last_present = std::time::Instant::now();
                         // Modeset odtworzył bufory — zdarzenia flipów sprzed zmiany
                         // trybu nie dotyczą już nowych framebufferów.
-                        pending_flips = 0;
+                        if pending_flips > 0 {
+                            pending_flips = 0;
+                            present.presented();
+                        }
                         // Modeset zeruje LUT gamma — night light trzeba wgrać ponownie.
                         applied_night = None;
 
@@ -1012,12 +1053,21 @@ pub fn spawn_drm(
             }
 
             if !any_changed && !cur_changed {
+                if pending_flips > 0 {
+                    let t = std::time::Instant::now();
+                    backend.wait_flips();
+                    ms_wait += t.elapsed().as_secs_f64() * 1000.0;
+                    pending_flips = 0;
+                    present.presented();
+                }
                 if present.has_pending_frames() {
-                    // Pacing ~60 Hz bez przerysowywania pulpitu.
-                    std::thread::sleep(Duration::from_millis(16));
-                    present.tick_frames();
+                    // Pacing ~60 Hz bez przerysowywania pulpitu; jeśli w międzyczasie
+                    // przyjdzie commit lub wejście, wstajemy natychmiast zamiast spać 16 ms.
+                    if !render_wake.wait_timeout(&mut seen_wake, Duration::from_millis(16)) {
+                        present.tick_frames();
+                    }
                 } else {
-                    std::thread::sleep(Duration::from_millis(2));
+                    render_wake.wait_timeout(&mut seen_wake, Duration::from_millis(100));
                 }
                 continue;
             }
@@ -1125,6 +1175,21 @@ pub fn spawn_drm(
                     });
                 }
                 ms_render += t_render.elapsed().as_secs_f64() * 1000.0;
+
+                // Dopiero teraz czekamy na flipy poprzedniej klatki. Cały render
+                // i readback zdążyły się wykonać **w trakcie** skanowania
+                // poprzedniej klatki, więc nie dokładają się do okresu odświeżania
+                // (wcześniej czekanie stało na początku iteracji i przy 60 Hz
+                // każde opóźnienie renderu kosztowało cały vblank — YouTube spadał
+                // z 60 do 30 klatek).
+                if pending_flips > 0 {
+                    let t = std::time::Instant::now();
+                    backend.wait_flips();
+                    ms_wait += t.elapsed().as_secs_f64() * 1000.0;
+                    // Flipy się zakończyły — klatki są na ekranie. Dopiero teraz
+                    // oddajemy klientom bufory, których już nikt nie skanuje.
+                    present.presented();
+                }
 
                 let mut num_flips = 0;
                 for i in 0..sizes.len() {
@@ -1926,6 +1991,23 @@ fn wallpaper_for(w: u32, h: u32) -> Option<std::sync::Arc<ImageData>> {
 ///
 /// Kompozytor działa dalej bez restartu — wystarczy zapis `wallpaper.conf`.
 fn wallpaper_stamp() -> u64 {
+    type StampCache = Option<(Instant, u64)>;
+    static CACHE: std::sync::OnceLock<Mutex<StampCache>> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    {
+        let guard = cache.lock_or_recover();
+        if let Some((checked_at, stamp)) = *guard {
+            if checked_at.elapsed() < Duration::from_millis(500) {
+                return stamp;
+            }
+        }
+    }
+    let stamp = compute_wallpaper_stamp();
+    *cache.lock_or_recover() = Some((Instant::now(), stamp));
+    stamp
+}
+
+fn compute_wallpaper_stamp() -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     for var in ["LUNA_WALLPAPER", "SELENE_WALLPAPER", "SELENE_NO_WALLPAPER"] {

@@ -12,8 +12,10 @@
 //! po klatce nested). Numer sekwencji chroni przed wyścigiem: wysyłamy tylko
 //! zdarzenia zakolejkowane przed ostatnią prezentacją.
 
+use std::io::Write;
+use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use wayland_server::protocol::{wl_buffer, wl_callback};
@@ -35,6 +37,10 @@ pub struct PresentQueue {
     /// Numer ostatniej klatki faktycznie pokazanej (po `wait_flip`).
     presented: AtomicU64,
     pending: Mutex<Vec<(u64, Item)>>,
+    /// Opcjonalny deskryptor wybudzania pętli głównej (`main.rs`), żeby
+    /// `display.flush_clients()` wysłało `wl_buffer.release` / `wl_callback.done`
+    /// natychmiast po flipie zamiast czekać na ruch myszy lub timeout `poll`.
+    wake: OnceLock<UnixStream>,
 }
 
 impl PresentQueue {
@@ -44,7 +50,20 @@ impl PresentQueue {
             submitted: AtomicU64::new(0),
             presented: AtomicU64::new(0),
             pending: Mutex::new(Vec::new()),
+            wake: OnceLock::new(),
         })
+    }
+
+    /// Rejestruje nieblokujący zapis wybudzający pętlę główną po wysłaniu zdarzeń.
+    pub fn set_wake(&self, wake: UnixStream) {
+        let _ = wake.set_nonblocking(true);
+        let _ = self.wake.set(wake);
+    }
+
+    fn notify_wake(&self) {
+        if let Some(mut w) = self.wake.get() {
+            let _ = w.write(&[1u8]);
+        }
     }
 
     /// Odkłada zwolnienie bufora do najbliższej prezentacji klatki, która go zastąpiła.
@@ -74,10 +93,11 @@ impl PresentQueue {
 
     /// Wątek wyjścia: klatka została pokazana — wyślij zaległe zdarzenia.
     pub fn presented(&self) {
-        let seq = self.presented.fetch_add(1, Ordering::AcqRel) + 1;
-        // Zdarzenie może czekać tylko wtedy, gdy po jego zakolejkowaniu powstała
-        // i została pokazana co najmniej jedna klatka. Sam `presented` bez nowego
-        // `submitted` to wyścig z commitem — wtedy czekamy do następnego obiegu.
+        self.presented.fetch_add(1, Ordering::AcqRel);
+        // Zdarzenie może wyjść dopiero wtedy, gdy po jego zakolejkowaniu
+        // została przekazana i pokazana co najmniej jedna klatka (`at < rendered`).
+        // Porównanie wyłącznie z `submitted` chroni przed rozjazdem liczników
+        // po `resume()` lub `set_mode()`.
         let rendered = self.submitted.load(Ordering::Acquire);
         let due: Vec<Item> = {
             let mut pending = self.pending.lock_or_recover();
@@ -85,7 +105,7 @@ impl PresentQueue {
             let mut index = 0;
             while index < pending.len() {
                 let at = pending[index].0;
-                if at < seq && at < rendered {
+                if at < rendered {
                     due.push(pending.swap_remove(index).1);
                 } else {
                     index += 1;
@@ -93,6 +113,9 @@ impl PresentQueue {
             }
             due
         };
+        if due.is_empty() {
+            return;
+        }
         // Poza blokadą: `send_event` może obudzić klienta i wejść w backend.
         let now = self.start.elapsed().as_millis() as u32;
         for item in due {
@@ -108,6 +131,7 @@ impl PresentQueue {
                 }
             }
         }
+        self.notify_wake();
     }
 
     /// Czy czeka bufor do zwolnienia (wymaga prezentacji nowej klatki).
@@ -145,12 +169,16 @@ impl PresentQueue {
             }
             due
         };
+        if due.is_empty() {
+            return;
+        }
         let now = self.start.elapsed().as_millis() as u32;
         for item in due {
             if let Item::Frame(callback) = item {
                 let _ = callback.send_event(wl_callback::Event::Done { callback_data: now });
             }
         }
+        self.notify_wake();
     }
 
     #[cfg(test)]
@@ -172,5 +200,21 @@ mod tests {
         queue.mark_submitted();
         queue.presented();
         assert_eq!(queue.presented.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn presented_wakes_poll_fd_only_when_events_are_due() {
+        use std::io::Read;
+        let (mut read_end, write_end) = UnixStream::pair().unwrap();
+        read_end.set_nonblocking(true).unwrap();
+
+        let queue = PresentQueue::new(std::time::Instant::now());
+        queue.set_wake(write_end);
+
+        // Brak oczekujących zdarzeń -> brak bajtu wybudzającego.
+        queue.mark_submitted();
+        queue.presented();
+        let mut buf = [0u8; 8];
+        assert!(read_end.read(&mut buf).is_err());
     }
 }

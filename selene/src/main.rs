@@ -297,6 +297,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Magistrala wejścia (wątek wyjścia → wątek protokołu) z parą gniazd do wybudzania.
     let (events, mut wake_read, wake_write) = input::channel();
+    // Kanał wybudzania pętli głównej przez wątek wyjścia (po flipie / tick_frames),
+    // żeby `display.flush_clients()` wysłało `wl_buffer.release` i `wl_callback.done` od razu.
+    let (mut present_wake_read, present_wake_write) =
+        std::os::unix::net::UnixStream::pair().expect("socketpair prezentacji");
+    let _ = present_wake_read.set_nonblocking(true);
+    state.present.set_wake(present_wake_write);
+    let render_wake = output::RenderWake::new();
 
     // Wyjście: realne DRM/KMS (gdy `SELENE_BACKEND=drm`) lub nested na nadrzędnym kompozytorze.
     if std::env::var("SELENE_BACKEND").as_deref() == Ok("drm") {
@@ -313,6 +320,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             Arc::clone(&state.overview),
             Arc::clone(&state.screenshot),
             Arc::clone(&state.present),
+            Arc::clone(&render_wake),
             Arc::clone(&state.night_light),
             Arc::clone(&state.power_saver),
             Arc::clone(&state.outputs),
@@ -386,17 +394,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         let backend_fd = display.backend().poll_fd().as_raw_fd();
         let wake_fd = wake_read.as_raw_fd();
+        let present_wake_fd = present_wake_read.as_raw_fd();
 
         let listener = unsafe { BorrowedFd::borrow_raw(listener_fd) };
         let backend = unsafe { BorrowedFd::borrow_raw(backend_fd) };
         let wake = unsafe { BorrowedFd::borrow_raw(wake_fd) };
+        let present_wake = unsafe { BorrowedFd::borrow_raw(present_wake_fd) };
         let input_raw = evdev_input.as_ref().map(|e| e.fds()).unwrap_or_default();
         let input_fds: Vec<BorrowedFd> = input_raw
             .iter()
             .map(|&r| unsafe { BorrowedFd::borrow_raw(r) })
             .collect();
 
-        let mut fds = Vec::with_capacity(5 + input_fds.len());
+        let mut fds = Vec::with_capacity(6 + input_fds.len());
         fds.push(rustix::event::PollFd::new(
             &listener,
             rustix::event::PollFlags::IN,
@@ -423,6 +433,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         if let Some(fd) = &clipboard_dup {
             fds.push(rustix::event::PollFd::new(fd, rustix::event::PollFlags::IN));
         }
+        let present_wake_idx = fds.len();
+        fds.push(rustix::event::PollFd::new(
+            &present_wake,
+            rustix::event::PollFlags::IN,
+        ));
         // Budzimy się co ~16 ms przy skrypcie wejścia (dopisane polecenia) oraz gdy
         // kursor stoi w „gorącym rogu” — poświata musi rosnąć, a aktywacja nie może
         // zależeć od dalszego ruchu myszy. Bez tego budzimy się najpóźniej co sekundę,
@@ -439,7 +454,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else {
             idle_wait.map(|ms| ms.clamp(16, 1000) as i32).unwrap_or(-1)
         };
-        rustix::event::poll(&mut fds, poll_timeout)?;
+        match rustix::event::poll(&mut fds, poll_timeout) {
+            Ok(_) => {}
+            Err(rustix::io::Errno::INTR) => continue,
+            Err(e) => return Err(e.into()),
+        }
+        if fds[present_wake_idx]
+            .revents()
+            .contains(rustix::event::PollFlags::IN)
+        {
+            use std::io::Read;
+            let mut buf = [0u8; 64];
+            while present_wake_read.read(&mut buf).is_ok_and(|n| n > 0) {}
+        }
 
         // Odliczanie przytrzymania w rogu (rysowanie poświaty i ewentualna akcja).
         crate::seat::tick_corner(&mut state);
@@ -522,6 +549,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         xwm::sync(&mut state);
         // Most schowka X11 → Wayland: XWM publikuje migawkę tekstu, my rozsyłamy oferty.
         crate::data::sync_x11_selection(&mut state, &handle);
+        // Obudź wątek DRM, jeśli komit/wejście/XWM mogło zmienić scenę.
+        render_wake.notify();
         // Nowe okno/popup pod **nieruchomym** kursorem musi dostać `wl_pointer.enter`.
         // Bez tego menu przeglądarki nie podświetla pozycji, dopóki nie ruszysz myszą,
         // a pierwszy klik bywa traktowany jak klik poza menu.
