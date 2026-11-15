@@ -276,13 +276,13 @@ sudo ./scripts/install.sh --prefix /usr                        # instalacja syst
 ```
 
 Pliki sesji: `de/session/luna-session` (launcher) i `de/session/selene.desktop`
-(`share/wayland-sessions`). **GPU jest domyślnie włączone**: `luna-session` ustawia
-`LUNA_GPU=1`, gdy w systemie jest węzeł renderujący (`/dev/dri/renderD*`), więc Selene
-ogłasza `zwp_linux_dmabuf_v1` i komponuje okna sprzętowo. Bez EGL Selene sam spada do
-CPU i tylko to loguje. Awaryjnie instalujemy też sesję **„Luna (bez GPU)”**
-(`de/session/luna-session-cpu` ustawia `LUNA_GPU=0` + `selene-cpu.desktop`) na wypadek
-sterownika bez EGL albo do diagnozy migotania — jeśli problem znika w trybie CPU,
-winne jest GPU, nie kompozytor.
+(`share/wayland-sessions`). Domyślnie działa ścieżka **CPU** — stabilna: X11, układ
+monitorów i brak migotania. Obok instalowana jest sesja **„Luna (eksperymentalna
+GPU)”**: `de/session/luna-session-gpu` ustawia `LUNA_GPU=1` + `selene-gpu.desktop`.
+Selene ogłasza wtedy `zwp_linux_dmabuf_v1` i komponuje bufory klientów sprzętowo,
+ale ścieżka GPU nie jest jeszcze dopracowana na NVIDII (sterownik odrzuca
+zero-copy, a układ monitorów wymaga sprawdzenia) — dlatego jest opcją, nie
+domyślnym wyborem.
 Ikona sesji (`Icon=luna`) to `assets/branding/luna.svg` — instalator kładzie
 go w `share/icons/hicolor/scalable/apps` oraz rasteryzuje (rsvg-convert) do PNG w rozmiarach
 16–256 i `share/pixmaps`, więc greeter pokaże go nawet bez obsługi SVG.

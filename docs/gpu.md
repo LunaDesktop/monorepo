@@ -123,9 +123,9 @@ zgadza się z trybem wyjścia — wcześniej pokazywał wtedy nieodświeżony bu
 Zakres (zrobione):
 1. Global `zwp_linux_dmabuf_v1` **v4** + `zwp_linux_buffer_params_v1`
    (`create` → `created`, `create_immed`, `add`, `destroy`). Global powstaje
-   **tylko** gdy GPU jest włączone i EGL potrafi zaimportować dmabuf.
-   `luna-session` włącza GPU **domyślnie** (gdy istnieje `/dev/dri/renderD*`),
-   a `LUNA_GPU=0` — albo sesja „Luna (bez GPU)” w greeterze — wymusza czysty CPU.
+   **tylko** gdy `LUNA_GPU=1` i EGL potrafi zaimportować dmabuf. Domyślna sesja
+   „Luna” zostaje na CPU; GPU włącza osobna sesja „Luna (eksperymentalna GPU)”
+   (`de/session/luna-session-gpu`).
 2. `feedback` (v4): `format_table` (memfd, **16 B na wpis**: 4 B formatu,
    4 B rezerwy i 8 B modyfikatora — bez rezerwy Xwayland przerywa `assert`-em,
    a Mesa czyta modyfikatory o 4 B za wcześnie), `main_device` i jeden tranche (`tranche_target_device`,

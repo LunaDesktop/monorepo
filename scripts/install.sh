@@ -212,7 +212,7 @@ files() {
     }
     emit "selene"   "$lib/selene"          "$dest/bin/selene"          "755"
     emit "selene"   "$root/de/session/selene.desktop" "$dest/share/wayland-sessions/selene.desktop" "644"
-    emit "selene"   "$root/de/session/selene-cpu.desktop" "$dest/share/wayland-sessions/selene-cpu.desktop" "644"
+    emit "selene"   "$root/de/session/selene-gpu.desktop" "$dest/share/wayland-sessions/selene-gpu.desktop" "644"
     emit "luna"     "$lib/luna-shell"      "$dest/bin/luna-shell"      "755"
     emit "luna"     "$lib/luna-desktop"    "$dest/bin/luna-desktop"    "755"
     emit "luna"     "$lib/luna-keyring"    "$dest/bin/luna-keyring"    "755"
@@ -302,8 +302,8 @@ files() {
     # `Requisite=graphical-session.target`, więc bez tego targetu nie startują
     # przez D-Bus, a Flatpaki czekają na portal do timeoutu.
     emit "base"     "$root/de/session/luna-session.target" "$dest/lib/systemd/user/luna-session.target" "644"
-    # Awaryjna sesja bez GPU (LUNA_GPU=0) — wybór „Luna (bez GPU)” w menedżerze logowania.
-    emit "base"     "$root/de/session/luna-session-cpu" "$dest/bin/luna-session-cpu" "755"
+    # Sesja z GPU (eksperymentalna, LUNA_GPU=1) — wybór „Luna (eksperymentalna GPU)” w menedżerze logowania.
+    emit "base"     "$root/de/session/luna-session-gpu" "$dest/bin/luna-session-gpu" "755"
     # Backend portali XDG dla Luny — bez tego `xdg-desktop-portal` nie wybiera backendu
     # (aplikacje flatpak/żądania portalu kończą się timeoutem).
     emit "base"     "$root/de/session/luna-portals.conf" "$dest/share/xdg-desktop-portal/luna-portals.conf" "644"
@@ -521,14 +521,14 @@ while IFS='|' read -r comp src dst mode; do
     do_cmd install -D -m "$mode" "$src" "$dst"
 done < <(files)
 
-# Migracja wpisów sesji: do 0.0.20 GPU było osobną sesją „Luna (GPU)”. Teraz GPU
-# jest domyślne w sesji „Luna”, a osobno instalujemy awaryjną „Luna (bez GPU)”.
-# Stary wpis wskazywałby na usunięty launcher, więc sprzątamy go przy instalacji.
+# Migracja wpisów sesji: w 0.0.20 GPU było domyślne i istniała sesja „Luna (bez
+# GPU)”. Wracamy do CPU domyślnie + „Luna (eksperymentalna GPU)”, więc sprzątamy
+# pliki tamtego wariantu — wskazywałyby na nieistniejący launcher.
 if [ -z "$only" ] || [ "$only" = "selene" ] || [ "$only" = "base" ]; then
-    for legacy in "$dest/share/wayland-sessions/selene-gpu.desktop" "$dest/bin/luna-session-gpu"; do
+    for legacy in "$dest/share/wayland-sessions/selene-cpu.desktop" "$dest/bin/luna-session-cpu"; do
         if [ -e "$legacy" ]; then
             do_cmd rm -f "$legacy"
-            say "  usunięto dawną sesję GPU: $legacy"
+            say "  usunięto wpis poprzedniej sesji: $legacy"
         fi
     done
 fi
@@ -659,7 +659,7 @@ if [ "$destdir" = "" ] && [ "$(id -u)" -eq 0 ]; then
     fi
 fi
 
-managed_bins="selene luna-shell luna-desktop luna-lock luna-keyring luna-polkit luna-eq luna-accounts luna-security luna-greeter luna-greeter-config luna-demo luna-settings luna-files luna-media luna-clock luna-calculator luna-store luna-welcome luna-installer luna-editor luna-terminal luna-session luna-session-cpu"
+managed_bins="selene luna-shell luna-desktop luna-lock luna-keyring luna-polkit luna-eq luna-accounts luna-security luna-greeter luna-greeter-config luna-demo luna-settings luna-files luna-media luna-clock luna-calculator luna-store luna-welcome luna-installer luna-editor luna-terminal luna-session luna-session-gpu"
 
 # ── Inne kopie naszych binarek w PATH ────────────────────────────────────────
 # Typowa pułapka: w /usr/bin leży stary `selene` z poprzedniej instalacji,
