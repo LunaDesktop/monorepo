@@ -1119,12 +1119,21 @@ impl DrmBackend {
         let Some(out) = self.outputs.get_mut(idx) else {
             return false;
         };
+        let reject = |reason: &str| {
+            if std::env::var("SELENE_STATS").is_ok() {
+                eprintln!(
+                    "selene/drm: skanout odrzucony na wyjściu {idx}: {reason} (fourcc 0x{:08x}, modifier 0x{:016x})",
+                    frame.fourcc, frame.modifier
+                );
+            }
+            false
+        };
         if frame.width != out.width
             || frame.height != out.height
             || frame.planes.is_empty()
             || frame.planes.len() > 4
         {
-            return false;
+            return reject("rozmiar/liczba planów");
         }
         // Framebuffery z dwóch klatek wstecz są już po flipie (na flipy czekamy
         // na początku iteracji), więc wolno je zwolnić.
@@ -1151,18 +1160,21 @@ impl DrmBackend {
                 Ok(done) if done.handle != 0 => handles.push(done.handle),
                 _ => {
                     release_gem(fd, &handles);
-                    return false;
+                    return reject("PRIME_FD_TO_HANDLE");
                 }
             }
         }
 
+        // Bufor liniowy (`modifier == DRM_FORMAT_MOD_LINEAR`) dodajemy bez flagi
+        // `DRM_MODE_FB_MODIFIERS` — `nvidia-drm` zwraca `EINVAL`, gdy flaga jest
+        // ustawiona, nawet dla zera, a bez niej przyjmuje bufor bez zastrzeżeń.
+        let linear = frame.modifier == 0;
         let mut fb_desc = ModeFbCmd2 {
             fb_id: 0,
             width: out.width,
             height: out.height,
             pixel_format: frame.fourcc,
-            // `DRM_MODE_FB_MODIFIERS` — modyfikator jest istotny (tiling)
-            flags: 2,
+            flags: if linear { 0 } else { 2 },
             ..ModeFbCmd2::default()
         };
         for (i, handle) in handles.iter().enumerate() {
@@ -1171,15 +1183,17 @@ impl DrmBackend {
         for (i, (_, offset, stride)) in frame.planes.iter().enumerate() {
             fb_desc.pitches[i] = *stride;
             fb_desc.offsets[i] = *offset;
-            fb_desc.modifier[i] = frame.modifier;
+            if !linear {
+                fb_desc.modifier[i] = frame.modifier;
+            }
         }
         let Ok(added) = ioctl_rw::<ModeFbCmd2, DRM_IOCTL_MODE_ADDFB2, _>(fd, fb_desc) else {
             release_gem(fd, &handles);
-            return false;
+            return reject("ADDFB2");
         };
         if added.fb_id == 0 {
             release_gem(fd, &handles);
-            return false;
+            return reject("ADDFB2 bez fb_id");
         }
 
         let req = ModePageFlip {
@@ -1192,7 +1206,7 @@ impl DrmBackend {
         if ioctl_rw::<ModePageFlip, DRM_IOCTL_MODE_PAGE_FLIP, _>(fd, req).is_err() {
             destroy_fb(fd, added.fb_id);
             release_gem(fd, &handles);
-            return false;
+            return reject("PAGE_FLIP");
         }
         out.dmabuf_fbs.push_back((added.fb_id, handles));
         true
@@ -1968,6 +1982,62 @@ mod tests {
         // Zero-copy nie może **wywrócić** sesji: brak wsparcia = fallback do readbacku.
         // Test pilnuje tylko, żeby ścieżka eksportu w ogóle działała (PRIME weszło).
         let _ = any_ok;
+    }
+
+    /// Eksport musi zwracać klatkę, która **właśnie** została narysowana.
+    ///
+    /// Cele renderu są podwójne (ping-pong), a zamiana następowała po narysowaniu
+    /// klatki — `export_dmabuf` czytał wtedy teksturę sprzed dwóch klatek, czyli
+    /// na starcie pustą, a potem nieaktualną. Zero-copy prezentował więc
+    /// nieaktualny obraz, a readback po odrzuceniu — czarne tło.
+    #[test]
+    fn export_returns_just_drawn_frame() {
+        use libluna_core::{Color, Rect};
+        use libluna_render::{gpu::GpuRenderer, Renderer, Scene};
+
+        let (w, h) = (64u32, 48u32);
+        let Ok(mut gpu) = GpuRenderer::new(w, h) else {
+            eprintln!("pominięto: brak EGL/GPU");
+            return;
+        };
+        let mut scene = Scene::new();
+        scene.fill_rect(
+            Rect::from_xywh(0.0, 0.0, f64::from(w), f64::from(h)),
+            Color::from_rgba8(255, 0, 0, 255),
+        );
+        gpu.draw(&scene, 1.0, Color::from_rgba8(0, 0, 0, 255));
+        let Some(frame) = gpu.export_dmabuf() else {
+            eprintln!("pominięto: sterownik nie eksportuje dmabuf");
+            return;
+        };
+
+        // Import z powrotem: klatka musi być czerwona, nie czarna i nie niebieska.
+        let mut check = GpuRenderer::new(w, h).expect("drugi kontekst");
+        let mut check_scene = Scene::new();
+        check_scene.image_dmabuf(
+            Rect::from_xywh(0.0, 0.0, f64::from(w), f64::from(h)),
+            std::sync::Arc::new(libluna_render::DmabufImage {
+                width: w,
+                height: h,
+                format: frame.fourcc,
+                modifier: frame.modifier,
+                planes: frame
+                    .planes
+                    .iter()
+                    .map(|(plane_fd, offset, stride)| libluna_render::DmabufPlane {
+                        fd: plane_fd.try_clone().expect("dup fd"),
+                        offset: *offset,
+                        stride: *stride,
+                    })
+                    .collect(),
+            }),
+        );
+        check.draw(&check_scene, 1.0, Color::from_rgba8(0, 0, 255, 255));
+        let px = &check.data()[..4];
+        assert!(
+            px[0] > 200 && px[1] < 40 && px[2] < 40,
+            "eksport zwrócił nieaktualną klatkę: {px:?}"
+        );
     }
 
     fn added_err(r: &rustix::io::Result<ModeFbCmd2>) -> Option<std::io::ErrorKind> {

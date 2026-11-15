@@ -992,8 +992,14 @@ impl GpuRenderer {
         Ok(renderer)
     }
 
-    /// Włącza tryb skanoutu bez readbacku (klatka zostaje w teksturze GPU).
+    /// Włącza tryb skanoutu bez readbacku (klatka zostaje w buforze GPU).
+    ///
+    /// Przy wyłączaniu odczytujemy ostatnią klatkę do `data()` — inaczej fallback
+    /// po odrzuceniu zero-copy prezentowałby bufor, do którego nie rysowaliśmy.
     pub fn set_scanout_only(&mut self, on: bool) {
+        if self.scanout_only && !on {
+            self.readback_full();
+        }
         self.scanout_only = on;
     }
 
@@ -1006,6 +1012,9 @@ impl GpuRenderer {
             return;
         }
         self.gl.bind();
+        // `self.fbo` to bufor, do którego **naprawdę** rysowaliśmy: zamiana celów
+        // (ping-pong) dzieje się na początku `draw`, nie na końcu, więc odczyt
+        // trafia w bieżącą klatkę, a nie w pustą sprzed dwóch prezentacji.
         unsafe {
             (self.gl.bind_framebuffer)(GL_FRAMEBUFFER, self.fbo);
             (self.gl.read_pixels)(
@@ -1984,9 +1993,18 @@ impl Renderer for GpuRenderer {
         // Kontekst EGL jest per wątek: przy kilku monitorach trzeba go przełączyć
         // na własny, inaczej rysujemy w obiekty innego renderera.
         self.gl.bind();
-        let damage = self.next_damage.take();
+        let mut damage = self.next_damage.take();
         self.last_readback = None;
-        unsafe { (self.gl.bind_framebuffer)(GL_FRAMEBUFFER, self.fbo) };
+        if self.scanout_only {
+            // Zero-copy: cele idą na przemian (bufor prezentowany nie może być
+            // nadpisywany). Drugi cel ma treść sprzed dwóch klatek, więc render
+            // cząstkowy zgubiłby zmiany z poprzedniej — zawsze cała klatka.
+            damage = None;
+            std::mem::swap(&mut self.fbo, &mut self.fbo2);
+            std::mem::swap(&mut self.out_tex, &mut self.out_tex2);
+        }
+        let fbo = self.fbo;
+        unsafe { (self.gl.bind_framebuffer)(GL_FRAMEBUFFER, fbo) };
         if !self.target_ok() {
             return;
         }
@@ -2003,16 +2021,32 @@ impl Renderer for GpuRenderer {
             match cmd {
                 DrawCommand::PushClip { rect } => {
                     self.flush_run(&mut run, &mut run_bounds, k, &clip_stack);
-                    let effective = clip_stack
-                        .last()
-                        .and_then(|(c, _)| c.intersection(rect))
-                        .unwrap_or(*rect);
-                    clip_stack.push((effective, 0.0));
+                    let (effective, radius) = match clip_stack.last() {
+                        Some((c, cr)) => {
+                            let effective = c.intersection(rect).unwrap_or(Rect::ZERO);
+                            // Prostokąt, który niczego nie przycina, nie może zgubić
+                            // zaokrąglenia wcześniejszego maskowania.
+                            let radius = if effective == *c { *cr } else { 0.0 };
+                            (effective, radius)
+                        }
+                        None => (*rect, 0.0),
+                    };
+                    clip_stack.push((effective, radius));
                 }
                 DrawCommand::PushClipRounded { rect, radius } => {
                     self.flush_run(&mut run, &mut run_bounds, k, &clip_stack);
                     let (effective, r) = match clip_stack.last() {
-                        Some((c, cr)) => (c.intersection(rect).unwrap_or(*rect), radius.min(*cr)),
+                        Some((c, cr)) => {
+                            let effective = c.intersection(rect).unwrap_or(Rect::ZERO);
+                            let r = if effective == *c {
+                                *cr
+                            } else if effective == *rect {
+                                *radius
+                            } else {
+                                0.0
+                            };
+                            (effective, r)
+                        }
                         None => (*rect, *radius),
                     };
                     clip_stack.push((effective, r));
@@ -2204,11 +2238,9 @@ impl Renderer for GpuRenderer {
                 eprintln!("libluna-render: GL error 0x{:x}", self.gl.error());
             }
         }
-        // Podwójne buforowanie celów renderu: kolejna klatka idzie do drugiej
-        // tekstury, więc bufor wyeksportowany do skanoutu (`export_dmabuf`) nie jest
-        // nadpisywany, zanim kernel skończy go wyświetlać.
-        std::mem::swap(&mut self.fbo, &mut self.fbo2);
-        std::mem::swap(&mut self.out_tex, &mut self.out_tex2);
+        // Zamiana celów (ping-pong) dzieje się **na początku** `draw`, nie tutaj.
+        // Po zamianie na końcu `export_dmabuf`/`readback_full` czytały już następny
+        // bufor, czyli klatkę sprzed dwóch prezentacji (pierwszą pustą).
     }
 
     fn encode_png(&self) -> Option<Vec<u8>> {

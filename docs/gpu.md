@@ -233,17 +233,21 @@ własny uniform `round_r`, a rozmiar clipu idzie w `zw`; pilnuje tego test
    taka „zero-copy” wyświetliłaby śmieci. Dlatego fallback idzie **do readbacku**.
    Test `drm::tests::exported_dmabuf_becomes_a_framebuffer` pilnuje, że eksport
    i `PRIME` działają, i raportuje, czy `AddFB2` przyjął modyfikator.
-3. [~] **Zero-copy na NVIDIA wymaga GBM.** Potrzebne na hoście:
-   `/usr/lib/libnvidia-egl-gbm.so.1` i `/usr/lib/gbm/nvidia-drm_gbm.so`
-   (oba są w runtime Flatpaka `org.freedesktop.Platform.GL.nvidia-*`, na hoście
-   ich brak). Wtedy alokujemy `gbm_bo` z `GBM_BO_USE_SCANOUT|GBM_BO_USE_RENDERING`,
-   renderujemy do niego przez `eglCreateImage(EGL_LINUX_DMA_BUF_EXT)` i robimy
-   page-flip bez eksportu z tekstury GL. To jedyna droga, bo modyfikator
-   zaakceptowany przez `nvidia-drm` pochodzi z alokatora NVIDII.
-   **Detekcja gotowa:** `libluna_render::gbm` sprawdza `libgbm`, platformę EGL
-   i backend `nvidia-drm_gbm`, a `SELENE_STATS=1` wypisuje konkretnie, czego brak
-   (`selene/drm: GBM (zero-copy NVIDIA): tak/nie (...)`). Alokacja+import to
-   następny krok — dopiero po instalacji `nvidia-dkms` z GBM.
+3. [–] **Zero-copy na NVIDIA — badaństwo zakończone, niewykonalne przez `dmabuf`.**
+   Na tej maszynie (GTX 1660 SUPER, sterownik 615.78.08) sprawdzone:
+   - host **ma** GBM: `libgbm`, `libnvidia-egl-gbm.so`, `gbm/nvidia-drm_gbm.so`
+     (`selene/drm: GBM (zero-copy NVIDIA): tak`),
+   - `gbm_bo_create(LINEAR | RENDERING)` → `EINVAL`; działa tylko
+     `SCANOUT | LINEAR` (modyfikator 0, stride = szerokość × 4),
+   - taki bufor **nie nadaje się na cel renderu** (`FBO niekompletne`),
+   - `glEGLImageTargetTexture2DOES` na nim → `GL_INVALID_OPERATION` (także gdy
+     EGL jest zainicjalizowany na platformie GBM, `EGL_PLATFORM_GBM_KHR`),
+     czyli sterownik nie pozwala GL **dotknąć** liniowego bufora.
+   Wniosek: na NVIDIA zero-copy przez `dmabuf` jest niewykonalne (kafelkowany
+   bufor z EGL odrzuca `nvidia-drm`, a liniowego nie przyjmuje GL). Zostaje
+   świadomy fallback: **render na GPU + jeden readback do CPU** — bez utraty
+   poprawności obrazu. Ponowna próba ma sens tylko przez `EGLStream` (ścieżka
+   zastrzeżona) albo po zmianie zachowania sterownika.
 4. [x] **Readback tylko z regionu uszkodzenia** (platforma/nested): `Renderer::draw_damage`
    + `Scene::damage_bounds` (konserwatywny prostokąt różnicy scen, tekst mierzony
    silnikiem tekstu). `GpuRenderer` czyta z FBO tylko ten prostokąt, a

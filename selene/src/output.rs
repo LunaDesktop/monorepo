@@ -426,6 +426,23 @@ pub fn spawn_drm(
             } else {
                 layout_horizontal(&mut list);
             }
+            // Geometria z modesetu: bez tego nie da się po fakcie ustalić, czy drugi
+            // monitor dostał właściwy tryb, pozycję i skalę (objaw „obraz nie
+            // dostosowuje się do monitorów”).
+            if std::env::var("SELENE_STATS").is_ok() {
+                for info in &list {
+                    eprintln!(
+                        "selene/drm: wyjście {}: {}x{}+{}+{} (skala {}, {} Hz)",
+                        info.name,
+                        info.width,
+                        info.height,
+                        info.x,
+                        info.y,
+                        info.scale,
+                        info.refresh_hz
+                    );
+                }
+            }
             write_outputs_snapshot(&list, &detailed);
             origins = list
                 .iter()
@@ -1116,10 +1133,13 @@ pub fn spawn_drm(
                         }
                         if !flipped {
                             zerocopy[i] = false;
+                            // `set_scanout_only(false)` odczytuje ostatnią klatkę do
+                            // `data()` (zanim bufor skanoutu zniknie), więc nie wołamy
+                            // tu `readback_full()` — po usunięciu celu czytałoby inny.
                             gpu_renderers[i].set_scanout_only(false);
-                            gpu_renderers[i].readback_full();
-                            // Cała klatka jest świeża — następna prezentacja musi
-                            // skopiować wszystko (bufory mogły się rozjechać).
+                            // Następna klatka musi być pełna: render szedł do bufora
+                            // skanoutu, a zwykły cel ma treść sprzed dwóch klatek.
+                            prev_scene[i] = None;
                             prev_damage[i] = None;
                             eprintln!(
                                 "selene/drm: zero-copy odrzucone na wyjściu {i} — czytam przez CPU"
