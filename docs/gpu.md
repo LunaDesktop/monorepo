@@ -263,17 +263,6 @@ i poprzedniej klatki. Scena z widocznym `dmabuf` wymusza pełną klatkę — kli
    byłaby fałszywie zerowa. Kryterium: przy animacji panelu odczyt ≤ 10% klatki.
    Testy: `drm::tests::present_region_*`.
 
-**Pacing per wyjście (zrobione):** każde wyjście prezentuje po **własnym**
-vblanku. Klatka narysowana dla wyjścia, które ma jeszcze flip w toku, czeka
-w rendererze (`pending_present`), a pętla śpi tylko wtedy, gdy żadne wyjście nie
-może się Zaprezentować (`poll_flips`). Wcześniej `wait_flips()` czekało na
-wszystkie monitory naraz, więc 60 Hz HDMI dyktowało tempo 75 Hz DP-1.
-
-**Statystyki prezentacji:** `SELENE_STATS=1` dopisuje do linii fps
-`| pełne N, damage M, dmabuf K`. Pełne klatki poza rozruchem oznaczają, że
-`force_full_frames` zadziałał (flip padł, tryb się zmienił, klatka nie zdążyła)
-albo scena ma widoczny `dmabuf`.
-
 **Pacing (zrobione):** czekanie na flipy stoi **przed prezentacją**, a nie na
 początku iteracji: scena i readback bieżącej klatki liczą się w trakcie skanowania
 poprzedniej, więc opóźnienie renderu nie przepada jako cały vblank (wcześniej
