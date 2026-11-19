@@ -1860,3 +1860,43 @@ Disk I/O (r/w) = Datenträger-E/A (L/S)
 No access = Kein Zugriff
 No thread data = Keine Thread-Daten
 +{n} more threads = +{n} weitere Threads
+Run command… = Befehl ausführen…
+Manage plugin = Plugin verwalten
+Clipboard = Zwischenablage
+Search clipboard = Zwischenablage durchsuchen
+Copied to clipboard = In die Zwischenablage kopiert
+Pin toggled = Anheftung geändert
+Entry removed = Eintrag entfernt
+just now = gerade eben
+{n} min ago = vor {n} Min.
+{n} h ago = vor {n} Std.
+{n} d ago = vor {n} Tagen
+{n} lines = {n} Zeilen
+{n} entries = {n} Einträge
+Enter copies = Eingabe kopiert
+Ctrl+P pins = Strg+P heftet an
+The clipboard is empty = Die Zwischenablage ist leer
+Copy something and it will show up here = Kopiere etwas, es erscheint dann hier
+(empty) = (leer)
+Clipboard history stays on this computer = Der Verlauf bleibt auf diesem Rechner
+Stored in ~/.config/luna/clipboard.conf (mode 0600) = Gespeichert in ~/.config/luna/clipboard.conf (Rechte 0600)
+
+# Menedżer schowka — zbyt duży wpis
+Entry too large to keep in history = Eintrag zu groß für den Verlauf
+
+# Menedżer schowka — liczby pojedyncze wieku wpisu
+1 min ago = vor 1 Min.
+1 h ago = vor 1 Std.
+1 d ago = vor 1 Tag
+
+# Editor — Plugin-Aktualisierungen
+Update = Aktualisieren
+Updating… = Wird aktualisiert…
+No update source for this plugin = Keine Aktualisierungsquelle für dieses Plugin
+Installed manually — no update source = Manuell installiert — keine Aktualisierungsquelle
+Update plugin = Plugin aktualisieren
+
+# Języki wykryte w systemie bez katalogu Luny
+no translation = keine Übersetzung
+No Luna translation for {language} yet — the interface stays in English = Keine Luna-Übersetzung für {language} — Oberfläche auf Englisch
+No Luna translation yet — the interface stays in English = Keine Luna-Übersetzung — Oberfläche auf Englisch

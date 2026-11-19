@@ -20,7 +20,7 @@
 //! Podstawianie argumentów: `tr_args("Hello, {name}", &[("name", "Ania")])`.
 //! Każdy katalog może zdefiniować `__name__` — natywną nazwę języka do UI.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -79,6 +79,143 @@ impl From<String> for Locale {
     fn from(value: String) -> Self {
         Locale::new(value)
     }
+}
+
+/// Język widoczny w wyborze języka (Ustawienia Luny).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Language {
+    /// Krótki kod języka, np. `pl`.
+    pub code: String,
+    /// Nazwa do pokazania w UI (natywna, jeśli czcionka ją pokrywa).
+    pub name: String,
+    /// Czy mamy katalog tłumaczeń; bez katalogu interfejs zostaje po angielsku.
+    pub translated: bool,
+}
+
+/// Natywna i angielska nazwa języka spoza katalogów (np. wykrytego z systemu).
+fn known_names(code: &str) -> Option<(&'static str, &'static str)> {
+    Some(match code {
+        "af" => ("Afrikaans", "Afrikaans"),
+        "ar" => ("العربية", "Arabic"),
+        "az" => ("Azərbaycan", "Azerbaijani"),
+        "be" => ("Беларуская", "Belarusian"),
+        "bg" => ("Български", "Bulgarian"),
+        "bn" => ("বাংলা", "Bengali"),
+        "bs" => ("Bosanski", "Bosnian"),
+        "ca" => ("Català", "Catalan"),
+        "cs" => ("Čeština", "Czech"),
+        "cy" => ("Cymraeg", "Welsh"),
+        "da" => ("Dansk", "Danish"),
+        "de" => ("Deutsch", "German"),
+        "el" => ("Ελληνικά", "Greek"),
+        "en" => ("English", "English"),
+        "eo" => ("Esperanto", "Esperanto"),
+        "es" => ("Español", "Spanish"),
+        "et" => ("Eesti", "Estonian"),
+        "eu" => ("Euskara", "Basque"),
+        "fa" => ("فارسی", "Persian"),
+        "fi" => ("Suomi", "Finnish"),
+        "fil" => ("Filipino", "Filipino"),
+        "fr" => ("Français", "French"),
+        "ga" => ("Gaeilge", "Irish"),
+        "gl" => ("Galego", "Galician"),
+        "he" => ("עברית", "Hebrew"),
+        "hi" => ("हिन्दी", "Hindi"),
+        "hr" => ("Hrvatski", "Croatian"),
+        "hu" => ("Magyar", "Hungarian"),
+        "hy" => ("Հայերեն", "Armenian"),
+        "id" => ("Bahasa Indonesia", "Indonesian"),
+        "is" => ("Íslenska", "Icelandic"),
+        "it" => ("Italiano", "Italian"),
+        "ja" => ("日本語", "Japanese"),
+        "ka" => ("ქართული", "Georgian"),
+        "kk" => ("Қазақша", "Kazakh"),
+        "ko" => ("한국어", "Korean"),
+        "lt" => ("Lietuvių", "Lithuanian"),
+        "lv" => ("Latviešu", "Latvian"),
+        "mk" => ("Македонски", "Macedonian"),
+        "mn" => ("Монгол", "Mongolian"),
+        "ms" => ("Bahasa Melayu", "Malay"),
+        "mt" => ("Malti", "Maltese"),
+        "nb" => ("Norsk bokmål", "Norwegian Bokmål"),
+        "ne" => ("नेपाली", "Nepali"),
+        "nl" => ("Nederlands", "Dutch"),
+        "nn" => ("Norsk nynorsk", "Norwegian Nynorsk"),
+        "no" => ("Norsk", "Norwegian"),
+        "pl" => ("Polski", "Polish"),
+        "pt" => ("Português", "Portuguese"),
+        "ro" => ("Română", "Romanian"),
+        "ru" => ("Русский", "Russian"),
+        "sk" => ("Slovenčina", "Slovak"),
+        "sl" => ("Slovenščina", "Slovenian"),
+        "sq" => ("Shqip", "Albanian"),
+        "sr" => ("Српски", "Serbian"),
+        "sv" => ("Svenska", "Swedish"),
+        "sw" => ("Kiswahili", "Swahili"),
+        "ta" => ("தமிழ்", "Tamil"),
+        "te" => ("తెలుగు", "Telugu"),
+        "th" => ("ไทย", "Thai"),
+        "tr" => ("Türkçe", "Turkish"),
+        "uk" => ("Українська", "Ukrainian"),
+        "ur" => ("اردو", "Urdu"),
+        "uz" => ("Oʻzbek", "Uzbek"),
+        "vi" => ("Tiếng Việt", "Vietnamese"),
+        "zh" => ("中文", "Chinese"),
+        "zu" => ("isiZulu", "Zulu"),
+        _ => return None,
+    })
+}
+
+/// Czy czcionka Luna (DejaVu/Adwaita) pokrywa wszystkie znaki nazwy?
+///
+/// Pismo CJK, arabskie, hebrajskie i indyjskie bez fallbacku renderuje się jako
+/// puste prostokąty, więc dla nich pokazujemy nazwę angielską.
+fn renderable(name: &str) -> bool {
+    name.chars().all(|c| {
+        let cp = c as u32;
+        (0x20..=0x024f).contains(&cp)
+            || (0x0370..=0x03ff).contains(&cp)
+            || (0x0400..=0x04ff).contains(&cp)
+            || (0x1e00..=0x1eff).contains(&cp)
+    })
+}
+
+/// Nazwa języka do UI: natywna, jeśli da się ją wyrenderować, inaczej angielska.
+fn display_name(code: &str) -> String {
+    match known_names(code) {
+        Some((native, _)) if renderable(native) => native.to_owned(),
+        Some((_, english)) => english.to_owned(),
+        None => code.to_ascii_uppercase(),
+    }
+}
+
+/// Wyciąga kod języka z nazwy locale (`pl_PL.UTF-8` → `pl`), odrzucając `C`/`POSIX`.
+fn language_code(locale: &str) -> Option<String> {
+    let base = locale.trim().split(['.', '@']).next().unwrap_or_default();
+    let code = base
+        .split(['_', '-'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let alphabetic = !code.is_empty() && code.chars().all(|c| c.is_ascii_alphabetic());
+    if !alphabetic || code == "c" || code == "posix" {
+        return None;
+    }
+    (2..=3).contains(&code.len()).then_some(code)
+}
+
+/// Kody języków zainstalowanych w systemie (`locale -a`), bez powtórzeń.
+pub fn system_language_codes() -> Vec<String> {
+    let Ok(output) = Command::new("locale").arg("-a").output() else {
+        return Vec::new();
+    };
+    let mut codes = BTreeSet::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if let Some(code) = language_code(line) {
+            codes.insert(code);
+        }
+    }
+    codes.into_iter().collect()
 }
 
 /// Katalog tłumaczeń jednego języka.
@@ -165,6 +302,20 @@ impl Translations {
         t.add_source("en", include_str!("../i18n/en.lang"));
         t.add_source("pl", include_str!("../i18n/pl.lang"));
         t.add_source("de", include_str!("../i18n/de.lang"));
+        // Języki „startowe”: katalog obejmuje najczęściej widoczne napisy,
+        // a nieprzetłumaczone klucze wracają do angielskiego (kontrakt `tr`).
+        // CMK, arabski i pismo złożone wymagają fallbacku czcionek/shaping — poza tym etapem.
+        t.add_source("fr", include_str!("../i18n/fr.lang"));
+        t.add_source("es", include_str!("../i18n/es.lang"));
+        t.add_source("pt", include_str!("../i18n/pt.lang"));
+        t.add_source("it", include_str!("../i18n/it.lang"));
+        t.add_source("nl", include_str!("../i18n/nl.lang"));
+        t.add_source("ru", include_str!("../i18n/ru.lang"));
+        t.add_source("uk", include_str!("../i18n/uk.lang"));
+        t.add_source("tr", include_str!("../i18n/tr.lang"));
+        t.add_source("sv", include_str!("../i18n/sv.lang"));
+        t.add_source("cs", include_str!("../i18n/cs.lang"));
+        t.add_source("sw", include_str!("../i18n/sw.lang"));
         t
     }
 
@@ -190,6 +341,34 @@ impl Translations {
     /// Natywna nazwa języka z jego katalogu (np. `Polski`).
     pub fn language_name(&self, language: &str) -> Option<&str> {
         self.catalogs.get(language).and_then(Catalog::name)
+    }
+
+    /// Czy mamy (niepusty) katalog tłumaczeń dla języka.
+    pub fn has_catalog(&self, language: &str) -> bool {
+        self.catalogs
+            .get(&language.to_ascii_lowercase())
+            .is_some_and(|catalog| !catalog.is_empty())
+    }
+
+    /// Języki do wyboru: katalogi Luny **oraz** locale zainstalowane w systemie.
+    ///
+    /// Pozycje bez katalogu mają `translated: false` — UI zostaje po angielsku.
+    pub fn language_list(&self) -> Vec<Language> {
+        let mut codes: BTreeSet<String> = self.catalogs.keys().cloned().collect();
+        codes.extend(system_language_codes());
+        let mut list: Vec<Language> = codes
+            .into_iter()
+            .map(|code| Language {
+                translated: self.has_catalog(&code),
+                name: self
+                    .language_name(&code)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| display_name(&code)),
+                code,
+            })
+            .collect();
+        list.sort_by_cached_key(|language| (language.name.to_lowercase(), language.code.clone()));
+        list
     }
 
     /// Tłumaczenie klucza; przy braku wpisu zwraca sam klucz (angielski).
@@ -397,6 +576,17 @@ fn full_locale(language: &str) -> Option<&'static str> {
         "pl" => Some("pl_PL.UTF-8"),
         "en" => Some("en_US.UTF-8"),
         "de" => Some("de_DE.UTF-8"),
+        "fr" => Some("fr_FR.UTF-8"),
+        "es" => Some("es_ES.UTF-8"),
+        "pt" => Some("pt_PT.UTF-8"),
+        "it" => Some("it_IT.UTF-8"),
+        "nl" => Some("nl_NL.UTF-8"),
+        "ru" => Some("ru_RU.UTF-8"),
+        "uk" => Some("uk_UA.UTF-8"),
+        "tr" => Some("tr_TR.UTF-8"),
+        "sv" => Some("sv_SE.UTF-8"),
+        "cs" => Some("cs_CZ.UTF-8"),
+        "sw" => Some("sw_KE.UTF-8"),
         _ => None,
     }
 }
@@ -478,6 +668,11 @@ pub fn sync_environment(locale: &Locale) {
 }
 
 fn propagate_locale(language: &str) {
+    // Locale spoza pl/en/de generujemy dopiero przy wyborze języka; bez tego
+    // `LANGUAGE` byłoby nowe, a `LANG` (używany przez Qt/GTK) zostałby stary.
+    if let Some(locale) = full_locale(language) {
+        let _ = ensure_user_locale(locale);
+    }
     // Bieżący proces i wszystkie uruchamiane z niego dzieci.
     prepare_user_locales();
     sync_environment(&Locale::new(language));
@@ -590,6 +785,22 @@ pub fn language_name(language: &str) -> Option<String> {
         .and_then(|g| g.language_name(language).map(str::to_owned))
 }
 
+/// Czy mamy katalog tłumaczeń dla języka (globalnie).
+pub fn has_catalog(language: &str) -> bool {
+    global()
+        .read()
+        .map(|g| g.has_catalog(language))
+        .unwrap_or(false)
+}
+
+/// Języki do wyboru w Ustawieniach (katalogi Luny + locale systemowe).
+pub fn language_list() -> Vec<Language> {
+    global()
+        .read()
+        .map(|g| g.language_list())
+        .unwrap_or_default()
+}
+
 /// Przetłumaczony napis (globalnie).
 pub fn tr(key: &str) -> String {
     global()
@@ -679,6 +890,49 @@ mod tests {
     }
 
     #[test]
+    fn locale_names_are_reduced_to_language_codes() {
+        assert_eq!(language_code("pl_PL.UTF-8").as_deref(), Some("pl"));
+        assert_eq!(language_code("de_CH.utf8@euro").as_deref(), Some("de"));
+        assert_eq!(language_code("sr_RS.UTF-8@latin").as_deref(), Some("sr"));
+        assert_eq!(language_code("C"), None);
+        assert_eq!(language_code("C.UTF-8"), None);
+        assert_eq!(language_code("POSIX"), None);
+        assert_eq!(language_code(""), None);
+    }
+
+    #[test]
+    fn names_use_native_spelling_only_when_glyphs_exist() {
+        assert_eq!(display_name("fi"), "Suomi");
+        assert_eq!(display_name("ru"), "Русский");
+        assert_eq!(display_name("el"), "Ελληνικά");
+        // Bez fallbacku czcionek pismo CJK/arabskie renderuje się jako kratki.
+        assert_eq!(display_name("ja"), "Japanese");
+        assert_eq!(display_name("ar"), "Arabic");
+        assert_eq!(display_name("zz"), "ZZ");
+    }
+
+    #[test]
+    fn language_list_merges_catalogs_with_system_locales() {
+        let t = Translations::builtin();
+        let list = t.language_list();
+        for code in t.languages() {
+            let entry = list
+                .iter()
+                .find(|language| language.code == code)
+                .unwrap_or_else(|| panic!("{code} missing from language list"));
+            assert!(entry.translated, "{code} should have a catalog");
+            assert!(!entry.name.is_empty(), "{code} needs a display name");
+        }
+        let names: Vec<String> = list
+            .iter()
+            .map(|language| language.name.to_lowercase())
+            .collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted, "language list is sorted by name");
+    }
+
+    #[test]
     fn args_substitution() {
         let t = Translations::new(Locale::new("en"));
         assert_eq!(
@@ -730,5 +984,39 @@ mod tests {
         std::fs::write(&path, "# ręcznie\nlanguage=pl\n").unwrap();
         assert_eq!(read_language(&path).as_deref(), Some("pl"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod starter_language_tests {
+    use super::{Locale, Translations};
+
+    #[test]
+    fn starter_catalogs_are_registered_and_translate() {
+        let mut t = Translations::builtin();
+        for (code, name) in [
+            ("fr", "Français"),
+            ("es", "Español"),
+            ("pt", "Português"),
+            ("it", "Italiano"),
+            ("nl", "Nederlands"),
+            ("ru", "Русский"),
+            ("uk", "Українська"),
+            ("tr", "Türkçe"),
+            ("sv", "Svenska"),
+            ("cs", "Čeština"),
+            ("sw", "Kiswahili"),
+        ] {
+            assert_eq!(t.language_name(code), Some(name), "nazwa języka {code}");
+        }
+        t.set_locale(Locale::new("fr"));
+        assert_eq!(t.translate("Settings"), "Paramètres");
+        t.set_locale(Locale::new("ru"));
+        assert_eq!(t.translate("Close"), "Закрыть");
+        t.set_locale(Locale::new("sw"));
+        assert_eq!(t.translate("Close"), "Funga");
+        t.set_locale(Locale::new("fr"));
+        // Brak wpisu w katalogu = klucz angielski (kontrakt `tr`).
+        assert_eq!(t.translate("Nieznany klucz"), "Nieznany klucz");
     }
 }

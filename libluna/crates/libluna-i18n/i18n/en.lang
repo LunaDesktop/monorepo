@@ -1832,3 +1832,38 @@ Disk I/O (r/w) = Disk I/O (r/w)
 No access = No access
 No thread data = No thread data
 +{n} more threads = +{n} more threads
+Run command… = Run command…
+Manage plugin = Manage plugin
+Clipboard = Clipboard
+Search clipboard = Search clipboard
+Copied to clipboard = Copied to clipboard
+Pin toggled = Pin toggled
+Entry removed = Entry removed
+just now = just now
+{n} min ago = {n} min ago
+{n} h ago = {n} h ago
+{n} d ago = {n} d ago
+{n} lines = {n} lines
+{n} entries = {n} entries
+Enter copies = Enter copies
+Ctrl+P pins = Ctrl+P pins
+The clipboard is empty = The clipboard is empty
+Copy something and it will show up here = Copy something and it will show up here
+(empty) = (empty)
+Clipboard history stays on this computer = Clipboard history stays on this computer
+Stored in ~/.config/luna/clipboard.conf (mode 0600) = Stored in ~/.config/luna/clipboard.conf (mode 0600)
+
+# Menedżer schowka — zbyt duży wpis
+Entry too large to keep in history = Entry too large to keep in history
+
+# Menedżer schowka — liczby pojedyncze wieku wpisu
+1 min ago = 1 min ago
+1 h ago = 1 h ago
+1 d ago = 1 d ago
+
+# Editor — plugin updates
+Update = Update
+Updating… = Updating…
+No update source for this plugin = No update source for this plugin
+Installed manually — no update source = Installed manually — no update source
+Update plugin = Update plugin

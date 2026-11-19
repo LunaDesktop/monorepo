@@ -1874,3 +1874,43 @@ Disk I/O (r/w) = Dysk (odczyt/zapis)
 No access = Brak dostępu
 No thread data = Brak danych wątków
 +{n} more threads = +{n} więcej wątków
+Run command… = Uruchom polecenie…
+Manage plugin = Zarządzaj wtyczką
+Clipboard = Schowek
+Search clipboard = Szukaj w schowku
+Copied to clipboard = Skopiowano do schowka
+Pin toggled = Zmieniono przypięcie
+Entry removed = Usunięto wpis
+just now = teraz
+{n} min ago = {n} min temu
+{n} h ago = {n} godz. temu
+{n} d ago = {n} dni temu
+{n} lines = {n} linii
+{n} entries = {n} wpisów
+Enter copies = Enter kopiuje
+Ctrl+P pins = Ctrl+P przypina
+The clipboard is empty = Schowek jest pusty
+Copy something and it will show up here = Skopiuj coś, a pojawi się tutaj
+(empty) = (puste)
+Clipboard history stays on this computer = Historia schowka zostaje na tym komputerze
+Stored in ~/.config/luna/clipboard.conf (mode 0600) = Zapis w ~/.config/luna/clipboard.conf (prawa 0600)
+
+# Menedżer schowka — zbyt duży wpis
+Entry too large to keep in history = Wpis zbyt duży, aby trafił do historii
+
+# Menedżer schowka — liczby pojedyncze wieku wpisu
+1 min ago = 1 min temu
+1 h ago = 1 godz. temu
+1 d ago = 1 dzień temu
+
+# Edytor — aktualizacja wtyczek
+Update = Aktualizuj
+Updating… = Aktualizowanie…
+No update source for this plugin = Brak źródła aktualizacji dla tej wtyczki
+Installed manually — no update source = Zainstalowana ręcznie — brak źródła aktualizacji
+Update plugin = Aktualizuj wtyczkę
+
+# Języki wykryte w systemie bez katalogu Luny
+no translation = brak tłumaczenia
+No Luna translation for {language} yet — the interface stays in English = Brak tłumaczenia Luny dla {language} — interfejs po angielsku
+No Luna translation yet — the interface stays in English = Brak tłumaczenia Luny — interfejs po angielsku
