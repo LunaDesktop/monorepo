@@ -10,7 +10,7 @@ use libluna_core::holidays::{self, Holiday};
 use libluna_core::style::weight;
 use libluna_core::{Color, IconTheme, Point, Rect, Size, Theme, ThemePreference};
 use libluna_i18n::{tr, tr_args};
-use libluna_render::TextEngine;
+use libluna_render::{ImageData, TextEngine};
 use libluna_widgets::{paint_icon, paint_icon_themed, paint_named_icon, Hover, IconName, PaintCtx};
 
 use crate::calendar::CalendarEvent;
@@ -83,6 +83,9 @@ pub struct PanelState {
     pub toggles: Vec<Toggle>,
     /// Nazwa zalogowanego użytkownika.
     pub user: String,
+    /// Zdjęcie użytkownika (AccountsService albo kopia lokalna z Ustawień);
+    /// `None` = okrąg z inicjałem.
+    pub avatar: Option<std::sync::Arc<ImageData>>,
     /// Okna z kompozytora (`zwlr_foreign_toplevel`) — taskbar na pasku.
     pub tasks: Vec<Task>,
     /// Liczba powiadomień w historii (wysokość centrum powiadomień).
@@ -238,18 +241,21 @@ impl PanelState {
                 },
             ],
             user: "patryks".to_owned(),
+            avatar: None,
             tasks: vec![
                 Task {
                     title: format!("{} — {}", tr("Files"), tr("Documents")),
                     app_id: "files".to_owned(),
                     active: true,
                     minimized: false,
+                    fullscreen: false,
                 },
                 Task {
                     title: tr("Terminal"),
                     app_id: "terminal".to_owned(),
                     active: false,
                     minimized: false,
+                    fullscreen: false,
                 },
             ],
             notifications: 0,
@@ -1902,9 +1908,14 @@ pub struct QuickMedia<'a> {
 /// Dane do narysowania Quick Panelu.
 pub struct QuickData<'a> {
     pub user: &'a str,
+    /// Zdjęcie użytkownika (AccountsService albo kopia lokalna); `None` = inicjał.
+    pub avatar: Option<&'a std::sync::Arc<ImageData>>,
     pub preference: ThemePreference,
     /// Czy rozwiązany motyw jest ciemny (dla wyróżnienia kafelka „Motyw”).
     pub dark: bool,
+    /// Motyw wymusza własną paletę (`appearance = light|dark`) — przełącznik
+    /// trybu jest wtedy wyszarzony i nieklikalny.
+    pub appearance_locked: bool,
     pub wifi_on: bool,
     pub ssid: Option<&'a str>,
     /// `None` = brak adaptera Bluetooth.
@@ -1928,6 +1939,40 @@ pub struct QuickData<'a> {
 }
 
 /// Rysuje Quick Panel: profil, kafelki szybkich akcji, dźwięk/jasność, media i sesję.
+/// Rysuje awatar: zdjęcie przycięte do koła albo inicjał na kolorowym tle.
+///
+/// Ten sam wygląd w pasku, w Quick Panelu i w Ustawieniach.
+fn paint_avatar_round(
+    ctx: &mut PaintCtx,
+    rect: Rect,
+    user: &str,
+    image: Option<&std::sync::Arc<ImageData>>,
+    bg: Color,
+    fg: Color,
+    font: f64,
+) {
+    if let Some(image) = image {
+        ctx.scene.push_clip_rounded(rect, rect.width() / 2.0);
+        ctx.scene.image(rect, image.clone());
+        ctx.scene.pop_clip();
+        return;
+    }
+    ctx.scene.fill_rounded_rect(rect, rect.width() / 2.0, bg);
+    let initial = user
+        .chars()
+        .next()
+        .map(|c| c.to_uppercase().to_string())
+        .unwrap_or_else(|| "?".to_owned());
+    ctx.label_center(
+        rect.center().x,
+        rect.center().y,
+        &initial,
+        font,
+        weight::BOLD,
+        fg,
+    );
+}
+
 pub fn paint_quick_panel(ctx: &mut PaintCtx, rect: Rect, data: &QuickData, hover: &Hover) {
     let t = ctx.theme;
     let l = quick_layout(rect, t);
@@ -1938,21 +1983,16 @@ pub fn paint_quick_panel(ctx: &mut PaintCtx, rect: Rect, data: &QuickData, hover
         .stroke_rounded_rect(rect, t.radius.large, 1.0, t.colors.border);
 
     // ── Nagłówek: awatar, użytkownik, bateria, przyciski ──
-    ctx.scene
-        .fill_rounded_rect(l.avatar, l.avatar.width() / 2.0, t.colors.accent);
-    let initial = data
-        .user
-        .chars()
-        .next()
-        .map(|c| c.to_uppercase().to_string())
-        .unwrap_or_else(|| "U".to_owned());
-    ctx.label_center(
-        l.avatar.center().x,
-        l.avatar.center().y,
-        &initial,
-        t.typography.heading.size,
-        weight::BOLD,
+    // Zdjęcie z AccountsService / `~/.local/share/luna`, a bez pliku — inicjał
+    // w kolorze akcentu (ten sam helper co w pasku i na ekranie logowania).
+    paint_avatar_round(
+        ctx,
+        l.avatar,
+        data.user,
+        data.avatar,
+        t.colors.accent,
         t.colors.accent_fg,
+        t.typography.heading.size,
     );
 
     let text_x = l.avatar.right() + 12.0;
@@ -2036,7 +2076,17 @@ pub fn paint_quick_panel(ctx: &mut PaintCtx, rect: Rect, data: &QuickData, hover
                 .fill_rounded_rect(*r, t.radius.medium, header_hover(i, hit));
             let sz = 20.0;
             // Ciemny motyw zaznaczamy akcentem — od razu widać stan przełącznika.
-            let fg = if i == 0 && data.dark {
+            // Gdy motyw wymusza własną paletę, przełącznik jest wyszarzony.
+            let locked = i == 0 && data.appearance_locked;
+            if locked {
+                // Bez tła hover — przycisk jest nieaktywny.
+            } else {
+                ctx.scene
+                    .fill_rounded_rect(*r, t.radius.medium, header_hover(i, hit));
+            }
+            let fg = if locked {
+                t.colors.dim_text.scale_alpha(0.5)
+            } else if i == 0 && data.dark {
                 t.colors.accent
             } else {
                 t.colors.text
@@ -4099,6 +4149,7 @@ mod taskbar_tests {
                 app_id: "app".into(),
                 active: false,
                 minimized: false,
+                fullscreen: false,
             })
             .collect();
         let (rects, icon_only) = task_layout(bar, &theme, &text, &tasks);
@@ -4137,6 +4188,7 @@ mod taskbar_tests {
                 app_id: "thunar".into(),
                 active: false,
                 minimized: false,
+                fullscreen: false,
             }),
             IconName::Files
         );
@@ -4146,6 +4198,7 @@ mod taskbar_tests {
                 app_id: "xfce4-terminal".into(),
                 active: false,
                 minimized: false,
+                fullscreen: false,
             }),
             IconName::Terminal
         );
@@ -4155,6 +4208,7 @@ mod taskbar_tests {
                 app_id: "nieznana".into(),
                 active: false,
                 minimized: false,
+                fullscreen: false,
             }),
             IconName::App
         );
@@ -4171,12 +4225,14 @@ mod taskbar_tests {
                 app_id: "files".into(),
                 active: true,
                 minimized: false,
+                fullscreen: false,
             },
             Task {
                 title: "Terminal".into(),
                 app_id: "term".into(),
                 active: false,
                 minimized: false,
+                fullscreen: false,
             },
         ];
         let rects = task_rects(bar, &theme, &text, &tasks);
@@ -4509,34 +4565,24 @@ fn paint_panel_items(panel: &PanelState, hover: &Hover, ctx: &mut PaintCtx, rect
                 fg,
             );
         } else {
-            // Awatar użytkownika: okrąg z inicjałem; aktywny — akcent.
+            // Awatar użytkownika: zdjęcie z Ustawień albo okrąg z inicjałem.
             let avatar = Rect::from_xywh(r.center().x - 10.0, r.center().y - 10.0, 20.0, 20.0);
-            ctx.scene.fill_rounded_rect(
+            paint_avatar_round(
+                ctx,
                 avatar,
-                10.0,
+                &panel.user,
+                panel.avatar.as_ref(),
                 if active {
                     t.colors.accent
                 } else {
                     t.colors.shade
                 },
-            );
-            let initial = panel
-                .user
-                .chars()
-                .next()
-                .map(|c| c.to_uppercase().to_string())
-                .unwrap_or_else(|| "?".to_owned());
-            ctx.label_center(
-                avatar.center().x,
-                avatar.center().y,
-                &initial,
-                t.typography.caption.size,
-                weight::BOLD,
                 if active {
                     t.colors.accent_fg
                 } else {
                     t.colors.text
                 },
+                t.typography.caption.size,
             );
         }
         if *kind == IndicatorKind::Notifications && panel.unseen > 0 {
@@ -5311,14 +5357,16 @@ fn paint_launcher_sidebar(
     for (category, rect) in &r.categories {
         let active = launcher.category == *category;
         let hovered = hover.is_hovered(*rect);
-        let fg = if active {
-            t.colors.accent_fg
+        // Spójnie z `libluna_widgets::NavList`: aktywna pozycja to delikatna
+        // pigułka akcentu, a nie pełne wypełnienie (to zostawiamy przyciskom).
+        let icon_fg = if active {
+            t.colors.accent
         } else {
-            t.colors.text
+            t.colors.dim_text
         };
         if active {
             ctx.scene
-                .fill_rounded_rect(*rect, t.radius.small, t.colors.accent);
+                .fill_rounded_rect(*rect, t.radius.small, t.colors.accent.scale_alpha(0.14));
         } else if hovered {
             ctx.scene
                 .fill_rounded_rect(*rect, t.radius.small, libluna_widgets::hover_fill(&t));
@@ -5329,14 +5377,18 @@ fn paint_launcher_sidebar(
             icon_sz,
             icon_sz,
         );
-        panel_icon(ctx, category.icon(), icon, fg);
+        panel_icon(ctx, category.icon(), icon, icon_fg);
         ctx.label_left(
             icon.right() + t.spacing.sm,
             rect.center().y,
             &category.label(),
             t.typography.body.size,
-            if active { weight::BOLD } else { weight::NORMAL },
-            fg,
+            if active {
+                weight::MEDIUM
+            } else {
+                weight::NORMAL
+            },
+            t.colors.text,
         );
     }
 
@@ -5359,11 +5411,9 @@ fn paint_launcher_sidebar(
             if hover.is_hovered(rect) {
                 libluna_widgets::hover_fill(&t)
             } else {
-                t.colors.card_bg
+                t.colors.shade
             },
         );
-        ctx.scene
-            .stroke_rounded_rect(rect, t.radius.small, 1.0, t.colors.border);
         let icon_rect = Rect::from_xywh(
             rect.x() + t.spacing.sm,
             rect.center().y - icon_sz / 2.0,
@@ -5432,14 +5482,19 @@ pub fn paint_launcher(
         );
     }
 
-    // Przełącznik widoku — same ikony.
+    // Przełącznik widoku — segmentowy tor (jak `ViewSwitcher` w libLuna):
+    // wspólne tło `shade`, aktywny segment jako podniesiona karta z akcentową ikoną.
+    ctx.scene
+        .fill_rounded_rect(r.switcher, t.radius.medium, t.colors.shade);
     for (i, view) in LauncherView::ALL.iter().enumerate() {
         let rect = r.views[i];
         let active = *view == launcher.view;
         let hovered = hover.is_hovered(rect);
         if active {
             ctx.scene
-                .fill_rounded_rect(rect, t.radius.small, t.colors.accent);
+                .fill_rounded_rect(rect, t.radius.small, t.colors.card_bg);
+            ctx.scene
+                .stroke_rounded_rect(rect, t.radius.small, 1.0, t.colors.border);
         } else if hovered {
             ctx.scene
                 .fill_rounded_rect(rect, t.radius.small, libluna_widgets::hover_fill(&t));
@@ -5455,7 +5510,7 @@ pub fn paint_launcher(
                 isz,
             ),
             if active {
-                t.colors.accent_fg
+                t.colors.accent
             } else {
                 t.colors.text
             },
@@ -6329,8 +6384,10 @@ mod tests {
             let q = quick_panel_rect(bar, &theme);
             let data = QuickData {
                 user: "patryks",
+                avatar: None,
                 preference: ThemePreference::System,
                 dark: i == 1,
+                appearance_locked: false,
                 wifi_on: true,
                 ssid: Some("Dom_5G"),
                 bluetooth: Some((true, 2)),
@@ -7298,6 +7355,19 @@ pub fn bar_rect(size: Size, thickness: f64, position: PanelPosition) -> Rect {
     }
 }
 
+/// Wygląd paska z uwzględnieniem pełnoekranowych okien.
+///
+/// Pływająca karta („Pływający”) jest wsunięta od krawędzi ekranu, więc nad
+/// pełnoekranową aplikacją odsłaniałaby fragmenty pulpitu. Na czas pełnego
+/// ekranu wracamy wtedy do płaskiego paska Luna na całą szerokość.
+pub fn look_for_fullscreen(look: PanelLook, fullscreen: bool) -> PanelLook {
+    if fullscreen && matches!(look, PanelLook::MacOs) {
+        PanelLook::Luna
+    } else {
+        look
+    }
+}
+
 /// Pływający pasek (wygląd macOS) — z marginesem od krawędzi ekranu.
 pub fn floating_bar(size: Size, thickness: f64, position: PanelPosition) -> Rect {
     let inset = 8.0;
@@ -7689,32 +7759,22 @@ pub fn paint_panel_vertical(
             );
         } else {
             let avatar = Rect::from_xywh(r.center().x - 10.0, r.center().y - 10.0, 20.0, 20.0);
-            ctx.scene.fill_rounded_rect(
+            paint_avatar_round(
+                ctx,
                 avatar,
-                10.0,
+                &panel.user,
+                panel.avatar.as_ref(),
                 if active {
                     t.colors.accent
                 } else {
                     t.colors.shade
                 },
-            );
-            let initial = panel
-                .user
-                .chars()
-                .next()
-                .map(|c| c.to_uppercase().to_string())
-                .unwrap_or_else(|| "?".to_owned());
-            ctx.label_center(
-                avatar.center().x,
-                avatar.center().y,
-                &initial,
-                t.typography.caption.size,
-                weight::BOLD,
                 if active {
                     t.colors.accent_fg
                 } else {
                     t.colors.text
                 },
+                t.typography.caption.size,
             );
         }
         if *kind == IndicatorKind::Notifications && panel.unseen > 0 {
@@ -8241,6 +8301,21 @@ mod panel_edge_tests {
         assert!(bar.x() > 0.0);
         assert!(bar.right() < size.width);
         assert!(bar.height() < THICKNESS);
+    }
+
+    #[test]
+    fn fullscreen_falls_back_to_the_full_width_look() {
+        // Pełny ekran: pływająca karta wraca do płaskiego paska Luna (bez prześwitów).
+        assert_eq!(look_for_fullscreen(PanelLook::MacOs, true), PanelLook::Luna);
+        assert_eq!(
+            look_for_fullscreen(PanelLook::MacOs, false),
+            PanelLook::MacOs
+        );
+        assert_eq!(look_for_fullscreen(PanelLook::Luna, true), PanelLook::Luna);
+        let size = Size::new(1920.0, 1080.0);
+        let bar = bar_rect(size, THICKNESS, PanelPosition::Top);
+        assert_eq!(bar.x(), 0.0);
+        assert_eq!(bar.width(), size.width);
     }
 
     #[test]

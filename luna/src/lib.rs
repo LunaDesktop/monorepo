@@ -8,6 +8,7 @@
 
 pub mod accounts_service;
 pub mod apps;
+pub mod avatar;
 pub mod bluetooth;
 pub mod calendar;
 pub mod clock_widget;

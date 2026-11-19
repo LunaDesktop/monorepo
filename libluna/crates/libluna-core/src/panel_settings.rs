@@ -84,17 +84,17 @@ impl PanelLook {
     pub fn from_key(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "luna" | "luna-like" => Some(Self::Luna),
-            "macos" | "mac" | "macos-like" | "dock" => Some(Self::MacOs),
+            "macos" | "mac" | "macos-like" | "dock" | "floating" => Some(Self::MacOs),
             _ => None,
         }
     }
 
     /// Czy wygląd jest dostępny w tej wersji Luny.
     ///
-    /// Wygląd macOS wymaga globalnego menu i docka na dole — pojawi się
-    /// w późniejszej wersji, więc ustawienia pokazują go jako wyszarzony.
+    /// Pływający pasek (dawniej „macOS”) jest już zaimplementowany w powłoce,
+    /// więc można go wybrać bez czekania na globalne menu.
     pub fn available(self) -> bool {
-        matches!(self, Self::Luna)
+        true
     }
 }
 

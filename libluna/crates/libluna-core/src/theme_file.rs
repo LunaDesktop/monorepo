@@ -122,6 +122,14 @@ impl ThemePatch {
         self.entries.get("appearance").map(String::as_str)
     }
 
+    /// Czy styl wymusza jedną paletę (`appearance = light|dark`).
+    ///
+    /// Taki motyw sam ustala jasny/ciemny wygląd, więc przełącznik w Ustawieniach
+    /// i w Quick Panelu jest wyszarzony — wybór i tak nie zmieniłby kolorów.
+    pub fn pins_appearance(&self) -> bool {
+        matches!(self.appearance(), Some("dark") | Some("light"))
+    }
+
     /// Buduje motyw: bazą jest wariant z `appearance` (jeśli podany), w przeciwnym razie
     /// `fallback`. Akcent z `fallback` jest zachowany, o ile styl go nie nadpisuje.
     pub fn build(&self, fallback: Theme) -> Theme {

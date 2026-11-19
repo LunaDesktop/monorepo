@@ -170,8 +170,8 @@ pub use dialogs::{
     AboutDialog, AlertDialog, AlertRects, Dialog, DialogRects, PreferencesDialog, ShortcutsDialog,
 };
 pub use display::{
-    AspectFrame, Frame, Label, LabelAlign, LevelBar, Orientation, Overlay, ProgressBar, Revealer,
-    Separator,
+    ellipsize, ellipsize_weighted, wrap_text, AspectFrame, Frame, Label, LabelAlign, LevelBar,
+    Orientation, Overlay, ProgressBar, Revealer, Separator,
 };
 pub use dropdown::DropDown;
 pub use emoji_chooser::EmojiChooser;

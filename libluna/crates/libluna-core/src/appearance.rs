@@ -257,6 +257,19 @@ impl ThemeSettings {
             .with_accessibility(&accessibility)
     }
 
+    /// Czy można przełączać jasny/ciemny przy bieżącym stylu.
+    ///
+    /// Motyw ze słowem `appearance = dark` albo `light` wymusza jedną paletę,
+    /// więc przełącznik trybu jest wtedy bezużyteczny (Ustawienia i Quick Panel
+    /// pokazują go jako wyszarzony).
+    pub fn appearance_supported(&self) -> bool {
+        self.style
+            .as_deref()
+            .and_then(crate::theme_file::load)
+            .map(|patch| !patch.pins_appearance())
+            .unwrap_or(true)
+    }
+
     // --- Trwałość (prosty format `klucz = wartość`) ---
 
     /// Domyślna ścieżka konfiguracji: `$XDG_CONFIG_HOME/luna/theme.conf`.

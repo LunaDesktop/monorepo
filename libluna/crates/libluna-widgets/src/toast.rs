@@ -9,6 +9,7 @@ use libluna_core::{Animation, Easing, Point, Rect, Size, Theme};
 use libluna_render::TextEngine;
 
 use crate::ctx::PaintCtx;
+use crate::display::ellipsize;
 
 /// Powiadomienie („toast”).
 #[derive(Debug, Clone, Default)]
@@ -175,10 +176,20 @@ impl Toast {
         ctx.scene.fill_rounded_rect(t, t.height() / 2.0, bg);
 
         let body = theme.typography.body.size;
+        // Napis nie może wyjść poza toast: zostawiamy miejsce na przycisk akcji
+        // i skracamy wielokropkiem (długie ścieżki/komendy się nie mieszczą).
+        let action_w = self
+            .action
+            .as_ref()
+            .and_then(|_| self.action_rect(size, &theme, ctx.text))
+            .map(|r| (t.right() - r.x()).max(0.0))
+            .unwrap_or(0.0);
+        let text_max = (t.width() - 2.0 * m.pad_x - action_w).max(0.0);
+        let message = ellipsize(&self.message, text_max, body, ctx.text);
         ctx.label_left(
             t.x() + m.pad_x,
             t.center().y,
-            &self.message,
+            &message,
             body,
             weight::NORMAL,
             fg,

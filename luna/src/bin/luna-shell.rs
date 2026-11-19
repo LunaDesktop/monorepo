@@ -81,6 +81,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         .escape_to_exit(false);
 
     let mut state = PanelState::sample();
+    // Znacznik pliku awatara — zdjęcie ładujemy ponownie dopiero po jego zmianie.
+    let mut avatar_stamp: Option<std::time::SystemTime> = None;
     let desktop = luna::apps::scan();
     let mut apps = if desktop.is_empty() {
         App::sample()
@@ -234,8 +236,27 @@ fn main() -> Result<(), Box<dyn Error>> {
     let restart = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let restart_flag = restart.clone();
     let mut panel_checked = Instant::now();
+    // Strażnik `panel.conf`: budzi pętlę rysowania **natychmiast** po zapisie
+    // ustawień. Bez tego zmiana wyglądu/tray’a czekała na następną klatkę
+    // (zegar albo ruch myszy) i wyglądała na „nie działa”.
+    let mut panel_watch_started = false;
 
     let result = run(cfg, move |frame: &mut Frame| {
+        if !panel_watch_started {
+            panel_watch_started = true;
+            if let Some(path) = PanelSettings::config_path() {
+                let waker = frame.waker();
+                let mut last = file_stamp(&path);
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(std::time::Duration::from_millis(400));
+                    let now = file_stamp(&path);
+                    if now != last {
+                        last = now;
+                        waker.wake();
+                    }
+                });
+            }
+        }
         if toplevels.is_none() {
             toplevels = luna::toplevels::Toplevels::spawn(Some(frame.waker()));
         }
@@ -244,6 +265,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         if panel_checked.elapsed() >= std::time::Duration::from_secs(1) {
             panel_checked = Instant::now();
             let fresh = PanelSettings::load();
+            let changed = fresh.look != panel_settings.look || fresh.tray != panel_settings.tray;
             if fresh.position != panel_position {
                 restart_flag.store(true, std::sync::atomic::Ordering::Relaxed);
                 frame.close();
@@ -257,6 +279,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             // Styl tray’a działa na żywo (bez restartu) — wcześniej zmiana
             // „Ikona i nazwa” była widoczna dopiero po ponownym zalogowaniu.
             panel_settings.tray = fresh.tray;
+            if stats && changed {
+                eprintln!(
+                    "luna-shell: panel.conf → look={:?}, tray={:?}",
+                    panel_settings.look, panel_settings.tray
+                );
+            }
         }
         let panel_look = panel_settings.look;
         // Etykiety tray’a mają sens tylko na poziomym pasku (w pionie nie ma miejsca).
@@ -400,10 +428,39 @@ fn main() -> Result<(), Box<dyn Error>> {
             });
         }
 
+        // Lista okien steruje też wyglądem paska (pełny ekran), więc odświeżamy ją
+        // **przed** policzeniem geometrii — inaczej pasek reaguje klatkę później.
+        state.title.clear();
+        if let Some(tl) = &toplevels {
+            let tasks = tl.tasks();
+            if stats && tasks.len() != state.tasks.len() {
+                eprintln!(
+                    "luna-shell: taskbar: {} okien: {}",
+                    tasks.len(),
+                    tasks
+                        .iter()
+                        .map(|t| t.title.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                );
+            }
+            state.tasks = tasks;
+        } else {
+            state.tasks.clear();
+        }
+
         let size = frame.size;
         let theme = &frame.theme;
         let text = frame.text;
-        let bar = if theme.panel.float.unwrap_or(panel_look == PanelLook::MacOs) {
+        // Pełnoekranowa aplikacja na tym wyjściu: pływający pasek odsłaniałby
+        // fragmenty pulpitu przy krawędziach, więc wracamy do pełnej szerokości
+        // (styl Luna) na czas pełnego ekranu.
+        let fullscreen_task = state.tasks.iter().any(|t| t.fullscreen);
+        let effective_look = panel::look_for_fullscreen(panel_look, fullscreen_task);
+        // Motyw może wymusić pływanie; pełny ekran ma jednak pierwszeństwo.
+        let float_panel =
+            !fullscreen_task && theme.panel.float.unwrap_or(panel_look == PanelLook::MacOs);
+        let bar = if float_panel {
             panel::floating_bar(size, THICKNESS, panel_position)
         } else {
             panel::bar_rect(size, THICKNESS, panel_position)
@@ -520,28 +577,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         theme_schedule.apply(luna::theme_schedule::current_hour());
 
-        state.title.clear();
-        if let Some(tl) = &toplevels {
-            let tasks = tl.tasks();
-            if stats && tasks.len() != state.tasks.len() {
-                eprintln!(
-                    "luna-shell: taskbar: {} okien: {}",
-                    tasks.len(),
-                    tasks
-                        .iter()
-                        .map(|t| t.title.as_str())
-                        .collect::<Vec<_>>()
-                        .join(" | ")
-                );
-            }
-            state.tasks = tasks;
-        } else {
-            state.tasks.clear();
-        }
-
         // Stan systemu
         if let Ok(sys) = system.lock() {
             state.user = sys.user.clone();
+            // Awatar użytkownika: AccountsService albo kopia lokalna z Ustawień.
+            // Odczyt tylko po zmianie pliku (`avatar_stamp`), żeby nie dekodować
+            // PNG w każdej klatce.
+            let stamp = luna::avatar::avatar_stamp(&state.user);
+            if stamp != avatar_stamp {
+                avatar_stamp = stamp;
+                state.avatar = luna::avatar::load_user_avatar(&state.user);
+            }
             state.toggles = build_toggles(&sys);
             brightness_state = sys.brightness;
             battery_state = sys.battery;
@@ -1376,16 +1422,22 @@ fn main() -> Result<(), Box<dyn Error>> {
                                             target_progress = 0.0;
                                         }
                                         panel::QuickHit::Theme => {
-                                            let mut s = libluna_core::ThemeSettings::load();
-                                            let i = ThemePreference::ALL
-                                                .iter()
-                                                .position(|p| *p == s.preference())
-                                                .unwrap_or(2);
-                                            s.set_preference(
-                                                ThemePreference::ALL
-                                                    [(i + 1) % ThemePreference::ALL.len()],
-                                            );
-                                            let _ = s.save();
+                                            // Motyw wymusza własną paletę — przełącznik jest
+                                            // wyszarzony, więc klik nie zmienia preferencji.
+                                            if libluna_core::ThemeSettings::load()
+                                                .appearance_supported()
+                                            {
+                                                let mut s = libluna_core::ThemeSettings::load();
+                                                let i = ThemePreference::ALL
+                                                    .iter()
+                                                    .position(|p| *p == s.preference())
+                                                    .unwrap_or(2);
+                                                s.set_preference(
+                                                    ThemePreference::ALL
+                                                        [(i + 1) % ThemePreference::ALL.len()],
+                                                );
+                                                let _ = s.save();
+                                            }
                                         }
                                         panel::QuickHit::Wifi => {
                                             // Kafelek pokazuje tylko bieżącą sieć — kliknięcie
@@ -2229,9 +2281,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         // klatkę, gdy nic się nie zmieniło (np. sam ruch kursora nad tym samym kafelkiem).
         let mut th: u64 = state.tasks.len() as u64;
         for t in &state.tasks {
-            th = th
-                .wrapping_mul(1_099_511_628_211)
-                .wrapping_add(u64::from(t.active) ^ t.title.len() as u64);
+            th = th.wrapping_mul(1_099_511_628_211).wrapping_add(
+                u64::from(t.active) ^ (u64::from(t.fullscreen) << 2) ^ t.title.len() as u64,
+            );
         }
         for tg in &state.toggles {
             let mut lh: u64 = 0;
@@ -2245,6 +2297,20 @@ fn main() -> Result<(), Box<dyn Error>> {
         th = th
             .wrapping_mul(1_099_511_628_211)
             .wrapping_add(state.user.len() as u64);
+        // Styl tray’a i wygląd panelu zmieniają układ — muszą wchodzić do sygnatury.
+        // Wcześniej zmiana „Ikona i nazwa” w Ustawieniach nie odświeżała paska wcale
+        // (panel rysuje się tylko przy zmianie sygnatury lub zdarzeniu).
+        th = th
+            .wrapping_mul(1_099_511_628_211)
+            .wrapping_add(u64::from(state.tray_labels) ^ ((effective_look as u64) << 1));
+        th = th
+            .wrapping_mul(1_099_511_628_211)
+            .wrapping_add(state.tray.len() as u64);
+        for item in &state.tray {
+            for b in item.label().bytes() {
+                th = th.wrapping_mul(31).wrapping_add(u64::from(b));
+            }
+        }
         th = th
             .wrapping_mul(1_099_511_628_211)
             .wrapping_add(state.workspaces as u64 ^ ((state.current_ws as u64) << 8));
@@ -2475,9 +2541,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         // powierzchni na cały ekran — do zrobienia osobno.
 
         if panel_position.is_vertical() {
-            panel::paint_panel_vertical(&state, &hover, &mut ctx, bar, panel_look);
+            panel::paint_panel_vertical(&state, &hover, &mut ctx, bar, effective_look);
         } else {
-            panel::paint_panel_styled(&state, &hover, &mut ctx, bar, panel_look);
+            panel::paint_panel_styled(&state, &hover, &mut ctx, bar, effective_look);
         }
 
         // Rysowanie wysuniętego popupu/launchera z płynnym ruchem (slide)
@@ -2645,8 +2711,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                     });
                     let data = panel::QuickData {
                         user: &state.user,
+                        avatar: state.avatar.as_ref(),
                         preference,
                         dark: frame.theme.appearance == libluna_core::style::Appearance::Dark,
+                        appearance_locked: libluna_core::ThemeSettings::load()
+                            .appearance_supported()
+                            == false,
                         wifi_on,
                         ssid,
                         bluetooth: bluetooth_state,
@@ -3098,6 +3168,12 @@ fn with_tray(slot: &TraySlot, f: impl FnOnce(&luna::tray::TrayBus)) {
             f(bus);
         }
     }
+}
+
+/// Znacznik pliku (czas modyfikacji + rozmiar) — tani test „czy się zmienił”.
+fn file_stamp(path: &std::path::Path) -> Option<(std::time::SystemTime, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
 }
 
 /// Pobiera menu DBusMenu dla pozycji tray’a (jeśli usługa je udostępnia).

@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use libluna_core::style::weight;
 use libluna_core::{config, Point, Rect, Theme};
 use libluna_render::TextEngine;
-use libluna_widgets::{paint_icon, IconName, PaintCtx};
+use libluna_widgets::{ellipsize_weighted, paint_icon, wrap_text, IconName, PaintCtx};
 
 /// Czas animacji wejścia/wyjścia (s).
 const SLIDE: f64 = 0.22;
@@ -303,7 +303,10 @@ impl Notifications {
         }
         let mut expired = Vec::new();
         self.items.retain(|(n, age)| {
-            let keep = n.timeout <= 0.0 || *age < n.timeout;
+            // Powiadomienie z przyciskami czeka na decyzję użytkownika: nie
+            // znikamy go po czasie, bo razem z nim przepada akcja (np. „Otwórz
+            // lokalizację” zrzutu ekranu po 6 s).
+            let keep = n.timeout <= 0.0 || !n.actions.is_empty() || *age < n.timeout;
             if !keep {
                 expired.push(n.clone());
             }
@@ -480,31 +483,74 @@ impl Notifications {
             let inner = Rect::from_xywh(icon.x() + 7.0, icon.y() + 7.0, 18.0, 18.0);
             paint_icon(ctx, n.icon, inner, t.colors.accent.scale_alpha(a));
 
+            // Tekst nie może wyjść poza kartę: przycinamy rysowanie do jej wnętrza,
+            // a to, co się nie mieści, skracamy/zawijamy. Wcześniej długi
+            // `body` (np. ścieżka i URI z D-Bus) wyjeżdżał poza toast.
+            ctx.scene.push_clip(rect);
             let tx = icon.right() + pad;
+            let text_max = (rect.right() - pad - tx).max(0.0);
+            let caption = t.typography.caption.size;
+
+            // Nazwa aplikacji po prawej — skracana, bo bywa długa (np. Flatpak ID).
+            let app = ellipsize_weighted(
+                &n.app,
+                (text_max * 0.45).max(40.0),
+                caption,
+                weight::NORMAL,
+                ctx.text,
+            );
+            let app_w = ctx.measure(&app, caption, weight::NORMAL);
+            let title = ellipsize_weighted(
+                &n.title,
+                (text_max - app_w - t.spacing.sm).max(0.0),
+                t.typography.body.size,
+                weight::MEDIUM,
+                ctx.text,
+            );
             ctx.label_left(
                 tx,
                 rect.y() + 26.0,
-                &n.title,
+                &title,
                 t.typography.body.size,
                 weight::MEDIUM,
                 t.colors.text.scale_alpha(a),
             );
-            ctx.label_left(
-                tx,
-                rect.y() + 48.0,
-                &n.body,
-                t.typography.caption.size,
-                weight::NORMAL,
-                t.colors.dim_text.scale_alpha(a),
-            );
             ctx.label_right(
                 rect.right() - pad,
                 rect.y() + 26.0,
-                &n.app,
-                t.typography.caption.size,
+                &app,
+                caption,
                 weight::NORMAL,
                 t.colors.dim_text.scale_alpha(a),
             );
+
+            // Treść: do dwóch linii (jedna, gdy są przyciski akcji — inaczej
+            // nachodziłyby na nie), ostatnia linia z wielokropkiem.
+            let mut lines = wrap_text(&n.body, text_max, caption, weight::NORMAL, ctx.text);
+            let limit = if n.actions.is_empty() { 2 } else { 1 };
+            if lines.len() > limit {
+                lines.truncate(limit);
+                if let Some(last) = lines.last_mut() {
+                    *last = ellipsize_weighted(
+                        &format!("{last}…"),
+                        text_max,
+                        caption,
+                        weight::NORMAL,
+                        ctx.text,
+                    );
+                }
+            }
+            for (line, text) in lines.iter().enumerate() {
+                ctx.label_left(
+                    tx,
+                    rect.y() + 48.0 + line as f64 * 14.0,
+                    text,
+                    caption,
+                    weight::NORMAL,
+                    t.colors.dim_text.scale_alpha(a),
+                );
+            }
+            ctx.scene.pop_clip();
 
             // Przyciski akcji (np. „Otwórz”, „Odpisz”).
             if !n.actions.is_empty() {
@@ -551,7 +597,78 @@ impl Notifications {
 mod tests {
     use super::*;
     use libluna_core::Theme;
-    use libluna_render::{Scene, TextEngine};
+    use libluna_render::{DrawCommand, Scene, TextEngine};
+
+    #[test]
+    fn notification_with_actions_never_expires() {
+        // Regresja: toast o zrzucie ekranu znikał po 6 s razem z przyciskiem
+        // „Otwórz lokalizację”, więc `notify-send` nie dostawał żadnej akcji.
+        let mut notes = Notifications::new();
+        notes.push(
+            Notification::new("Luna", "Utworzono zrzut ekranu", "/tmp/zrzut.png").with_actions(
+                vec![("default".to_owned(), "Otwórz lokalizację".to_owned())],
+            ),
+        );
+        assert_eq!(notes.len(), 1);
+        assert!(
+            notes.advance(60.0).is_empty(),
+            "akcja nie może przepaść po czasie"
+        );
+        assert_eq!(notes.len(), 1);
+
+        // Bez akcji stary limit czasu nadal obowiązuje.
+        let mut plain = Notifications::new();
+        plain.push(Notification::new("Zed", "Gotowe", "treść"));
+        assert_eq!(plain.advance(60.0).len(), 1);
+    }
+
+    #[test]
+    fn long_body_never_leaves_the_toast() {
+        // Regresja: ścieżka/URI w treści powiadomienia wychodziła poza kartę.
+        let theme = Theme::dark();
+        let text = TextEngine::system();
+        let area = Rect::from_xywh(0.0, 0.0, 1280.0, 800.0);
+        let mut notes = Notifications::new();
+        notes.push(
+            Notification::new(
+                "Zed",
+                "Zadanie zakończone",
+                "/home/patryks/.local/zed.app/libexec/zed-editor zed-cli:///tmp/.tmp8y5mUY/socket — proces zakończony",
+            )
+            .with_icon(IconName::Info),
+        );
+        notes.advance(0.3);
+
+        let mut scene = Scene::new();
+        {
+            let mut ctx = PaintCtx::new(&mut scene, &theme, &text);
+            notes.paint(&mut ctx, area);
+        }
+
+        let mut clip: Option<Rect> = None;
+        let mut texts = 0;
+        for command in scene.commands() {
+            match command {
+                DrawCommand::PushClip { rect } => clip = Some(*rect),
+                DrawCommand::PopClip => clip = None,
+                DrawCommand::Text(run) => {
+                    if let Some(rect) = clip {
+                        texts += 1;
+                        let width = text.measure(&run.text, run.size, run.weight).width;
+                        assert!(run.origin.x >= rect.x() - 0.5);
+                        assert!(
+                            run.origin.x + width <= rect.right() + 0.5,
+                            "tekst poza kartą: {:?}",
+                            run.text
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(clip.is_none(), "clip nie został zdjęty");
+        assert!(texts >= 2, "powinien być tytuł i treść");
+    }
 
     #[test]
     fn expires_after_timeout() {

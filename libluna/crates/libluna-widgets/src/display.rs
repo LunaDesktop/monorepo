@@ -438,7 +438,21 @@ impl AspectFrame {
 
 /// Pomocnik: ucinanie napisu z wielokropkiem do zadanej szerokości.
 pub fn ellipsize(text: &str, max_width: f64, size: f64, text_engine: &TextEngine) -> String {
-    if text_engine.measure(text, size, weight::NORMAL).width <= max_width {
+    ellipsize_weighted(text, max_width, size, weight::NORMAL, text_engine)
+}
+
+/// Jak [`ellipsize`], ale z jawną grubością czcionki.
+pub fn ellipsize_weighted(
+    text: &str,
+    max_width: f64,
+    size: f64,
+    weight: u16,
+    text_engine: &TextEngine,
+) -> String {
+    if max_width <= 0.0 {
+        return String::new();
+    }
+    if text_engine.measure(text, size, weight).width <= max_width {
         return text.to_owned();
     }
     let mut out = String::new();
@@ -446,12 +460,64 @@ pub fn ellipsize(text: &str, max_width: f64, size: f64, text_engine: &TextEngine
         let mut candidate = out.clone();
         candidate.push(ch);
         candidate.push('…');
-        if text_engine.measure(&candidate, size, weight::NORMAL).width > max_width {
+        if text_engine.measure(&candidate, size, weight).width > max_width {
             break;
         }
         out.push(ch);
     }
     out.push('…');
+    out
+}
+
+/// Zawija tekst do `max_width`.
+///
+/// Zachowuje jawne `\n`, a słowa dłuższe niż cała linia łamie po znakach —
+/// inaczej długie ścieżki (`/home/…/zed-editor`) i URL-e wychodzą za ramkę.
+/// Pusta linia w tekście daje pustą linię na wyjściu.
+pub fn wrap_text(
+    text: &str,
+    max_width: f64,
+    size: f64,
+    weight: u16,
+    text_engine: &TextEngine,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if max_width <= 0.0 {
+        return out;
+    }
+    for paragraph in text.split('\n') {
+        if paragraph.trim().is_empty() {
+            out.push(String::new());
+            continue;
+        }
+        let mut line = String::new();
+        for word in paragraph.split_whitespace() {
+            let candidate = if line.is_empty() {
+                word.to_owned()
+            } else {
+                format!("{line} {word}")
+            };
+            if text_engine.measure(&candidate, size, weight).width <= max_width {
+                line = candidate;
+                continue;
+            }
+            if !line.is_empty() {
+                out.push(std::mem::take(&mut line));
+            }
+            // Słowo dłuższe niż cała linia — dzielimy po znakach.
+            let mut chunk = String::new();
+            for ch in word.chars() {
+                let probe = format!("{chunk}{ch}");
+                if !chunk.is_empty() && text_engine.measure(&probe, size, weight).width > max_width
+                {
+                    out.push(std::mem::take(&mut chunk));
+                }
+                chunk.push(ch);
+            }
+            line = chunk;
+        }
+        out.push(line);
+    }
     out
 }
 
@@ -531,5 +597,40 @@ mod tests {
         let out = ellipsize("bardzo długi napis do ucięcia", 20.0, 14.0, &engine);
         assert!(out.ends_with('…'));
         assert!(out.chars().count() < "bardzo długi napis do ucięcia".chars().count());
+    }
+
+    #[test]
+    fn wrap_text_breaks_long_paths_within_width() {
+        let engine = TextEngine::system();
+        let path = "/home/patryks/.local/zed.app/libexec/zed-editor";
+        let width = 90.0;
+        let lines = wrap_text(path, width, 14.0, weight::NORMAL, &engine);
+        assert!(lines.len() > 1, "ścieżka powinna zostać złamana");
+        for line in &lines {
+            let measured = engine.measure(line, 14.0, weight::NORMAL).width;
+            assert!(
+                measured <= width + 0.5,
+                "linia {line:?} ma {measured} px (limit {width})"
+            );
+        }
+        assert_eq!(lines.join(""), path);
+    }
+
+    #[test]
+    fn wrap_text_keeps_explicit_paragraphs() {
+        let engine = TextEngine::system();
+        let lines = wrap_text("pierwsza\n\ndruga", 500.0, 14.0, weight::NORMAL, &engine);
+        assert_eq!(
+            lines,
+            vec!["pierwsza".to_owned(), String::new(), "druga".to_owned()]
+        );
+    }
+
+    #[test]
+    fn ellipsize_weighted_respects_width() {
+        let engine = TextEngine::system();
+        let out = ellipsize_weighted("bardzo długi napis", 60.0, 14.0, weight::BOLD, &engine);
+        let measured = engine.measure(&out, 14.0, weight::BOLD).width;
+        assert!(measured <= 60.5, "{out:?} ma {measured} px");
     }
 }

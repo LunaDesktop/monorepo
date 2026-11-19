@@ -30,6 +30,9 @@ pub struct Task {
     pub active: bool,
     /// Czy okno jest zminimalizowane (wtedy menu pokazuje „Pokaż” zamiast „Schowaj”).
     pub minimized: bool,
+    /// Czy okno zajmuje cały ekran — pływający pasek musi wtedy wrócić do
+    /// pełnej szerokości, inaczej przy krawędziach zostają prześwity pulpitu.
+    pub fullscreen: bool,
 }
 
 #[derive(Default)]
@@ -204,6 +207,7 @@ impl Toplevels {
                 app_id: e.app_id.clone(),
                 active: e.states.contains(&ST_ACTIVATED),
                 minimized: e.states.contains(&ST_MINIMIZED),
+                fullscreen: e.states.contains(&ST_FULLSCREEN),
             })
             .collect()
     }

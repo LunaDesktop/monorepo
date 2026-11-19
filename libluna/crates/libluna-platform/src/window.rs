@@ -886,6 +886,8 @@ where
         needs_redraw: true,
         actions: WindowActions::default(),
         frame_requested: false,
+        frame_pending: false,
+        wanted_frame: false,
         frame_deadline: None,
         motion_redraw: false,
         input_region: RefCell::new(InputRegion::Auto),
@@ -907,7 +909,13 @@ where
 
     while !app.exit {
         // Gdy trwa animacja (aplikacja prosi o klatki), odświeżamy płynnie (~60 Hz).
-        let mut timeout = if app.needs_redraw {
+        // Gdy trwa animacja, czekamy na vblank kompozytora (`wl_surface.frame`);
+        // fallback 50 ms chroni przed zawieszeniem, gdy callback nie przyjdzie
+        // (np. powierzchnia jest zasłonięta).
+        let awaiting_vblank = app.frame_pending && app.wanted_frame;
+        let mut timeout = if awaiting_vblank {
+            Duration::from_millis(50)
+        } else if app.needs_redraw {
             Duration::from_millis(16)
         } else {
             Duration::from_millis(100)
@@ -949,6 +957,13 @@ where
             if app.last_present.elapsed() < FRAME_INTERVAL {
                 // Kompozytor nie pokaże szybciej niż monitor i tak; nie zalewajmy go.
                 continue;
+            }
+            if app.frame_pending && app.wanted_frame {
+                // Tempo animacji dyktuje kompozytor — czekamy na `wl_surface.frame`.
+                // Po 50 ms i tak rysujemy (fallback dla zasłoniętych powierzchni).
+                if app.last_present.elapsed() < Duration::from_millis(50) {
+                    continue;
+                }
             }
             app.redraw();
         }
@@ -1046,6 +1061,10 @@ struct App {
     actions: WindowActions,
     /// Aplikacja poprosiła o kolejną klatkę (animacja w toku).
     frame_requested: bool,
+    /// Poproszono kompozytora o `wl_surface.frame` — czekamy na vblank.
+    frame_pending: bool,
+    /// Aplikacja chce kolejnych klatek (animacja) — tempo dyktuje kompozytor.
+    wanted_frame: bool,
     /// Termin kolejnej klatki zaplanowanej przez aplikację (np. zegar).
     frame_deadline: Option<Instant>,
     /// Czy sam ruch kursora ma wywoływać przerysowanie (patrz [`Frame::set_motion_redraw`]).
@@ -1237,6 +1256,11 @@ impl App {
             return;
         }
 
+        // Tempo animacji dyktuje kompozytor: `wl_surface.frame` musi być zamówiony
+        // **przed** `commit`, żeby callback przyszedł po pokazaniu tej klatki.
+        self.wanted_frame = self.frame_requested;
+        self.request_frame_callback();
+
         let t_present = Instant::now();
         let presented = self.present(input_changed);
         let ms_present = t_present.elapsed().as_secs_f64() * 1000.0;
@@ -1274,6 +1298,19 @@ impl App {
         if self.frame_requested {
             self.needs_redraw = true;
         }
+    }
+
+    /// Prosi kompozytora o `wl_surface.frame` (jeśli trwa animacja).
+    ///
+    /// Callback wybudza pętlę dokładnie na vblank, więc klatki są równe i nie
+    /// wysyłamy buforów, których kompozytor i tak by nie pokazał.
+    fn request_frame_callback(&mut self) {
+        if !self.wanted_frame || self.frame_pending || !self.configured {
+            return;
+        }
+        let surface = self.target.surface().clone();
+        surface.frame(&self.qh, surface.clone());
+        self.frame_pending = true;
     }
 
     /// Wykonuje akcje okna zgłoszone w trakcie klatki.
@@ -1963,7 +2000,11 @@ impl CompositorHandler for App {
         _surface: &wl_surface::WlSurface,
         _time: u32,
     ) {
-        self.needs_redraw = true;
+        // Kompozytor pokazał klatkę — dopiero teraz wolno rysować następną.
+        self.frame_pending = false;
+        if self.wanted_frame {
+            self.needs_redraw = true;
+        }
     }
 
     fn surface_enter(
