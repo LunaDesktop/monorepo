@@ -81,42 +81,6 @@ fn cover_thumbnail(image: &ImageData, width: u32, height: u32) -> ImageData {
     ImageData::new(width, height, out)
 }
 
-fn paint_wallpaper_control(
-    ctx: &mut PaintCtx,
-    control: Rect,
-    path: &Path,
-    selected: bool,
-    theme: &Theme,
-) {
-    let radius = theme.radius.small;
-    ctx.scene
-        .fill_rounded_rect(control, radius, theme.colors.shade);
-    if let Some(image) = wallpaper_thumbnail(path) {
-        paint_wallpaper_cover(ctx, control, image, radius);
-    }
-    ctx.scene.stroke_rounded_rect(
-        control,
-        radius,
-        if selected { 2.0 } else { 1.0 },
-        if selected {
-            theme.colors.accent
-        } else {
-            theme.colors.border
-        },
-    );
-    if selected {
-        let badge = Rect::from_xywh(control.right() - 20.0, control.y() + 4.0, 16.0, 16.0);
-        ctx.scene
-            .fill_rounded_rect(badge, badge.width() / 2.0, theme.colors.accent);
-        paint_icon(
-            ctx,
-            IconName::Check,
-            Rect::from_xywh(badge.x() + 3.0, badge.y() + 3.0, 10.0, 10.0),
-            theme.colors.accent_fg,
-        );
-    }
-}
-
 /// Wysokość grafiki układu monitorów na stronie „Ekrany”.
 const DISPLAYS_HERO_H: f64 = 156.0;
 
@@ -716,10 +680,7 @@ fn preferences_page(groups: &[Group]) -> PreferencesPage {
 fn row_is_clickable(row: &pages::Row) -> bool {
     match &row.control {
         Control::None | Control::Value(_) => row.action != Action::None,
-        Control::Select { .. }
-        | Control::Switch(_)
-        | Control::Check(_)
-        | Control::Wallpaper { .. } => true,
+        Control::Select { .. } | Control::Switch(_) | Control::Check(_) => true,
         _ => false,
     }
 }
@@ -946,17 +907,6 @@ fn paint_row(
         Control::ThemePreview { accent, icons } => {
             paint_theme_preview(ctx, control, *accent, icons, &theme, icon_theme);
         }
-        Control::Wallpaper { path, selected } => {
-            paint_wallpaper_control(ctx, control, path, *selected, &theme);
-            if control_hovered {
-                ctx.scene.stroke_rounded_rect(
-                    control,
-                    theme.radius.small,
-                    1.5,
-                    theme.colors.text.scale_alpha(0.55),
-                );
-            }
-        }
         Control::Button { label, suggested } => {
             let mut button = Button::new(label.clone()).variant(if *suggested {
                 ButtonVariant::Suggested
@@ -1036,7 +986,6 @@ fn control_width(control: &Control, theme: &Theme, text: &TextEngine) -> f64 {
             n * 20.0 + (n - 1.0).max(0.0) * 8.0
         }
         Control::ThemePreview { .. } => 248.0,
-        Control::Wallpaper { .. } => 96.0,
         Control::Button { label, .. } => Button::new(label.clone()).width(text, theme),
         Control::Buttons { labels, .. } => {
             const GAP: f64 = 8.0;
@@ -1136,12 +1085,6 @@ fn control_rect(control: &Control, rect: Rect, theme: &Theme, text: &TextEngine)
             suffix.center().y - 26.0,
             width,
             52.0,
-        ),
-        Control::Wallpaper { .. } => Rect::from_xywh(
-            suffix.right() - width,
-            suffix.center().y - 27.0,
-            width,
-            54.0,
         ),
         Control::None | Control::Value(_) => suffix,
     }
@@ -1491,11 +1434,6 @@ fn handle_click(app: &mut SettingsApp, hit: RowHit, p: Point, theme: &Theme, tex
         }
         Control::Check(_) => {
             // Cały wiersz jest wygodnym celem — tak jak przy przełączniku.
-            if hit.rect.contains(p) || hit.control.contains(p) {
-                app.on_action(hit.row.action.clone());
-            }
-        }
-        Control::Wallpaper { .. } => {
             if hit.rect.contains(p) || hit.control.contains(p) {
                 app.on_action(hit.row.action.clone());
             }
@@ -4150,7 +4088,7 @@ mod tests {
         app.open_picker(pages::PickerKind::Language);
         handle_events(
             &mut app,
-            &[key(0x64, Some("d")), key(0x65, Some("e"))],
+            &[key(0x64, Some("d")), key(0x65, Some("e")), key(0x75, Some("u"))],
             size,
             &theme,
             &text,

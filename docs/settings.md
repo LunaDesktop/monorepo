@@ -51,7 +51,7 @@ język, użytkownicy, sterowniki).
 | **Wygląd i ikony** | jasny/ciemny/auto, akcent, styl z pliku oraz **ikony** (dołączony Luna-Icons, styl wektorowy i zewnętrzne zestawy freedesktop) z podglądem; **tapeta pulpitu** (kafle z pełnym podglądem 16:9 + wybór PNG z dysku, zmiana bez wylogowania) | `ThemeSettings`, `theme_file`, `~/.config/luna/icons.conf`, `~/.config/luna/wallpaper.conf` | ✅ |
 | **Ekran logowania** | tapety PNG w **siatce kafli 3×N z podglądem 16:9**, kafel **„Więcej tapet”** (popover ze źródłami: Obrazy, Tapety systemowe, katalog domowy, **Zaskocz mnie**, przeglądanie dysku), tryb/akcent, zegar greetera; **szkic zmian + „Zastosuj zmiany” + formularz hasła administratora** (`sudo`) | `/etc/luna/greeter.conf`, `luna-greeter-config` | ✅ |
 | **Ekran blokady** | tryb/akcent, zegar, tapeta pulpitu lub jednolite tło oraz **automatyczna blokada po bezczynności** | `~/.config/luna/lock.conf`, `~/.config/luna/idle.conf`, `luna-lock` (bez roota) | ✅ |
-| **Język i region** | wyszukiwany wybór języka, locale (`locale -a`/`SUPPORTED`) i strefy (`zone.tab`/`timedatectl`); zapis `locale.conf` + `region.conf`; język działa **na żywo** we wszystkich aplikacjach Luny; przełącznik NTP | `libluna-i18n`, `libluna-platform`, sesja (`LC_TIME`, `TZ`), `timedatectl` | ✅ |
+| **Język i region** | wyszukiwany wybór języka (katalogi Luny **+** locale wykryte przez `locale -a`), locale (`locale -a`/`SUPPORTED`) i strefy (`zone.tab`/`timedatectl`); zapis `locale.conf` + `region.conf`; język działa **na żywo** we wszystkich aplikacjach Luny; przełącznik NTP | `libluna-i18n`, `libluna-platform`, sesja (`LC_TIME`, `TZ`), `timedatectl` | ✅ |
 | **Powiadomienia** | DND, pozycja toastów w jednym z czterech rogów, **przycisk „Wyślij test”** (D-Bus), status daemona | `~/.config/luna/notifications.conf`, `luna-shell` | ✅ |
 | **Przestrzenie robocze** | liczba (na żywo przez `luna-control workspace-count`) i nazwy; panel, pulpit oraz podgląd `Super+Tab` aktualizują się od razu; opcjonalne **przełączanie dolnymi rogami** i **podgląd w lewym górnym rogu obszaru roboczego** (to samo co `Super+Tab`); róg działa po **0,5 s przytrzymania**, a rosnąca **poświata w narożniku** pokazuje odliczanie (wjazd po drodze do launchera nic nie otwiera) | `~/.config/luna/workspaces.conf`, Selene (`ext_workspace_v1`, `luna-control workspace-corner` / `workspace-overview-corner`) | ✅ |
 | **Sieć** | Wi‑Fi: skanowanie, łączenie (także z hasłem i sieci ukryte), włączanie/wyłączanie radia, zapisane sieci („Automatyczne łączenie”, „Zapomnij”); przewodowe: DHCP lub statyczny IPv4 z bramą i DNS; flaga połączenia taryfowanego; **VPN**: lista profili, łączenie/rozłączanie, import `.ovpn`/`.conf` | NetworkManager (D-Bus, warstwa `luna::network` i `luna::vpn`); `nmcli` **tylko** do importu pliku | ✅ |
@@ -348,6 +348,14 @@ Legenda: ✅ działa, ◐ tylko odczyt/częściowo, ⏳ zaplanowane.
 ## Język — przełączanie na żywo
 
 - Wybór języka w Ustawieniach zapisuje `~/.config/luna/locale.conf` (`language = pl|en|de|…`).
+- Lista języków to **suma** wbudowanych katalogów Luny i locale zainstalowanych
+  w systemie (`libluna_i18n::language_list()` parsuje `locale -a`). Język bez katalogu
+  jest oznaczony „— brak tłumaczenia”: po jego wyborze interfejs zostaje po angielsku
+  (kontrakt `tr`), a `LANGUAGE` nadal trafia do sesji, więc programy spoza Luny mogą
+  użyć własnych tłumaczeń. Informację o tym pokazuje też podtytuł wiersza i toast.
+- Nazwy języków pochodzą z `__name__` katalogu; dla wykrytych bez katalogu używamy
+  wbudowanej tabeli nazw natywnych, a gdy czcionka nie pokrywa pisma (CJK, arabski,
+  hebrajski, pisma indyjskie) — nazwy angielskiej, żeby nie rysować pustych prostokątów.
 - Każdy proces na libLunie sprawdza mtime tego pliku przy przebudzeniu pętli
   (`libluna-platform::refresh_appearance`). Po zmianie: `set_locale(preferred_locale())`,
   ponowne `load_catalogs_from_dirs()` i `std::env::set_var("LANGUAGE", …)`.
@@ -365,10 +373,12 @@ Legenda: ✅ działa, ◐ tylko odczyt/częściowo, ⏳ zaplanowane.
   Dzięki temu nowe programy spoza Luny startują w wybranym języku; już działające
   trzeba uruchomić ponownie (tak samo w GNOME/KDE). `luna-session` robi to także
   przy logowaniu.
-- **Brakujące locale** (`pl_PL`, `en_US`, `de_DE`, `C.UTF-8`) są generowane bez roota
-  przez `localedef` do `~/.local/share/locale`, a sesja dostaje `LOCPATH`. Dzięki temu
-  np. niemiecki działa też w aplikacjach Qt/GTK na systemie, gdzie wygenerowano tylko
-  polski i angielski.
+- **Brakujące locale** (`pl_PL`, `en_US`, `de_DE`, `fr_FR`, `es_ES`, `pt_PT`, `it_IT`,
+  `nl_NL`, `ru_RU`, `uk_UA`, `tr_TR`, `sv_SE`, `cs_CZ`, `sw_KE`, `C.UTF-8`) są generowane
+  bez roota przez `localedef` do `~/.local/share/locale`, a sesja dostaje `LOCPATH`. Dzięki
+  temu np. niemiecki działa też w aplikacjach Qt/GTK na systemie, gdzie wygenerowano tylko
+  polski i angielski. Locale wybranego języka jest dogenerowywane przy zmianie języka
+  (`propagate_locale`), a nie dopiero przy starcie sesji.
 - **Po aktualizacji** upewnij się, że w `PATH` nie ma starszej kopii powłoki
   (np. `/usr/local/bin/luna-shell` przed nowszym `/usr/bin/luna-shell`). Stara
   powłoka nie zna mechanizmu odświeżania i język nie zmieni się w panelu/launcherze,

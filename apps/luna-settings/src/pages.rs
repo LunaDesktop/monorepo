@@ -219,8 +219,6 @@ pub enum Action {
     SetBrightness(u8),
     TogglePowerSaver,
     ToggleDnd,
-    /// Tapeta ekranu logowania (indeks w [`SettingsApp::wallpapers`]).
-    SetGreeterWallpaper(usize),
     /// Ekran logowania bez tapety — gradient akcentu.
     ClearGreeterWallpaper,
     SetGreeterTheme(ThemePreference),
@@ -469,11 +467,6 @@ pub enum Control {
     ThemePreview {
         accent: Accent,
         icons: Vec<IconName>,
-    },
-    /// Miniatura tapety z zaznaczeniem.
-    Wallpaper {
-        path: PathBuf,
-        selected: bool,
     },
     Button {
         label: String,
@@ -730,11 +723,14 @@ fn appearance(app: &SettingsApp) -> Vec<Group> {
         .join(" · ");
 
     let current_wallpaper = libluna_render::wallpaper::configured_path();
+    // Wybór tapety idzie przez pełny wybierak (siatka miniatur + „Przeglądaj dysk”).
+    // Wbudowane miniatury w wierszach tylko dublowały ten ekran i ucinały listę
+    // do sześciu pozycji, więc wybór był niepełny.
     let mut wallpaper_rows = vec![row_sub(
         tr("Desktop wallpaper"),
         current_wallpaper
             .as_ref()
-            .map(|path| path.display().to_string())
+            .map(|path| wallpaper_label(path))
             .unwrap_or_else(|| tr("Built-in graphic")),
         Control::Button {
             label: tr("Browse…"),
@@ -742,19 +738,6 @@ fn appearance(app: &SettingsApp) -> Vec<Group> {
         },
         Action::OpenDesktopWallpaperPicker,
     )];
-    for path in app.wallpapers.iter().take(6) {
-        wallpaper_rows.push(row_sub(
-            wallpaper_label(path),
-            path.parent()
-                .map(|parent| parent.display().to_string())
-                .unwrap_or_default(),
-            Control::Wallpaper {
-                path: path.clone(),
-                selected: current_wallpaper.as_deref() == Some(path.as_path()),
-            },
-            Action::SetDesktopWallpaperPath(path.clone()),
-        ));
-    }
     if current_wallpaper.is_some() {
         wallpaper_rows.push(row(
             tr("Built-in wallpaper"),
@@ -1133,12 +1116,19 @@ fn security(app: &SettingsApp) -> Vec<Group> {
 }
 
 fn language(app: &SettingsApp) -> Vec<Group> {
-    let language_name = app
+    let current = app
         .languages
         .iter()
-        .find(|(code, _)| *code == app.language)
-        .map(|(code, name)| format!("{name} ({code})"))
+        .find(|language| language.code == app.language);
+    let language_name = current
+        .map(|language| format!("{} ({})", language.name, language.code))
         .unwrap_or_else(|| app.language.clone());
+    let translated = current.map_or(true, |language| language.translated);
+    let language_subtitle = if translated {
+        tr("Applies immediately to all Luna apps")
+    } else {
+        tr("No Luna translation yet — the interface stays in English")
+    };
 
     let locale = app.region.effective_locale();
     let locale_value = if app.region.locale.is_some() {
@@ -1159,7 +1149,7 @@ fn language(app: &SettingsApp) -> Vec<Group> {
             vec![
                 row_sub(
                     tr("Interface language"),
-                    tr("Applies immediately to all Luna apps"),
+                    language_subtitle,
                     Control::Select {
                         value: language_name,
                     },
@@ -1450,35 +1440,8 @@ fn login(app: &SettingsApp) -> Vec<Group> {
         Action::OpenWallpaperPicker,
     ));
 
-    if app.wallpapers.is_empty() {
-        wallpaper_rows.push(info_row(
-            tr("No wallpapers found"),
-            "/usr/share/wallpapers · ~/.local/share/backgrounds",
-        ));
-    } else {
-        for (index, path) in app.wallpapers.iter().enumerate() {
-            let selected = app.greeter.wallpaper.as_deref() == Some(path.as_path());
-            wallpaper_rows.push(row_sub(
-                wallpaper_label(path),
-                path.parent()
-                    .map(|parent| parent.display().to_string())
-                    .unwrap_or_default(),
-                Control::Wallpaper {
-                    path: path.clone(),
-                    selected,
-                },
-                Action::SetGreeterWallpaper(index),
-            ));
-        }
-    }
-
     if let Some(current) = &app.greeter.wallpaper {
-        if !app.wallpapers.iter().any(|path| path == current) {
-            wallpaper_rows.push(value_row(
-                tr("Current wallpaper"),
-                current.display().to_string(),
-            ));
-        }
+        wallpaper_rows.push(value_row(tr("Current wallpaper"), wallpaper_label(current)));
     }
 
     let apply = vec![

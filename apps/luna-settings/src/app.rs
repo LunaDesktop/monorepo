@@ -565,7 +565,8 @@ pub struct SettingsApp {
     pub styles: Vec<StyledTheme>,
     pub style: Option<String>,
     pub language: String,
-    pub languages: Vec<(String, String)>,
+    /// Katalogi Luny + języki wykryte w systemie (`locale -a`).
+    pub languages: Vec<libluna_i18n::Language>,
 
     pub icons: IconSettings,
     /// Ustawienia panelu (`~/.config/luna/panel.conf`).
@@ -770,14 +771,7 @@ impl PendingKind {
 impl SettingsApp {
     pub fn new(settings: &ThemeSettings) -> Self {
         let language = libluna_i18n::locale().language().to_owned();
-        let mut languages: Vec<(String, String)> = libluna_i18n::languages()
-            .into_iter()
-            .map(|code| {
-                let name = libluna_i18n::language_name(&code).unwrap_or_else(|| code.clone());
-                (code, name)
-            })
-            .collect();
-        languages.sort_by_cached_key(|(_, name)| name.to_lowercase());
+        let languages = libluna_i18n::language_list();
 
         // Wybrany wcześniej zestaw ikon ma obowiązywać także aplikacje GTK/Qt/KDE;
         // ponawiamy zapis przy starcie, gdyby inny program nadpisał te pliki.
@@ -1261,9 +1255,18 @@ impl SettingsApp {
             PickerKind::Language => self
                 .languages
                 .iter()
-                .map(|(code, name)| PickerItem {
-                    label: format!("{name} ({code})"),
-                    value: code.clone(),
+                .map(|language| PickerItem {
+                    label: if language.translated {
+                        format!("{} ({})", language.name, language.code)
+                    } else {
+                        format!(
+                            "{} ({}) — {}",
+                            language.name,
+                            language.code,
+                            tr("no translation")
+                        )
+                    },
+                    value: language.code.clone(),
                 })
                 .collect(),
             PickerKind::Locale => {
@@ -1481,7 +1484,7 @@ impl SettingsApp {
                 if let Some(index) = self
                     .languages
                     .iter()
-                    .position(|(code, _)| *code == item.value)
+                    .position(|language| language.code == item.value)
                 {
                     self.on_action(Action::SetLanguage(index));
                 }
@@ -2489,9 +2492,10 @@ impl SettingsApp {
                 self.pending.style = Some(style);
             }
             Action::SetLanguage(index) => {
-                let Some((code, _)) = self.languages.get(index).cloned() else {
+                let Some(language) = self.languages.get(index).cloned() else {
                     return;
                 };
+                let code = language.code.clone();
                 self.language = code.clone();
                 let locale = Locale::new(&code);
                 set_locale(locale.clone());
@@ -2499,7 +2503,15 @@ impl SettingsApp {
                 let _ = libluna_i18n::save_preferred_locale(&locale);
                 self.title = app_title();
                 self.rebuild_nav();
-                self.show_status(tr("Language changed — all Luna apps switch automatically"));
+                // Katalog może dojść z `~/.config/luna/i18n` — sprawdzamy po doładowaniu.
+                if libluna_i18n::has_catalog(&code) {
+                    self.show_status(tr("Language changed — all Luna apps switch automatically"));
+                } else {
+                    self.show_status(tr_args(
+                        "No Luna translation for {language} yet — the interface stays in English",
+                        &[("language", &language.name)],
+                    ));
+                }
             }
             Action::OpenPicker(kind) => self.open_picker(kind),
             Action::SetIconTheme(theme) => {
@@ -2887,16 +2899,6 @@ impl SettingsApp {
             Action::ToggleDnd => {
                 self.dnd = !self.dnd;
                 system::set_dnd(self.dnd);
-            }
-            Action::SetGreeterWallpaper(index) => {
-                let Some(path) = self.wallpapers.get(index).cloned() else {
-                    return;
-                };
-                if self.greeter.wallpaper.as_deref() == Some(path.as_path()) {
-                    return;
-                }
-                self.greeter.wallpaper = Some(path);
-                self.greeter_dirty = true;
             }
             Action::ClearGreeterWallpaper => {
                 if self.greeter.wallpaper.is_none() {
@@ -3589,9 +3591,32 @@ mod tests {
         assert!(!filtered.is_empty());
         assert_eq!(filtered[picker.selected].value, "de");
 
-        app.picker.as_mut().unwrap().query.set_text("de");
+        app.picker.as_mut().unwrap().query.set_text("deu");
         let filtered = app.picker_filtered();
         assert!(filtered.iter().all(|item| item.value == "de"));
+    }
+
+    #[test]
+    fn language_picker_marks_languages_without_catalog() {
+        let mut app = app();
+        app.languages.push(libluna_i18n::Language {
+            code: "xx".to_owned(),
+            name: "Testlang".to_owned(),
+            translated: false,
+        });
+        let items = app.picker_items(PickerKind::Language);
+        let item = items
+            .iter()
+            .find(|item| item.value == "xx")
+            .expect("untranslated language in the list");
+        assert!(item.label.starts_with("Testlang (xx)"));
+        // Bez katalogu UI zostaje po angielsku — picker musi to zasygnalizować.
+        assert!(item.label.contains('—'), "label: {}", item.label);
+        let translated = items
+            .iter()
+            .find(|item| item.value == "pl")
+            .expect("polish catalog");
+        assert_eq!(translated.label, "Polski (pl)");
     }
 
     #[test]
