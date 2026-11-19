@@ -2251,6 +2251,7 @@ fn toggle_maximize(state: &mut State, slot: usize) {
     }
     sync_x11_geometry(state, slot);
     crate::foreign_toplevel::broadcast_states(state);
+    // Maksymalizacja nie zmienia widoczności paska — bez przeliczania warstw.
 }
 
 /// Przełącza pełny ekran (ukrywa dekorację).
@@ -2318,6 +2319,9 @@ fn toggle_fullscreen(state: &mut State, slot: usize) {
     }
     sync_x11_geometry(state, slot);
     crate::foreign_toplevel::broadcast_states(state);
+    // Pasek (warstwa top) chowa się na czas pełnego ekranu — przeliczamy
+    // powierzchnie warstwowe od razu, bez czekania na następny `commit` panelu.
+    crate::compositor::recompose_layers(state);
 }
 
 /// Przekazuje oknu X11 bieżącą geometrię treści (pozycję i rozmiar).

@@ -2,7 +2,7 @@
 
 use std::sync::Mutex;
 
-use libluna_core::Rect;
+use libluna_core::{Point, Rect};
 use libluna_render::ImageData;
 use wayland_protocols::wp::fractional_scale::v1::server::wp_fractional_scale_v1::WpFractionalScaleV1;
 use wayland_protocols::xdg::shell::server::{xdg_popup, xdg_surface, xdg_toplevel};
@@ -1137,6 +1137,98 @@ fn composite_ime_popup(state: &mut State, surface: &wl_surface::WlSurface, data:
     }
 }
 
+/// Ile pikseli górnej krawędzi warstwy przyciąć, gdy na wyjściu jest pełny ekran.
+///
+/// Chowamy tylko **pasek panelu** (warstwa top z rezerwacją miejsca, zakotwiczona
+/// do góry): pierwsze `zone` pikseli bufora nie jest rysowane, a powierzchnia
+/// startuje zaraz pod nimi. Reszta bufora (OSD, powiadomienia) zostaje widoczna.
+fn fullscreen_panel_crop(
+    layer: u32,
+    anchor: u32,
+    zone: i32,
+    height: usize,
+    fullscreen: bool,
+) -> usize {
+    const TOP_LAYER: u32 = 2;
+    if !fullscreen || layer != TOP_LAYER || zone <= 0 {
+        return 0;
+    }
+    let top = anchor & crate::layer::ANCHOR_TOP != 0;
+    let bottom = anchor & crate::layer::ANCHOR_BOTTOM != 0;
+    if !top || bottom {
+        return 0;
+    }
+    (zone as usize).min(height.saturating_sub(1))
+}
+
+/// Przesuwa prostokąty regionu wejścia w górę (o przycięty pasek).
+fn shift_rects_up(rects: Vec<Rect>, dy: f64) -> Vec<Rect> {
+    rects
+        .into_iter()
+        .filter_map(|r| {
+            let top = r.y() - dy;
+            let bottom = r.bottom() - dy;
+            if bottom <= 0.0 {
+                return None;
+            }
+            let y = top.max(0.0);
+            Some(Rect::from_xywh(r.x(), y, r.width(), bottom - y))
+        })
+        .collect()
+}
+
+/// Czy na wyjściu `idx` jest widoczne okno na pełnym ekranie.
+fn fullscreen_on_output(state: &State, idx: usize) -> bool {
+    let workspace = *state.ws_current.lock_or_recover();
+    let (ox, oy, ow, oh) = output_rect(state, idx);
+    let area = Rect::from_xywh(ox, oy, ow, oh);
+    let windows = state.windows.lock_or_recover();
+    windows.iter().any(|w| {
+        w.fullscreen
+            && w.mapped
+            && !w.minimized
+            && !w.layer
+            && !w.popup
+            && w.in_workspace(workspace)
+            && area.contains(Point::new(
+                w.x + w.width as f64 / 2.0,
+                w.y + w.height as f64 / 2.0,
+            ))
+    })
+}
+
+/// Przelicza powierzchnie warstwowe po zmianie stanu pełnego ekranu.
+///
+/// Kompozycja warstwy dzieje się przy `commit` klienta, a wejście/wyjście
+/// z pełnego ekranu nie zmienia bufora panelu — bez tego paska nie dałoby się
+/// schować (ani pokazać) od razu, dopiero przy następnym odrysowaniu powłoki.
+pub(crate) fn recompose_layers(state: &mut State) {
+    let slots: Vec<usize> = {
+        let windows = state.windows.lock_or_recover();
+        windows
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| w.layer && w.mapped)
+            .map(|(slot, _)| slot)
+            .collect()
+    };
+    for slot in slots {
+        let Some(surface) = state.slots.get(slot).cloned() else {
+            continue;
+        };
+        let layer = surface
+            .data::<SurfaceData>()
+            .and_then(|data| data.layer.lock_or_recover().clone());
+        let Some(ls) = layer else {
+            continue;
+        };
+        let Some(data) = surface.data::<SurfaceData>() else {
+            continue;
+        };
+        composite_layer(state, &surface, data, &ls);
+    }
+}
+
 fn composite_layer(
     state: &mut State,
     surface: &wl_surface::WlSurface,
@@ -1220,17 +1312,39 @@ fn composite_layer(
     };
     // Panele/popupy mają dużo w pełni przezroczystych obszarów; wtedy renderer
     // może pomijać `alpha == 0` zamiast blendować cały prostokąt.
+    let z = crate::layer::layer_z(st.layer);
+    let out_idx = ld.output.unwrap_or(0);
+    // Pełny ekran na tym wyjściu: górny pasek (panel) nie może zasłaniać obrazu.
+    // Przycinamy wyłącznie `exclusive_zone` górnej krawędzi, więc reszta
+    // powierzchni (OSD, powiadomienia pod paskiem) zostaje widoczna.
+    let top_crop = fullscreen_panel_crop(
+        st.layer,
+        st.anchor,
+        st.exclusive_zone,
+        effective_h as usize,
+        fullscreen_on_output(state, out_idx),
+    );
+    let (effective_h, final_rgba, input_rects) = if top_crop > 0 {
+        let mut rgba = final_rgba;
+        let row = w as usize * 4;
+        rgba.drain(..row * top_crop);
+        (
+            effective_h - top_crop as i32,
+            rgba,
+            shift_rects_up(input_rects, top_crop as f64),
+        )
+    } else {
+        (effective_h, final_rgba, input_rects)
+    };
     let covered: f64 = input_rects.iter().map(|r| r.width() * r.height()).sum();
     let total = (w as f64) * (effective_h as f64);
     let image = std::sync::Arc::new(
         ImageData::new(w as u32, effective_h as u32, final_rgba)
             .with_sparse(total > 0.0 && covered < total * 0.75),
     );
-    let z = crate::layer::layer_z(st.layer);
     // Strefa wyłączna panelu → obszar roboczy. Obsługujemy wszystkie cztery
     // krawędzie: pasek może być na górze, dole, z lewej albo z prawej.
     // Zapamiętujemy ją **per monitor** — panel jest tylko na jednym wyjściu.
-    let out_idx = ld.output.unwrap_or(0);
     if st.layer == 2 && st.exclusive_zone > 0 {
         let left = st.anchor & crate::layer::ANCHOR_LEFT != 0;
         let right = st.anchor & crate::layer::ANCHOR_RIGHT != 0;
@@ -1281,6 +1395,13 @@ fn composite_layer(
         }
         _ => (input_rects.clone(), false),
     };
+    // Region wejścia w układzie bufora: po przycięciu paska przesuwamy go w górę,
+    // żeby trafienia zgadzały się z tym, co widać.
+    let base_input = if top_crop > 0 {
+        shift_rects_up(base_input, top_crop as f64)
+    } else {
+        base_input
+    };
     let mut slots = ld.slots.lock_or_recover();
     let targets: Vec<usize> = if lock_mirror {
         (0..outputs.len()).collect()
@@ -1297,7 +1418,7 @@ fn composite_layer(
             &mut slots[i],
             surface,
             ox + rx,
-            oy + ry,
+            oy + ry + top_crop as f64,
             w,
             effective_h,
             z,
@@ -1454,6 +1575,62 @@ mod input_region_tests {
         // Region tylko paska nie przechwytuje całej powierzchni.
         let bar = Rect::from_xywh(0.0, 0.0, 1920.0, 32.0);
         assert!(!covers_surface(&bar, 1920.0, 680.0));
+    }
+}
+
+#[cfg(test)]
+mod fullscreen_panel_tests {
+    use super::*;
+
+    const TOP: u32 = crate::layer::ANCHOR_TOP;
+    const BOTTOM: u32 = crate::layer::ANCHOR_BOTTOM;
+    const LEFT: u32 = crate::layer::ANCHOR_LEFT;
+    const RIGHT: u32 = crate::layer::ANCHOR_RIGHT;
+
+    #[test]
+    fn top_bar_is_cropped_for_fullscreen() {
+        // Panel górny: warstwa top (2), kotwice TOP|LEFT|RIGHT, rezerwacja 48 px.
+        assert_eq!(
+            fullscreen_panel_crop(2, TOP | LEFT | RIGHT, 48, 680, true),
+            48
+        );
+        // Bez pełnego ekranu nic nie przycinamy.
+        assert_eq!(
+            fullscreen_panel_crop(2, TOP | LEFT | RIGHT, 48, 680, false),
+            0
+        );
+        // Dolny/pionowy pasek nie jest obsługiwany tym cięciem.
+        assert_eq!(
+            fullscreen_panel_crop(2, BOTTOM | LEFT | RIGHT, 48, 680, true),
+            0
+        );
+        assert_eq!(
+            fullscreen_panel_crop(2, LEFT | TOP | BOTTOM, 48, 680, true),
+            0
+        );
+        // Powierzchnia bez rezerwacji (OSD, tło) zostaje nietknięta.
+        assert_eq!(
+            fullscreen_panel_crop(2, TOP | LEFT | RIGHT, 0, 680, true),
+            0
+        );
+        assert_eq!(
+            fullscreen_panel_crop(0, TOP | LEFT | RIGHT, 48, 680, true),
+            0
+        );
+        // Cięcie jest ograniczone wysokością bufora.
+        assert_eq!(fullscreen_panel_crop(2, TOP | LEFT, 48, 20, true), 19);
+    }
+
+    #[test]
+    fn input_rects_move_up_with_the_crop() {
+        let rects = vec![
+            Rect::from_xywh(0.0, 0.0, 10.0, 20.0),
+            Rect::from_xywh(0.0, 40.0, 10.0, 30.0),
+        ];
+        let shifted = shift_rects_up(rects, 30.0);
+        assert_eq!(shifted.len(), 1, "region w całości pod cięciem znika");
+        assert_eq!(shifted[0].y(), 10.0);
+        assert_eq!(shifted[0].height(), 30.0);
     }
 }
 
