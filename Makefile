@@ -23,7 +23,7 @@ ROOT := $(CURDIR)
 CARGO_TARGET_DIR ?= $(ROOT)/target
 export CARGO_TARGET_DIR
 
-.PHONY: all build check test test-doc smoke smoke-x11 bench-render bench-gpu lock install install-terminal install-store install-store-user install-welcome install-installer icons icons-png clean fmt \
+.PHONY: all build check test test-doc smoke smoke-x11 bench-render bench-gpu lock install install-terminal install-store install-store-user install-welcome install-installer icons icons-png cursors clean fmt \
 	web-assets web-api web-docs
 
 all: build
@@ -79,6 +79,10 @@ icons:
 
 # Stara nazwa celu — pakiet zawiera teraz również wersje SVG.
 icons-png: icons
+
+# Kursory Luny: SVG → XCursor (24/32/48 px) + arkusz podglądu do dokumentacji.
+cursors:
+	python3 assets/cursors/generate.py
 
 clean:
 	rm -rf "$(CARGO_TARGET_DIR)" libluna/target luna/target selene/target luna-greeter/target apps/*/target

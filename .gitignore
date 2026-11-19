@@ -14,4 +14,7 @@
 /docs/luna-*.png
 *.wazne
 /docs/*.md
+!/docs/grub-theme.md
+!/docs/tasks.md
+!/docs/cursors.md
 /docs/github/*.md
