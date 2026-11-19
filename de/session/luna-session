@@ -178,16 +178,15 @@ if [ -r "$luna_region_file" ]; then
 fi
 
 # Język ma obowiązywać w **całej sesji**, nie tylko w aplikacjach libLuny.
-# D-Bus i systemd user przekazują `LANGUAGE` nowo uruchamianym programom.
-if command -v dbus-update-activation-environment >/dev/null 2>&1; then
-    dbus-update-activation-environment --systemd LANGUAGE LANG LC_TIME TZ >/dev/null 2>&1 || true
-fi
-if command -v systemctl >/dev/null 2>&1; then
-    systemctl --user import-environment LANGUAGE LANG LC_TIME TZ >/dev/null 2>&1 || true
-
-fi
+# `dbus-update-activation-environment` / `systemctl --user import-environment`
+# wykonujemy w tle, razem z resztą środowiska (niżej) — wywołane tutaj, przed
+# powłoką, potrafią czekać na start menedżera użytkownika nawet kilkadziesiąt
+# sekund i przez ten czas widać tylko tapetę. Powłoka dziedziczy `LANGUAGE`
+# bezpośrednio z tego procesu, więc niczego nie traci.
 
 ts "uruchamiam selene"
+# Znacznik do pomiaru „jak szybko po kompozytorze wstaje panel” w logu sesji.
+t0="$(date +%s%3N 2>/dev/null || echo 0)"
 # Sprzątanie po poprzedniej sesji: zamki gniazd zostają po nagłym zabiciu kompozytora.
 # Katalog jest per-użytkownik, więc nie ruszamy niczego cudzego.
 marker="$rt/luna-wayland"
@@ -295,7 +294,7 @@ if [ -z "${XCURSOR_PATH:-}" ]; then
     export XCURSOR_PATH
 fi
 if [ -z "${XCURSOR_THEME:-}" ]; then
-    for theme in Pagan-Cursors Adwaita DMZ-Black DMZ-White; do
+    for theme in Luna-Cursors Pagan-Cursors Adwaita DMZ-Black DMZ-White; do
         for dir in "${HOME:-}/.icons" "${HOME:-}/.local/share/icons" /usr/local/share/icons /usr/share/icons; do
             if [ -d "$dir/$theme/cursors" ] && [ -n "$(ls -A "$dir/$theme/cursors" 2>/dev/null)" ]; then
                 XCURSOR_THEME="$theme"
@@ -311,19 +310,99 @@ if [ -z "${XCURSOR_SIZE:-}" ]; then
     XCURSOR_SIZE=24
     export XCURSOR_SIZE
 fi
+ts "krok: motyw kursora gotowy (${XCURSOR_THEME:-wbudowany})"
 
-# Aktualizacja środowiska aktywacji D-Bus i systemd (wymagane m.in. dla xdg-desktop-portal)
-if command -v dbus-update-activation-environment >/dev/null 2>&1; then
-    dbus-update-activation-environment --systemd WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_SESSION_DESKTOP MOZ_ENABLE_WAYLAND QT_QPA_PLATFORM GDK_BACKEND XCURSOR_THEME XCURSOR_SIZE XCURSOR_PATH _JAVA_AWT_WM_NONREPARENTING 2>/dev/null || true
+# ── Powłoka startuje **natychmiast** ─────────────────────────────────────────
+#
+# Wszystko, czego potrzebuje panel (gniazdo Waylanda, `DISPLAY`, motyw kursora),
+# jest już gotowe. Portale, keyring, polkit i aktualizacja środowiska D-Bus /
+# systemd idą **po** powłoce — w tle. Wcześniej blokujące `systemctl --user
+# start xdg-desktop-portal` potrafiło zjeść 75 s (limit zadania systemd),
+# a panel pojawiał się dopiero po nim.
+if command -v luna-security >/dev/null 2>&1; then
+    # Monitor prywatności: startuje przed panelem, żeby wskaźniki mikrofonu /
+    # kamery / sieci miały stan od pierwszej klatki.
+    ts "uruchamiam luna-security"
+    luna-security daemon >/dev/null 2>&1 &
 fi
-if command -v systemctl >/dev/null 2>&1; then
-    systemctl --user import-environment WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_SESSION_DESKTOP MOZ_ENABLE_WAYLAND QT_QPA_PLATFORM GDK_BACKEND XCURSOR_THEME XCURSOR_SIZE XCURSOR_PATH _JAVA_AWT_WM_NONREPARENTING 2>/dev/null || true
 
-    # `graphical-session.target` ma `RefuseManualStart=yes` — wciągamy go
-    # zależnością z własnego targetu. Usługi portali
-    # (`Requisite=graphical-session.target`) bez tego nie startują przez D-Bus.
-    systemctl --user start luna-session.target >/dev/null 2>&1 || true
+# Powłoka Luna (panel, launcher, OSD).
+#
+# Domyślnie **jeden** panel na monitorze głównym (pierwszym) — popupy (kalendarz, Wi‑Fi,
+# głośność) są rysowane w tym samym buforze co pasek, więc mają sens tylko na jednym
+# ekranie. Panel na każdym monitorze (osobna instancja powłoki na wyjście) włączasz
+# jawnie:  LUNA_PANELS=all luna-session
+if command -v luna-shell >/dev/null 2>&1; then
+    if [ "${LUNA_PANELS:-primary}" = "all" ]; then
+        nouts=1
+        if [ -f "$rt/luna-outputs" ]; then
+            n="$(cat "$rt/luna-outputs" 2>/dev/null)"
+            case "$n" in
+                ''|*[!0-9]*) n=1 ;;
+            esac
+            if [ "$n" -ge 1 ]; then nouts="$n"; fi
+        fi
+        ts "uruchamiam luna-shell x$nouts (panel na każdym monitorze)"
+        i=0
+        while [ "$i" -lt "$nouts" ]; do
+            LUNA_OUTPUT="$i" luna-shell &
+            i=$((i + 1))
+        done
+    else
+        ts "uruchamiam luna-shell (panel na monitorze głównym)"
+        luna-shell &
+    fi
+else
+    ts "brak luna-shell w PATH"
 fi
+if [ "${t0:-0}" != 0 ] && command -v date >/dev/null 2>&1; then
+    t1="$(date +%s%3N 2>/dev/null || echo 0)"
+    if [ "$t1" != 0 ] && [ "$t1" -ge "$t0" ]; then
+        ts "powłoka uruchomiona po $((t1 - t0)) ms od startu kompozytora"
+    fi
+fi
+
+# Ikony pulpitu (pliki, foldery, skróty `.desktop`). Osobny proces, bo jest
+# powierzchnią warstwową pod oknami — restart pulpitu nie restartuje paska.
+if command -v luna-desktop >/dev/null 2>&1; then
+    # Jedna instancja — ikony mają być tylko na jednym pulpicie. Uruchamianie
+    # kopii na każdym monitorze dublowałoby te same pliki na wszystkich ekranach.
+    ts "uruchamiam luna-desktop"
+    luna-desktop >/dev/null 2>&1 &
+else
+    ts "brak luna-desktop w PATH"
+fi
+
+# Aktualizacja środowiska aktywacji D-Bus i systemd (wymagane m.in. dla xdg-desktop-portal).
+#
+# **Nie mogą blokować startu powłoki.** `dbus-update-activation-environment --systemd`
+# i `systemctl --user` potrafią zawiesić się do limitu systemd (90 s) — a przez ten
+# czas widać tylko tapetę rysowaną przez Selene, bez panelu. Każdy krok ma własny
+# krótki limit, a start jednostek jest `--no-block`.
+tmo=""
+if command -v timeout >/dev/null 2>&1; then
+    tmo="timeout 3"
+fi
+# Cały blok idzie w tło: powłoka nie może czekać na D-Bus/systemd nawet wtedy,
+# gdy menedżer użytkownika dopiero wstaje (D-Bus ma 25 s limitu, a dwa oczekiwania
+# dawały 50 s samej tapety przed pierwszym panelem).
+(
+    if command -v dbus-update-activation-environment >/dev/null 2>&1; then
+        $tmo dbus-update-activation-environment --systemd LANGUAGE LANG LC_TIME TZ WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_SESSION_DESKTOP MOZ_ENABLE_WAYLAND QT_QPA_PLATFORM GDK_BACKEND XCURSOR_THEME XCURSOR_SIZE XCURSOR_PATH _JAVA_AWT_WM_NONREPARENTING 2>/dev/null || true
+    fi
+    ts "krok: środowisko dbus"
+    if command -v systemctl >/dev/null 2>&1; then
+        $tmo systemctl --user import-environment LANGUAGE LANG LC_TIME TZ WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_SESSION_DESKTOP MOZ_ENABLE_WAYLAND QT_QPA_PLATFORM GDK_BACKEND XCURSOR_THEME XCURSOR_SIZE XCURSOR_PATH _JAVA_AWT_WM_NONREPARENTING 2>/dev/null || true
+        ts "krok: środowisko systemd"
+
+        # `graphical-session.target` ma `RefuseManualStart=yes` — wciągamy go
+        # zależnością z własnego targetu. Usługi portali
+        # (`Requisite=graphical-session.target`) bez tego nie startują przez D-Bus.
+        $tmo systemctl --user start --no-block luna-session.target >/dev/null 2>&1 || true
+        ts "krok: target sesji uruchomiony"
+    fi
+) &
+ts "krok: dbus/systemd w tle"
 
 # Portal XDG (aplikacje GTK4/flatpak/Steam): startujemy jawnie, z poprawnym
 # środowiskiem sesji. Bez tego aktywacja D-Bus bywała bez WAYLAND_DISPLAY /
@@ -348,7 +427,7 @@ for backend in /usr/libexec/xdg-desktop-portal-gtk /usr/lib/xdg-desktop-portal-g
     [ -x "$backend" ] || continue
     portal_gtk=ok
     if command -v ldd >/dev/null 2>&1; then
-        portal_gtk_missing="$(ldd "$backend" 2>/dev/null | sed -n 's/^[[:space:]]*\([^[:space:]]*\) => not found.*/\1/p' | tr '\n' ' ')"
+        portal_gtk_missing="$($tmo ldd "$backend" 2>/dev/null | sed -n 's/^[[:space:]]*\([^[:space:]]*\) => not found.*/\1/p' | tr '\n' ' ')"
         [ -n "$portal_gtk_missing" ] && portal_gtk=uszkodzony
     fi
     break
@@ -359,11 +438,12 @@ for backend in /usr/libexec/xdg-desktop-portal-wlr /usr/lib/xdg-desktop-portal-w
     [ -x "$backend" ] || continue
     portal_wlr=ok
     if command -v ldd >/dev/null 2>&1; then
-        portal_wlr_missing="$(ldd "$backend" 2>/dev/null | sed -n 's/^[[:space:]]*\([^[:space:]]*\) => not found.*/\1/p' | tr '\n' ' ')"
+        portal_wlr_missing="$($tmo ldd "$backend" 2>/dev/null | sed -n 's/^[[:space:]]*\([^[:space:]]*\) => not found.*/\1/p' | tr '\n' ' ')"
         [ -n "$portal_wlr_missing" ] && portal_wlr=uszkodzony
     fi
     break
 done
+ts "krok: backendy portali sprawdzone (gtk=$portal_gtk wlr=$portal_wlr)"
 
 case "$portal_gtk" in
     uszkodzony)
@@ -416,78 +496,101 @@ PORTAL_CONF
     fi
 fi
 
+portal_log="${log_dir:-${XDG_STATE_HOME:-$HOME/.local/state}/luna}/portal.log"
+
+# Decyzja o środowisku dla aplikacji GTK zapada **synchronicznie** (jest tania),
+# bo `GTK_USE_PORTAL` / `GDK_DEBUG` muszą odziedziczyć wszystkie późniejsze
+# aplikacje. Sam start usług idzie już w tle.
 if [ -z "$portal_bin" ]; then
     ts "xdg-desktop-portal: brak frontendu — aplikacje użyją własnych okien"
-elif [ "$portal_gtk" != ok ] && [ "$portal_wlr" != ok ]; then
-    ts "xdg-desktop-portal: żaden backend nie jest kompletny — pomijam portal"
-    ts "  Flatpak/Steam bez portalu nie uruchomi gier (timeout org.freedesktop.portal.Flatpak)"
     export GTK_USE_PORTAL=0
+elif [ "$portal_gtk" != ok ]; then
+    if [ "$portal_wlr" != ok ]; then
+        ts "xdg-desktop-portal: żaden backend nie jest kompletny — pomijam portal"
+        ts "  Flatpak/Steam bez portalu nie uruchomi gier (timeout org.freedesktop.portal.Flatpak)"
+    else
+        # Backend GTK uszkodzony, ale wlr działa: nie każmy aplikacjom GTK czekać
+        # na portal, który i tak nie obsłuży wyboru pliku.
+        ts "portal/gtk: pomijam w aplikacjach GTK (GTK_USE_PORTAL=0)"
+    fi
+    export GTK_USE_PORTAL=0
+fi
+if [ "${GTK_USE_PORTAL:-}" = 0 ]; then
     if [ -n "${GDK_DEBUG:-}" ]; then
         export GDK_DEBUG="$GDK_DEBUG,no-portals"
     else
         export GDK_DEBUG="no-portals"
     fi
-else
-    portal_log="${log_dir:-${XDG_STATE_HOME:-$HOME/.local/state}/luna}/portal.log"
-    portal_started=0
-    # Preferujemy usługę systemd: ma własny cgroup i nie zostawia sieroty po sesji.
-    if command -v systemctl >/dev/null 2>&1; then
-        if systemctl --user start xdg-desktop-portal.service >>"$portal_log" 2>&1; then
-            portal_started=1
-        fi
-    fi
-    if [ "$portal_started" = 0 ]; then
-        "$portal_bin" >>"$portal_log" 2>&1 &
-    fi
-    ts "uruchamiam xdg-desktop-portal (gtk=$portal_gtk wlr=$portal_wlr, log: $portal_log)"
-    # Backendy startujemy jawnie — usługa aktywowana przez D-Bus dostaje środowisko
-    # z chwili aktywacji, a nie z chwili startu sesji (np. po restarcie D-Busa).
-    if command -v systemctl >/dev/null 2>&1; then
-        [ "$portal_gtk" = ok ] && systemctl --user start xdg-desktop-portal-gtk.service >>"$portal_log" 2>&1 || true
-        if [ "$portal_wlr" = ok ]; then
-            if ! systemctl --user start xdg-desktop-portal-wlr.service >>"$portal_log" 2>&1; then
-                ts "portal/wlr: usługa nie wystartowała — sprawdź log: $portal_log"
+fi
+
+# Start portalu i backendów **w tle**.
+#
+# `systemctl --user start` bez `--no-block` czeka na zakończenie zadania — przy
+# wolno wstającym menedżerze użytkownika to 75 s (limit systemd). Powłoka
+# startowała wtedy dopiero po portalu, czyli po ponad minucie tapety.
+if [ -n "$portal_bin" ] && { [ "$portal_gtk" = ok ] || [ "$portal_wlr" = ok ]; }; then
+    (
+        portal_started=0
+        # Preferujemy usługę systemd: ma własny cgroup i nie zostawia sieroty po sesji.
+        if command -v systemctl >/dev/null 2>&1; then
+            if $tmo systemctl --user start --no-block xdg-desktop-portal.service >>"$portal_log" 2>&1; then
+                portal_started=1
             fi
         fi
-        # Frontend cache'uje `luna-portals.conf` przy starcie — po wygenerowaniu
-        # brakującego mapowania trzeba go przeładować, inaczej ScreenCast nadal
-        # trafiałby do backendu GTK.
-        if [ "$portal_conf_generated" = 1 ]; then
-            systemctl --user restart xdg-desktop-portal.service >>"$portal_log" 2>&1 || true
+        if [ "$portal_started" = 0 ]; then
+            "$portal_bin" >>"$portal_log" 2>&1 &
         fi
-    fi
-    # Backend GTK jest uszkodzony, ale wlr działa: nie każmy aplikacjom GTK
-    # czekać na portal, który i tak nie obsłuży wyboru pliku.
-    if [ "$portal_gtk" != ok ]; then
-        export GTK_USE_PORTAL=0
-        if [ -n "${GDK_DEBUG:-}" ]; then
-            GDK_DEBUG="$GDK_DEBUG,no-portals"
-        else
-            GDK_DEBUG="no-portals"
+        ts "uruchamiam xdg-desktop-portal (gtk=$portal_gtk wlr=$portal_wlr, log: $portal_log)"
+        # Backendy startujemy jawnie — usługa aktywowana przez D-Bus dostaje środowisko
+        # z chwili aktywacji, a nie z chwili startu sesji (np. po restarcie D-Busa).
+        if command -v systemctl >/dev/null 2>&1; then
+            if [ "$portal_gtk" = ok ]; then
+                $tmo systemctl --user start --no-block xdg-desktop-portal-gtk.service >>"$portal_log" 2>&1 || true
+            fi
+            if [ "$portal_wlr" = ok ]; then
+                if ! $tmo systemctl --user start --no-block xdg-desktop-portal-wlr.service >>"$portal_log" 2>&1; then
+                    ts "portal/wlr: usługa nie wystartowała — sprawdź log: $portal_log"
+                fi
+            fi
+            # Frontend cache'uje `luna-portals.conf` przy starcie — po wygenerowaniu
+            # brakującego mapowania trzeba go przeładować, inaczej ScreenCast nadal
+            # trafiałby do backendu GTK.
+            if [ "$portal_conf_generated" = 1 ]; then
+                $tmo systemctl --user restart --no-block xdg-desktop-portal.service >>"$portal_log" 2>&1 || true
+            fi
         fi
-        export GDK_DEBUG
-    fi
-    # Dowód, że frontend i backend GTK naprawdę odpowiadają. Bez tego usterka
-    # portalu ujawnia się dopiero po 25 s w aplikacji (jak w RapidRAW).
-    # `Settings.Read` obsługuje backend GTK — przy jego braku test nie ma sensu.
-    if [ "$portal_gtk" != ok ]; then
-        ts "portal/Settings: backend gtk niedostępny — pomijam test Settings.Read"
-    elif command -v gdbus >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
-        portal_reply="$(timeout 3 gdbus call --session \
-            --dest org.freedesktop.portal.Desktop \
-            --object-path /org/freedesktop/portal/desktop \
-            --method org.freedesktop.portal.Settings.Read \
-            org.freedesktop.appearance color-scheme 2>/dev/null || true)"
-        if [ -n "$portal_reply" ]; then
-            ts "portal odpowiada (Settings.Read: $portal_reply)"
-        else
-            ts "UWAGA: portal nie odpowiedział w 3 s — sprawdź $portal_log"
+        # Dowód, że frontend i backend GTK naprawdę odpowiadają. Bez tego usterka
+        # portalu ujawnia się dopiero po 25 s w aplikacji (jak w RapidRAW).
+        # `Settings.Read` obsługuje backend GTK — przy jego braku test nie ma sensu.
+        if [ "$portal_gtk" != ok ]; then
+            ts "portal/Settings: backend gtk niedostępny — pomijam test Settings.Read"
+        elif command -v gdbus >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
+            # Start jest nieblokujący, więc frontend potrzebuje kilku prób.
+            portal_reply=""
+            tries=0
+            while [ "$tries" -lt 6 ] && [ -z "$portal_reply" ]; do
+                portal_reply="$(timeout 2 gdbus call --session \
+                    --dest org.freedesktop.portal.Desktop \
+                    --object-path /org/freedesktop/portal/desktop \
+                    --method org.freedesktop.portal.Settings.Read \
+                    org.freedesktop.appearance color-scheme 2>/dev/null || true)"
+                tries=$((tries + 1))
+                if [ -z "$portal_reply" ] && [ "$tries" -lt 6 ]; then
+                    sleep 0.5
+                fi
+            done
+            if [ -n "$portal_reply" ]; then
+                ts "portal odpowiada (Settings.Read: $portal_reply)"
+            else
+                ts "UWAGA: portal nie odpowiedział — sprawdź $portal_log"
+            fi
         fi
-    fi
+    ) &
+    ts "krok: portal startuje w tle"
 fi
 # Aplikacje uruchamiane przez D-Bus (zsynchronizuj też środowisko aktywacji).
 if command -v dbus-update-activation-environment >/dev/null 2>&1; then
-    dbus-update-activation-environment \
+    $tmo dbus-update-activation-environment \
         ${GTK_USE_PORTAL:+GTK_USE_PORTAL} ${GDK_DEBUG:+GDK_DEBUG} 2>/dev/null || true
 fi
 
@@ -533,54 +636,6 @@ else
             break
         fi
     done
-fi
-
-# Monitor prywatności (mikrofon/kamera/sieć i zgody aplikacji).
-# Startuje przed powłoką, żeby panel od razu miał stan; błędy nie blokują sesji.
-if command -v luna-security >/dev/null 2>&1; then
-    ts "uruchamiam luna-security"
-    luna-security daemon >/dev/null 2>&1 &
-fi
-
-# Powłoka Luna (panel, launcher, OSD).
-#
-# Domyślnie **jeden** panel na monitorze głównym (pierwszym) — popupy (kalendarz, Wi‑Fi,
-# głośność) są rysowane w tym samym buforze co pasek, więc mają sens tylko na jednym
-# ekranie. Panel na każdym monitorze (osobna instancja powłoki na wyjście) włączasz
-# jawnie:  LUNA_PANELS=all luna-session
-if command -v luna-shell >/dev/null 2>&1; then
-    if [ "${LUNA_PANELS:-primary}" = "all" ]; then
-        nouts=1
-        if [ -f "$rt/luna-outputs" ]; then
-            n="$(cat "$rt/luna-outputs" 2>/dev/null)"
-            case "$n" in
-                ''|*[!0-9]*) n=1 ;;
-            esac
-            if [ "$n" -ge 1 ]; then nouts="$n"; fi
-        fi
-        ts "uruchamiam luna-shell x$nouts (panel na każdym monitorze)"
-        i=0
-        while [ "$i" -lt "$nouts" ]; do
-            LUNA_OUTPUT="$i" luna-shell &
-            i=$((i + 1))
-        done
-    else
-        ts "uruchamiam luna-shell (panel na monitorze głównym)"
-        luna-shell &
-    fi
-else
-    ts "brak luna-shell w PATH"
-fi
-
-# Ikony pulpitu (pliki, foldery, skróty `.desktop`). Osobny proces, bo jest
-# powierzchnią warstwową pod oknami — restart pulpitu nie restartuje paska.
-if command -v luna-desktop >/dev/null 2>&1; then
-    # Jedna instancja — ikony mają być tylko na jednym pulpicie. Uruchamianie
-    # kopii na każdym monitorze dublowałoby te same pliki na wszystkich ekranach.
-    ts "uruchamiam luna-desktop"
-    luna-desktop >/dev/null 2>&1 &
-else
-    ts "brak luna-desktop w PATH"
 fi
 
 # Powitanie: „Co nowego” i (na obrazie live) skrót do instalatora.

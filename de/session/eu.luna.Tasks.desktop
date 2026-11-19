@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=Task Manager
+Name[pl]=Menedżer zadań
+Name[de]=Aufgabenverwaltung
+Comment=Process manager and system monitor
+Comment[pl]=Menedżer procesów i monitor systemu
+Comment[de]=Prozessverwaltung und Systemmonitor
+Exec=luna-tasks
+Icon=utilities-system-monitor
+Terminal=false
+Categories=System;Monitor;
+Keywords=processes;task manager;system monitor;cpu;memory;kill;
+Keywords[pl]=procesy;menedżer zadań;monitor systemu;procesor;pamięć;zakończ;
+Keywords[de]=Prozesse;Aufgabenverwaltung;Systemmonitor;CPU;Speicher;beenden;

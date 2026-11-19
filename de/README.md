@@ -89,6 +89,9 @@ Selene.
   przełączniki z ikonami, przestrzenie robocze, użytkownik) i **launcher** w trzech widokach:
   **Lista**, **Siatka**, **Karuzela** (segmentowy przełącznik w nagłówku).
   Ikony z pakietu `libluna-widgets::icon` (`IconName`/`paint_icon`) — wektorowe, spójne ze stylem.
+- **Luna-Cursors** — motyw XCursor (24/32/48 px): strzałka, łapka, ładowanie,
+  zmiana rozmiaru, I-beam i aliasy CSS/X11; wybierany przez Selene i sesję jako
+  pierwszy (`XCURSOR_THEME`). Szczegóły: [`docs/cursors.md`](../docs/cursors.md).
 - `luna-panel` (bin) — render headless: `docs/images/luna-panel-idle.png`,
   `luna-launcher-{list,grid,carousel}.png`, `luna-popup-*.png` (w tym
   `luna-popup-notifications.png`) i `luna-osd.png`.
@@ -129,7 +132,8 @@ Selene.
   libLunie: sidebar z sekcjami **Środowisko / Sprzęt / Informacje** i stronami
   **Wygląd** (motyw, akcent, styl), **Ikony** (styl wektorowy + **zewnętrzne zestawy
   freedesktop**, np. Papirus, z podglądem i wyborem globalnym), **Ekran logowania**
-  (tapety z miniaturami, motyw i zegar greetera; szkic zmian, przycisk **Zastosuj
+  (tapety w **kaflach z pełnym podglądem 16:9** + popover **„Więcej tapet”** ze
+  źródłami, motyw i zegar greetera; szkic zmian, przycisk **Zastosuj
   zmiany** i **formularz hasła administratora** przez `sudo -S`), **Ekran blokady**
   (per użytkownik, bez roota), **Powiadomienia** (DND + róg toastów + **test**),
   **Język i region** (wyszukiwany wybór języka/locale/strefy; `locale.conf` +
@@ -188,6 +192,19 @@ Selene.
   `cargo run --manifest-path apps/luna-calculator/Cargo.toml --bin preview` →
   `docs/images/calculator-*.png`.
   Szczegóły: [`docs/calculator.md`](../docs/calculator.md).
+- **Luna Tasks** (`luna-tasks`, `apps/luna-tasks`) — menedżer procesów i monitor
+  systemu: lista z `/proc` (PID, nazwa, CPU, pamięć, użytkownik), sortowanie po
+  kliknięciu nagłówka, wyszukiwanie w pasku tytułu po PID/nazwie/poleceniu/koncie,
+  kolorowanie stanu i zużycia, panel szczegółów, menu kontekstowe (PPM),
+  przełącznik zakresu **Moje** w pasku tytułu oraz opcjonalne wykresy CPU/RAM/procesu z ostatniej minuty (**Pokaż wykresy**,
+  `Ctrl+G`; historia 60 próbek) i zakończenie procesu (`SIGTERM`) i wymuszone
+  zamknięcie (`SIGKILL`) po potwierdzeniu. PID 1 jest chroniony, `starttime` chroni przed recyklingiem PID,
+  a bez fokusu okno nie odpytuje `/proc`. Ustawienia widoku:
+  `~/.config/luna/tasks.conf` (`sort`, `order`, `scope`). Wejście z wpisu
+  `eu.luna.Tasks.desktop`; podglądy:
+  `cargo run --manifest-path apps/luna-tasks/Cargo.toml --bin preview` →
+  `docs/images/tasks-*.png`.
+  Szczegóły i prywatność: [`docs/tasks.md`](../docs/tasks.md).
 - **Wielojęzyczność na żywo**: `libluna-platform` obserwuje `~/.config/luna/locale.conf`,
   przeładowuje katalogi `libluna-i18n`, ustawia `LANGUAGE`/`LANG` i odrysowuje okno;
   aplikacje z cache'owanymi napisami (sidebar, nawigacja, tytuł okna) odświeżają je po

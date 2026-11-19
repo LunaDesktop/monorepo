@@ -1,0 +1,66 @@
+# Motyw GRUB środowiska Luna dla PaganOS.
+#
+# Tło, podświetlenie pozycji i fonty leżą w tym samym katalogu. Skrypt
+# /etc/grub.d/05_luna_theme ładuje wszystkie pliki .pf2 z tego katalogu i
+# ustawia `theme`, ale tylko wtedy, gdy administrator nie wybrał własnego
+# GRUB_THEME w /etc/default/grub.
+#
+# Kolory i kształty pochodzą z brandingu Luny (półksiężyc #D8CCF0/#B5D5F1,
+# obrys #7B67AB, złota gwiazda #F3D27C).
+
+desktop-image: "background.png"
+title-text: ""
+
+message-font: "DejaVu Sans Regular 16"
+message-color: "#E7ECF8"
+message-bg-color: "#0A0E1C"
+
+terminal-box: "terminal_*.png"
+terminal-font: "DejaVu Sans Mono Regular 14"
+
+# Lista systemów — lewa strona, na półprzezroczystym panelu z tła.
++ boot_menu {
+    left = 8%
+    top = 31%
+    width = 38%
+    height = 42%
+    item_font = "DejaVu Sans Regular 18"
+    item_color = "#C9D2E8"
+    selected_item_font = "DejaVu Sans Bold 18"
+    selected_item_color = "#FFFFFF"
+    selected_item_pixmap_style = "select_*.png"
+    item_height = 44
+    item_padding = 0
+    item_spacing = 22
+    icon_width = 0
+    icon_height = 0
+    item_icon_space = 0
+    scrollbar = false
+}
+
+# Pasek odliczania — cienka linia na dole, w kolorach akcentu.
++ progress_bar {
+    id = "__timeout__"
+    left = 25%
+    top = 88%
+    width = 50%
+    height = 12
+    font = "DejaVu Sans Regular 16"
+    text_color = "#E7ECF8"
+    fg_color = "#5D6BA6"
+    bg_color = "#141A33"
+    border_color = "#3A456E"
+    text = "@TIMEOUT_NOTIFICATION_LONG@"
+}
+
+# Podpowiedź klawiszy — bez tłumaczenia, same symbole.
++ label {
+    left = 8%
+    top = 93%
+    width = 60%
+    height = 20
+    text = "↑ ↓   ·   Enter   ·   E   ·   C"
+    font = "DejaVu Sans Regular 16"
+    color = "#7F8AB0"
+    align = "left"
+}

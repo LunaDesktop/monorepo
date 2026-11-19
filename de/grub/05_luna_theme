@@ -1,0 +1,57 @@
+#!/bin/sh
+# PaganOS/Luna — motyw GRUB.
+#
+# Instalowany jako /etc/grub.d/05_luna_theme. Ustawia motyw Luny tylko wtedy,
+# gdy administrator nie wybrał własnego GRUB_THEME w /etc/default/grub. Skrypt
+# działa jak odpowiedni fragment 00_header: ładuje fonty PF2 z katalogu motywu
+# i wskazuje theme.txt względem urządzenia rozruchowego.
+set -e
+
+THEME=
+for candidate in \
+    /boot/grub/themes/luna/theme.txt \
+    /usr/share/grub/themes/luna/theme.txt \
+    /usr/local/share/grub/themes/luna/theme.txt
+do
+    if [ -f "$candidate" ]; then
+        THEME="$candidate"
+        break
+    fi
+done
+[ -n "$THEME" ] || exit 0
+
+# Jawny wybór administratora ma pierwszeństwo.
+[ -n "${GRUB_THEME:-}" ] && exit 0
+
+# `grub-mkconfig` eksportuje `grub_probe`; poza nim szukamy w PATH.
+GRUB_PROBE="${grub_probe:-grub-probe}"
+if ! command -v "$GRUB_PROBE" >/dev/null 2>&1 && [ ! -x "$GRUB_PROBE" ]; then
+    exit 0
+fi
+
+# `is_path_readable_by_grub` i `make_system_path_relative_to_its_root` to
+# funkcje biblioteki GRUB-a — ten sam mechanizm co w 00_header.
+. /usr/share/grub/grub-mkconfig_lib
+
+if is_path_readable_by_grub "$THEME" 2>/dev/null; then
+    prepare_grub_to_access_device "$("$GRUB_PROBE" --target=device "$THEME")"
+else
+    # LUKS, osobne /usr albo nietypowy układ — `($root)` i tak wskazuje system
+    # rozruchowy, więc motyw ma szansę zadziałać mimo braku potwierdzenia.
+    echo "luna-grub-theme: uwaga: GRUB nie potwierdził czytelności $THEME — próbuję mimo to" >&2
+fi
+
+echo "Found theme: $THEME" >&2
+# Zdejmij stary `GRUB_BACKGROUND` (np. splash.png) — motyw ma własne tło.
+# `background_image` bez argumentu usuwa obraz; moduł jest częścią GRUB-a.
+echo "if insmod gfxterm_background; then"
+echo "  background_image"
+echo "fi"
+echo "insmod png"
+echo "insmod gfxmenu"
+for f in "$(dirname "$THEME")"/*.pf2; do
+    [ -f "$f" ] || continue
+    echo "loadfont (\$root)$(make_system_path_relative_to_its_root "$f")"
+done
+echo "set theme=(\$root)$(make_system_path_relative_to_its_root "$THEME")"
+export theme

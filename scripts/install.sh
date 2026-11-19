@@ -16,6 +16,7 @@
 #   bin/luna-media (przeglądarka obrazów i filmów: libLuna + ffmpeg)
 #   bin/luna-clock (czas: zegar, minutnik, stoper, strefy czasowe i kalendarz)
 #   bin/luna-calculator (kalkulator standardowy i naukowy)
+#   bin/luna-tasks (menedżer procesów i monitor systemu)
 #
 # Demo/galeria widgetów (`bin/luna-demo`, `bin/luna-gallery`, `bin/luna-showcase`)
 # to dokumentacja dla deweloperów — **nie** instalujemy jej u zwykłych użytkowników.
@@ -25,6 +26,7 @@
 #   share/icons/hicolor/scalable/apps/luna.svg   (ikona sesji)
 #   share/icons/hicolor/<N>x<N>/apps/luna.png     (rastrowe, dla greeterów bez SVG)
 #   share/icons/Luna-Icons/                       (pastelowy pakiet PNG 16–512 px + SVG, freedesktop)
+#   share/icons/Luna-Cursors/                     (motyw kursorów XCursor: strzałka, łapka, ładowanie, resize…)
 #   share/pixmaps/luna.png
 #   share/luna/i18n/*.lang, share/luna/themes/*.theme
 #   share/luna/greetd/config.toml.example   (konfiguracja greetd dla Luny)
@@ -95,7 +97,7 @@ Użycie: $prog [opcje]
                    które sesja mogłaby uruchomić zamiast nowej instalacji
   --user           instalacja bez roota do ~/.local (bin, share, aplikacje)
   --only NAME      tylko jeden komponent: base, selene, luna, greeter,
-                   demo, settings, files, media, clock, calculator, store,
+                   demo, settings, files, media, clock, calculator, tasks, store,
                    welcome, installer, editor, terminal, icons
   --with-demo      doinstaluj demo/galerię widgetów (luna-demo, luna-gallery,
                    luna-showcase). Domyślnie pomijane — to narzędzie dla
@@ -128,8 +130,8 @@ while [ $# -gt 0 ]; do
 done
 
 case "$only" in
-    ""|base|selene|luna|greeter|demo|settings|files|media|clock|calculator|store|welcome|installer|editor|terminal|icons) ;;
-    *) echo "nieznany komponent: $only (dozwolone: base, selene, luna, greeter, demo, settings, files, media, clock, calculator, store, welcome, installer, editor, terminal, icons)" >&2; exit 2 ;;
+    ""|base|selene|luna|greeter|demo|settings|files|media|clock|calculator|tasks|store|welcome|installer|editor|terminal|icons) ;;
+    *) echo "nieznany komponent: $only (dozwolone: base, selene, luna, greeter, demo, settings, files, media, clock, calculator, tasks, store, welcome, installer, editor, terminal, icons)" >&2; exit 2 ;;
 esac
 
 # `--only demo` jest równoważne `--with-demo` (wybór komponentu to jawna zgoda).
@@ -277,6 +279,11 @@ files() {
         emit "calculator" "$lib/luna-calculator" "$dest/bin/luna-calculator" "755"
         emit "calculator" "$root/de/session/eu.luna.Calculator.desktop" "$dest/share/applications/eu.luna.Calculator.desktop" "644"
     fi
+    # Menedżer procesów i monitor systemu Luna Tasks.
+    if [ "$all" = "all" ] || [ -f "$lib/luna-tasks" ]; then
+        emit "tasks" "$lib/luna-tasks" "$dest/bin/luna-tasks" "755"
+        emit "tasks" "$root/de/session/eu.luna.Tasks.desktop" "$dest/share/applications/eu.luna.Tasks.desktop" "644"
+    fi
     # Sklep z oprogramowaniem Luna Store (+ domyślny plik repozytoriów, reguła polkit).
     if [ "$all" = "all" ] || [ -f "$lib/luna-store" ]; then
         emit "store" "$lib/luna-store" "$dest/bin/luna-store" "755"
@@ -289,6 +296,10 @@ files() {
         emit "welcome" "$lib/luna-welcome" "$dest/bin/luna-welcome" "755"
         emit "welcome" "$root/de/session/eu.luna.Welcome.desktop" "$dest/share/applications/eu.luna.Welcome.desktop" "644"
         emit "welcome" "$root/apps/luna-welcome/data/news.md" "$dest/share/luna/welcome/news.md" "644"
+        # Warianty językowe „Co nowego”: bez nich sesja EN/DE czytałaby
+        # polski plik bazowy z dysku (ma pierwszeństwo przed notatkami wbudowanymi).
+        emit "welcome" "$root/apps/luna-welcome/data/news.en.md" "$dest/share/luna/welcome/news.en.md" "644"
+        emit "welcome" "$root/apps/luna-welcome/data/news.de.md" "$dest/share/luna/welcome/news.de.md" "644"
     fi
     # Instalator systemu + referencyjny backend (uruchamiany przez pkexec).
     if [ "$all" = "all" ] || [ -f "$lib/luna-installer" ]; then
@@ -370,6 +381,7 @@ remove_installed() {
     # Pastelowy pakiet ikon (freedesktop) instalowany jako całe drzewo.
     if [ -z "$only" ] || [ "$only" = "base" ] || [ "$only" = "icons" ]; then
         do_cmd rm -rf "$dest/share/icons/Luna-Icons"
+        do_cmd rm -rf "$dest/share/icons/Luna-Cursors"
     fi
 }
 
@@ -414,6 +426,7 @@ EOF
             media)    build_dir "$root/apps/luna-media" ;;
             clock)    build_dir "$root/apps/luna-clock" ;;
             calculator) build_dir "$root/apps/luna-calculator" ;;
+            tasks)    build_dir "$root/apps/luna-tasks" ;;
             store)    build_dir "$root/apps/luna-store" ;;
             welcome)  build_dir "$root/apps/luna-welcome" ;;
             installer) build_dir "$root/apps/luna-installer" ;;
@@ -429,7 +442,7 @@ EOF
         build_component "$only"
     else
         # Demo pomijamy domyślnie — buduje je dopiero `--with-demo`.
-        for c in selene luna greeter settings files media clock calculator store welcome installer editor terminal; do
+        for c in selene luna greeter settings files media clock calculator tasks store welcome installer editor terminal; do
             build_component "$c"
         done
         if [ "$with_demo" = 1 ]; then
@@ -473,7 +486,7 @@ if [ -f "$lib/selene" ]; then
     # sprawdzamy `luna-shell`, żeby nie zgłaszać fałszywych alarmów o keyring/lock/polkit.
     check_stale "$lib/luna-shell" "$root/luna/src"
     check_stale "$lib/luna-greeter" "$root/luna-greeter/src"
-    for app in files media settings store editor terminal clock calculator welcome installer; do
+    for app in files media settings store editor terminal clock calculator tasks welcome installer; do
         check_stale "$lib/luna-$app" "$root/apps/luna-$app/src"
     done
     if [ "$with_demo" = 1 ]; then
@@ -681,6 +694,14 @@ if [ -d "$root/assets/icons/Luna-Icons" ]; then
     fi
 fi
 
+# Motyw kursorów XCursor — Selene, Xwayland i aplikacje GTK/Qt/X11 czytają go
+# z `share/icons` (albo `XCURSOR_PATH`). Bez niego systemowy kursor zostaje strzałką.
+if [ -d "$root/assets/cursors/Luna-Cursors" ]; then
+    step "Kursory Luna (XCursor)"
+    do_cmd install -d "$dest/share/icons"
+    do_cmd cp -a "$root/assets/cursors/Luna-Cursors" "$dest/share/icons/"
+fi
+
 # Pomocnik PAM polkit musi być setuid root. W niektórych instalacjach PaganOS bit
 # jest zgubiony — wtedy **żaden** agent (także luna-polkit) nie zweryfikuje hasła,
 # a okno autoryzacji kończy się błędem. Przywracamy wyłącznie brakujący bit.
@@ -709,7 +730,7 @@ if [ "$destdir" = "" ] && [ "$(id -u)" -eq 0 ]; then
     fi
 fi
 
-managed_bins="selene luna-shell luna-desktop luna-lock luna-keyring luna-polkit luna-eq luna-accounts luna-security luna-greeter luna-greeter-config luna-demo luna-settings luna-files luna-media luna-clock luna-calculator luna-store luna-welcome luna-installer luna-editor luna-terminal luna-session luna-session-gpu"
+managed_bins="selene luna-shell luna-panel luna-desktop luna-lock luna-keyring luna-polkit luna-eq luna-accounts luna-security luna-greeter luna-greeter-config luna-demo luna-settings luna-files luna-media luna-clock luna-calculator luna-tasks luna-store luna-welcome luna-installer luna-editor luna-terminal luna-session luna-session-gpu"
 
 # ── Inne kopie naszych binarek w PATH ────────────────────────────────────────
 # Typowa pułapka: w /usr/bin leży stary `selene` z poprzedniej instalacji,
