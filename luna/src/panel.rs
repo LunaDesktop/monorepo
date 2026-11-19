@@ -1311,18 +1311,77 @@ pub fn tray_menu_hit(
 }
 
 /// Rysuje ikonę tray’a (nazwana z motywu, pikselowa albo zapasowa).
-fn paint_tray_icon(ctx: &mut PaintCtx, icon: &TrayIcon, rect: Rect) {
+///
+/// `fallback` to nazwa pozycji — bez niej nie da się pokazać czytelnego
+/// zastępnika, gdy motyw nie ma danej ikony.
+fn paint_tray_icon(ctx: &mut PaintCtx, icon: &TrayIcon, rect: Rect, fallback: &str) {
     match icon {
         TrayIcon::Named(name) => {
             if !paint_named_icon(ctx, Some(name), rect) {
-                panel_icon(ctx, IconName::Info, rect, ctx.theme.colors.text);
+                paint_tray_letter(ctx, rect, fallback);
             }
         }
         TrayIcon::Pixmap(image) => {
             ctx.scene.image(rect, image.clone());
         }
-        TrayIcon::None => panel_icon(ctx, IconName::Info, rect, ctx.theme.colors.text),
+        TrayIcon::None => paint_tray_letter(ctx, rect, fallback),
     }
+}
+
+/// Zastępstwo brakującej ikony: kafelek z pierwszą literą nazwy aplikacji.
+///
+/// Wcześniej rysowaliśmy `IconName::Info` — kolorowe kółko „i”, które wyglądało
+/// jak przycisk informacji i nie mówiło, do czego należy (zgłoszone przez
+/// użytkownika: „to niebieskie i od czego to jest?”).
+fn paint_tray_letter(ctx: &mut PaintCtx, rect: Rect, label: &str) {
+    let t = ctx.theme;
+    ctx.scene
+        .fill_rounded_rect(rect, t.radius.small, t.colors.shade);
+    let initial = label
+        .chars()
+        .next()
+        .map(|c| c.to_uppercase().next().unwrap_or(c))
+        .unwrap_or('?');
+    let text = initial.to_string();
+    ctx.label_center(
+        rect.center().x,
+        rect.center().y,
+        &text,
+        t.typography.caption.size,
+        weight::MEDIUM,
+        t.colors.dim_text,
+    );
+}
+
+/// Dymek z nazwą pozycji tray’a pod paskiem — widoczny po najechaniu na ikonę.
+fn paint_tray_tooltip(ctx: &mut PaintCtx, bar: Rect, icon: Rect, label: &str) {
+    let t = ctx.theme;
+    let caption = t.typography.caption.size;
+    let pad = t.spacing.sm;
+    let text = ellipsize(label, 260.0, caption, weight::NORMAL, ctx.text);
+    let width = ctx.text.measure(&text, caption, weight::NORMAL).width + 2.0 * pad;
+    let height = 24.0;
+    let min_x = bar.x() + 6.0;
+    let max_x = (bar.right() - width - 6.0).max(min_x);
+    let x = (icon.center().x - width / 2.0).clamp(min_x, max_x);
+    let rect = Rect::from_xywh(x, bar.bottom() + 6.0, width, height);
+    ctx.scene.fill_rounded_rect(
+        Rect::from_xywh(rect.x() + 1.0, rect.y() + 2.0, rect.width(), rect.height()),
+        t.radius.small,
+        Color::rgba(0.0, 0.0, 0.0, 0.16),
+    );
+    ctx.scene
+        .fill_rounded_rect(rect, t.radius.small, t.colors.headerbar_bg);
+    ctx.scene
+        .stroke_rounded_rect(rect, t.radius.small, 1.0, t.colors.border);
+    ctx.label_center(
+        rect.center().x,
+        rect.center().y,
+        &text,
+        caption,
+        weight::NORMAL,
+        t.colors.text,
+    );
 }
 
 fn paint_tray_item(
@@ -1349,7 +1408,7 @@ fn paint_tray_item(
         (icon_rect.width() - 4.0).max(1.0),
         (icon_rect.height() - 4.0).max(1.0),
     );
-    paint_tray_icon(ctx, &item.icon, inner);
+    paint_tray_icon(ctx, &item.icon, inner, &item.label());
     if let Some(label) = label {
         let caption = t.typography.caption.size;
         let max = (rect.width() - TRAY_ICON - t.spacing.xs).max(0.0);
@@ -1388,7 +1447,7 @@ pub fn paint_tray_menu(ctx: &mut PaintCtx, rect: Rect, state: &PanelState, hover
                 .fill_rounded_rect(r, t.radius.small, libluna_widgets::hover_fill(t));
         }
         let icon = Rect::from_xywh(r.x() + 4.0, r.center().y - 9.0, 18.0, 18.0);
-        paint_tray_icon(ctx, &item.icon, icon);
+        paint_tray_icon(ctx, &item.icon, icon, &item.label());
         let label = ellipsize(
             item.label(),
             r.width() - 44.0,
@@ -4505,6 +4564,17 @@ fn paint_panel_items(panel: &PanelState, hover: &Hover, ctx: &mut PaintCtx, rect
         if let Some(item) = panel.tray.get(*i) {
             let label = panel.tray_labels.then(|| item.label());
             paint_tray_item(ctx, item, *r, hover.is_hovered_within(*r, 3.0), label);
+        }
+    }
+    // Po nazwie pozycji po najechaniu: ikony tray’a nie mają podpisów, a bez
+    // tego nie da się ich rozpoznać (zgłoszenie użytkownika).
+    if let Some((r, i)) = tray
+        .icons
+        .iter()
+        .find(|(r, _)| hover.is_hovered_within(*r, 2.0))
+    {
+        if let Some(item) = panel.tray.get(*i) {
+            paint_tray_tooltip(ctx, rect, *r, item.label());
         }
     }
     if let Some(r) = tray.overflow {
