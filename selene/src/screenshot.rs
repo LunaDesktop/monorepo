@@ -443,19 +443,44 @@ pub(crate) fn notify_saved(path: &std::path::Path) {
     }
 }
 
-/// Otwiera folder ze zrzutem w domyślnym menedżerze plików.
+/// Otwiera folder ze zrzutem w menedżerze plików.
+///
+/// Najpierw `luna-files` — nie zależy od `xdg-open`, domyślnych skojarzeń ani
+/// od tego, czy w systemie jest jakikolwiek inny menedżer. `xdg-open` zostaje
+/// jako fallback. Obie ścieżki dostają `WAYLAND_DISPLAY` (kompozytor poznaje
+/// nazwę gniazda dopiero po starcie, a dzieci nie dziedziczą jej z sesji).
 fn open_location(path: &std::path::Path) {
     let folder = if path.is_dir() {
         path
     } else {
         path.parent().unwrap_or(path)
     };
-    let _ = std::process::Command::new("xdg-open")
-        .arg(folder)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+    for program in ["luna-files", "xdg-open"] {
+        let mut cmd = std::process::Command::new(program);
+        cmd.arg(folder)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if std::env::var_os("WAYLAND_DISPLAY").is_none() {
+            if let Ok(rt) = std::env::var("XDG_RUNTIME_DIR") {
+                if let Ok(name) =
+                    std::fs::read_to_string(std::path::Path::new(&rt).join("luna-wayland"))
+                {
+                    let name = name.trim();
+                    if !name.is_empty() {
+                        cmd.env("WAYLAND_DISPLAY", name);
+                    }
+                }
+            }
+        }
+        if cmd.spawn().is_ok() {
+            return;
+        }
+    }
+    eprintln!(
+        "selene: nie udało się otworzyć folderu ze zrzutem: {}",
+        folder.display()
+    );
 }
 
 fn intersect(a: &Rect, b: &Rect) -> Option<Rect> {

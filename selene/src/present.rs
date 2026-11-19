@@ -91,21 +91,35 @@ impl PresentQueue {
         self.submitted.fetch_add(1, Ordering::AcqRel);
     }
 
+    /// Numer ostatniej klatki przekazanej do skanoutu.
+    pub fn submitted(&self) -> u64 {
+        self.submitted.load(Ordering::Acquire)
+    }
+
     /// Wątek wyjścia: klatka została pokazana — wyślij zaległe zdarzenia.
     pub fn presented(&self) {
+        self.presented_upto(self.submitted());
+    }
+
+    /// Zwalnia zdarzenia zakolejkowane **przed** klatką numer `upto`.
+    ///
+    /// Monitory mają różne odświeżanie (75 Hz + 60 Hz), więc „pokazane” liczy
+    /// się per wyjście. Wywołujący podaje numer najstarszej klatki, która
+    /// **nadal jest skanowana** (minus jeden), zamiast czekać na kompletny
+    /// zestaw flipów — inaczej 60 Hz dyktowało tempo obu monitorom.
+    pub fn presented_upto(&self, upto: u64) {
         self.presented.fetch_add(1, Ordering::AcqRel);
         // Zdarzenie może wyjść dopiero wtedy, gdy po jego zakolejkowaniu
-        // została przekazana i pokazana co najmniej jedna klatka (`at < rendered`).
+        // została przekazana i pokazana co najmniej jedna klatka (`at < upto`).
         // Porównanie wyłącznie z `submitted` chroni przed rozjazdem liczników
         // po `resume()` lub `set_mode()`.
-        let rendered = self.submitted.load(Ordering::Acquire);
         let due: Vec<Item> = {
             let mut pending = self.pending.lock_or_recover();
             let mut due = Vec::new();
             let mut index = 0;
             while index < pending.len() {
                 let at = pending[index].0;
-                if at < rendered {
+                if at < upto {
                     due.push(pending.swap_remove(index).1);
                 } else {
                     index += 1;

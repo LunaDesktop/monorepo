@@ -611,7 +611,8 @@ pub fn spawn_drm(
         // Na kartach wirtualnych płaszczyzna kursora jest bezużyteczna (qxl
         // wywraca w niej jądro), więc kursor rysuje scena — bez MODE_CURSOR.
         let hw_cursor_supported = backend.supports_hw_cursor();
-        let mut hw_cursor = hw_cursor_supported && crate::cursor::fits_hardware(&cursor_gfx);
+        let mut hw_cursor =
+            hw_cursor_supported && crate::cursor::fits_plane(&cursor_gfx, backend.cursor_size());
         for i in 0..sizes.len() {
             // Bezpieczna próba na (0, 0) i natychmiastowe ukrycie — uodparnia na
             // sterowniki DRM odrzucające ujemne współrzędne w `MODE_CURSOR`.
@@ -630,9 +631,20 @@ pub fn spawn_drm(
             }
         }
         if !hw_cursor {
+            let (cw, ch) = backend.cursor_size();
             eprintln!(
-                "{}",
-                libluna_i18n::tr("DRM hardware cursor unavailable; using software cursor")
+                "{} (obraz {}×{}, płaszczyzna {}×{})",
+                libluna_i18n::tr("DRM hardware cursor unavailable; using software cursor"),
+                cursor_gfx.width,
+                cursor_gfx.height,
+                cw,
+                ch
+            );
+        } else if std::env::var("SELENE_STATS").is_ok() {
+            let (cw, ch) = backend.cursor_size();
+            eprintln!(
+                "selene/drm: kursor sprzętowy {}×{} (płaszczyzna {}×{})",
+                cursor_gfx.width, cursor_gfx.height, cw, ch
             );
         }
         let mut cursor_shown = vec![false; sizes.len()];
@@ -641,6 +653,8 @@ pub fn spawn_drm(
         let stats = std::env::var("SELENE_STATS").is_ok();
         let mut flip_error_logged = false;
         let mut frames = 0u64;
+        // Prezentacje per wyjście — po jednym vblanku na monitor, w jego własnym tempie.
+        let mut flips_per_output: Vec<u64> = vec![0; sizes.len()];
         let (mut ms_render, mut ms_present, mut ms_wait) = (0.0f64, 0.0f64, 0.0f64);
         let mut report = std::time::Instant::now();
         let mut last_sigs: Vec<Option<u64>> = vec![None; sizes.len()];
@@ -650,11 +664,19 @@ pub fn spawn_drm(
         // suma dwóch ostatnich klatek (back był ostatnio pokazany dwa flipy temu).
         let mut prev_scene: Vec<Option<Scene>> = vec![None; sizes.len()];
         let mut prev_damage: Vec<Option<Rect>> = vec![None; sizes.len()];
+        // Damage **wyrenderowanej, jeszcze niepokazanej** klatki. Trzymamy go poza
+        // iteracją: klatka może czekać na wolny bufor swojego wyjścia (pacing per
+        // monitor), a wtedy nie ma już z czego odtworzyć prostokąta.
+        let mut frame_damage: Vec<Option<Rect>> = vec![None; sizes.len()];
         let mut applied_night: Option<u8> = None;
         let mut applied_power = false;
         let mut last_present = std::time::Instant::now();
-        // Flipy zakolejkowane w poprzedniej iteracji, na które jeszcze nie czekaliśmy.
-        let mut pending_flips = 0usize;
+        // Klatki wyrenderowane, ale czekające na wolny tylny bufor swojego wyjścia
+        // (własny flip jeszcze trwa). Per-monitor: 75 Hz nie czeka na 60 Hz.
+        let mut deferred: Vec<bool> = vec![false; sizes.len()];
+        // Numer klatki aktualnie skanowanej na danym wyjściu (do bezpiecznego
+        // zwalniania buforów klientów — patrz `release_presented`).
+        let mut inflight: Vec<Option<u64>> = vec![None; sizes.len()];
         // Wykrywanie powrotu z uśpienia: pętla po suspendzie wznawia się po
         // wielosekundowej przerwie. Jądro mogło zgubić stan CRTC, a zdarzenia
         // flipów sprzed snu nie dotyczą już nowych klatek.
@@ -670,19 +692,20 @@ pub fn spawn_drm(
                 if !backend.resume() {
                     eprintln!("selene/drm: modeset po wybudzeniu nie powiódł się — próbuję dalej");
                 }
-                if pending_flips > 0 {
-                    pending_flips = 0;
-                    present.presented();
-                }
+                deferred = vec![false; sizes.len()];
+                inflight = vec![None; sizes.len()];
+                present.presented();
                 last_sigs = vec![None; sizes.len()];
                 prev_scene = vec![None; sizes.len()];
                 prev_damage = vec![None; sizes.len()];
+                frame_damage = vec![None; sizes.len()];
                 cursor_shown = vec![false; sizes.len()];
                 applied_night = None;
                 applied_power = false;
                 flip_error_logged = false;
                 // Płaszczyzna kursora też została zresetowana przez resume.
-                hw_cursor = hw_cursor_supported && crate::cursor::fits_hardware(&cursor_gfx);
+                hw_cursor = hw_cursor_supported
+                    && crate::cursor::fits_plane(&cursor_gfx, backend.cursor_size());
                 for i in 0..sizes.len() {
                     if !hw_cursor
                         || !backend.set_cursor_image(
@@ -732,18 +755,20 @@ pub fn spawn_drm(
                         for damage in prev_damage.iter_mut() {
                             *damage = None;
                         }
+                        for damage in frame_damage.iter_mut() {
+                            *damage = None;
+                        }
                         cursor_shown = vec![false; sizes.len()];
                         applied_night = None;
                         applied_power = false;
                         flip_error_logged = false;
-                        if pending_flips > 0 {
-                            pending_flips = 0;
-                            present.presented();
-                        }
+                        deferred = vec![false; sizes.len()];
+                        inflight = vec![None; sizes.len()];
+                        present.presented();
                         last_present = std::time::Instant::now();
                         // Modeset zresetował płaszczyznę kursora — ładujemy ją ponownie.
-                        hw_cursor =
-                            hw_cursor_supported && crate::cursor::fits_hardware(&cursor_gfx);
+                        hw_cursor = hw_cursor_supported
+                            && crate::cursor::fits_plane(&cursor_gfx, backend.cursor_size());
                         for i in 0..sizes.len() {
                             if !hw_cursor
                                 || !backend.set_cursor_image(
@@ -826,8 +851,8 @@ pub fn spawn_drm(
                                 .collect();
                         }
                         // Płaszczyzna kursora mogła zostać zresetowana przez modeset.
-                        hw_cursor =
-                            hw_cursor_supported && crate::cursor::fits_hardware(&cursor_gfx);
+                        hw_cursor = hw_cursor_supported
+                            && crate::cursor::fits_plane(&cursor_gfx, backend.cursor_size());
                         for i in 0..sizes.len() {
                             if !hw_cursor
                                 || !backend.set_cursor_image(
@@ -848,13 +873,14 @@ pub fn spawn_drm(
                         // Nowe renderery/bufory: następna klatka musi być pełna.
                         prev_scene = vec![None; sizes.len()];
                         prev_damage = vec![None; sizes.len()];
+                        frame_damage = vec![None; sizes.len()];
+                        deferred = vec![false; sizes.len()];
+                        inflight = vec![None; sizes.len()];
+                        flips_per_output = vec![0; sizes.len()];
                         last_present = std::time::Instant::now();
                         // Modeset odtworzył bufory — zdarzenia flipów sprzed zmiany
                         // trybu nie dotyczą już nowych framebufferów.
-                        if pending_flips > 0 {
-                            pending_flips = 0;
-                            present.presented();
-                        }
+                        present.presented();
                         // Modeset zeruje LUT gamma — night light trzeba wgrać ponownie.
                         applied_night = None;
 
@@ -986,7 +1012,7 @@ pub fn spawn_drm(
                 }
             };
             if image_changed {
-                if hw_cursor && !crate::cursor::fits_hardware(&cursor_gfx) {
+                if hw_cursor && !crate::cursor::fits_plane(&cursor_gfx, backend.cursor_size()) {
                     // Płaszczyzna bywa mniejsza niż kursor klienta — rysujemy w scenie.
                     hw_cursor = false;
                     for i in 0..sizes.len() {
@@ -1052,13 +1078,16 @@ pub fn spawn_drm(
                 any_changed = true;
             }
 
-            if !any_changed && !cur_changed {
-                if pending_flips > 0 {
+            // Klatka wyrenderowana i czekająca na wolny bufor swojego wyjścia
+            // to też „jest co robić” — nie wolno wtedy zasypiać.
+            let any_deferred = deferred.iter().any(|d| *d);
+
+            if !any_changed && !cur_changed && !any_deferred {
+                if backend.has_pending_flips() {
                     let t = std::time::Instant::now();
-                    backend.wait_flips();
+                    backend.wait_flips_any(Duration::from_millis(50));
                     ms_wait += t.elapsed().as_secs_f64() * 1000.0;
-                    pending_flips = 0;
-                    present.presented();
+                    release_presented(&backend, &inflight, &present);
                 }
                 if present.has_pending_frames() {
                     // Pacing ~60 Hz bez przerysowywania pulpitu; jeśli w międzyczasie
@@ -1087,7 +1116,7 @@ pub fn spawn_drm(
                 );
             }
 
-            if any_changed {
+            if any_changed || any_deferred {
                 // Tryb oszczędzania: maksymalnie ~30 klatek/s (oszczędza CPU/GPU
                 // podczas animacji i przewijania; kursor sprzętowy pozostaje płynny).
                 if let Some(delay) = throttle_delay(power, last_present.elapsed()) {
@@ -1099,9 +1128,8 @@ pub fn spawn_drm(
                 // jednej. Sekwencyjny render dwóch monitorów zjadał cały budżet klatki
                 // (7–10 ms każdy) i powłoka „zwalniała” do ~20 FPS.
                 let t_render = std::time::Instant::now();
-                // Damage bieżącej klatki (None = pełna klatka). Wypełniane tylko
-                // w ścieżce GPU; CPU rysuje i czyta całość.
-                let mut frame_damage: Vec<Option<Rect>> = vec![None; sizes.len()];
+                // Damage bieżącej klatki (None = pełna klatka) jest trzymany poza
+                // pętlą — patrz `frame_damage` na początku wątku wyjścia.
                 if use_gpu {
                     // Sekwencyjnie: kontekst EGL jest przypięty do wątku tworzącego,
                     // a i tak jest znacznie szybszy od równoległego CPU.
@@ -1176,24 +1204,34 @@ pub fn spawn_drm(
                 }
                 ms_render += t_render.elapsed().as_secs_f64() * 1000.0;
 
-                // Dopiero teraz czekamy na flipy poprzedniej klatki. Cały render
+                // Dopiero teraz czekamy na flip poprzedniej klatki. Cały render
                 // i readback zdążyły się wykonać **w trakcie** skanowania
-                // poprzedniej klatki, więc nie dokładają się do okresu odświeżania
-                // (wcześniej czekanie stało na początku iteracji i przy 60 Hz
-                // każde opóźnienie renderu kosztowało cały vblank — YouTube spadał
-                // z 60 do 30 klatek).
-                if pending_flips > 0 {
+                // poprzedniej klatki, więc nie dokładają się do okresu odświeżania.
+                //
+                // Czekamy na **pierwszy** zakończony flip, nie na wszystkie:
+                // DP-1 (75 Hz) i HDMI (60 Hz) mają własne vblanki i szybszy
+                // monitor nie może gubić co drugiej klatki z powodu wolniejszego.
+                if backend.has_pending_flips() {
                     let t = std::time::Instant::now();
-                    backend.wait_flips();
+                    backend.wait_flips_any(Duration::from_millis(50));
                     ms_wait += t.elapsed().as_secs_f64() * 1000.0;
-                    // Flipy się zakończyły — klatki są na ekranie. Dopiero teraz
-                    // oddajemy klientom bufory, których już nikt nie skanuje.
-                    present.presented();
+                    // Oddajemy klientom bufory, których nie skanuje już **żadne**
+                    // wyjście — próg liczymy per monitor (patrz `release_presented`).
+                    release_presented(&backend, &inflight, &present);
                 }
 
                 let mut num_flips = 0;
+                let mut presented_now: Vec<usize> = Vec::new();
                 for i in 0..sizes.len() {
-                    if !changed[i] {
+                    // Klatka czeka na prezentację (albo scena właśnie się zmieniła).
+                    if !deferred[i] && !changed[i] {
+                        continue;
+                    }
+                    // Własny flip tego wyjścia jeszcze trwa — nie ma wolnego
+                    // tylnego bufora. Prezentujemy przy następnym vblanku **tego**
+                    // monitora, bez blokowania drugiego.
+                    if backend.flip_pending(i) {
+                        deferred[i] = true;
                         continue;
                     }
                     let t = std::time::Instant::now();
@@ -1215,6 +1253,7 @@ pub fn spawn_drm(
                             // skanoutu, a zwykły cel ma treść sprzed dwóch klatek.
                             prev_scene[i] = None;
                             prev_damage[i] = None;
+                            frame_damage[i] = None;
                             eprintln!(
                                 "selene/drm: zero-copy odrzucone na wyjściu {i} — czytam przez CPU"
                             );
@@ -1249,32 +1288,53 @@ pub fn spawn_drm(
 
                     if flipped {
                         num_flips += 1;
+                        presented_now.push(i);
+                        deferred[i] = false;
+                        if let Some(count) = flips_per_output.get_mut(i) {
+                            *count += 1;
+                        }
+                    } else {
+                        // Prezentacja odrzucona (błąd sterownika) — nie ponawiamy
+                        // w ciasnej pętli; następna zmiana sceny spróbuje od nowa.
+                        deferred[i] = false;
                     }
                 }
 
-                // Czekanie na flipy przenosimy na początek następnej iteracji
-                // (patrz `pending_flips` wyżej) — tutaj tylko je zapamiętujemy.
-                pending_flips = num_flips;
                 if num_flips > 0 {
                     present.mark_submitted();
+                    // Numer klatki, którą właśnie zesłaliśmy na skanout każdego
+                    // wyjścia — na tej podstawie liczymy bezpieczny próg zwolnień.
+                    let seq = present.submitted();
+                    for i in presented_now {
+                        inflight[i] = Some(seq);
+                    }
                 }
 
                 frames += 1;
                 if stats && report.elapsed().as_secs_f64() >= 2.0 {
                     let secs = report.elapsed().as_secs_f64();
                     let frames_f = frames.max(1) as f64;
-                    let per_monitor = frames_f * sizes.len() as f64;
+                    let flips_total: f64 = flips_per_output.iter().sum::<u64>() as f64;
+                    let per_output: Vec<String> = flips_per_output
+                        .iter()
+                        .map(|n| format!("{:.1}", *n as f64 / secs))
+                        .collect();
                     eprintln!(
-                        "selene/drm: {:.1} klatek/s | render {:.2} ms/klatke, present {:.2} ms, wait_flip {:.2} ms",
-                        frames as f64 / secs,
+                        "selene/drm: {} kl./s (per wyjście) | render {:.2} ms/klatke, present {:.2} ms, wait_flip {:.2} ms",
+                        if per_output.is_empty() {
+                            "0.0".to_owned()
+                        } else {
+                            per_output.join(" + ")
+                        },
                         ms_render / frames_f,
-                        ms_present / per_monitor.max(1.0),
-                        ms_wait / per_monitor.max(1.0)
+                        ms_present / flips_total.max(1.0),
+                        ms_wait / frames_f
                     );
                     frames = 0;
                     ms_render = 0.0;
                     ms_present = 0.0;
                     ms_wait = 0.0;
+                    flips_per_output = vec![0; sizes.len()];
                     report = std::time::Instant::now();
                 }
             }
@@ -1397,6 +1457,39 @@ pub(crate) fn screenshot_dir() -> std::path::PathBuf {
         }
     }
     std::path::PathBuf::from("/tmp")
+}
+
+/// Zwalnia klientom bufory, których nie skanuje już **żadne** wyjście.
+///
+/// Próg liczymy per monitor: wyjście z flipsem w locie blokuje tylko własne
+/// klatki (numer `inflight[i] - 1`), a nie klatki drugiego monitora. Wcześniej
+/// czekaliśmy na wszystkie flipy naraz, więc 60 Hz dyktowało tempo 75 Hz.
+fn release_presented(
+    backend: &DrmBackend,
+    inflight: &[Option<u64>],
+    present: &crate::present::PresentQueue,
+) {
+    let pending: Vec<bool> = (0..inflight.len())
+        .map(|i| backend.flip_pending(i))
+        .collect();
+    present.presented_upto(release_limit(present.submitted(), inflight, &pending));
+}
+
+/// Najstarszy numer klatki, której **jeszcze nie wolno** oddać klientom.
+///
+/// `inflight[i]` to klatka skanowana przez wyjście `i` (jeśli `pending[i]`).
+/// Wyjście bez flipsa w locie nie ogranicza niczego.
+fn release_limit(submitted: u64, inflight: &[Option<u64>], pending: &[bool]) -> u64 {
+    let mut upto = submitted;
+    for (i, seq) in inflight.iter().enumerate() {
+        if !pending.get(i).copied().unwrap_or(false) {
+            continue;
+        }
+        if let Some(seq) = seq {
+            upto = upto.min(seq.saturating_sub(1));
+        }
+    }
+    upto
 }
 
 /// Ustawia obraz i pozycję kursora sprzętowego na wyjściach (DRM).
@@ -2352,6 +2445,21 @@ mod tests {
         // Wystający poza prawą/dolną krawędź zostaje przycięty.
         let c = pixel_rect(Rect::from_xywh(90.0, 90.0, 50.0, 50.0), 100, 100).unwrap();
         assert_eq!((c.x, c.y, c.w, c.h), (90, 90, 10, 10));
+    }
+
+    #[test]
+    fn release_limit_follows_each_output() {
+        // Nic w locie — można oddać wszystko do ostatniej przekazanej klatki.
+        assert_eq!(release_limit(10, &[Some(9), Some(9)], &[false, false]), 10);
+        // Wyjście 0 skanuje klatkę 10 — oddajemy tylko to, co przed nią.
+        assert_eq!(release_limit(10, &[Some(10), Some(10)], &[true, false]), 9);
+        // Dwa wyjścia w locie: decyduje starsza klatka (75 Hz nie czeka na 60 Hz,
+        // ale też nie wolno oddać bufora, który wciąż jest skanowany).
+        assert_eq!(release_limit(12, &[Some(12), Some(11)], &[true, true]), 10);
+        // Wyjście bez zapisanej klatki nie blokuje niczego.
+        assert_eq!(release_limit(7, &[None], &[true]), 7);
+        // Brak przekazanych klatek — próg nie schodzi poniżej zera.
+        assert_eq!(release_limit(0, &[Some(0)], &[true]), 0);
     }
 
     #[test]

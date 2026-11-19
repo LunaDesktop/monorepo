@@ -41,6 +41,12 @@ const DRM_IOCTL_GEM_CLOSE: u32 = 0x4008_6409;
 const DRM_IOCTL_MODE_PAGE_FLIP: u32 = 0xC018_64B0;
 /// `drm_mode_cursor` (`sizeof` = 28 = 0x1C).
 const DRM_IOCTL_MODE_CURSOR: u32 = 0xC01C_64A3;
+/// `drm_get_cap` (`sizeof` = 16 = 0x10).
+const DRM_IOCTL_GET_CAP: u32 = 0xC010_640C;
+/// `DRM_CAP_CURSOR_WIDTH` / `DRM_CAP_CURSOR_HEIGHT` — maksymalny wymiar
+/// płaszczyzny kursora zgłaszany przez sterownik (NVIDIA: 256×256).
+const DRM_CAP_CURSOR_WIDTH: u64 = 0x8;
+const DRM_CAP_CURSOR_HEIGHT: u64 = 0x9;
 
 // — ioctle bez argumentu (`_IO`) —
 const DRM_IOCTL_SET_MASTER: u32 = 0x0000_641E;
@@ -250,6 +256,14 @@ struct ModeCursor {
     width: u32,
     height: u32,
     handle: u32,
+}
+
+/// `struct drm_get_cap`.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct GetCap {
+    capability: u64,
+    value: u64,
 }
 
 /// Opakowanie na ioctl typu „read-write” z jednym struktem wejścia/wyjścia.
@@ -812,6 +826,12 @@ struct DrmOutput {
     /// je jeszcze skanować) ani wysyłać kolejnego `PAGE_FLIP` (jądro zwróci
     /// `EBUSY`). Flaga schodzi dopiero po zdarzeniu z pasującym `user_data`.
     flip_pending: bool,
+    /// Ile razy z rzędu nie doczekaliśmy się `FLIP_COMPLETE` do limitu czasu.
+    ///
+    /// Sterowniki po suspend/resume potrafią zgubić zdarzenie. Czekanie na nie
+    /// w każdej klatce blokowałoby wątek wyjścia (kursor i okna „stoją”), więc
+    /// po dwóch seriach przestajemy czekać i traktujemy klatkę jako pokazaną.
+    flip_stalls: u8,
     /// Ile najbliższych prezentacji musi skopiować **całą** klatkę, mimo damage.
     ///
     /// Oba bufory `DumbBuffer` są spójne z historią damage tylko wtedy, gdy
@@ -872,6 +892,8 @@ pub struct DrmBackend {
     /// Nazwa sterownika karty (`qxl`, `virtio_gpu`, `i915`, …).
     /// Sterowniki wirtualne nie obsługują `XBGR8888` — patrz [`scanout_formats`].
     driver: Option<String>,
+    /// Maksymalny wymiar płaszczyzny kursora (`DRM_CAP_CURSOR_WIDTH/HEIGHT`).
+    cursor_cap: (u32, u32),
 }
 
 impl Drop for DrmBackend {
@@ -955,10 +977,12 @@ impl DrmBackend {
                 last = DrmError::NoOutputs;
                 continue;
             }
+            let cursor_cap = cursor_cap_of(fd.as_fd());
             return Ok(Self {
                 fd,
                 outputs,
                 driver,
+                cursor_cap,
             });
         }
         Err(last)
@@ -1004,7 +1028,12 @@ impl DrmBackend {
     /// `DRM_IOCTL_MODE_CURSOR`, a pozostałym zdarza się obraz z zamienionymi
     /// kanałami. Na takich kartach kursor rysuje scena (`cursor::paint`).
     pub fn supports_hw_cursor(&self) -> bool {
-        !is_virtual_driver(self.driver.as_deref())
+        !is_virtual_driver(self.driver.as_deref()) && self.cursor_cap.0 > 0 && self.cursor_cap.1 > 0
+    }
+
+    /// Maksymalny rozmiar kursora sprzętowego na tej karcie.
+    pub fn cursor_size(&self) -> (u32, u32) {
+        self.cursor_cap
     }
 
     /// Po powrocie z uśpienia: odzyskaj mastera DRM i odtwórz tryb na wyjściach.
@@ -1218,15 +1247,37 @@ impl DrmBackend {
 
     /// Czeka, aż wyjście `idx` nie ma oczekującego flipa (z limitem czasu).
     ///
-    /// Normalnie flaga jest już zdjęta przez `wait_flips()` w pętli kompozytora;
+    /// Normalnie flaga jest już zdjęta przez `wait_flips_any()` w pętli kompozytora;
     /// to zabezpieczenie na wypadek zgubionego zdarzenia albo wywołania
     /// prezentacji poza główną pętlą.
     fn settle_flips(&mut self, idx: usize) {
-        for _ in 0..2 {
-            if !self.outputs.get(idx).is_some_and(|out| out.flip_pending) {
-                return;
+        let Some(out) = self.outputs.get(idx) else {
+            return;
+        };
+        if !out.flip_pending {
+            return;
+        }
+        // Po dwóch seriach zgubionych zdarzeń nie blokujemy już wątku renderu.
+        // Wcześniej podwójne czekanie po 200 ms dawało do 400 ms zamrożenia
+        // kursora i okien przy każdej klatce.
+        if out.flip_stalls >= 2 {
+            // Zgubione zdarzenie: nie blokujemy wątku, ale stan buforów jest
+            // nieznany — następne klatki kopiujemy w całości.
+            self.outputs[idx].flip_pending = false;
+            self.outputs[idx].force_full_frames = 2;
+            return;
+        }
+        // Czekamy na flip **własnego** wyjścia. Czekanie na wszystkie
+        // monitory sprawiało, że 75 Hz traciło klatkę przy każdym vblanku 60 Hz.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
+        while self.outputs.get(idx).is_some_and(|o| o.flip_pending) {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                break;
             }
-            self.wait_flips();
+            if !self.wait_flips_any(remaining) {
+                break;
+            }
         }
     }
 
@@ -1272,7 +1323,18 @@ impl DrmBackend {
                 true
             }
             Err(rustix::io::Errno::BUSY) => {
-                self.wait_flips();
+                // `EBUSY` = poprzedni flip tego CRTC jeszcze trwa. Czekamy tylko
+                // na **to** wyjście, nie na wszystkie monitory.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
+                while self.outputs.get(idx).is_some_and(|o| o.flip_pending) {
+                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    if !self.wait_flips_any(remaining) {
+                        break;
+                    }
+                }
                 if ioctl_rw::<ModePageFlip, DRM_IOCTL_MODE_PAGE_FLIP, _>(&self.fd, req).is_ok() {
                     self.outputs[idx].flip_pending = true;
                     true
@@ -1398,17 +1460,40 @@ impl DrmBackend {
     ///
     /// Obsługuje wiele monitorów naraz (dopasowując `user_data` do indeksu wyjścia),
     /// `EINTR` na `poll`/`read` oraz bezpieczny limit czasu po suspend/resume.
-    pub fn wait_flips(&mut self) {
+    /// Czy któreś wyjście ma jeszcze niezakończony page-flip.
+    ///
+    /// Wątek renderu pyta o to przed czekaniem: licznik `pending_flips`
+    /// w pętli wyjścia może się rozjechać po modesecie, a stan backendu jest
+    /// wtedy jedynym wiarygodnym źródłem prawdy.
+    pub fn has_pending_flips(&self) -> bool {
+        self.outputs.iter().any(|o| o.flip_pending)
+    }
+
+    /// Czy **to** wyjście czeka na zakończenie page-flipa.
+    ///
+    /// Prezentacja jest per wyjście: 75 Hz nie może czekać na vblank 60 Hz.
+    pub fn flip_pending(&self, idx: usize) -> bool {
+        self.outputs.get(idx).is_some_and(|o| o.flip_pending)
+    }
+
+    /// Czeka na **pierwszy** zakończony page-flip (dowolnego wyjścia).
+    ///
+    /// Wyjścia mają różne odświeżanie (np. 75 Hz + 60 Hz). Czekanie na
+    /// wszystkie naraz kazało szybszemu monitorowi gubić co drugi vblank
+    /// (widoczny wzór 37,5 kl./s). Zwraca `true`, gdy co najmniej jeden flip
+    /// się zakończył, `false` po przekroczeniu `max_wait` lub błędzie.
+    pub fn wait_flips_any(&mut self, max_wait: std::time::Duration) -> bool {
         use rustix::event::{poll, PollFd, PollFlags};
-        use std::time::{Duration, Instant};
+        use std::time::Instant;
 
         if !self.outputs.iter().any(|o| o.flip_pending) {
-            return;
+            return false;
         }
-        let deadline = Instant::now() + Duration::from_millis(200);
+        let deadline = Instant::now() + max_wait;
         let mut buf = [0u8; 1024];
+        let mut completed = false;
 
-        while self.outputs.iter().any(|o| o.flip_pending) {
+        while !completed {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 break;
@@ -1454,7 +1539,9 @@ impl DrmBackend {
                             ]) as usize;
                             if let Some(out) = self.outputs.get_mut(idx) {
                                 out.flip_pending = false;
+                                out.flip_stalls = 0;
                             }
+                            completed = true;
                         }
                         offset += len;
                     }
@@ -1462,6 +1549,9 @@ impl DrmBackend {
                 Err(rustix::io::Errno::INTR | rustix::io::Errno::AGAIN) => continue,
                 Err(_) => break,
             }
+        }
+        if completed {
+            return true;
         }
         // Timeout albo błąd odczytu: nie wiemy, które flipy się zakończyły.
         // Zgubione zdarzenie nie może zablokować kompozytora na zawsze, więc
@@ -1471,10 +1561,12 @@ impl DrmBackend {
         // całą optymalizację damage i samo powodowało pełne kopie 8 MB na klatkę.
         for out in &mut self.outputs {
             if out.flip_pending {
+                out.flip_stalls = out.flip_stalls.saturating_add(1);
                 out.force_full_frames = 2;
                 out.flip_pending = false;
             }
         }
+        false
     }
 
     /// Ustawia obraz kursora sprzętowego na wyjściu `idx` w pozycji `(x, y)`.
@@ -1491,38 +1583,55 @@ impl DrmBackend {
         y: i32,
     ) -> bool {
         let fd = self.fd.as_fd();
+        let (cap_w, cap_h) = self.cursor_cap;
+        // Płaszczyzna ma skończony rozmiar (NVIDIA: 256×256); większy obraz
+        // musi narysować scena.
+        if w == 0 || h == 0 || w > cap_w || h > cap_h {
+            return false;
+        }
         let Some(out) = self.outputs.get_mut(idx) else {
             return false;
         };
-        // Rozmiar kursora może się zmienić (motyw 24 px → obraz klienta 64 px).
-        // Stary bufor ma inny `pitch`/rozmiar, więc bez odtworzenia pisalibyśmy
-        // poza jego zakres.
-        if let Some(old) = out.cursor.as_ref() {
-            if old.width != w || old.height != h {
+        // Rozmiar kursora może się zmienić (motyw 24 px → obraz klienta 64 px),
+        // a BO ma stały pitch — wtedy odtwarzamy bufor.
+        let reusable = out
+            .cursor
+            .as_ref()
+            .is_some_and(|c| c.height == h && c.width >= w);
+        if !reusable {
+            if let Some(old) = out.cursor.take() {
                 destroy_dumb(fd, old.handle);
-                out.cursor = None;
             }
-        }
-        if out.cursor.is_none() {
-            match create_dumb_fmt(fd, w, h, DRM_FORMAT_ARGB8888, false) {
-                Some(b) => out.cursor = Some(b),
-                None => return false,
-            }
+            out.cursor = create_cursor_bo(fd, w, h, cap_w);
         }
         let Some(cur) = out.cursor.as_mut() else {
             return false;
         };
+        // Padding na prawo od obrazu musi być przezroczysty — bez zerowania
+        // widać było śmieci z poprzedniego kursora (pitch > width * 4).
+        unsafe { std::ptr::write_bytes(cur.ptr, 0, cur.size) };
         swizzle_argb_into(cur.ptr, cur.pitch, rgba, w as usize, h as usize);
         let req = ModeCursor {
             flags: DRM_MODE_CURSOR_BO,
             crtc_id: out.crtc_id,
             x,
             y,
-            width: w,
+            // Jądro liczy pitch framebufferu jako `width * 4`, więc zgłaszamy
+            // szerokość **alokacji** (z paddingiem), nie sam obraz.
+            width: cur.width,
             height: h,
             handle: cur.handle,
         };
-        ioctl_rw::<ModeCursor, DRM_IOCTL_MODE_CURSOR, _>(&self.fd, req).is_ok()
+        match ioctl_rw::<ModeCursor, DRM_IOCTL_MODE_CURSOR, _>(&self.fd, req) {
+            Ok(_) => true,
+            Err(e) => {
+                eprintln!(
+                    "selene/drm: kursor sprzętowy odrzucony na wyjściu {idx} ({}×{}, BO {}×{}, pitch {}: {:?})",
+                    w, h, cur.width, h, cur.pitch, e
+                );
+                false
+            }
+        }
     }
 
     /// Przesuwa kursor sprzętowy na wyjściu `idx` (bez zmiany obrazu).
@@ -1545,12 +1654,19 @@ impl DrmBackend {
         let Some(crtc_id) = self.outputs.get(idx).map(|o| o.crtc_id) else {
             return false;
         };
+        // `handle = 0` + szerokość/wysokość 0 = wyłączenie płaszczyzny.
         let req = ModeCursor {
             flags: DRM_MODE_CURSOR_BO,
             crtc_id,
             ..ModeCursor::default()
         };
-        ioctl_rw::<ModeCursor, DRM_IOCTL_MODE_CURSOR, _>(&self.fd, req).is_ok()
+        match ioctl_rw::<ModeCursor, DRM_IOCTL_MODE_CURSOR, _>(&self.fd, req) {
+            Ok(_) => true,
+            Err(e) => {
+                eprintln!("selene/drm: nie udało się ukryć kursora na wyjściu {idx}: {e:?}");
+                false
+            }
+        }
     }
 }
 
@@ -1698,6 +1814,7 @@ fn setup_output(
         dmabuf_fbs: std::collections::VecDeque::new(),
         front_dmabuf: false,
         flip_pending: false,
+        flip_stalls: 0,
         // Pierwsze dwie klatki po starcie zawsze w całości (bufory są świeże,
         // ale historia damage jeszcze nie istnieje).
         force_full_frames: 2,
@@ -1798,6 +1915,63 @@ fn create_dumb_fmt(
 fn destroy_dumb(fd: BorrowedFd, handle: u32) {
     let _ =
         ioctl_rw::<ModeDestroyDumb, DRM_IOCTL_MODE_DESTROY_DUMB, _>(fd, ModeDestroyDumb { handle });
+}
+
+/// Maksymalny rozmiar płaszczyzny kursora (`DRM_CAP_CURSOR_WIDTH/HEIGHT`).
+///
+/// Gdy sterownik nie zgłasza caps (starsze jądra), przyjmujemy 64×64 — taki
+/// rozmiar akceptuje każdy znany sterownik.
+fn cursor_cap_of(fd: BorrowedFd) -> (u32, u32) {
+    let read = |capability: u64| -> Option<u32> {
+        ioctl_rw::<GetCap, DRM_IOCTL_GET_CAP, _>(
+            fd,
+            GetCap {
+                capability,
+                value: 0,
+            },
+        )
+        .ok()
+        .map(|c| c.value as u32)
+        .filter(|&v| v > 0)
+    };
+    (
+        read(DRM_CAP_CURSOR_WIDTH).unwrap_or(64).clamp(1, 512),
+        read(DRM_CAP_CURSOR_HEIGHT).unwrap_or(64).clamp(1, 512),
+    )
+}
+
+/// Tworzy bufor kursora, którego `pitch == width * 4`.
+///
+/// Jądro tworzy framebuffer kursora z `pitch = width * 4` (`drm_mode_cursor`),
+/// a `drm_mode_create_dumb` wyrównuje pitch do 256 B (NVIDIA): dla kursora
+/// 24 px bufor ma 256 B, więc framebuffer dostaje inny pitch niż alokacja
+/// i `MODE_CURSOR` kończy się `EINVAL` — przez to sprzętowy kursor był
+/// wyłączany w całości. Bierzemy naturalny pitch sterownika i powiększamy
+/// **szerokość** BO do `pitch / 4`; obraz zajmuje tylko lewy górny róg,
+/// a resztę wypełniamy przezroczystym tłem.
+/// Następna szerokość BO dla naturalnego pitcha sterownika.
+///
+/// `None` = brak zbieżności (pitch nie jest wielokrotnością 4 albo wynik
+/// przekracza płaszczyznę kursora).
+fn next_cursor_width(width: u32, pitch: usize, cap_w: u32) -> Option<u32> {
+    let next = (pitch / 4) as u32;
+    (next > width && next <= cap_w).then_some(next)
+}
+
+fn create_cursor_bo(fd: BorrowedFd, w: u32, h: u32, cap_w: u32) -> Option<DumbBuffer> {
+    let mut width = w;
+    for _ in 0..4 {
+        let bo = create_dumb_fmt(fd, width, h, DRM_FORMAT_ARGB8888, false)?;
+        if bo.pitch == width as usize * 4 {
+            return Some(bo);
+        }
+        let handle = bo.handle;
+        let next = next_cursor_width(width, bo.pitch, cap_w);
+        drop(bo); // Drop zwalnia tylko mapowanie.
+        destroy_dumb(fd, handle);
+        width = next?;
+    }
+    None
 }
 
 /// Odczytuje rozmiar sprzętowej tablicy gamma CRTC (0 = brak wsparcia).
@@ -2334,6 +2508,24 @@ mod tests {
         assert_eq!(core::mem::size_of::<ModeFbCmd2>(), 104);
         assert_eq!(core::mem::size_of::<ModePageFlip>(), 24);
         assert_eq!(core::mem::size_of::<ModeCursor>(), 28);
+        assert_eq!(core::mem::size_of::<GetCap>(), 16);
+    }
+
+    #[test]
+    fn cursor_buffer_width_matches_kernel_pitch() {
+        // `drm_mode_cursor` tworzy framebuffer kursora z `pitch = width * 4`.
+        // NVIDIA wyrównuje pitch dumb-bufora do 256 B, więc dla kursora 24 px
+        // (96 B) `MODE_CURSOR` kończy się `EINVAL` — dlatego BO musi mieć
+        // szerokość 64 px (pitch 256). Wartości zmierzone na sterowniku nvidia.
+        assert_eq!(next_cursor_width(24, 256, 256), Some(64));
+        assert_eq!(next_cursor_width(32, 256, 256), Some(64));
+        assert_eq!(next_cursor_width(48, 256, 256), Some(64));
+        assert_eq!(next_cursor_width(65, 512, 256), Some(128));
+        assert_eq!(next_cursor_width(129, 768, 256), Some(192));
+        // 64 px to już zgodny pitch — dalej nie ma czego powiększać.
+        assert_eq!(next_cursor_width(64, 256, 256), None);
+        // Bez płaszczyzny większej niż obraz nie da się dopasować.
+        assert_eq!(next_cursor_width(100, 1024, 128), None);
     }
 
     #[test]

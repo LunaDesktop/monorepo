@@ -262,6 +262,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         libluna_i18n::tr("Selene compositor started")
     );
 
+    // Nazwa gniazda jest znana dopiero tutaj, a kompozytor uruchamia własne
+    // procesy (powiadomienie o zrzucie → `luna-files` / `xdg-open`). Menedżer
+    // sesji ustawia `WAYLAND_DISPLAY` **po** starcie selene, więc bez tej linii
+    // dzieci nie miały do czego się połączyć i „Otwórz lokalizację” kończyło się
+    // cicho (brak okna, brak błędu — `xdg-open` pisał tylko na stderr).
+    if !socket_name.is_empty() {
+        std::env::set_var("WAYLAND_DISPLAY", &socket_name);
+    }
+
     // Marker gotowości dla menedżera sesji: nazwa gniazda, na którym **naprawdę**
     // słuchamy. Bez tego sesja musi zgadywać `wayland-0` — a jeśli po poprzedniej
     // sesji został martwy plik gniazda, połączyłaby się z nikim.

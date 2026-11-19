@@ -103,12 +103,10 @@ fn copy_buffer(data: &crate::compositor::SurfaceData, hotspot: (i32, i32)) -> Op
 
 /// Rozmiar wbudowanej strzałki (gdy nie ma żadnego motywu kursorów).
 const FALLBACK_SIZE: u32 = 24;
-/// Preferowany rozmiar kształtu z motywu (px). Płaszczyzna sprzętowa DRM na
-/// NVIDIA obsługuje do 64×64, więc trzymamy się rozsądnego rozmiaru.
+/// Preferowany rozmiar kształtu z motywu (px). Płaszczyzna sprzętowa przyjmie
+/// więcej (limit czytamy z `DRM_CAP_CURSOR_WIDTH/HEIGHT`, NVIDIA: 256×256),
+/// ale kursor pulpitu ma wyglądać jak w reszcie systemu.
 const PREFERRED_SIZE: u32 = 24;
-/// Powyżej tego rozmiaru kursor idzie przez scenę (software), bo płaszczyzna
-/// sprzętowa bywa mniejsza.
-pub const MAX_HW_SIZE: u32 = 64;
 
 /// Aktualny obraz kursora (piksele + hotspot) — wspólny dla wątku wyjścia i testów.
 static CURRENT: Mutex<Option<(Arc<ImageData>, (i32, i32))>> = Mutex::new(None);
@@ -158,9 +156,9 @@ fn hidden_image() -> (Arc<ImageData>, (i32, i32)) {
         .clone()
 }
 
-/// Czy obraz zmieści się na płaszczyźnie sprzętowej.
-pub fn fits_hardware(image: &ImageData) -> bool {
-    image.width <= MAX_HW_SIZE && image.height <= MAX_HW_SIZE
+/// Czy obraz zmieści się na płaszczyźnie kursora o zadanym rozmiarze.
+pub fn fits_plane(image: &ImageData, cap: (u32, u32)) -> bool {
+    image.width > 0 && image.height > 0 && image.width <= cap.0 && image.height <= cap.1
 }
 
 /// Wbudowana strzałka (gdy system nie ma motywu XCursor).
@@ -337,6 +335,7 @@ fn theme_candidates() -> Vec<String> {
     // Kolejność: motyw dystrybucji, potem klasyki. Motyw bez plików kursorów
     // (np. pusty `cursors/`) jest pomijany przez sprawdzenie `left_ptr`.
     for name in [
+        "Luna-Cursors",
         "Pagan-Cursors",
         "Adwaita",
         "DMZ-Black",
@@ -508,5 +507,101 @@ mod tests {
         assert_eq!((image.width, image.height), (1, 1));
         assert_eq!(hotspot, (0, 0));
         assert!(image.rgba.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn bundled_luna_theme_has_every_required_shape() {
+        // Motyw jest w repo, więc test pilnuje, że każdy kształt i alias
+        // używany przez `cursor-shape-v1` naprawdę istnieje i jest poprawny.
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../assets/cursors/Luna-Cursors/cursors");
+        let required = [
+            "left_ptr",
+            "left_ptr_watch",
+            "watch",
+            "wait",
+            "progress",
+            "hand1",
+            "hand2",
+            "grab",
+            "grabbing",
+            "pointer",
+            "xterm",
+            "text",
+            "vertical-text",
+            "crosshair",
+            "cell",
+            "fleur",
+            "move",
+            "all-scroll",
+            "sb_h_double_arrow",
+            "sb_v_double_arrow",
+            "ew-resize",
+            "ns-resize",
+            "col-resize",
+            "row-resize",
+            "e-resize",
+            "w-resize",
+            "n-resize",
+            "s-resize",
+            "bd_double_arrow",
+            "fd_double_arrow",
+            "nesw-resize",
+            "nwse-resize",
+            "top_left_corner",
+            "top_right_corner",
+            "bottom_left_corner",
+            "bottom_right_corner",
+            "sb_left_arrow",
+            "sb_right_arrow",
+            "sb_up_arrow",
+            "sb_down_arrow",
+            "crossed_circle",
+            "not-allowed",
+            "no-drop",
+            "question_arrow",
+            "help",
+            "up_arrow",
+            "copy",
+            "dnd-copy",
+            "dnd-move",
+            "dnd-link",
+            "dnd-no-drop",
+            "context-menu",
+            "zoom-in",
+            "zoom-out",
+            "default",
+        ];
+        for name in required {
+            let path = dir.join(name);
+            let bytes =
+                std::fs::read(&path).unwrap_or_else(|error| panic!("brak kursora {name}: {error}"));
+            let images = xcursor::parser::parse_xcursor(&bytes)
+                .unwrap_or_else(|| panic!("niepoprawny XCursor: {name}"));
+            assert!(!images.is_empty(), "{name}: brak obrazów");
+            for image in &images {
+                assert!(image.width > 0 && image.height > 0, "{name}: pusty obraz");
+                assert!(
+                    image.xhot < image.width as u32 && image.yhot < image.height as u32,
+                    "{name}: hotspot poza obrazem"
+                );
+                assert_eq!(
+                    image.pixels_rgba.len(),
+                    (image.width * image.height * 4) as usize,
+                    "{name}: zły rozmiar pikseli"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn luna_cursors_is_preferred_over_distro_themes() {
+        let names = theme_candidates();
+        let luna = names.iter().position(|name| name == "Luna-Cursors");
+        assert!(luna.is_some(), "brak Luna-Cursors na liście motywów");
+        let pagan = names.iter().position(|name| name == "Pagan-Cursors");
+        if let (Some(luna), Some(pagan)) = (luna, pagan) {
+            assert!(luna < pagan, "Luna-Cursors musi być przed Pagan-Cursors");
+        }
     }
 }

@@ -247,10 +247,10 @@ impl EvdevInput {
             let mut buf = [0u8; std::mem::size_of::<RawEvent>() * 64];
             loop {
                 match rustix::io::read(&dev.fd, &mut buf) {
-                    Ok(0) => {
-                        dead.push(idx);
-                        break;
-                    }
+                    // Brak danych (EAGAIN bywa zwrócony jako 0 przez niektóre
+                    // urządzenia) — **nie** usuwamy urządzenia: pojedynczy pusty
+                    // odczyt nie oznacza, że mysz zniknęła.
+                    Ok(0) => break,
                     Ok(n) => {
                         for chunk in buf[..n].chunks_exact(std::mem::size_of::<RawEvent>()) {
                             if let Some(ev) = decode(chunk) {
@@ -260,22 +260,25 @@ impl EvdevInput {
                             }
                         }
                     }
-                    Err(
-                        rustix::io::Errno::NODEV
-                        | rustix::io::Errno::NXIO
-                        | rustix::io::Errno::IO
-                        | rustix::io::Errno::BADF,
-                    ) => {
-                        // Odłączone urządzenie (np. odpięta mysz USB) — usuwamy,
-                        // żeby `poll()` w pętli głównej nie kręcił się na `POLLHUP`/`POLLERR`.
+                    Err(rustix::io::Errno::NODEV | rustix::io::Errno::NXIO) => {
+                        // Urządzenie naprawdę zniknęło (odpięta mysz/klawiatura) —
+                        // usuwamy, żeby `poll()` nie kręcił się na `POLLHUP`.
                         dead.push(idx);
                         break;
                     }
-                    Err(_) => break, // EAGAIN lub EINTR — kończymy na tym urządzeniu
+                    // `EIO`/`EBADF`/`EINTR` itd. traktujemy jak koniec odczytu
+                    // **w tej rundzie**. Wcześniej usuwaliśmy urządzenie na każdy
+                    // taki błąd i przejściowy `EIO` na stałe odbierał ruch myszy.
+                    Err(_) => break,
                 }
             }
         }
         for idx in dead.into_iter().rev() {
+            if std::env::var_os("SELENE_STATS").is_some() {
+                if let Some(dev) = self.devices.get(idx) {
+                    eprintln!("selene/evdev: urządzenie zniknęło: {}", dev.path);
+                }
+            }
             self.devices.swap_remove(idx);
         }
         let mut out = Vec::new();
