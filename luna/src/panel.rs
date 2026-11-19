@@ -1114,10 +1114,6 @@ pub fn quick_button_rect(bar: Rect, theme: &Theme, text: &TextEngine, state: &Pa
 pub const TRAY_ICON: f64 = 22.0;
 /// Odstęp między ikonami tray’a.
 const TRAY_GAP: f64 = 4.0;
-/// Ile ikon tray’a mieści się przed przyciskiem Quick, zanim pojawi się overflow.
-pub const TRAY_VISIBLE_MAX: usize = 4;
-/// Maksimum ikon, gdy obok ikony rysujemy też nazwę (szersze pozycje).
-pub const TRAY_VISIBLE_MAX_LABELS: usize = 2;
 /// Wysokość wiersza w menu overflow.
 const TRAY_ROW_H: f64 = 34.0;
 
@@ -1125,29 +1121,19 @@ const TRAY_ROW_H: f64 = 34.0;
 pub struct TrayLayout {
     /// `(prostokąt, indeks w `PanelState::tray`)`, od lewej do prawej.
     pub icons: Vec<(Rect, usize)>,
-    /// Przycisk „więcej” — tylko gdy pozycji jest więcej niż [`TRAY_VISIBLE_MAX`].
+    /// Przycisk „więcej” — tylko gdy pozycje nie mieszczą się na pasku.
     pub overflow: Option<Rect>,
     /// Indeks pierwszej pozycji ukrytej w overflow.
     pub hidden_from: usize,
-}
-
-fn tray_hidden_from(total: usize, labels: bool) -> usize {
-    let max = if labels {
-        TRAY_VISIBLE_MAX_LABELS
-    } else {
-        TRAY_VISIBLE_MAX
-    };
-    if total > max {
-        max - 1
-    } else {
-        total
-    }
 }
 
 /// Ikony tray’a leżą bezpośrednio na lewo od grupy wskaźników.
 ///
 /// Gdy `PanelState::tray_labels` jest włączone, każda pozycja dostaje też
 /// nazwę aplikacji (przyciętą, by nie wypychać zegara i wskaźników).
+///
+/// Liczba widocznych pozycji wynika **wyłącznie z miejsca** — nie ma sztywnego
+/// limitu, więc włączanie etykiet nie chowa ikon, dopóki się mieszczą.
 ///
 /// Tray **nigdy** nie wchodzi na zegar ani na chip wskaźników prywatności:
 /// lewa granica jest wyliczana z `clock_rect`/`security_chip_rect`, a gdy ikony
@@ -1186,8 +1172,9 @@ pub fn tray_layout(bar: Rect, theme: &Theme, text: &TextEngine, state: &PanelSta
         (width + theme.spacing.xs).max(0.0)
     };
 
-    // Tyle pozycji pokazujemy domyślnie (z rezerwacją slotu na overflow).
-    let mut visible = tray_hidden_from(total, labels);
+    // Tyle pozycji pokazujemy: zaczynamy od wszystkich i zwężamy tylko wtedy,
+    // gdy naprawdę nie mieszczą się w dostępnym miejscu.
+    let mut visible = total;
     while visible > 0 {
         let needs_overflow = visible < total;
         let icons_width: f64 = (0..visible).map(|i| TRAY_ICON + label_width(i)).sum();
@@ -1295,7 +1282,7 @@ pub fn tray_menu_hit(
     if !rect.contains(p) {
         return None;
     }
-    let hidden_from = tray_hidden_from(state.tray.len(), state.tray_labels);
+    let hidden_from = tray_layout(bar, theme, text, state).hidden_from;
     let hidden = state.tray.len().saturating_sub(hidden_from).min(8);
     let inner = Rect::from_xywh(
         rect.x() + 6.0,
@@ -1430,13 +1417,19 @@ fn paint_tray_item(
 }
 
 /// Rysuje menu overflow z ukrytymi ikonami.
-pub fn paint_tray_menu(ctx: &mut PaintCtx, rect: Rect, state: &PanelState, hover: Option<usize>) {
+pub fn paint_tray_menu(
+    ctx: &mut PaintCtx,
+    rect: Rect,
+    state: &PanelState,
+    hidden_from: usize,
+    hover: Option<usize>,
+) {
     let t = ctx.theme;
     ctx.scene
         .fill_rounded_rect(rect, t.radius.medium, t.colors.card_bg);
     ctx.scene
         .stroke_rounded_rect(rect, t.radius.medium, 1.0, t.colors.border);
-    let hidden_from = tray_hidden_from(state.tray.len(), state.tray_labels);
+    let hidden_from = hidden_from.min(state.tray.len());
     let x = rect.x() + 6.0;
     let y = rect.y() + 6.0;
     let w = rect.width() - 12.0;
@@ -7333,26 +7326,30 @@ mod tests {
     }
 
     #[test]
-    fn tray_layout_shows_overflow_after_limit() {
+    fn tray_layout_shows_overflow_when_items_do_not_fit() {
         let theme = Theme::light();
         let text = TextEngine::system();
-        let bar = Rect::from_xywh(0.0, 0.0, 1920.0, THICKNESS);
+        // Wąski pasek: 8 pozycji nie ma prawa się zmieścić.
+        let bar = Rect::from_xywh(0.0, 0.0, 900.0, THICKNESS);
         let mut st = PanelState::sample();
-        st.tray = (0..6).map(tray_item).collect();
+        st.tray = (0..8).map(tray_item).collect();
         let layout = tray_layout(bar, &theme, &text, &st);
-        assert_eq!(layout.icons.len(), TRAY_VISIBLE_MAX - 1);
-        assert_eq!(layout.hidden_from, TRAY_VISIBLE_MAX - 1);
+        assert!(
+            layout.hidden_from < 8,
+            "część pozycji musi trafić do overflow"
+        );
+        assert_eq!(layout.hidden_from, layout.icons.len());
         let overflow = layout.overflow.expect("overflow");
         assert!(bar.contains(overflow.center()));
         assert_eq!(
             tray_at(bar, &theme, &text, &st, overflow.center()),
             Some(TrayHit::Overflow)
         );
-        let (rect, index) = layout.icons[1];
-        assert_eq!(index, 1);
+        let (rect, index) = layout.icons[0];
+        assert_eq!(index, 0);
         assert_eq!(
             tray_at(bar, &theme, &text, &st, rect.center()),
-            Some(TrayHit::Icon(1))
+            Some(TrayHit::Icon(0))
         );
     }
 
@@ -7365,8 +7362,10 @@ mod tests {
         st.tray = (0..3).map(tray_item).collect();
         st.tray_labels = true;
         let layout = tray_layout(bar, &theme, &text, &st);
-        // Przy etykietach mieści się mniej pozycji, a każda jest szersza niż ikona.
-        assert_eq!(layout.icons.len(), TRAY_VISIBLE_MAX_LABELS - 1);
+        // Przy etykietach każda widoczna pozycja jest szersza niż sama ikona,
+        // a liczba widocznych wynika z wolnego miejsca (bez sztywnego limitu).
+        assert!(!layout.icons.is_empty());
+        assert_eq!(layout.icons.len(), 3, "1920 px mieści 3 opisane pozycje");
         assert!(layout
             .icons
             .iter()
@@ -7380,6 +7379,8 @@ mod tests {
         st.tray_labels = false;
         let plain = tray_layout(bar, &theme, &text, &st);
         assert_eq!(plain.icons.len(), 3);
+        assert!(plain.overflow.is_none());
+        assert!(layout.icons.len() <= plain.icons.len());
         assert!(plain
             .icons
             .iter()
@@ -7390,14 +7391,19 @@ mod tests {
     fn tray_overflow_menu_lists_hidden_items() {
         let theme = Theme::light();
         let text = TextEngine::system();
-        let bar = Rect::from_xywh(0.0, 0.0, 1920.0, THICKNESS);
+        // Wąski pasek, żeby część ikon musiała trafić do overflow.
+        let bar = Rect::from_xywh(0.0, 0.0, 900.0, THICKNESS);
         let mut st = PanelState::sample();
-        st.tray = (0..6).map(tray_item).collect();
+        st.tray = (0..8).map(tray_item).collect();
+        let layout = tray_layout(bar, &theme, &text, &st);
+        assert!(layout.overflow.is_some(), "nadmiar musi trafić do overflow");
         let rect = tray_menu_rect(bar, &theme, &text, &st);
         assert!(rect.height() > 0.0);
-        let hidden_from = TRAY_VISIBLE_MAX - 1;
         let p = Point::new(rect.x() + 20.0, rect.y() + 6.0 + TRAY_ROW_H * 0.5);
-        assert_eq!(tray_menu_hit(bar, &theme, &text, &st, p), Some(hidden_from));
+        assert_eq!(
+            tray_menu_hit(bar, &theme, &text, &st, p),
+            Some(layout.hidden_from)
+        );
     }
 }
 
@@ -7558,7 +7564,8 @@ pub fn workspace_rects_v(bar: Rect, theme: &Theme, state: &PanelState) -> Vec<Re
 /// wchodzić na zegar.
 pub fn tray_layout_v(bar: Rect, theme: &Theme, state: &PanelState) -> TrayLayout {
     let total = state.tray.len();
-    let mut visible = tray_hidden_from(total, false);
+    // Pionowy pasek nie ma etykiet, ale liczba pozycji i tak wynika z miejsca.
+    let mut visible = total;
     let mut bottom = match workspace_rects_v(bar, theme, state).first().copied() {
         Some(first) => first.y() - theme.spacing.sm,
         None => indicator_rects_v(bar, theme)[0].y() - theme.spacing.md,
@@ -8214,6 +8221,21 @@ pub fn task_menu_rect_at(
     }
 }
 
+/// Indeks pierwszej pozycji ukrytej w overflow dla danej krawędzi panelu.
+pub fn tray_hidden_from_at(
+    bar: Rect,
+    position: PanelPosition,
+    theme: &Theme,
+    text: &TextEngine,
+    state: &PanelState,
+) -> usize {
+    if position.is_vertical() {
+        tray_layout_v(bar, theme, state).hidden_from
+    } else {
+        tray_layout(bar, theme, text, state).hidden_from
+    }
+}
+
 pub fn tray_menu_rect_at(
     bar: Rect,
     position: PanelPosition,
@@ -8249,7 +8271,7 @@ pub fn tray_menu_hit_at(
     if !rect.contains(p) {
         return None;
     }
-    let hidden_from = tray_hidden_from(state.tray.len(), state.tray_labels);
+    let hidden_from = tray_hidden_from_at(bar, position, theme, text, state);
     let hidden = state.tray.len().saturating_sub(hidden_from).min(8);
     let inner = Rect::from_xywh(
         rect.x() + 6.0,
@@ -8392,7 +8414,7 @@ mod panel_edge_tests {
     fn tray_labels_widen_items_and_show_overflow_sooner() {
         let theme = Theme::dark();
         let text = TextEngine::system();
-        let bar = Rect::from_xywh(0.0, 0.0, 1920.0, THICKNESS);
+        let bar = Rect::from_xywh(0.0, 0.0, 1100.0, THICKNESS);
         let mut state = PanelState::sample();
         state.tray = (0..3)
             .map(|i| TrayItem {
@@ -8413,10 +8435,14 @@ mod panel_edge_tests {
 
         state.tray_labels = true;
         let labelled = tray_layout(bar, &theme, &text, &state);
-        // Przy etykietach wchodzi tylko jedna ikona + overflow.
-        assert_eq!(labelled.icons.len(), 1);
+        // Etykiety są szersze, więc część pozycji trafia do overflow wcześniej —
+        // ale nic nie znika bez powodu (żadnego sztywnego limitu 2 pozycji).
+        assert!(labelled.icons.len() < icons_only.icons.len());
         assert!(labelled.overflow.is_some());
-        assert!(labelled.icons[0].0.width() > TRAY_ICON);
+        assert!(labelled
+            .icons
+            .iter()
+            .all(|(rect, _)| rect.width() > TRAY_ICON));
     }
 
     fn tray_item(i: usize) -> TrayItem {

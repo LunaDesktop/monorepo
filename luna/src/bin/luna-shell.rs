@@ -2791,7 +2791,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                         panel::tray_menu_rect_at(bar, panel_position, &frame.theme, text, &state);
                     let cur =
                         Rect::from_xywh(rect.x(), rect.y() + slide, rect.width(), rect.height());
-                    panel::paint_tray_menu(&mut ctx, cur, &state, tray_hover);
+                    let hidden_from =
+                        panel::tray_hidden_from_at(bar, panel_position, &frame.theme, text, &state);
+                    panel::paint_tray_menu(&mut ctx, cur, &state, hidden_from, tray_hover);
                 }
                 ActivePopup::TrayContext => {
                     if let Some(menu) = &tray_context {
