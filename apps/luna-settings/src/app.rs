@@ -318,6 +318,8 @@ pub enum WallpaperTarget {
     Greeter,
     /// Pulpit (`~/.config/luna/wallpaper.conf`, działa od razu).
     Desktop,
+    /// Awatar użytkownika — dowolny PNG z dysku.
+    Avatar,
 }
 
 /// Przeciąganie monitora na grafice układu.
@@ -1096,6 +1098,24 @@ impl SettingsApp {
         ));
     }
 
+    /// Wybór awatara z dysku — ten sam przeglądarek co tapety (miniatury PNG).
+    pub fn open_avatar_picker(&mut self) {
+        let current = luna::avatar::current_avatar_path(&self.user);
+        self.wallpaper_picker = Some(WallpaperPicker::new(WallpaperTarget::Avatar, current));
+    }
+
+    /// Ustawia awatar bieżącego konta z pliku (walidacja + re-kodowanie PNG).
+    pub fn set_avatar(&mut self, path: PathBuf) {
+        let login = self.user.clone();
+        let result = luna::avatar::load_source(&path)
+            .and_then(|source| luna::avatar::custom_from_source(&source, 1.0))
+            .and_then(|avatar| luna::avatar::save_avatar(&login, &avatar.png));
+        match result {
+            Ok(_) => self.show_status(tr("Avatar updated")),
+            Err(err) => self.show_status(format!("{}: {err}", tr("Could not change the avatar"))),
+        }
+    }
+
     /// „Zaskocz mnie”: losowa tapeta z bieżącego katalogu, od razu zastosowana.
     pub fn surprise_wallpaper(&mut self) {
         let picked = match self.wallpaper_picker.as_mut() {
@@ -1798,6 +1818,7 @@ impl SettingsApp {
                 self.greeter_dirty = true;
             }
             WallpaperTarget::Desktop => self.set_desktop_wallpaper(path),
+            WallpaperTarget::Avatar => self.set_avatar(path),
         }
     }
 
@@ -2429,10 +2450,28 @@ impl SettingsApp {
         self.audio_next = std::time::Instant::now() + Duration::from_secs(3);
     }
 
+    /// Czy można przełączać jasny/ciemny przy wybranym stylu.
+    ///
+    /// Styl z `appearance = light|dark` wymusza własną paletę, więc wtedy
+    /// przełącznik trybu jest wyszarzony (Ustawienia i Quick Panel).
+    pub fn appearance_supported(&self) -> bool {
+        self.style
+            .as_deref()
+            .and_then(libluna_core::theme_file::load)
+            .map(|patch| !patch.pins_appearance())
+            .unwrap_or(true)
+    }
+
     pub fn on_action(&mut self, action: Action) {
         match action {
             Action::None => {}
             Action::SetPreference(preference) => {
+                if !self.appearance_supported() {
+                    self.show_status(tr(
+                        "This theme sets its own light or dark palette — the mode switch has no effect",
+                    ));
+                    return;
+                }
                 self.theme_pref = preference;
                 self.pending.preference = Some(preference);
             }
@@ -2601,6 +2640,7 @@ impl SettingsApp {
             }
             Action::OpenWallpaperPicker => self.open_wallpaper_picker(),
             Action::OpenDesktopWallpaperPicker => self.open_desktop_wallpaper_picker(),
+            Action::OpenAvatarPicker => self.open_avatar_picker(),
             Action::SetDesktopWallpaperPath(path) => self.set_desktop_wallpaper(path),
             Action::ClearDesktopWallpaper => self.clear_desktop_wallpaper(),
             Action::AddDesktopFolder => self.open_desktop_folder_editor(),
@@ -2778,6 +2818,9 @@ impl SettingsApp {
             Action::OpenAddAccount => self.open_account_form(AccountMode::AddUser),
             Action::OpenPasswordChange(login) => {
                 self.open_account_form(AccountMode::ChangePassword { login })
+            }
+            Action::SetAvatarPath(path) => {
+                self.set_avatar(path);
             }
             Action::ToggleLockOnBlank => {
                 let enabled = !self.idle.lock_on_blank;
@@ -3591,11 +3634,11 @@ mod tests {
     }
 
     #[test]
-    fn macos_panel_look_is_locked() {
+    fn floating_panel_look_is_selectable() {
         let mut app = app();
-        assert!(app.panel.look.available());
+        assert!(PanelLook::MacOs.available());
         app.on_action(Action::SetPanelLook(PanelLook::MacOs));
-        assert_eq!(app.panel.look, PanelLook::Luna);
+        assert_eq!(app.panel.look, PanelLook::MacOs);
     }
 
     #[test]

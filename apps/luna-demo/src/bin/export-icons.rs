@@ -281,6 +281,13 @@ const EXPORTS: &[Export] = &[
         name: "application-x-executable",
         aliases: &[],
     },
+    Export {
+        // Menedżer zadań Luny (`luna-tasks`) — standardowa nazwa freedesktop.
+        art: Art::Icon(IconName::Monitor),
+        context: "apps",
+        name: "utilities-system-monitor",
+        aliases: &[],
+    },
 ];
 
 fn main() -> Result<(), Box<dyn Error>> {

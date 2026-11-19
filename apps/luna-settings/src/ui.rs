@@ -14,9 +14,10 @@ use libluna_i18n::tr;
 use libluna_render::wallpaper::decode_png;
 use libluna_render::{ImageData, Scene, TextEngine};
 use libluna_widgets::{
-    clipboard_command, hover_fill, paint_icon, ActionRow, Button, ButtonVariant, CheckButton,
-    ControlsSide, Entry, HeaderBar, IconName, PaintCtx, PreferencesGroup, PreferencesPage,
-    ScrollDrag, Slider, Switch, TextClipboardCommand, TitleAlign, ViewSwitcher, WindowControl,
+    clipboard_command, hover_fill, paint_icon, paint_icon_themed, ActionRow, Button, ButtonVariant,
+    CheckButton, ControlsSide, Entry, HeaderBar, IconName, PaintCtx, PreferencesGroup,
+    PreferencesPage, ScrollDrag, Slider, Switch, TextClipboardCommand, TitleAlign, ViewSwitcher,
+    WindowControl,
 };
 
 use crate::app::{AccountField, AccountForm, SettingsApp, TextPasteTarget};
@@ -87,14 +88,15 @@ fn paint_wallpaper_control(
     selected: bool,
     theme: &Theme,
 ) {
+    let radius = theme.radius.small;
     ctx.scene
-        .fill_rounded_rect(control, theme.radius.small, theme.colors.shade);
+        .fill_rounded_rect(control, radius, theme.colors.shade);
     if let Some(image) = wallpaper_thumbnail(path) {
-        ctx.scene.image(control, image);
+        paint_wallpaper_cover(ctx, control, image, radius);
     }
     ctx.scene.stroke_rounded_rect(
         control,
-        theme.radius.small,
+        radius,
         if selected { 2.0 } else { 1.0 },
         if selected {
             theme.colors.accent
@@ -507,6 +509,10 @@ fn info_button_rect(lay: &Layout, theme: &Theme) -> Rect {
 
 /// Rysuje całą klatkę.
 pub fn paint(app: &SettingsApp, scene: &mut Scene, size: Size, theme: &Theme, text: &TextEngine) {
+    APPEARANCE_LOCKED.store(
+        !app.appearance_supported(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     let lay = layout(size, theme);
     let mut ctx = PaintCtx::new(scene, theme, text);
 
@@ -555,17 +561,26 @@ pub fn paint(app: &SettingsApp, scene: &mut Scene, size: Size, theme: &Theme, te
     } else {
         theme.colors.text
     };
-    let icon_size = (info_rect.width() * 0.72).round();
-    paint_icon(
+    // Ten sam margines co kontrolki okna (`icon::close/minimize/maximize` rysują
+    // glif w prostokącie pomniejszonym o 5 px z każdej strony), żeby „i” miało
+    // identyczną wielkość i grubość kreski.
+    let icon_size = (info_rect.width() - 10.0).max(12.0);
+    let icon_rect = Rect::from_xywh(
+        info_rect.center().x - icon_size / 2.0,
+        info_rect.center().y - icon_size / 2.0,
+        icon_size,
+        icon_size,
+    );
+    // Ikona wektorowa w tym samym stylu co pozostałe kontrolki belki
+    // (minimalizuj / maksymalizuj / zamknij). Zestaw kolorowych ikon rysuje
+    // wypełnione kółko „i”, które odstawało od monochromatycznych, cienkich
+    // ikon okna — dlatego wymuszamy styl monochromatyczny.
+    paint_icon_themed(
         &mut ctx,
         IconName::Info,
-        Rect::from_xywh(
-            info_rect.center().x - icon_size / 2.0,
-            info_rect.center().y - icon_size / 2.0,
-            icon_size,
-            icon_size,
-        ),
+        icon_rect,
         info_color,
+        IconTheme::Monochrome,
     );
 
     // Nawigacja.
@@ -714,11 +729,19 @@ fn row_is_clickable(row: &pages::Row) -> bool {
 /// Zablokowane segmenty są wyszarzone i nie reagują na podświetlenie;
 /// kliknięcie nadal trafia do akcji, żeby pokazać wyjaśnienie.
 fn segment_locked(actions: &[Action], index: usize) -> bool {
+    // Tryb jasny/ciemny jest bezużyteczny, gdy motyw wymusza jedną paletę
+    // (`appearance = light|dark` w pliku stylu).
+    if matches!(actions.get(index), Some(Action::SetPreference(_))) {
+        return APPEARANCE_LOCKED.load(std::sync::atomic::Ordering::Relaxed);
+    }
     matches!(
         actions.get(index),
         Some(Action::SetPanelLook(look)) if !look.available()
     )
 }
+
+/// Czy bieżący motyw pozwala przełączać jasny/ciemny (ustawia [`paint`]).
+static APPEARANCE_LOCKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Przycisk dialogu z podświetleniem wyliczonym z pozycji kursora.
 fn dialog_button(
@@ -2529,8 +2552,7 @@ fn handle_info_events(
 const WALLPAPER_COLS: usize = 3;
 const WALLPAPER_GAP: f64 = 14.0;
 const WALLPAPER_ROW_H: f64 = 34.0;
-const WALLPAPER_SHEET_ROW_H: f64 = 44.0;
-const WALLPAPER_SHEET_W: f64 = 430.0;
+const WALLPAPER_SHEET_ROW_H: f64 = 40.0;
 
 struct WallpaperLayout {
     card: Rect,
@@ -2587,32 +2609,31 @@ fn wallpaper_layout(app: &SettingsApp, size: Size, theme: &Theme) -> WallpaperLa
         (hint.y() - path.bottom() - 18.0).max(0.0),
     );
 
-    // Arkusz „Więcej tapet” nad kartą.
+    // Arkusz „Więcej tapet” jako popover przy kaflu — bez przygaszania całego okna.
     let rows = app
         .wallpaper_picker
         .as_ref()
         .map(|picker| picker.sources.len() + 2)
         .unwrap_or(0);
-    let sheet_h = 60.0 + rows as f64 * WALLPAPER_SHEET_ROW_H + 14.0;
-    let sheet_w = WALLPAPER_SHEET_W.min((size.width - 80.0).max(240.0));
-    let sheet = Rect::from_xywh(
-        (size.width - sheet_w) / 2.0,
-        (size.height - sheet_h) / 2.0,
-        sheet_w,
-        sheet_h,
-    );
+    let (tile_w, tile_h) = wallpaper_tile_size(grid);
+    let sheet_h = 50.0 + rows as f64 * WALLPAPER_SHEET_ROW_H + 10.0;
+    let sheet_w = (tile_w + 48.0).clamp(250.0, 340.0);
+    let sheet_x = (grid.x() + 6.0).min((card.right() - sheet_w - 12.0).max(grid.x()));
+    let sheet_y =
+        (grid.y() + tile_h + 8.0).min((card.bottom() - sheet_h - button_h - 30.0).max(grid.y()));
+    let sheet = Rect::from_xywh(sheet_x, sheet_y, sheet_w, sheet_h);
     let sheet_title = Rect::from_xywh(
-        sheet.x() + 18.0,
-        sheet.y() + 14.0,
-        sheet.width() - 36.0,
+        sheet.x() + 16.0,
+        sheet.y() + 12.0,
+        sheet.width() - 32.0,
         24.0,
     );
     let sheet_rows = (0..rows)
         .map(|index| {
             Rect::from_xywh(
-                sheet.x() + 8.0,
-                sheet_title.bottom() + 8.0 + index as f64 * WALLPAPER_SHEET_ROW_H,
-                sheet.width() - 16.0,
+                sheet.x() + 6.0,
+                sheet_title.bottom() + 6.0 + index as f64 * WALLPAPER_SHEET_ROW_H,
+                sheet.width() - 12.0,
                 WALLPAPER_SHEET_ROW_H,
             )
         })
@@ -2634,13 +2655,12 @@ fn wallpaper_layout(app: &SettingsApp, size: Size, theme: &Theme) -> WallpaperLa
     }
 }
 
-/// Rozmiar kafla: podgląd 16:9 + pasek z nazwą pod nim.
+/// Rozmiar kafla: pełnoekranowy podgląd 16:9, nazwa rysowana na obrazie.
 fn wallpaper_tile_size(grid: Rect) -> (f64, f64) {
     let width = ((grid.width() - WALLPAPER_GAP * (WALLPAPER_COLS as f64 - 1.0))
         / WALLPAPER_COLS as f64)
-        .max(40.0);
-    let inner = (width - 12.0).max(10.0);
-    (width, inner * 9.0 / 16.0 + 32.0)
+        .max(60.0);
+    (width, (width * 9.0 / 16.0).clamp(84.0, 180.0))
 }
 
 fn wallpaper_row_count(app: &SettingsApp) -> usize {
@@ -2904,8 +2924,20 @@ fn paint_wallpaper_picker(app: &SettingsApp, ctx: &mut PaintCtx, size: Size) {
     ctx.scene
         .stroke_rounded_rect(lay.card, theme.radius.large, 1.0, theme.colors.border);
 
+    let badge = Rect::from_xywh(lay.title.x(), lay.title.center().y - 12.0, 24.0, 24.0);
+    ctx.scene.fill_rounded_rect(
+        badge,
+        theme.radius.small,
+        theme.colors.accent.scale_alpha(0.16),
+    );
+    paint_icon(
+        ctx,
+        IconName::Image,
+        Rect::from_xywh(badge.x() + 4.0, badge.y() + 4.0, 16.0, 16.0),
+        theme.colors.accent,
+    );
     ctx.label_left(
-        lay.title.x(),
+        lay.title.x() + 32.0,
         lay.title.center().y,
         &tr("Choose a wallpaper"),
         theme.typography.heading.size,
@@ -2950,19 +2982,23 @@ fn paint_wallpaper_picker(app: &SettingsApp, ctx: &mut PaintCtx, size: Size) {
         weight::NORMAL,
         theme.colors.dim_text,
     );
-    ctx.scene
-        .fill_rounded_rect(lay.chip, lay.chip.height() / 2.0, theme.colors.shade);
+    ctx.scene.fill_rounded_rect(
+        lay.chip,
+        lay.chip.height() / 2.0,
+        theme.colors.accent.scale_alpha(0.14),
+    );
     let target = match picker.target {
         WallpaperTarget::Greeter => tr("Login Screen"),
         WallpaperTarget::Desktop => tr("Desktop"),
+        WallpaperTarget::Avatar => tr("Avatar"),
     };
     ctx.label_center(
         lay.chip.center().x,
         lay.chip.center().y,
         &target,
         theme.typography.caption.size,
-        weight::NORMAL,
-        theme.colors.dim_text,
+        weight::MEDIUM,
+        theme.colors.accent,
     );
 
     if picker.browse {
@@ -3000,6 +3036,7 @@ fn paint_wallpaper_picker(app: &SettingsApp, ctx: &mut PaintCtx, size: Size) {
         match picker.target {
             WallpaperTarget::Greeter => tr("Only PNG images are supported by the login screen"),
             WallpaperTarget::Desktop => tr("Pick any PNG image from your computer"),
+            WallpaperTarget::Avatar => tr("Pick any PNG image from your computer"),
         }
     };
     ctx.label_left(
@@ -3176,16 +3213,6 @@ fn paint_wallpaper_list(
     ctx.scene.pop_clip();
 }
 
-/// Podgląd kafla (16:9) z paskiem nazwy pod nim.
-fn wallpaper_preview_rect(tile: Rect) -> Rect {
-    Rect::from_xywh(
-        tile.x() + 6.0,
-        tile.y() + 6.0,
-        tile.width() - 12.0,
-        tile.height() - 32.0,
-    )
-}
-
 fn paint_wallpaper_image_tile(
     ctx: &mut PaintCtx,
     theme: &Theme,
@@ -3196,58 +3223,47 @@ fn paint_wallpaper_image_tile(
     selected: bool,
 ) {
     let radius = theme.radius.medium;
-    if selected {
-        ctx.scene
-            .fill_rounded_rect(tile, radius, theme.colors.accent.scale_alpha(0.16));
-    } else if hovered {
-        ctx.scene
-            .fill_rounded_rect(tile, radius, theme.colors.shade.scale_alpha(1.6));
-    }
-    let preview = wallpaper_preview_rect(tile);
-    ctx.scene.fill_rounded_rect(
-        preview,
-        theme.radius.small,
-        Color::rgba(0.0, 0.0, 0.0, 0.35),
-    );
-    match wallpaper_thumbnail(path) {
-        Some(image) => {
-            ctx.scene.push_clip_rounded(preview, theme.radius.small);
-            ctx.scene.image(preview, image);
-            ctx.scene.pop_clip();
-        }
-        None => paint_wallpaper_placeholder(ctx, theme, preview, path, picker.target),
-    }
-    ctx.scene
-        .stroke_rounded_rect(preview, theme.radius.small, 1.0, theme.colors.border);
-
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("wallpaper.png");
-    let label = fit_text(
-        name,
-        (tile.width() - 12.0).max(0.0),
-        theme.typography.caption.size,
-        weight::NORMAL,
-        ctx.text,
+
+    match wallpaper_thumbnail(path) {
+        Some(image) => paint_wallpaper_cover(ctx, tile, image, radius),
+        None => {
+            ctx.scene
+                .fill_rounded_rect(tile, radius, theme.colors.shade);
+            paint_wallpaper_placeholder(ctx, theme, tile, path, picker.target);
+        }
+    }
+
+    // Nazwa leży na obrazie — bez osobnego paska pod kaflem.
+    ctx.scene.push_clip_rounded(tile, radius);
+    let band_h = 28.0_f64.min(tile.height() * 0.45);
+    ctx.scene.fill_rect(
+        Rect::from_xywh(tile.x(), tile.bottom() - band_h, tile.width(), band_h),
+        Color::rgba(0.0, 0.0, 0.0, 0.58),
     );
-    ctx.label_center(
-        tile.center().x,
-        preview.bottom() + 13.0,
-        &label,
+    ctx.scene.pop_clip();
+    ctx.label_left(
+        tile.x() + 10.0,
+        tile.bottom() - band_h / 2.0,
+        &fit_text(
+            name,
+            (tile.width() - 20.0).max(0.0),
+            theme.typography.caption.size,
+            weight::MEDIUM,
+            ctx.text,
+        ),
         theme.typography.caption.size,
-        weight::NORMAL,
-        if selected {
-            theme.colors.text
-        } else {
-            theme.colors.dim_text
-        },
+        weight::MEDIUM,
+        theme.colors.accent_fg,
     );
 
     if selected {
         ctx.scene
-            .stroke_rounded_rect(tile, radius, 2.0, theme.colors.accent);
-        let center = Point::new(preview.right() - 14.0, preview.y() + 14.0);
+            .stroke_rounded_rect(tile, radius, 2.5, theme.colors.accent);
+        let center = Point::new(tile.right() - 15.0, tile.y() + 15.0);
         ctx.scene.fill_circle(center, 10.0, theme.colors.accent);
         paint_icon(
             ctx,
@@ -3255,7 +3271,31 @@ fn paint_wallpaper_image_tile(
             Rect::from_xywh(center.x - 6.0, center.y - 6.0, 12.0, 12.0),
             theme.colors.accent_fg,
         );
+    } else if hovered {
+        ctx.scene
+            .stroke_rounded_rect(tile, radius, 2.0, theme.colors.accent.scale_alpha(0.65));
+    } else {
+        ctx.scene
+            .stroke_rounded_rect(tile, radius, 1.0, theme.colors.border);
     }
+}
+
+/// Rysuje obrazek tak, żeby wypełnił kafel (przycięty, bez zniekształceń).
+fn paint_wallpaper_cover(ctx: &mut PaintCtx, tile: Rect, image: Arc<ImageData>, radius: f64) {
+    let (width, height) = (image.width as f64, image.height as f64);
+    if width <= 0.0 || height <= 0.0 || tile.width() <= 0.0 || tile.height() <= 0.0 {
+        return;
+    }
+    let scale = (tile.width() / width).max(tile.height() / height);
+    let dest = Rect::from_xywh(
+        tile.center().x - width * scale / 2.0,
+        tile.center().y - height * scale / 2.0,
+        width * scale,
+        height * scale,
+    );
+    ctx.scene.push_clip_rounded(tile, radius);
+    ctx.scene.image(dest, image);
+    ctx.scene.pop_clip();
 }
 
 fn paint_wallpaper_folder_tile(
@@ -3268,85 +3308,96 @@ fn paint_wallpaper_folder_tile(
     selected: bool,
 ) {
     let radius = theme.radius.medium;
-    if selected {
-        ctx.scene
-            .fill_rounded_rect(tile, radius, theme.colors.accent.scale_alpha(0.16));
-    } else if hovered {
-        ctx.scene
-            .fill_rounded_rect(tile, radius, theme.colors.shade.scale_alpha(1.6));
-    }
-    let preview = wallpaper_preview_rect(tile);
     ctx.scene
-        .fill_rounded_rect(preview, theme.radius.small, theme.colors.shade);
+        .fill_rounded_rect(tile, radius, theme.colors.shade);
     ctx.scene
-        .stroke_rounded_rect(preview, theme.radius.small, 1.0, theme.colors.border);
-    paint_icon(
+        .stroke_rounded_rect(tile, radius, 1.0, theme.colors.border);
+    // Kafel nawigacji (nie obraz) rysujemy w języku Luny: wektorowa ikona
+    // w kółku, tak jak „Więcej tapet”. Kolorowa ikona folderu z zewnętrznego
+    // zestawu (Papirus) wyglądała jak wklejka z innego systemu, dlatego
+    // `Monochrome` wymusza ścieżkę wektorową.
+    let icon_size = 24.0_f64.min(tile.height() * 0.30);
+    let center = Point::new(tile.center().x, tile.center().y - 8.0);
+    ctx.scene.fill_circle(
+        center,
+        icon_size + 10.0,
+        theme.colors.text.scale_alpha(0.06),
+    );
+    paint_icon_themed(
         ctx,
         IconName::Files,
         Rect::from_xywh(
-            preview.center().x - 22.0,
-            preview.center().y - 22.0,
-            44.0,
-            44.0,
+            center.x - icon_size / 2.0,
+            center.y - icon_size / 2.0,
+            icon_size,
+            icon_size,
         ),
         theme.colors.dim_text,
+        IconTheme::Monochrome,
     );
     let name = if is_parent {
         tr("Up").to_owned()
     } else {
-        format!(
-            "{}/",
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("?")
-        )
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("?")
+            .to_owned()
     };
-    let label = fit_text(
-        &name,
-        (tile.width() - 12.0).max(0.0),
+    ctx.label_left(
+        tile.x() + 10.0,
+        tile.bottom() - 14.0,
+        &fit_text(
+            &name,
+            (tile.width() - 20.0).max(0.0),
+            theme.typography.caption.size,
+            weight::MEDIUM,
+            ctx.text,
+        ),
         theme.typography.caption.size,
-        weight::NORMAL,
-        ctx.text,
-    );
-    ctx.label_center(
-        tile.center().x,
-        preview.bottom() + 13.0,
-        &label,
-        theme.typography.caption.size,
-        weight::NORMAL,
-        theme.colors.dim_text,
+        weight::MEDIUM,
+        theme.colors.text,
     );
     if selected {
         ctx.scene
-            .stroke_rounded_rect(tile, radius, 2.0, theme.colors.accent);
+            .stroke_rounded_rect(tile, radius, 2.5, theme.colors.accent);
+    } else if hovered {
+        ctx.scene
+            .stroke_rounded_rect(tile, radius, 2.0, theme.colors.accent.scale_alpha(0.65));
     }
 }
 
 fn paint_wallpaper_more_tile(ctx: &mut PaintCtx, theme: &Theme, tile: Rect, hovered: bool) {
     let radius = theme.radius.medium;
-    if hovered {
-        ctx.scene
-            .fill_rounded_rect(tile, radius, theme.colors.shade.scale_alpha(1.6));
-    }
-    let preview = wallpaper_preview_rect(tile);
+    let bg = if hovered {
+        theme.colors.accent.scale_alpha(0.16)
+    } else {
+        theme.colors.accent.scale_alpha(0.09)
+    };
+    ctx.scene.fill_rounded_rect(tile, radius, bg);
     ctx.scene
-        .stroke_rounded_rect(preview, theme.radius.small, 1.0, theme.colors.border);
-    let center = preview.center();
+        .stroke_rounded_rect(tile, radius, 1.0, theme.colors.accent.scale_alpha(0.35));
+    let center = Point::new(tile.center().x, tile.center().y - 8.0);
     ctx.scene
         .fill_circle(center, 22.0, theme.colors.accent.scale_alpha(0.18));
     paint_icon(
         ctx,
-        IconName::Plus,
+        IconName::Grid,
         Rect::from_xywh(center.x - 12.0, center.y - 12.0, 24.0, 24.0),
         theme.colors.accent,
     );
-    ctx.label_center(
-        tile.center().x,
-        preview.bottom() + 13.0,
-        &tr("More wallpapers"),
+    ctx.label_left(
+        tile.x() + 10.0,
+        tile.bottom() - 14.0,
+        &fit_text(
+            &tr("More wallpapers"),
+            (tile.width() - 20.0).max(0.0),
+            theme.typography.caption.size,
+            weight::MEDIUM,
+            ctx.text,
+        ),
         theme.typography.caption.size,
-        weight::NORMAL,
-        theme.colors.dim_text,
+        weight::MEDIUM,
+        theme.colors.accent,
     );
 }
 
@@ -3369,6 +3420,7 @@ fn paint_wallpaper_placeholder(
     let accent = match target {
         WallpaperTarget::Greeter => theme.colors.accent,
         WallpaperTarget::Desktop => theme.colors.success,
+        WallpaperTarget::Avatar => theme.colors.accent,
     };
     let base = accent.scale_alpha(0.35);
     let glow = accent.scale_alpha(0.55);
@@ -3387,15 +3439,23 @@ fn paint_wallpaper_placeholder(
 fn paint_wallpaper_sheet(
     app: &SettingsApp,
     ctx: &mut PaintCtx,
-    size: Size,
+    _size: Size,
     lay: &WallpaperLayout,
     theme: &Theme,
 ) {
     let Some(picker) = &app.wallpaper_picker else {
         return;
     };
+    // Popover nad siatką — bez przygaszania całego wyboru (wcześniej wyglądało
+    // to jak drugie okno dialogowe nałożone na pierwsze).
+    let shadow = Rect::from_xywh(
+        lay.sheet.x() + 2.0,
+        lay.sheet.y() + 4.0,
+        lay.sheet.width(),
+        lay.sheet.height(),
+    );
     ctx.scene
-        .fill_rect(Rect::from_size(size), Color::rgba(0.0, 0.0, 0.0, 0.35));
+        .fill_rounded_rect(shadow, theme.radius.large, Color::rgba(0.0, 0.0, 0.0, 0.22));
     ctx.scene
         .fill_rounded_rect(lay.sheet, theme.radius.large, theme.colors.card_bg);
     ctx.scene
@@ -3411,52 +3471,112 @@ fn paint_wallpaper_sheet(
 
     for (index, row) in lay.sheet_rows.iter().enumerate() {
         let hovered = picker.more_hover == Some(index);
-        if hovered {
+        let active = index < picker.sources.len() && picker.sources[index].path == picker.dir;
+        if active {
+            ctx.scene.fill_rounded_rect(
+                *row,
+                theme.radius.small,
+                theme.colors.accent.scale_alpha(0.16),
+            );
+        } else if hovered {
             ctx.scene.fill_rounded_rect(
                 *row,
                 theme.radius.small,
                 theme.colors.shade.scale_alpha(1.6),
             );
         }
-        let (icon, label) = if index < picker.sources.len() {
+        let (icon, label, hint) = if index < picker.sources.len() {
             let source = &picker.sources[index];
             let icon = match source.key {
                 "Home folder" => IconName::Home,
-                "System wallpapers" => IconName::Image,
-                _ => IconName::Files,
+                "System wallpapers" => IconName::Monitor,
+                _ => IconName::Image,
             };
-            (icon, tr(source.key).to_owned())
+            // Bywają dwa katalogi systemowe (`wallpapers` i `backgrounds`)
+            // o tej samej nazwie — dopiero nazwa katalogu je rozróżnia.
+            let duplicated = picker
+                .sources
+                .iter()
+                .filter(|other| other.key == source.key)
+                .count()
+                > 1;
+            let hint = duplicated
+                .then(|| {
+                    source
+                        .path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or_default()
+                        .to_owned()
+                })
+                .filter(|hint| !hint.is_empty());
+            (icon, tr(source.key).to_owned(), hint)
         } else if index == picker.sources.len() {
-            (IconName::Star, tr("Surprise me").to_owned())
+            (IconName::Star, tr("Surprise me").to_owned(), None)
         } else {
-            (IconName::Files, tr("Browse the disk…").to_owned())
+            (IconName::Files, tr("Browse the disk…").to_owned(), None)
+        };
+        let color = if active {
+            theme.colors.accent
+        } else {
+            theme.colors.dim_text
         };
         paint_icon(
             ctx,
             icon,
             Rect::from_xywh(row.x() + 12.0, row.center().y - 9.0, 18.0, 18.0),
-            theme.colors.dim_text,
+            color,
         );
+        // Różnicujący podpis po prawej (np. „wallpapers” / „backgrounds”).
+        let caption = theme.typography.caption.size;
+        let label_area = (row.width() - 72.0).max(0.0);
+        let hint_w = match hint.as_deref() {
+            Some(hint) => ctx.label_right_fit(
+                row.right() - 30.0,
+                row.center().y,
+                hint,
+                caption,
+                weight::NORMAL,
+                if active {
+                    theme.colors.accent.scale_alpha(0.85)
+                } else {
+                    theme.colors.dim_text.scale_alpha(0.8)
+                },
+                (label_area * 0.55).max(0.0),
+            ),
+            None => 0.0,
+        };
+        let label_max = if hint_w > 0.0 {
+            (label_area - hint_w - 10.0).max(0.0)
+        } else {
+            label_area
+        };
         ctx.label_left(
             row.x() + 42.0,
             row.center().y,
             &fit_text(
                 &label,
-                (row.width() - 84.0).max(0.0),
+                label_max,
                 theme.typography.body.size,
                 weight::NORMAL,
                 ctx.text,
             ),
             theme.typography.body.size,
             weight::NORMAL,
-            theme.colors.text,
+            if active {
+                theme.colors.accent
+            } else {
+                theme.colors.text
+            },
         );
-        paint_icon(
-            ctx,
-            IconName::ChevronRight,
-            Rect::from_xywh(row.right() - 28.0, row.center().y - 8.0, 16.0, 16.0),
-            theme.colors.dim_text.scale_alpha(0.8),
-        );
+        if index < picker.sources.len() {
+            paint_icon(
+                ctx,
+                IconName::ChevronRight,
+                Rect::from_xywh(row.right() - 28.0, row.center().y - 8.0, 16.0, 16.0),
+                theme.colors.dim_text.scale_alpha(0.8),
+            );
+        }
     }
 }
 

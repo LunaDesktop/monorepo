@@ -5,6 +5,9 @@
 #   /usr/share/luna/welcome/news.md
 #   ~/.local/share/luna/welcome/news.md
 # albo wskazać własny przez LUNA_WELCOME_NEWS.
+#
+# Warianty językowe: obok tego pliku mogą leżeć `news.en.md`, `news.de.md` —
+# sesja w danym języku wybiera je przed tym plikiem (patrz `src/news.rs`).
 
 ## 0.0.8 — 2026-11-05
 - Luna Store: instalacja i aktualizacje z pacmana, paga, apt, dnfa, emerge i Flatpaka.

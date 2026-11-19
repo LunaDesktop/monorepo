@@ -280,6 +280,10 @@ pub enum Action {
     SetPanelLook(libluna_core::PanelLook),
     /// Sposób pokazywania tray’a: same ikony albo ikona + nazwa.
     SetTrayStyle(libluna_core::TrayStyle),
+    /// Ustawia awatar bieżącego konta z pliku PNG (wybór z obrazów w Obrazach).
+    SetAvatarPath(PathBuf),
+    /// Otwiera wybór awatara z dysku (przeglądarka PNG).
+    OpenAvatarPicker,
     /// Ustawia strefę systemową przez `pkexec timedatectl` (wymaga autoryzacji).
     ApplySystemTimezone,
     /// Włącza/wyłącza synchronizację czasu (NTP) w systemie.
@@ -636,7 +640,11 @@ fn appearance(app: &SettingsApp) -> Vec<Group> {
     let mut theme_rows = vec![
         row_sub(
             tr("Theme mode"),
-            tr("System colors are used when Auto is selected"),
+            if app.appearance_supported() {
+                tr("System colors are used when Auto is selected")
+            } else {
+                tr("This theme sets its own light or dark palette")
+            },
             Control::Segmented {
                 options: mode,
                 selected: mode_selected,
@@ -834,7 +842,7 @@ fn appearance(app: &SettingsApp) -> Vec<Group> {
                 )
             },
             Control::Segmented {
-                options: vec![tr("Luna"), tr("macOS")],
+                options: vec![tr("Luna"), tr("Floating")],
                 selected: match app.panel.look {
                     PanelLook::Luna => 0,
                     PanelLook::MacOs => 1,
@@ -2427,9 +2435,27 @@ fn users(app: &SettingsApp) -> Vec<Group> {
     };
 
     let helper_ready = crate::accounts_admin::helper_path().is_some();
+
+    // Awatar bieżącego konta: zdjęcie ustawione wcześniej albo wbudowane inicjały.
+    // Wybór idzie przez pełną przeglądarkę PNG („Przeglądaj…”).
+    let current_avatar = luna::avatar::current_avatar_path(&app.user);
+    let avatar_rows = vec![row_sub(
+        tr("Avatar"),
+        current_avatar
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| tr("Generated from initials")),
+        Control::Button {
+            label: tr("Browse…"),
+            suggested: false,
+        },
+        Action::OpenAvatarPicker,
+    )];
+
     vec![
         group(tr("Accounts"), rows),
         sessions_group(app),
+        group(tr("Avatar"), avatar_rows),
         group(
             tr("Manage accounts"),
             vec![row_sub(

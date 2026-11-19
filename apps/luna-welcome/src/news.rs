@@ -4,11 +4,22 @@
 //! `## 0.0.8 — 2026-11-05` oraz punkty zaczynające się od `- ` albo `* `.
 //! Plik z dysku ma pierwszeństwo nad wbudowanym, więc wydanie systemu może
 //! podmienić treść bez przebudowy aplikacji.
+//!
+//! **Język:** najpierw szukamy wariantu z kodem języka (`news.en.md`), potem
+//! — gdy plik bazowy na dysku byłby w innym języku — sięgamy po wbudowane
+//! notatki w języku sesji. Dopiero na końcu używamy pliku bazowego (polskiego).
 
 use std::path::{Path, PathBuf};
 
+/// Język plików bazowych w repozytorium (`data/news.md`).
+const BASE_LANGUAGE: &str = "pl";
+
 /// Wbudowane notatki — używane, gdy system nie dostarczył własnego pliku.
 pub const EMBEDDED_NEWS: &str = include_str!("../data/news.md");
+/// Wbudowane notatki po angielsku (`news.en.md`).
+const EMBEDDED_NEWS_EN: &str = include_str!("../data/news.en.md");
+/// Wbudowane notatki po niemiecku (`news.de.md`).
+const EMBEDDED_NEWS_DE: &str = include_str!("../data/news.de.md");
 
 /// Jedno wydanie.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,17 +155,76 @@ fn push_news_paths(paths: &mut Vec<PathBuf>, base: &Path) {
 
 /// Wczytuje pierwszy istniejący plik; w razie braku — wbudowane notatki.
 pub fn load() -> Notes {
-    for path in search_paths() {
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let mut notes = Notes::parse(&text);
-        if !notes.is_empty() {
-            notes.source = Some(path);
+    let language = language_code();
+    pick_notes(&language, &search_paths(), |path| {
+        let text = std::fs::read_to_string(path).ok()?;
+        let notes = Notes::parse(&text);
+        (!notes.is_empty()).then_some(notes)
+    })
+}
+
+/// Wybiera notatki dla języka: wariant językowy z dysku → wbudowane w języku
+/// sesji → plik bazowy z dysku → wbudowane bazowe.
+///
+/// `read` jest wstrzykiwane, żeby kolejność dała się przetestować bez dysku.
+fn pick_notes(
+    language: &str,
+    paths: &[PathBuf],
+    mut read: impl FnMut(&Path) -> Option<Notes>,
+) -> Notes {
+    for base in paths {
+        if let Some(path) = localized_variant(base, language) {
+            if let Some(mut notes) = read(&path) {
+                notes.source = Some(path);
+                return notes;
+            }
+        }
+    }
+    // Plik bazowy jest po polsku — dla innego języka lepiej pokazać wbudowane
+    // tłumaczenie niż polski tekst (o ile takie mamy).
+    if language != BASE_LANGUAGE {
+        if let Some(text) = embedded_notes(language) {
+            return Notes::parse(text);
+        }
+    }
+    for base in paths {
+        if let Some(mut notes) = read(base) {
+            notes.source = Some(base.clone());
             return notes;
         }
     }
     Notes::parse(EMBEDDED_NEWS)
+}
+
+/// Kod języka wybrany w Ustawieniach (`pl`, `en`, `de`).
+fn language_code() -> String {
+    libluna_i18n::locale().language().to_owned()
+}
+
+/// Wbudowane notatki dla języka; `None`, gdy nie mamy tłumaczenia.
+fn embedded_notes(language: &str) -> Option<&'static str> {
+    match language {
+        "en" => Some(EMBEDDED_NEWS_EN),
+        "de" => Some(EMBEDDED_NEWS_DE),
+        "pl" => Some(EMBEDDED_NEWS),
+        _ => None,
+    }
+}
+
+/// Ścieżka wariantu językowego: `<nazwa>.<język>.<rozszerzenie>`.
+fn localized_variant(path: &Path, language: &str) -> Option<PathBuf> {
+    if language.is_empty() {
+        return None;
+    }
+    let (stem, ext) = (path.file_stem()?, path.extension()?);
+    let mut name = std::ffi::OsString::from(stem);
+    name.push(".");
+    name.push(language);
+    name.push(".");
+    name.push(ext);
+    let mut localized = path.to_path_buf();
+    localized.set_file_name(name);
+    Some(localized)
 }
 
 /// Wersja systemu: `LUNA_VERSION`, pliki pakietu wydania (`/etc/luna-release`,
@@ -224,5 +294,75 @@ mod tests {
     fn embedded_notes_are_available() {
         let notes = Notes::parse(EMBEDDED_NEWS);
         assert!(!notes.is_empty());
+    }
+
+    #[test]
+    fn localized_variant_uses_language_suffix() {
+        let path = localized_variant(Path::new("/usr/share/luna/welcome/news.md"), "en");
+        assert_eq!(
+            path,
+            Some(PathBuf::from("/usr/share/luna/welcome/news.en.md"))
+        );
+        // Brak języka → brak wariantu (zostaje plik bazowy).
+        assert_eq!(
+            localized_variant(Path::new("/usr/share/luna/welcome/news.md"), ""),
+            None
+        );
+    }
+
+    #[test]
+    fn embedded_notes_follow_the_language() {
+        assert!(embedded_notes("en")
+            .unwrap()
+            .contains("installs and updates from pacman"));
+        assert!(embedded_notes("de")
+            .unwrap()
+            .contains("Installation und Aktualisierungen"));
+        assert!(embedded_notes("pl")
+            .unwrap()
+            .contains("instalacja i aktualizacje"));
+        // Nieznany język → brak tłumaczenia (zostaje plik bazowy z dysku).
+        assert!(embedded_notes("xx").is_none());
+        for language in ["pl", "en", "de"] {
+            assert!(
+                !Notes::parse(embedded_notes(language).unwrap()).is_empty(),
+                "brak notatek dla {language}"
+            );
+        }
+    }
+
+    #[test]
+    fn disk_variant_wins_over_base_file() {
+        let dir = std::env::temp_dir().join(format!("luna-news-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = dir.join("news.md");
+        std::fs::write(&base, "## 1.0 — 2026-01-01\n- Wersja polska\n").unwrap();
+        let english = dir.join("news.en.md");
+        std::fs::write(&english, "## 1.0 — 2026-01-01\n- English version\n").unwrap();
+
+        let notes = pick_notes("en", std::slice::from_ref(&base), |path| {
+            let text = std::fs::read_to_string(path).ok()?;
+            Some(Notes::parse(&text)).filter(|n| !n.is_empty())
+        });
+        assert_eq!(notes.latest().unwrap().items[0], "English version");
+        assert_eq!(notes.source.as_deref(), Some(english.as_path()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn embedded_translation_beats_foreign_base_file() {
+        // Dyskowy plik jest po polsku, a sesja mówi po angielsku: lepiej pokazać
+        // wbudowane angielskie notatki niż polski tekst z pakietu.
+        let paths = vec![PathBuf::from("/usr/share/luna/welcome/news.md")];
+        let notes = pick_notes("en", &paths, |_| None);
+        assert!(notes.latest().unwrap().items[0].contains("installs and updates"));
+
+        // Dla polskiego plik bazowy z dysku nadal wygrywa z wbudowanym.
+        let read = |path: &Path| {
+            (path.file_name() == Some(std::ffi::OsStr::new("news.md")))
+                .then(|| Notes::parse("## 1.0 — 2026-01-01\n- z dysku\n"))
+        };
+        let notes = pick_notes("pl", &paths, read);
+        assert_eq!(notes.latest().unwrap().items[0], "z dysku");
     }
 }
