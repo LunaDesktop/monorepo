@@ -1982,6 +1982,13 @@ fn on_left_press(
         }
         if ch.search.contains(p) {
             let pane = app.pane_mut();
+            // „×” w polu czyści frazę, ale zostawia wyszukiwanie otwarte.
+            if pane.search_active && pane.search.clear_at(ch.search, theme, p) {
+                pane.search.clear();
+                pane.dir.set_filter("");
+                pane.sync_view();
+                return;
+            }
             pane.search_active = !pane.search_active;
             pane.search.set_focused(pane.search_active);
             if !pane.search_active {

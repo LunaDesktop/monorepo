@@ -2272,12 +2272,18 @@ fn handle_click(
             return;
         }
         if lay.find_entry.contains(point) {
-            let clear = app
-                .find
-                .as_mut()
-                .is_some_and(|find| find.entry.clear_at(lay.find_entry, theme, point));
+            // „×” w polu szukania czyści frazę; wcześniej tylko ustawiał fokus,
+            // więc kliknięcie wyglądało na niedziałające.
+            let cleared = app.find.as_mut().is_some_and(|find| {
+                if find.entry.clear_at(lay.find_entry, theme, point) {
+                    find.entry.clear();
+                    true
+                } else {
+                    false
+                }
+            });
             app.set_find_focus(true);
-            if clear {
+            if cleared {
                 app.refresh_find();
             }
             return;
@@ -2584,6 +2590,34 @@ mod tests {
             &theme,
             &text,
         );
+    }
+
+    #[test]
+    fn find_clear_button_empties_the_query() {
+        let (dir, mut app) = tree_app();
+        app.open_path(dir.join("README.md"));
+        app.toggle_find();
+        app.find.as_mut().unwrap().entry.set_text("Test");
+        app.refresh_find();
+        assert!(!app.find.as_ref().unwrap().matches.is_empty());
+
+        let theme = theme();
+        let lay = test_layout(&app, &theme);
+        let clear = app
+            .find
+            .as_ref()
+            .unwrap()
+            .entry
+            .clear_rect(lay.find_entry, &theme)
+            .center();
+        click(&mut app, clear);
+
+        assert!(
+            app.find.as_ref().unwrap().entry.is_empty(),
+            "„×” czyści frazę w polu szukania"
+        );
+        assert!(app.find.as_ref().unwrap().matches.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn tree_app() -> (std::path::PathBuf, App) {
