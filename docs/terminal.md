@@ -39,7 +39,11 @@ Noto Sans Mono. Platforma tworzy renderer z tym silnikiem po
   (`wl_data_device`), **`Ctrl+Shift+V`** wkleja. Wklejanie respektuje
   `bracketed paste` (`?2004`), więc powłoka i edytory nie wykonują wklejonego
   tekstu od razu.
-- **Środkowy przycisk myszy** wkleja schowek (jak w terminalach X11).
+- **Zaznaczenie trafia od razu do selekcji pierwotnej** (`PRIMARY`,
+  `Frame::copy_to_primary`) — po puszczeniu przycisku można je wkleić środkowym
+  przyciskiem w innym oknie, bez `Ctrl+Shift+C`.
+- **Środkowy przycisk myszy** wkleja **selekcję pierwotną** (konwencja X11),
+  a nie schowek; `Ctrl+Shift+V` nadal wkleja schowek.
 - Wiersze są łączone znakiem `\n`, a końcowe spacje obcinane.
 
 ```mermaid

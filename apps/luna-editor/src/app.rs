@@ -154,7 +154,12 @@ pub struct App {
     pub pending: Pending,
     pub reveal_cursor: bool,
     pub clipboard_text: Option<String>,
+    /// Tekst do selekcji pierwotnej (PRIMARY) — wysyłany po każdym zaznaczeniu,
+    /// żeby środkowy przycisk w innym oknie wkleił to samo co `Ctrl+C`.
+    pub primary_text: Option<String>,
     pub paste_requested: bool,
+    /// Prośba o wklejenie selekcji pierwotnej (środkowy przycisk myszy).
+    pub primary_paste_requested: bool,
     pub dragging_selection: bool,
     pub drag_anchor: usize,
     pub workspace_focused: bool,
@@ -218,7 +223,9 @@ impl App {
             pending: Pending::default(),
             reveal_cursor: true,
             clipboard_text: None,
+            primary_text: None,
             paste_requested: false,
+            primary_paste_requested: false,
             dragging_selection: false,
             drag_anchor: 0,
             workspace_focused: false,
@@ -1633,9 +1640,16 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         if let Some(text) = app.clipboard_text.take() {
             frame.copy_to_clipboard(text);
         }
+        if let Some(text) = app.primary_text.take() {
+            frame.copy_to_primary(text);
+        }
         if app.paste_requested {
             app.paste_requested = false;
             frame.paste_from_clipboard();
+        }
+        if app.primary_paste_requested {
+            app.primary_paste_requested = false;
+            frame.paste_from_primary();
         }
         app.apply_pending(frame);
         app.poll_plugins();
