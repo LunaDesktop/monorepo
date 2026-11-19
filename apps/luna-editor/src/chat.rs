@@ -1611,16 +1611,6 @@ fn handle_picker(app: &mut App, event: &Event, lay: &Layout, _theme: &Theme) -> 
             picker.hover = None;
             true
         }
-        Event::Text(value) => {
-            if let Some(picker) = app.chat.picker.as_mut() {
-                let plain: String = value.chars().filter(|ch| !ch.is_control()).collect();
-                if !plain.is_empty() {
-                    picker.query.insert_str(&plain);
-                    picker.hover = None;
-                }
-            }
-            true
-        }
         Event::Paste(value) => {
             if let Some(picker) = app.chat.picker.as_mut() {
                 picker.query.insert_str(value);
@@ -1738,16 +1728,6 @@ pub fn handle_events(
             }
             true
         }
-        Event::Text(value) => {
-            if !app.chat.focused {
-                return false;
-            }
-            let plain: String = value.chars().filter(|ch| !ch.is_control()).collect();
-            if !plain.is_empty() {
-                app.chat.input.insert_str(&plain);
-            }
-            true
-        }
         Event::Paste(value) => {
             if !app.chat.focused {
                 return false;
@@ -1760,7 +1740,10 @@ pub fn handle_events(
 }
 
 fn insert_key_text(entry: &mut Entry, key: &KeyEvent) {
-    if key.modifiers.ctrl || key.modifiers.alt {
+    // `Event::Text` nie jest wysyłany przez platformę — tekst jest w `key.text`.
+    // `AltGr` (`level3`) przychodzi jako ctrl+alt, więc nie blokujemy go.
+    let plain_shortcut = (key.modifiers.ctrl && !key.modifiers.level3) || key.modifiers.logo;
+    if plain_shortcut {
         return;
     }
     if let Some(value) = &key.text {

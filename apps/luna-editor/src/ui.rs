@@ -57,6 +57,8 @@ pub struct Layout {
     pub chat_model: Rect,
     /// Przycisk czatu w nagłówku (0×0, gdy nie ma wtyczki AI).
     pub chat_ai: Rect,
+    /// Prawa szyna ikon (wtyczki + szybkie akcje); zerowa szerokość na wąskim oknie.
+    pub rail: Rect,
 }
 
 pub fn layout(
@@ -65,11 +67,12 @@ pub fn layout(
     workspace_visible: bool,
     find_open: bool,
     chat_visible: bool,
-    chat_button: bool,
+    _chat_button: bool,
 ) -> Layout {
     let header = Rect::from_xywh(0.0, 0.0, size.width, theme.metrics.headerbar.height);
     let pad = theme.spacing.md.min((size.width * 0.04).max(8.0));
     let status = Rect::from_xywh(0.0, size.height - STATUS_H, size.width, STATUS_H);
+    let rail = crate::rail::rect(size, header.bottom(), status.y());
     let header_content = HeaderBar::new()
         .controls(ControlsSide::Right)
         .controls_layout(header, theme)
@@ -86,21 +89,9 @@ pub fn layout(
         HEADER_BTN,
         HEADER_BTN,
     );
-    let chat_ai = if chat_button {
-        Rect::from_xywh(
-            menu.x() - 4.0 - HEADER_BTN,
-            menu.y(),
-            HEADER_BTN,
-            HEADER_BTN,
-        )
-    } else {
-        Rect::from_xywh(menu.x(), menu.y(), 0.0, 0.0)
-    };
-    let tabs_right = if chat_button {
-        chat_ai.x() - 4.0
-    } else {
-        menu.x() - 8.0
-    };
+    let chat_ai = Rect::from_xywh(menu.x(), menu.y(), 0.0, 0.0);
+    // Ikona czatu jest teraz kafelkiem prawej szyny (wtyczki), nie w nagłówku.
+    let tabs_right = menu.x() - 8.0;
     let tabs = Rect::from_xywh(
         workspace_toggle.right() + 6.0,
         header.center().y - theme.metrics.tabs.height / 2.0,
@@ -144,21 +135,23 @@ pub fn layout(
         (workspace_preview.y() - 6.0 - (workspace_root.bottom() + 6.0)).max(0.0),
     );
 
+    // Edytor wypełnia całą przestrzeń między panelem bocznym, czatem i szyną —
+    // bez marginesów i ramki, jak w edytorach kodu.
     let editor_left = if workspace_visible {
-        workspace.right() + pad
+        workspace.right()
     } else {
-        pad
+        0.0
     };
     let chat_w = if chat_visible {
         crate::chat::panel_width(size)
     } else {
         0.0
     };
-    let content_right = size.width - pad - if chat_visible { chat_w + pad } else { 0.0 };
+    let content_right = size.width - rail.width() - if chat_visible { chat_w } else { 0.0 };
     let find_bar = Rect::from_xywh(
-        editor_left,
-        header.bottom() + pad,
-        (content_right - editor_left).max(0.0),
+        editor_left + pad,
+        header.bottom() + 4.0,
+        (content_right - editor_left - 2.0 * pad).max(0.0),
         if find_open { FIND_H } else { 0.0 },
     );
     let find_entry = Rect::from_xywh(
@@ -175,19 +168,19 @@ pub fn layout(
     );
 
     let editor_top = if find_open {
-        find_bar.bottom() + pad
+        find_bar.bottom() + 4.0
     } else {
-        header.bottom() + pad
+        header.bottom()
     };
     let editor = Rect::from_xywh(
         editor_left,
         editor_top,
         (content_right - editor_left).max(0.0),
-        (status.y() - pad - editor_top).max(0.0),
+        (status.y() - editor_top).max(0.0),
     );
 
     let chat = Rect::from_xywh(
-        size.width - chat_w,
+        size.width - rail.width() - chat_w,
         header.bottom(),
         chat_w,
         (status.y() - header.bottom()).max(0.0),
@@ -253,6 +246,7 @@ pub fn layout(
         chat_gear,
         chat_model,
         chat_ai,
+        rail,
     }
 }
 
@@ -322,9 +316,13 @@ pub fn paint(app: &mut App, scene: &mut Scene, size: Size, theme: &Theme, text: 
     if app.find.is_some() {
         paint_find_bar(app, &mut ctx, &lay);
     }
+    // Tło pod treścią: `CodeView` rysuje zaokrąglony prostokąt, a przy pełnym
+    // wypełnieniu rogi mają ten sam kolor co wnętrze (bez prześwitu okna).
+    ctx.scene.fill_rect(lay.editor, colors.view_bg);
     app.view_mut().paint(&mut ctx, lay.editor);
     paint_status(app, &mut ctx, &lay);
     crate::chat::paint(app, &mut ctx, &lay);
+    crate::rail::paint(app, &mut ctx, lay.rail, size);
 
     if app.menu_open {
         if let Some(panel) = menu_panel(app, &lay, size, theme, text) {
@@ -618,7 +616,8 @@ fn paint_status(app: &App, ctx: &mut PaintCtx, lay: &Layout) {
     let colors = theme.colors;
     let caption = theme.typography.caption;
     let pad = theme.spacing.md.min((lay.status.width() * 0.04).max(8.0));
-    // Płaski pasek statusu: pełna szerokość, oddzielony samą linią.
+    // Pasek statusu: tło odcina go od treści, a separatorzy oddzielają wartości.
+    ctx.scene.fill_rect(lay.status, colors.shade);
     ctx.scene.fill_rect(
         Rect::from_xywh(lay.status.x(), lay.status.y(), lay.status.width(), 1.0),
         colors.border,
@@ -649,8 +648,15 @@ fn paint_status(app: &App, ctx: &mut PaintCtx, lay: &Layout) {
     let (line, column) = app.view().line_col();
     let position = format!("{} {}, {} {}", tr("Ln"), line, tr("Col"), column);
     let mut right = lay.status.right() - pad;
+    let mut first = true;
     for value in ["UTF-8", app.line_ending().label()] {
         let width = ctx.measure(value, caption.size, weight::NORMAL);
+        if !first {
+            ctx.scene.fill_rect(
+                Rect::from_xywh(right + 8.0, lay.status.center().y - 6.0, 1.0, 12.0),
+                colors.border,
+            );
+        }
         ctx.label_right(
             right,
             lay.status.center().y,
@@ -660,8 +666,13 @@ fn paint_status(app: &App, ctx: &mut PaintCtx, lay: &Layout) {
             colors.dim_text,
         );
         right -= width + 16.0;
+        first = false;
     }
     let width = ctx.measure(&position, caption.size, weight::NORMAL);
+    ctx.scene.fill_rect(
+        Rect::from_xywh(right + 8.0, lay.status.center().y - 6.0, 1.0, 12.0),
+        colors.border,
+    );
     ctx.label_right(
         right,
         lay.status.center().y,
@@ -671,6 +682,10 @@ fn paint_status(app: &App, ctx: &mut PaintCtx, lay: &Layout) {
         colors.dim_text,
     );
     right -= width + 20.0;
+    ctx.scene.fill_rect(
+        Rect::from_xywh(right + 10.0, lay.status.center().y - 6.0, 1.0, 12.0),
+        colors.border,
+    );
     ctx.label_right(
         right,
         lay.status.center().y,
@@ -1455,6 +1470,10 @@ pub fn handle_events(
             // Zdarzenie obsłużone przez panel czatu.
         } else if app.menu_open {
             handle_menu(app, event, &lay, size, theme, text);
+        } else if crate::rail::menu_open(app) {
+            crate::rail::handle_menu_events(app, event, size, theme, text);
+        } else if crate::rail::handle_click(app, event, lay.rail) {
+            // Kliknięcie w prawą szynę (wtyczki/akcje) — edytor go nie widzi.
         } else {
             handle_normal(app, event, &lay, size, theme, text);
         }
@@ -1622,18 +1641,7 @@ fn handle_goto(app: &mut App, event: &Event, size: Size, theme: &Theme) {
                             0xff50 => dialog.entry.home(),
                             0xff57 => dialog.entry.end(),
                             0x61 if key.modifiers.ctrl => dialog.entry.select_all(),
-                            _ => {
-                                if !key.modifiers.ctrl {
-                                    if let Some(value) = &key.text {
-                                        let plain: String =
-                                            value.chars().filter(|ch| !ch.is_control()).collect();
-                                        if !plain.is_empty() {
-                                            dialog.entry.insert_str(&plain);
-                                            dialog.error = None;
-                                        }
-                                    }
-                                }
-                            }
+                            _ => {}
                         }
                     }
                 }
@@ -1701,18 +1709,7 @@ fn handle_prompt(app: &mut App, event: &Event, size: Size, theme: &Theme, text: 
                             0xff50 => prompt.entry.home(),
                             0xff57 => prompt.entry.end(),
                             0x61 if key.modifiers.ctrl => prompt.entry.select_all(),
-                            _ => {
-                                if !key.modifiers.ctrl {
-                                    if let Some(value) = &key.text {
-                                        let plain: String =
-                                            value.chars().filter(|ch| !ch.is_control()).collect();
-                                        if !plain.is_empty() {
-                                            prompt.entry.insert_str(&plain);
-                                            prompt.error = None;
-                                        }
-                                    }
-                                }
-                            }
+                            _ => {}
                         }
                     }
                 }
@@ -1936,20 +1933,7 @@ fn handle_browser(app: &mut App, event: &Event, size: Size) {
                                 0xff50 => browser.filename.home(),
                                 0xff57 => browser.filename.end(),
                                 0x61 if key.modifiers.ctrl => browser.filename.select_all(),
-                                _ => {
-                                    if !key.modifiers.ctrl {
-                                        if let Some(value) = &key.text {
-                                            let plain: String = value
-                                                .chars()
-                                                .filter(|ch| !ch.is_control())
-                                                .collect();
-                                            if !plain.is_empty() {
-                                                browser.filename.insert_str(&plain);
-                                                browser.error = None;
-                                            }
-                                        }
-                                    }
-                                }
+                                _ => {}
                             }
                         }
                     }
@@ -2108,12 +2092,21 @@ fn handle_normal(
                 PointerButton::Right => {
                     handle_right_click(app, lay, button.position);
                 }
+                // Środkowy przycisk = wklejenie selekcji pierwotnej.
+                PointerButton::Middle => app.primary_paste_requested = true,
                 _ => {}
             }
         }
         Event::PointerButton(button) if button.state == ButtonState::Released => {
             app.dragging_selection = false;
             app.view_mut().end_scroll_drag();
+            // Zaznaczenie od razu staje się PRIMARY (konwencja X11) — środkowy
+            // przycisk w innym oknie wkleja je bez `Ctrl+C`.
+            if button.button == PointerButton::Left {
+                if let Some(text) = app.doc().copy() {
+                    app.primary_text = Some(text);
+                }
+            }
         }
         Event::Scroll(scroll) => {
             if lay.tabs.contains(scroll.position) {
@@ -2751,7 +2744,11 @@ mod tests {
         let lay = test_layout(&app, &theme);
         assert!(lay.chat.width() > 0.0);
         assert!(lay.editor.right() <= lay.chat.x());
-        assert!(lay.chat_ai.width() > 0.0);
+        assert_eq!(
+            lay.chat_ai.width(),
+            0.0,
+            "ikona czatu jest w szynie, nie w nagłówku"
+        );
         let mut scene = Scene::new();
         let text = TextEngine::none();
         let mut ctx = PaintCtx::new(&mut scene, &theme, &text);
@@ -2770,9 +2767,8 @@ mod tests {
         assert!(!app.workspace.visible);
         let hidden = test_layout(&app, &theme);
         assert_eq!(hidden.workspace.width(), 0.0);
-        let pad = theme.spacing.md.min((size().width * 0.04).max(8.0));
-        assert_eq!(hidden.editor.x(), pad);
-        assert_eq!(hidden.editor.right(), size().width - pad);
+        assert_eq!(hidden.editor.x(), 0.0);
+        assert_eq!(hidden.editor.right(), size().width - hidden.rail.width());
         click(&mut app, lay.workspace_toggle.center());
         assert!(app.workspace.visible);
     }

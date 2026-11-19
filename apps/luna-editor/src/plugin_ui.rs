@@ -34,6 +34,8 @@ pub struct PluginUi {
     pub status: Option<String>,
     pub prompt: Option<Prompt>,
     pub form: Option<Form>,
+    /// Otwarte menu kontekstowe prawej szyny (PPM na kafelku wtyczki).
+    pub rail_menu: Option<crate::rail::RailMenu>,
 }
 
 /// Pytanie o instrukcję dla polecenia wtyczki.
@@ -90,6 +92,7 @@ impl PluginUi {
             status: None,
             prompt: None,
             form: None,
+            rail_menu: None,
         }
     }
 }
@@ -103,6 +106,8 @@ struct ManagerLayout {
     commands: Vec<Rect>,
     settings: Rect,
     remove: Rect,
+    /// „Aktualizuj” — widoczne tylko dla wtyczek ze znanym źródłem.
+    update: Rect,
     url: Rect,
     install: Rect,
     status: Rect,
@@ -158,7 +163,7 @@ fn manager_layout(app: &App, size: Size, _theme: &Theme, _text: &TextEngine) -> 
     }
 
     let commands_top = detail.y() + 74.0;
-    let commands_bottom = detail.bottom() - 40.0;
+    let commands_bottom = detail.bottom() - 78.0;
     let mut commands = Vec::new();
     if let Some(plugin) = app.plugins.plugins.get(app.plugin_ui.selected) {
         for index in 0..plugin.commands.len() {
@@ -171,6 +176,7 @@ fn manager_layout(app: &App, size: Size, _theme: &Theme, _text: &TextEngine) -> 
     }
     let settings = Rect::from_xywh(detail.x(), detail.bottom() - 32.0, 116.0, 30.0);
     let remove = Rect::from_xywh(settings.right() + 8.0, settings.y(), 108.0, 30.0);
+    let update = Rect::from_xywh(detail.x(), settings.y() - 38.0, 140.0, 30.0);
 
     ManagerLayout {
         card,
@@ -181,6 +187,7 @@ fn manager_layout(app: &App, size: Size, _theme: &Theme, _text: &TextEngine) -> 
         commands,
         settings,
         remove,
+        update,
         url,
         install,
         status,
@@ -422,6 +429,27 @@ fn paint_manager(app: &App, ctx: &mut PaintCtx, size: Size) {
         let mut remove = Button::new(tr("Remove")).variant(ButtonVariant::Destructive);
         remove.set_hovered(!busy && hovered(lay.remove));
         remove.paint(ctx, lay.remove);
+        // Aktualizacja ma sens tylko wtedy, gdy znamy źródło instalacji.
+        if plugins::source_of(plugin).is_some() {
+            let mut update = Button::new(tr("Update")).variant(ButtonVariant::Suggested);
+            update.set_hovered(!busy && hovered(lay.update));
+            update.paint(ctx, lay.update);
+        } else {
+            let hint = elide(
+                ctx,
+                &tr("Installed manually — no update source"),
+                lay.update.width(),
+                theme.typography.caption.size,
+            );
+            ctx.label_left(
+                lay.update.x(),
+                lay.update.center().y,
+                &hint,
+                theme.typography.caption.size,
+                weight::NORMAL,
+                colors.dim_text,
+            );
+        }
     } else {
         ctx.label_left(
             lay.detail.x(),
@@ -850,6 +878,10 @@ fn handle_manager(app: &mut App, event: &Event, size: Size, theme: &Theme, _text
                 open_form(app);
                 return;
             }
+            if lay.update.contains(p) {
+                update_selected(app);
+                return;
+            }
             if lay.remove.contains(p) {
                 remove_selected(app);
                 return;
@@ -885,7 +917,7 @@ fn handle_manager(app: &mut App, event: &Event, size: Size, theme: &Theme, _text
                 app.plugin_ui.open = false;
             }
         }
-        Event::Text(value) if app.plugin_ui.url.is_focused() => {
+        Event::Paste(value) if app.plugin_ui.url.is_focused() => {
             app.plugin_ui.url.insert_str(&plain_text(value));
         }
         Event::Paste(value) if app.plugin_ui.url.is_focused() => {
@@ -1019,18 +1051,6 @@ fn handle_form(app: &mut App, event: &Event, size: Size, theme: &Theme, text: &T
             }
             if entry.text().len() != before {
                 mark_models_dirty(form);
-            }
-        }
-        Event::Text(value) => {
-            let plain = plain_text(value);
-            if !plain.is_empty() {
-                if let Some(form) = app.plugin_ui.form.as_mut() {
-                    if let Some(entry) = form.entries.get_mut(form.active).and_then(Option::as_mut)
-                    {
-                        entry.insert_str(&plain);
-                    }
-                    mark_models_dirty(form);
-                }
             }
         }
         Event::Paste(value) => {
@@ -1282,18 +1302,6 @@ fn handle_picker(app: &mut App, event: &Event, size: Size, theme: &Theme, text: 
                 picker.hover = None;
             }
         }
-        Event::Text(value) => {
-            let plain = plain_text(value);
-            if !plain.is_empty() {
-                if let Some(form) = app.plugin_ui.form.as_mut() {
-                    if let Some(picker) = form.picker.as_mut() {
-                        picker.query.insert_str(&plain);
-                        picker.scroll = 0.0;
-                        picker.hover = None;
-                    }
-                }
-            }
-        }
         Event::Paste(value) => {
             if let Some(form) = app.plugin_ui.form.as_mut() {
                 if let Some(picker) = form.picker.as_mut() {
@@ -1397,11 +1405,6 @@ fn handle_prompt(app: &mut App, event: &Event, size: Size, theme: &Theme, _text:
                 _ => insert_key_text(&mut prompt.entry, key),
             }
         }
-        Event::Text(value) => {
-            if let Some(prompt) = app.plugin_ui.prompt.as_mut() {
-                prompt.entry.insert_str(&plain_text(value));
-            }
-        }
         Event::Paste(value) => {
             if let Some(prompt) = app.plugin_ui.prompt.as_mut() {
                 prompt.entry.insert_str(value);
@@ -1412,7 +1415,10 @@ fn handle_prompt(app: &mut App, event: &Event, size: Size, theme: &Theme, _text:
 }
 
 fn insert_key_text(entry: &mut Entry, key: &KeyEvent) {
-    if key.modifiers.ctrl || key.modifiers.alt {
+    // `Event::Text` nie jest wysyłany przez platformę — tekst jest w `key.text`.
+    // `AltGr` (`level3`) przychodzi jako ctrl+alt, więc nie blokujemy go.
+    let plain_shortcut = (key.modifiers.ctrl && !key.modifiers.level3) || key.modifiers.logo;
+    if plain_shortcut {
         return;
     }
     if let Some(value) = &key.text {
@@ -1437,6 +1443,22 @@ fn start_install(app: &mut App) {
         return;
     }
     app.plugin_ui.status = Some(tr("Installing…"));
+    app.plugins.job = Some(Job::Install(plugins::spawn_install(url)));
+}
+
+pub fn update_selected(app: &mut App) {
+    if app.plugins.busy() {
+        return;
+    }
+    let Some(plugin) = app.plugins.plugins.get(app.plugin_ui.selected).cloned() else {
+        return;
+    };
+    let Some(url) = plugins::source_of(&plugin) else {
+        app.plugin_ui.status = Some(tr("No update source for this plugin"));
+        return;
+    };
+    // Ponowne pobranie tego samego adresu = aktualizacja do najnowszej wersji.
+    app.plugin_ui.status = Some(tr("Updating…"));
     app.plugins.job = Some(Job::Install(plugins::spawn_install(url)));
 }
 

@@ -1,7 +1,7 @@
 //! Renderuje Luna Editor do PNG — podgląd bez kompozytora Wayland.
 //!
 //! Użycie:
-//!   `cargo run --bin editor-render -- [--dark] [--lang CODE] [--file PATH] [--find QUERY] [--about] [--no-workspace] [--tree-menu] [--prompt new-file|new-folder|rename] [--settings] [--plugins] [wyjście.png]`
+//!   `cargo run --bin editor-render -- [--dark] [--lang CODE] [--file PATH] [--find QUERY] [--about] [--no-workspace] [--tree-menu] [--prompt new-file|new-folder|rename] [--settings] [--plugins] [--rail] [--rail-menu] [wyjście.png]`
 
 use std::error::Error;
 use std::path::PathBuf;
@@ -59,6 +59,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut prompt: Option<String> = None;
     let mut settings = false;
     let mut plugins_open = false;
+    let mut rail_preview = false;
+    let mut rail_menu_preview = false;
     let mut out: Option<String> = None;
 
     let mut index = 0;
@@ -112,6 +114,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             "--plugins" => {
                 plugins_open = true;
+                index += 1;
+            }
+            "--rail" => {
+                rail_preview = true;
+                index += 1;
+            }
+            "--rail-menu" => {
+                rail_menu_preview = true;
                 index += 1;
             }
             "--prompt" => {
@@ -216,6 +226,53 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     if plugins_open {
         app.open_plugins();
+    }
+
+    // Podgląd prawej szyny (`--rail`): trzy przykładowe wtyczki, żeby zrzut
+    // pokazywał realny układ (same kafelki bez wtyczek nic nie wnosi).
+    if rail_preview {
+        use luna_editor::plugins::{
+            Context as PluginCtx, Output, Plugin, PluginCommand, PluginSetting, SettingKind,
+        };
+        let setting = |key: &str, label: &str| PluginSetting {
+            key: key.into(),
+            label: label.into(),
+            kind: SettingKind::Text,
+            default: String::new(),
+        };
+        let command = |id: &str, title: &str, prompt: bool| PluginCommand {
+            id: id.into(),
+            title: title.into(),
+            prompt,
+            context: PluginCtx::Document,
+            output: Output::ReplaceDocument,
+        };
+        let plugin = |id: &str, name: &str, version: &str, description: &str| Plugin {
+            dir: PathBuf::from(format!("/tmp/{id}")),
+            id: id.into(),
+            name: name.into(),
+            version: version.into(),
+            author: "Luna".into(),
+            description: description.into(),
+            entry: "main.py".into(),
+            interpreter: Some("python3".into()),
+            commands: vec![],
+            settings: vec![],
+            chat: false,
+        };
+        let mut docs = plugin("docs", "Dokumentacja", "1.2.0", "Podgląd dokumentacji");
+        docs.settings = vec![setting("url", "Adres dokumentacji")];
+        docs.commands = vec![command("open", "Otwórz dokumentację", false)];
+        let mut shortcuts = plugin("shortcuts", "Skróty", "0.4.1", "Lista skrótów");
+        shortcuts.commands = vec![command("show", "Pokaż skróty", false)];
+        let mut ai = plugin("ai", "Asystent AI", "2.0.0", "Czat w panelu");
+        ai.settings = vec![setting("model", "Model")];
+        ai.chat = true;
+        app.plugins.plugins = vec![docs, shortcuts, ai];
+    }
+    if rail_menu_preview {
+        let lay = ui::layout(size, &theme, app.workspace.visible, false, false, false);
+        luna_editor::rail::open_menu(&mut app, lay.rail, 0);
     }
 
     let text_engine = TextEngine::mono();

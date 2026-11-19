@@ -170,8 +170,8 @@ resztę — kursor, zaznaczenie, gutter, przewijanie i trafianie myszą — robi
 
 - Brak podziału widoku i przeciągania zakładek.
 - Brak LSP i autouzupełniania; leksery są celowo płaskie (bez gramatyki).
-- Brak drag & drop (platforma nie przekazuje jeszcze zdarzeń DnD) — pliki
-  otwieramy przez `Ctrl+O`, „Otwórz za pomocą” albo argument wiersza poleceń.
+- Drag & drop z zewnątrz działa (upuszczenie pliku otwiera go), ale przeciąganie
+  **zakładek** wewnątrz okna jeszcze nie.
 - Wyszukiwanie jest tekstowe (bez wyrażeń regularnych i zamiany).
 
 ## Budowanie i instalacja

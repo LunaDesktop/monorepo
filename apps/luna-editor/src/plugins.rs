@@ -22,6 +22,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Nazwa pliku manifestu w katalogu wtyczki.
 pub const MANIFEST: &str = "plugin.conf";
 
+/// Plik z adresem, z którego wtyczka została zainstalowana (do aktualizacji).
+pub const SOURCE_FILE: &str = ".source";
+
 /// Rodzaj pola ustawień wtyczki.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SettingKind {
@@ -419,6 +422,16 @@ fn parse_setting(value: &str) -> Result<PluginSetting, String> {
 }
 
 /// Uruchamia instalację z GitHuba (albo z bezpośredniego URL archiwum) w tle.
+/// Adres, z którego zainstalowano wtyczkę (plik `.source` w jej katalogu).
+///
+/// `None` = wtyczka dodana ręcznie (skopiowana do `~/.local/share/...`), więc
+/// nie znamy źródła i nie możemy jej zaktualizować automatycznie.
+pub fn source_of(plugin: &Plugin) -> Option<String> {
+    let text = fs::read_to_string(plugin.dir.join(SOURCE_FILE)).ok()?;
+    let url = text.trim();
+    (!url.is_empty()).then(|| url.to_owned())
+}
+
 pub fn spawn_install(url: String) -> Receiver<Result<String, String>> {
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
@@ -459,6 +472,8 @@ fn install_blocking(url: &str) -> Result<String, String> {
             fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
         }
         copy_tree(source, &dest)?;
+        // Zapamiętujemy źródło — „Aktualizuj” to ponowne pobranie tego adresu.
+        let _ = fs::write(dest.join(SOURCE_FILE), url.trim());
         Ok(format!("{} {}", plugin.name, plugin.version))
     })();
     let _ = fs::remove_dir_all(&temp);

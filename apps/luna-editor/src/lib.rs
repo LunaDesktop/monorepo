@@ -17,6 +17,7 @@ pub mod document;
 pub mod plugin_ui;
 pub mod plugins;
 pub mod prefs;
+pub mod rail;
 pub mod syntax;
 pub mod ui;
 pub mod workspace;
