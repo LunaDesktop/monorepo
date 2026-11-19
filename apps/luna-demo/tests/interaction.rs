@@ -477,9 +477,15 @@ fn choosing_style_from_menu_sets_style() {
     click(&mut settings, &mut demo, style_item);
     assert_eq!(demo.popover, Some(Popover::Styles));
 
-    // Wybór pierwszego stylu (Nord) ustawia go i zamyka popover.
+    // Wybór stylu „Nord”. Szukamy go **po nazwie** — lista stylów rośnie
+    // (np. `full-example.theme`), więc indeks w menu się przesuwa.
+    let nord_index = ui::style_list()
+        .iter()
+        .position(|style| style.name.eq_ignore_ascii_case("nord"))
+        .expect("styl nord w examples/luna/themes");
     let nord = ui::popover_menu(size(), &theme, &text, &layout(&settings, &demo), &demo)
-        .map(|(panel, menu)| menu.rows(panel, &theme)[1].rect.center())
+        // +1, bo pierwszy wiersz to „Domyślny”.
+        .map(|(panel, menu)| menu.rows(panel, &theme)[nord_index + 1].rect.center())
         .expect("style list");
     click(&mut settings, &mut demo, nord);
     assert_eq!(settings.style(), Some("nord"));
