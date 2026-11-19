@@ -121,13 +121,22 @@ fi
 # Kompozytor w tle, a po nim powłoka Luna (panel/OSD).
 rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 ts() { printf '%s luna-session: %s\n' "$(date +%H:%M:%S)" "$*"; }
+# Start licznika całej sesji (od pierwszych instrukcji skryptu), żeby w logu
+# było widać pełny czas „logowanie → działający panel”, a nie tylko fragment.
+t_session="$(date +%s%3N 2>/dev/null || echo 0)"
 # `locale -a` wypisuje `pl_PL.utf8`, a my używamy tagów typu `pl_PL.UTF-8`.
 # Porównujemy po usunięciu myślników i wielkości liter.
 has_locale() {
     [ -n "$1" ] || return 1
     command -v locale >/dev/null 2>&1 || return 1
+    # Lista generowanych locale jest stała w czasie sesji, a `locale -a` to
+    # osobny proces (kilka–kilkadziesiąt ms). Pytamy raz i trzymamy wynik.
+    if [ -z "${locales_ready:-}" ]; then
+        locales_list="$(locale -a 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -d '-')"
+        locales_ready=1
+    fi
     norm="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d '-')"
-    locale -a 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -Fxq "$norm"
+    printf '%s\n' "$locales_list" | grep -Fxq "$norm"
 }
 
 # Język wybrany w Ustawieniach Luny. Ustawiamy `LANGUAGE` (gettext) i — gdy locale
@@ -359,6 +368,9 @@ if [ "${t0:-0}" != 0 ] && command -v date >/dev/null 2>&1; then
     t1="$(date +%s%3N 2>/dev/null || echo 0)"
     if [ "$t1" != 0 ] && [ "$t1" -ge "$t0" ]; then
         ts "powłoka uruchomiona po $((t1 - t0)) ms od startu kompozytora"
+    fi
+    if [ "${t_session:-0}" != 0 ] && [ "$t1" != 0 ] && [ "$t1" -ge "$t_session" ]; then
+        ts "sesja gotowa po $((t1 - t_session)) ms od startu skryptu"
     fi
 fi
 

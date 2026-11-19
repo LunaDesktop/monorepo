@@ -11,6 +11,8 @@
 use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::path::PathBuf;
+use std::sync::OnceLock;
+use std::time::Instant;
 
 use rustix::fs::{Mode, OFlags};
 use rustix::mm::{mmap, munmap, MapFlags, ProtFlags};
@@ -19,6 +21,20 @@ use libluna_core::{DisplaySettings, OutputMode};
 use libluna_render::gpu::ExportedFrame;
 
 use crate::monitors::{layout_horizontal, OutputInfo};
+
+/// Znacznik startu procesu — logi startowe podają czas w ms, żeby z sesji dało
+/// się odczytać, ile trwało dojście do gotowego ekranu (modeset na NVIDII bywa
+/// najdłuższym etapem startu).
+static START: OnceLock<Instant> = OnceLock::new();
+
+/// Zapisuje chwilę startu procesu (woła `main`).
+pub fn mark_start() {
+    let _ = START.set(Instant::now());
+}
+
+fn startup_ms() -> u128 {
+    START.get().map(|t| t.elapsed().as_millis()).unwrap_or(0)
+}
 
 // — Kody ioctl KMS (`_IOWR`) —
 const DRM_IOCTL_MODE_GETRESOURCES: u32 = 0xC040_64A0;
@@ -966,10 +982,11 @@ impl DrmBackend {
             }
             if std::env::var("SELENE_STATS").is_ok() {
                 eprintln!(
-                    "selene/drm: skonfigurowano {} wyjść (pominięto {} z {} złączy)",
+                    "selene/drm: skonfigurowano {} wyjść (pominięto {} z {} złączy) po {} ms",
                     outputs.len(),
                     skipped,
-                    res.connectors.len()
+                    res.connectors.len(),
+                    startup_ms()
                 );
             }
             if outputs.is_empty() {

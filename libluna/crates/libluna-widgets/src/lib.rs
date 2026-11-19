@@ -186,7 +186,9 @@ pub use helpers::{
     WindowTitleRects, WrapBox,
 };
 pub use hover::{hover_fill, Hover, Hoverable};
-pub use icon::{paint_icon, paint_icon_themed, paint_named_icon, sidebar_icon, IconName};
+pub use icon::{
+    paint_icon, paint_icon_themed, paint_named_icon, prewarm_named_icon, sidebar_icon, IconName,
+};
 pub use image::{Image, ImageIcon};
 pub use infobar::{InfoBar, InfoBarKind, InfoBarRects};
 pub use item_view::{Item, ItemKind, ItemView, ViewMode};

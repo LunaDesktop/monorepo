@@ -92,6 +92,9 @@ use crate::sync::LockExt;
 use state::State;
 
 fn main() -> Result<(), Box<dyn Error>> {
+    // Czas startu liczymy od pierwszych instrukcji — logi DRM podają, po ilu ms
+    // ekran był gotowy (to zwykle najdłuższy etap między logowaniem a obrazem).
+    drm::mark_start();
     // Wielojęzyczność: lokalizacja z otoczenia + katalogi `i18n/` doładowane w runtime.
     libluna_i18n::set_locale(libluna_i18n::Locale::from_env());
     libluna_i18n::load_catalogs_from_dirs();

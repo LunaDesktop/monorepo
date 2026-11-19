@@ -1181,6 +1181,27 @@ fn named_image(name: &str, target: u32) -> Option<Arc<ImageData>> {
     named_image_multi(&[name], target)
 }
 
+/// Ładuje ikonę aplikacji do globalnego cache **bez rysowania**.
+///
+/// Pierwsze wyszukanie nazwy w motywie to kilkadziesiąt `stat`-ów na ikonę
+/// (9 rozmiarów × 8 kategorii × 2 układy katalogów) plus dekodowanie PNG/SVG.
+/// Dla kilkudziesięciu aplikacji w launcherze dawało to ~0,4 s przy pierwszym
+/// otwarciu. Powłoka wywołuje tę funkcję w wątku tła po pierwszej klatce, więc
+/// launcher otwiera się natychmiast, a koszt schodzi z drogi krytycznej.
+///
+/// `target` to bok ikony w pikselach — musi odpowiadać rozmiarowi rysowania,
+/// bo cache ścieżek jest kluczowany rozmiarem (SVG rasteryzujemy per rozmiar).
+pub fn prewarm_named_icon(name: &str, target: u32) {
+    if active_icon_theme().is_monochrome() || active_icon_set().is_none() {
+        return;
+    }
+    let name = name.trim();
+    if name.is_empty() {
+        return;
+    }
+    let _ = named_image(name, target.max(1));
+}
+
 /// Rysuje ikonę aplikacji po jej nazwie z `.desktop` (zestaw zewnętrzny).
 ///
 /// Najpierw szuka w aktywnym zestawie (np. `Luna-Icons`), a gdy go tam nie ma —
@@ -2519,5 +2540,19 @@ mod icon_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prewarm_named_icon;
+
+    /// Prewarming jest wywoływany w tle przy starcie powłoki — dla nazw, których
+    /// nie ma w motywie (albo pustych), musi po prostu nic nie robić.
+    #[test]
+    fn prewarm_ignores_empty_and_unknown_names() {
+        prewarm_named_icon("", 40);
+        prewarm_named_icon("   ", 36);
+        prewarm_named_icon("nie-ma-takiej-ikony-luna-test", 68);
     }
 }

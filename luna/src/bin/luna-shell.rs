@@ -47,6 +47,9 @@ const CHROME_W: u32 = 1000;
 const LAUNCHER_SCROLL_PER_NOTCH: f64 = 64.0;
 
 fn main() -> Result<(), Box<dyn Error>> {
+    // Czas od startu procesu — pierwsza klatka w logu sesji pokazuje, ile
+    // realnie trwało dojście powłoki do gotowego panelu.
+    let boot = Instant::now();
     // Język z Ustawień Luny (`~/.config/luna/locale.conf`) ma pierwszeństwo
     // przed `LANG`; cała powłoka korzysta z jednego globalnego katalogu.
     libluna_i18n::set_locale(libluna_i18n::preferred_locale());
@@ -240,8 +243,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     // ustawień. Bez tego zmiana wyglądu/tray’a czekała na następną klatkę
     // (zegar albo ruch myszy) i wyglądała na „nie działa”.
     let mut panel_watch_started = false;
+    // Ikony aplikacji dekodujemy w tle po pierwszej klatce (patrz niżej).
+    let mut icons_warmed = false;
+    let mut first_frame = true;
 
     let result = run(cfg, move |frame: &mut Frame| {
+        if first_frame {
+            first_frame = false;
+            if stats {
+                eprintln!(
+                    "luna-shell: pierwsza klatka po {:.0} ms od startu procesu",
+                    boot.elapsed().as_secs_f64() * 1000.0
+                );
+            }
+        }
         if !panel_watch_started {
             panel_watch_started = true;
             if let Some(path) = PanelSettings::config_path() {
@@ -256,6 +271,23 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                 });
             }
+        }
+        // Pierwsze otwarcie launchera dekodowało kilkadziesiąt ikon z dysku
+        // (wyszukanie w motywie to ~144 `stat`-y na ikonę) i animacja wyglądała
+        // na zaciśniętą. Wątek tła wypełnia cache po pierwszej klatce, zanim
+        // użytkownik zdąży kliknąć w menu.
+        if !icons_warmed {
+            icons_warmed = true;
+            let names: Vec<String> = apps.iter().filter_map(|a| a.theme_icon.clone()).collect();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(900));
+                // Rozmiary z widoków launchera: lista 36, siatka 40, karuzela 68.
+                for size in [36u32, 40, 68] {
+                    for name in &names {
+                        libluna_widgets::prewarm_named_icon(name, size);
+                    }
+                }
+            });
         }
         if toplevels.is_none() {
             toplevels = luna::toplevels::Toplevels::spawn(Some(frame.waker()));
