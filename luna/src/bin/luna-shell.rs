@@ -179,7 +179,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // start panelu nie czekał na D-Bus.
     let tray_slot: TraySlot = std::sync::Arc::new(std::sync::Mutex::new(None));
     let tray_ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let mut tray_started = false;
+    let mut tray_retry_at = Instant::now();
 
     let mut brightness_state: Option<u8> = None;
     let mut battery_state: Option<luna::system::BatteryStatus> = None;
@@ -405,17 +405,23 @@ fn main() -> Result<(), Box<dyn Error>> {
                 });
             }
         }
-        if !tray_started {
-            tray_started = true;
+        // Tray (SNI) uruchamiamy z ponawianiem. Rejestracja nazwy
+        // `org.kde.StatusNotifierWatcher` może się nie udać, gdy magistrala
+        // jeszcze wstaje (albo nazwę chwilowo trzyma inny panel). Wcześniej
+        // jedna nieudana próba oznaczała **brak traya do końca sesji**.
+        if !tray_ready.load(std::sync::atomic::Ordering::Relaxed) && Instant::now() >= tray_retry_at
+        {
+            tray_retry_at = Instant::now() + std::time::Duration::from_secs(2);
             let slot = std::sync::Arc::clone(&tray_slot);
             let ready = std::sync::Arc::clone(&tray_ready);
             let waker = frame.waker();
             std::thread::spawn(move || {
-                let bus = luna::tray::TrayBus::spawn(waker);
-                if let Ok(mut g) = slot.lock() {
-                    *g = bus;
+                if let Some(bus) = luna::tray::TrayBus::spawn(waker) {
+                    if let Ok(mut g) = slot.lock() {
+                        *g = Some(bus);
+                    }
+                    ready.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
-                ready.store(true, std::sync::atomic::Ordering::Relaxed);
             });
         }
         if tray_ready.load(std::sync::atomic::Ordering::Relaxed) {
