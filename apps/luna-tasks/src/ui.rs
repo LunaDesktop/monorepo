@@ -270,6 +270,9 @@ pub fn paint(app: &mut App, scene: &mut Scene, size: Size, theme: &Theme, text: 
         state.menu.paint(&mut ctx, panel);
     }
 
+    if app.details.is_some() {
+        paint_details(app, &mut ctx, size);
+    }
     if let Some(confirm) = &app.confirm {
         app.hits.clear();
         confirm_dialog(confirm).paint(&mut ctx, size);
@@ -1214,6 +1217,10 @@ pub fn handle_events(
         handle_about_events(app, events, size, theme, text);
         return;
     }
+    if app.details.is_some() {
+        handle_details_events(app, events, size, theme, text);
+        return;
+    }
     if app.confirm.is_some() {
         handle_confirm_events(app, events, size, theme, text);
         return;
@@ -1741,6 +1748,358 @@ fn handle_key(app: &mut App, key: &KeyEvent) {
     }
 }
 
+// ── Okno „Szczegóły procesu” (PPM → „Szczegóły procesu”) ──
+
+const DETAILS_W: f64 = 560.0;
+const DETAILS_H: f64 = 520.0;
+const DETAILS_THREAD_H: f64 = 26.0;
+
+/// Prostokąt okna szczegółów (wyśrodkowany, z marginesem na małych ekranach).
+fn details_panel(size: Size, _theme: &Theme) -> Rect {
+    let w = (size.width - 80.0).clamp(320.0, DETAILS_W);
+    let h = (size.height - 80.0).clamp(280.0, DETAILS_H);
+    Rect::from_xywh((size.width - w) / 2.0, (size.height - h) / 2.0, w, h)
+}
+
+fn details_close_icon(panel: Rect) -> Rect {
+    Rect::from_xywh(panel.right() - 40.0, panel.y() + 12.0, 28.0, 28.0)
+}
+
+fn details_close_button(panel: Rect, text: &TextEngine, theme: &Theme) -> Rect {
+    let label = tr("Close dialog");
+    let width = text
+        .measure(&label, theme.typography.body.size, weight::MEDIUM)
+        .width
+        + 32.0;
+    Rect::from_xywh(
+        panel.right() - 20.0 - width,
+        panel.bottom() - 20.0 - 32.0,
+        width,
+        32.0,
+    )
+}
+
+/// Format bajtów I/O (B/KiB/MiB/GiB).
+fn format_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    let value = bytes as f64;
+    if value >= GIB {
+        format!("{:.1} GiB", value / GIB)
+    } else if value >= MIB {
+        format!("{:.1} MiB", value / MIB)
+    } else if value >= KIB {
+        format!("{:.0} KiB", value / KIB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn paint_details(app: &App, ctx: &mut PaintCtx, size: Size) {
+    let theme = *ctx.theme;
+    let Some(details) = app.details.clone() else {
+        return;
+    };
+    let panel = details_panel(size, &theme);
+    // Przyciemnienie tła — okno jest modalne.
+    ctx.scene
+        .fill_rect(Rect::from_size(size), Color::rgba(0.0, 0.0, 0.0, 0.35));
+    ctx.scene.fill_rounded_rect(
+        Rect::from_xywh(
+            panel.x() + 2.0,
+            panel.y() + 4.0,
+            panel.width(),
+            panel.height(),
+        ),
+        theme.radius.large,
+        Color::rgba(0.0, 0.0, 0.0, 0.28),
+    );
+    paint_card(ctx, panel);
+
+    let body = theme.typography.body.size;
+    let cap = theme.typography.caption.size;
+    let head = theme.typography.heading.size;
+    let pad = 20.0;
+    let x = panel.x() + pad;
+
+    ctx.label_left(
+        x,
+        panel.y() + 30.0,
+        &tr("Process details"),
+        head,
+        weight::BOLD,
+        theme.colors.text,
+    );
+    // Zamknij (×) w prawym górnym rogu.
+    let close_icon = details_close_icon(panel);
+    if app.pointer.is_some_and(|p| close_icon.contains(p)) {
+        ctx.scene.fill_rounded_rect(
+            close_icon,
+            theme.radius.small,
+            libluna_widgets::hover_fill(&theme),
+        );
+    }
+    paint_icon(
+        ctx,
+        IconName::Close,
+        close_icon.deflate(Insets::new(7.0, 7.0, 7.0, 7.0)),
+        theme.colors.dim_text,
+    );
+
+    let subtitle = format!(
+        "{} · PID {} · PPID {}",
+        details.name, details.pid, details.ppid
+    );
+    let subtitle = ellipsize(
+        ctx,
+        &subtitle,
+        panel.width() - 2.0 * pad - 40.0,
+        cap,
+        weight::NORMAL,
+    );
+    ctx.label_left(
+        x,
+        panel.y() + 50.0,
+        &subtitle,
+        cap,
+        weight::NORMAL,
+        theme.colors.dim_text,
+    );
+
+    // ── Podsumowanie: 2 kolumny × 3 wiersze ──
+    let io = details
+        .io
+        .map(|io| {
+            format!(
+                "{} / {}",
+                format_bytes(io.read_bytes),
+                format_bytes(io.write_bytes)
+            )
+        })
+        .unwrap_or_else(|| tr("No access"));
+    let cells = [
+        (
+            tr("User"),
+            details.user.clone(),
+            tr("CPU"),
+            format!("{:.1}%", details.cpu_percent),
+        ),
+        (
+            tr("Memory"),
+            format_memory(details.rss_kib),
+            tr("Threads"),
+            details.threads_total.to_string(),
+        ),
+        (
+            tr("State"),
+            tr(procs::state_key(details.state)).to_owned(),
+            tr("Disk I/O (r/w)"),
+            io,
+        ),
+    ];
+    let left_x = x;
+    let right_x = panel.center().x + 8.0;
+    let cell_w = (panel.width() / 2.0 - pad * 1.5).max(80.0);
+    let mut y = panel.y() + 74.0;
+    for (left_label, left_value, right_label, right_value) in cells {
+        let left_text = ellipsize(ctx, &left_value, cell_w, body, weight::MEDIUM);
+        let right_text = ellipsize(ctx, &right_value, cell_w, body, weight::MEDIUM);
+        ctx.label_left(
+            left_x,
+            y,
+            &left_label,
+            cap,
+            weight::NORMAL,
+            theme.colors.dim_text,
+        );
+        ctx.label_left(
+            left_x,
+            y + 15.0,
+            &left_text,
+            body,
+            weight::MEDIUM,
+            theme.colors.text,
+        );
+        ctx.label_left(
+            right_x,
+            y,
+            &right_label,
+            cap,
+            weight::NORMAL,
+            theme.colors.dim_text,
+        );
+        ctx.label_left(
+            right_x,
+            y + 15.0,
+            &right_text,
+            body,
+            weight::MEDIUM,
+            theme.colors.text,
+        );
+        y += 40.0;
+    }
+
+    // ── Rozbicie na wątki ──
+    let table_top = y + 4.0;
+    ctx.scene.fill_rect(
+        Rect::from_xywh(x, table_top, panel.width() - 2.0 * pad, 1.0),
+        theme.colors.border,
+    );
+    let header_y = table_top + 16.0;
+    let cpu_x = panel.right() - pad;
+    let state_x = cpu_x - 70.0;
+    let nice_x = state_x - 62.0;
+    ctx.label_left(
+        x,
+        header_y,
+        &tr("Thread"),
+        cap,
+        weight::MEDIUM,
+        theme.colors.dim_text,
+    );
+    ctx.label_right(
+        nice_x,
+        header_y,
+        &tr("Nice"),
+        cap,
+        weight::MEDIUM,
+        theme.colors.dim_text,
+    );
+    ctx.label_right(
+        state_x,
+        header_y,
+        &tr("State"),
+        cap,
+        weight::MEDIUM,
+        theme.colors.dim_text,
+    );
+    ctx.label_right(
+        cpu_x,
+        header_y,
+        &tr("CPU"),
+        cap,
+        weight::MEDIUM,
+        theme.colors.dim_text,
+    );
+
+    let footer = details_close_button(panel, ctx.text, &theme);
+    let first_row = header_y + 18.0;
+    let max_rows = (((footer.y() - 10.0 - first_row) / DETAILS_THREAD_H).floor() as usize).max(0);
+    let name_w = (nice_x - x - 16.0).max(60.0);
+    if details.threads.is_empty() {
+        ctx.label_left(
+            x,
+            first_row + 8.0,
+            &tr("No thread data"),
+            body,
+            weight::NORMAL,
+            theme.colors.dim_text,
+        );
+    }
+    for (row, thread) in details.threads.iter().take(max_rows).enumerate() {
+        let row_y = first_row + row as f64 * DETAILS_THREAD_H + DETAILS_THREAD_H / 2.0;
+        let name = ellipsize(ctx, &thread.name, name_w, body, weight::NORMAL);
+        ctx.label_left(x, row_y, &name, body, weight::NORMAL, theme.colors.text);
+        ctx.label_right(
+            nice_x,
+            row_y,
+            &thread.nice.to_string(),
+            body,
+            weight::NORMAL,
+            theme.colors.dim_text,
+        );
+        ctx.label_right(
+            state_x,
+            row_y,
+            &thread.state.to_string(),
+            body,
+            weight::NORMAL,
+            theme.colors.dim_text,
+        );
+        let color = if thread.cpu_percent >= 50.0 {
+            theme.colors.warning
+        } else {
+            theme.colors.text
+        };
+        ctx.label_right(
+            cpu_x,
+            row_y,
+            &format!("{:.1}%", thread.cpu_percent),
+            body,
+            weight::MEDIUM,
+            color,
+        );
+    }
+    if details.threads.len() > max_rows && max_rows > 0 {
+        let more = tr_args(
+            "+{n} more threads",
+            &[("n", &(details.threads.len() - max_rows).to_string())],
+        );
+        ctx.label_left(
+            x,
+            footer.center().y,
+            &more,
+            cap,
+            weight::NORMAL,
+            theme.colors.dim_text,
+        );
+    }
+
+    // ── Zamknij ──
+    let hovered = app.pointer.is_some_and(|p| footer.contains(p));
+    let fill = if hovered {
+        theme.colors.accent.scale_alpha(0.85)
+    } else {
+        theme.colors.accent
+    };
+    ctx.scene
+        .fill_rounded_rect(footer, theme.radius.small, fill);
+    ctx.label_center(
+        footer.center().x,
+        footer.center().y,
+        &tr("Close dialog"),
+        body,
+        weight::MEDIUM,
+        theme.colors.accent_fg,
+    );
+}
+
+fn handle_details_events(
+    app: &mut App,
+    events: &[Event],
+    size: Size,
+    theme: &Theme,
+    text: &TextEngine,
+) {
+    let panel = details_panel(size, theme);
+    let close_icon = details_close_icon(panel);
+    let footer = details_close_button(panel, text, theme);
+    for event in events {
+        match event {
+            Event::PointerButton(button)
+                if button.button == PointerButton::Left && button.state == ButtonState::Pressed =>
+            {
+                let pos = button.position;
+                // Zamknięcie: ×, przycisk „Zamknij” albo klik poza oknem.
+                if close_icon.contains(pos) || footer.contains(pos) || !panel.contains(pos) {
+                    app.details = None;
+                    break;
+                }
+                break;
+            }
+            Event::PointerMotion { position, .. } => app.pointer = Some(*position),
+            Event::PointerLeave => app.pointer = None,
+            Event::Key(key) if key.state == ButtonState::Pressed && key.keysym == KEY_ESCAPE => {
+                app.details = None;
+                break;
+            }
+            Event::Window(WindowEvent::CloseRequested) => app.pending_close = true,
+            _ => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1935,6 +2294,27 @@ mod tests {
         assert!(app.search.is_empty());
         assert!(!app.search.is_focused());
         assert_eq!(app.filtered.len(), 3);
+    }
+
+    #[test]
+    fn details_dialog_paints_and_closes_with_escape() {
+        let mut app = demo_app();
+        let size = Size::new(980.0, 700.0);
+        let theme = Theme::dark();
+        let text = TextEngine::system();
+        app.open_details(20);
+        assert!(app.details.is_some());
+        // Rysowanie nie może panikować także na małym oknie.
+        paint_once(&mut app, size);
+        paint_once(&mut app, Size::new(360.0, 300.0));
+        handle_events(
+            &mut app,
+            &[Event::Key(key(KEY_ESCAPE))],
+            size,
+            &theme,
+            &text,
+        );
+        assert!(app.details.is_none(), "Esc zamyka okno szczegółów");
     }
 
     #[test]

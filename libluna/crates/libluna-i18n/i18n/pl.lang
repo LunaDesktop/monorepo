@@ -1863,3 +1863,14 @@ Hide charts = Ukryj wykresy
 Process = Proces
 
 Mine = Moje
+
+# Menedżer zadań — okno „Szczegóły procesu”
+Process details = Szczegóły procesu
+Close dialog = Zamknij
+State = Stan
+Thread = Wątek
+Nice = Nice
+Disk I/O (r/w) = Dysk (odczyt/zapis)
+No access = Brak dostępu
+No thread data = Brak danych wątków
++{n} more threads = +{n} więcej wątków

@@ -5,7 +5,7 @@
 //! powtarza całego układu, a podglądy headless mogą narysować dowolny stan.
 
 use std::cmp::Ordering;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::time::{Duration, Instant};
 
@@ -21,6 +21,10 @@ use crate::procs::{self, Process, Snapshot};
 
 /// Odstęp między próbkami `/proc`.
 pub const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Odstęp próbek w oknie szczegółów procesu (wątki potrzebują dwóch próbek,
+/// żeby policzyć CPU; 400 ms to kompromis między reakcją a szumem).
+pub const DETAILS_INTERVAL: Duration = Duration::from_millis(400);
 
 /// Ile próbek trzyma historia wykresów (przy 1 s = ostatnia minuta).
 pub const CHART_SAMPLES: usize = 60;
@@ -188,8 +192,77 @@ pub enum ContextAction {
     ForceKill,
     CopyPid,
     CopyCommand,
+    Details,
     Refresh,
     ToggleScope,
+}
+
+/// Okno „Szczegóły procesu”: podsumowanie + rozbicie na wątki i I/O.
+///
+/// Wątki mają sens tylko względem dwóch próbek — dlatego trzymamy poprzednie
+/// `tid → jiffies` i liczymy CPU dokładnie tak samo jak dla procesów.
+#[derive(Debug, Clone)]
+pub struct Details {
+    pub pid: u32,
+    pub ppid: u32,
+    pub name: String,
+    pub user: String,
+    pub state: char,
+    /// Liczba wątków z `/proc/<pid>/status` (może być większa niż lista próbki).
+    pub threads_total: u32,
+    pub threads: Vec<procs::ThreadInfo>,
+    pub io: Option<procs::IoStats>,
+    /// CPU całego procesu z ostatniej migawki (dla nagłówka).
+    pub cpu_percent: f32,
+    pub rss_kib: u64,
+    pub sampled: Instant,
+    last: HashMap<u32, u64>,
+}
+
+impl Details {
+    pub fn open(
+        pid: u32,
+        ppid: u32,
+        name: String,
+        user: String,
+        state: char,
+        threads_total: u32,
+        cpu_percent: f32,
+        rss_kib: u64,
+    ) -> Self {
+        Self {
+            pid,
+            ppid,
+            name,
+            user,
+            state,
+            threads_total,
+            threads: Vec::new(),
+            io: None,
+            cpu_percent,
+            rss_kib,
+            sampled: Instant::now(),
+            last: HashMap::new(),
+        }
+    }
+
+    /// Odświeża wątki i I/O. Pierwsza próbka ma CPU wątków zerowe (brak delty).
+    pub fn sample(&mut self) {
+        let elapsed = self.sampled.elapsed();
+        self.threads = procs::read_threads(self.pid, &self.last, elapsed, procs::clock_ticks());
+        self.last = self
+            .threads
+            .iter()
+            .map(|thread| (thread.tid, thread.cpu_jiffies))
+            .collect();
+        self.io = procs::read_io(self.pid);
+        self.sampled = Instant::now();
+    }
+
+    /// Suma CPU wątków (pozwala złapać proces wielowątkowy, gdy `top` pokazuje mniej).
+    pub fn threads_cpu(&self) -> f32 {
+        self.threads.iter().map(|thread| thread.cpu_percent).sum()
+    }
 }
 
 /// Otwarte menu kontekstowe przy wskazanym procesie.
@@ -232,6 +305,8 @@ pub struct App {
     pub context: Option<ContextState>,
     pub about: Option<AlertDialog>,
     pub confirm: Option<Confirm>,
+    /// Otwarte okno szczegółów procesu (PPM → „Szczegóły procesu”).
+    pub details: Option<Details>,
     pub toast: Toast,
     pub toast_until: Option<Instant>,
     pub pointer: Option<Point>,
@@ -249,6 +324,7 @@ pub struct App {
     pub clipboard_text: Option<String>,
     pub pending_paste: bool,
     next_refresh: Instant,
+    next_details: Instant,
 }
 
 impl Default for App {
@@ -284,6 +360,7 @@ impl App {
             context: None,
             about: None,
             confirm: None,
+            details: None,
             toast: Toast::default(),
             toast_until: None,
             pointer: None,
@@ -298,6 +375,7 @@ impl App {
             clipboard_text: None,
             pending_paste: false,
             next_refresh: Instant::now() + REFRESH_INTERVAL,
+            next_details: Instant::now(),
         };
         app.recompute();
         app
@@ -521,6 +599,9 @@ impl App {
                 copy_command.disabled()
             },
             MenuEntry::separator(),
+            // Rozbicie na wątki i I/O — „co w tym procesie zjada zasoby”.
+            MenuEntry::action(tr("Process details")),
+            MenuEntry::separator(),
             MenuEntry::action(tr("Refresh")).shortcut("Ctrl+R"),
             MenuEntry::action(scope),
         ];
@@ -540,6 +621,8 @@ impl App {
                 Some(ContextAction::CopyPid),
                 Some(ContextAction::CopyCommand),
                 None,
+                Some(ContextAction::Details),
+                None,
                 Some(ContextAction::Refresh),
                 Some(ContextAction::ToggleScope),
             ],
@@ -551,6 +634,33 @@ impl App {
         if let Some(pid) = self.selected {
             self.open_context(pid, anchor);
         }
+    }
+
+    /// Otwiera okno szczegółów procesu (PPM → „Szczegóły procesu”).
+    pub fn open_details(&mut self, pid: u32) {
+        let Some(process) = self
+            .snapshot
+            .processes
+            .iter()
+            .find(|process| process.pid == pid)
+        else {
+            return;
+        };
+        let mut details = Details::open(
+            pid,
+            process.ppid,
+            process.name.clone(),
+            process.user.clone(),
+            process.state,
+            process.threads,
+            process.cpu_percent,
+            process.rss_kib,
+        );
+        details.sample();
+        self.details = Some(details);
+        self.next_details = Instant::now() + DETAILS_INTERVAL;
+        self.context = None;
+        self.menu = None;
     }
 
     /// Wykonuje pozycję menu kontekstowego.
@@ -594,6 +704,11 @@ impl App {
             ContextAction::Refresh => {
                 self.refresh();
                 self.show_toast(tr("Process list refreshed"));
+            }
+            ContextAction::Details => {
+                if let Some(pid) = pid {
+                    self.open_details(pid);
+                }
             }
             ContextAction::ToggleScope => self.toggle_only_mine(),
         }
@@ -673,6 +788,24 @@ impl App {
             .map(|process| (process.pid, process.cpu_percent));
         self.charts.record(&self.snapshot.system, selected);
         self.next_refresh = Instant::now() + REFRESH_INTERVAL;
+        // Nagłówek otwartych szczegółów ma świeże CPU/RAM z migawki procesów
+        // (wątki mają własny rytm próbkowania — patrz `update`).
+        if let Some(details) = self.details.as_mut() {
+            if let Some(process) = self
+                .snapshot
+                .processes
+                .iter()
+                .find(|process| process.pid == details.pid)
+            {
+                details.cpu_percent = process.cpu_percent;
+                details.rss_kib = process.rss_kib;
+                details.name = process.name.clone();
+                details.user = process.user.clone();
+                details.state = process.state;
+                details.threads_total = process.threads;
+                details.ppid = process.ppid;
+            }
+        }
     }
 
     pub fn update(&mut self, dt: f64) -> Update {
@@ -690,7 +823,16 @@ impl App {
             self.refresh();
         }
 
-        let delay = if self.toast.is_open() || self.toast.is_animating() {
+        // Otwarte szczegóły próbkujemy częściej niż listę — dopiero wtedy widać,
+        // który wątek naprawdę pracuje, a nie tylko średnią całego procesu.
+        if self.details.is_some() && self.focused && Instant::now() >= self.next_details {
+            if let Some(details) = self.details.as_mut() {
+                details.sample();
+            }
+            self.next_details = Instant::now() + DETAILS_INTERVAL;
+        }
+
+        let mut delay = if self.toast.is_open() || self.toast.is_animating() {
             Some(Duration::from_millis(100))
         } else {
             Some(
@@ -699,6 +841,13 @@ impl App {
                     .max(Duration::from_millis(50)),
             )
         };
+        if self.details.is_some() {
+            let details_delay = self
+                .next_details
+                .saturating_duration_since(Instant::now())
+                .max(Duration::from_millis(50));
+            delay = Some(delay.map_or(details_delay, |current| current.min(details_delay)));
+        }
         animating |= self.toast.is_animating();
         Update { animating, delay }
     }
@@ -1071,9 +1220,34 @@ mod tests {
                 ContextAction::ForceKill,
                 ContextAction::CopyPid,
                 ContextAction::CopyCommand,
+                ContextAction::Details,
                 ContextAction::Refresh,
                 ContextAction::ToggleScope,
             ]
+        );
+    }
+
+    #[test]
+    fn details_action_opens_the_thread_breakdown() {
+        let mut app = app_with(vec![process(20, "firefox", 1000, 25.0, 500)]);
+        app.uid = 1000;
+        app.open_context(20, Rect::from_xywh(10.0, 10.0, 1.0, 1.0));
+        let index = app
+            .context
+            .as_ref()
+            .expect("context")
+            .actions
+            .iter()
+            .position(|action| *action == Some(ContextAction::Details))
+            .expect("pozycja szczegółów");
+        app.run_context(index);
+        let details = app.details.as_ref().expect("szczegóły procesu");
+        assert_eq!(details.pid, 20);
+        assert_eq!(details.name, "firefox");
+        assert_eq!(details.user, "patryk");
+        assert!(
+            app.context.is_none(),
+            "menu zamyka się po otwarciu szczegółów"
         );
     }
 

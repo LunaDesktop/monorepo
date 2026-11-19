@@ -443,17 +443,29 @@ impl App {
     }
 
     fn copy_selection(&mut self, frame: &mut Frame) {
-        let Some(selection) = self.selection else {
+        let Some(text) = self.selected_text() else {
             return;
         };
-        let Some(pane) = self.panes.get(self.active) else {
-            return;
-        };
+        frame.copy_to_clipboard(text);
+    }
+
+    /// Wysyła bieżące zaznaczenie do **selekcji pierwotnej** (PRIMARY).
+    ///
+    /// Tak działa X11: zaznaczenie od razu trafia do PRIMARY i środkowy przycisk
+    /// wkleja je w innym oknie, bez `Ctrl+C`.
+    fn copy_selection_to_primary(&mut self, frame: &mut Frame) {
+        if let Some(text) = self.selected_text() {
+            frame.copy_to_primary(text);
+        }
+    }
+
+    /// Zaznaczony tekst z aktywnej zakładki (przycięty po bokach, jak w Xtermie).
+    fn selected_text(&self) -> Option<String> {
+        let selection = self.selection?;
+        let pane = self.panes.get(self.active)?;
         let (start, end) = selection.normalized();
         let text = pane.term.text_between(start, end);
-        if !text.is_empty() {
-            frame.copy_to_clipboard(text);
-        }
+        (!text.is_empty()).then_some(text)
     }
 
     fn paste(&mut self, text: &str) {
@@ -921,10 +933,15 @@ impl App {
                 if self.selection.is_some_and(Selection::is_empty) {
                     self.selection = None;
                 }
+                // Zaznaczenie od razu staje się PRIMARY — środkowy przycisk
+                // w innym oknie wklei je bez `Ctrl+Shift+C`.
+                self.copy_selection_to_primary(frame);
             }
             (PointerButton::Middle, ButtonState::Pressed) => {
                 if !self.settings_open && lay.area.contains(p) {
-                    frame.paste_from_clipboard();
+                    // Środkowy przycisk = selekcja pierwotna (konwencja X11),
+                    // a nie schowek; `Ctrl+Shift+V` nadal wkleja schowek.
+                    frame.paste_from_primary();
                 }
             }
             (PointerButton::Right, ButtonState::Pressed) => {

@@ -1821,3 +1821,14 @@ Hide charts = Hide charts
 Process = Process
 
 Mine = Mine
+
+# Menedżer zadań — okno „Szczegóły procesu”
+Process details = Process details
+Close dialog = Close
+State = State
+Thread = Thread
+Nice = Nice
+Disk I/O (r/w) = Disk I/O (r/w)
+No access = No access
+No thread data = No thread data
++{n} more threads = +{n} more threads

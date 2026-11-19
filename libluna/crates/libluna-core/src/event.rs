@@ -126,6 +126,44 @@ pub enum WindowEvent {
     Redraw,
 }
 
+/// Zawartość schowka w dowolnym formacie: obraz, HTML, lista plików itd.
+///
+/// Zwykły tekst nadal przychodzi jako [`Event::Paste`] — ten typ jest dla treści,
+/// której nie da się sensownie podać jako `String` (`image/png`, `text/html`,
+/// `text/uri-list`). Dzięki temu aplikacja może odróżnić „wklej tekst” od
+/// „wklej obraz”, zamiast zgadywać po bajtach.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClipboardData {
+    /// Typ MIME, np. `image/png`, `text/html`, `text/uri-list`.
+    pub mime: String,
+    /// Surowa zawartość w tym formacie.
+    pub bytes: Vec<u8>,
+}
+
+impl ClipboardData {
+    /// Świeżo skopiowany tekst — jedyny format, który oferujemy w kilku wariantach.
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            mime: "text/plain;charset=utf-8".to_owned(),
+            bytes: text.into().into_bytes(),
+        }
+    }
+
+    /// Czy treść da się pokazać jako tekst (UTF-8, HTML, lista URI).
+    pub fn is_text(&self) -> bool {
+        let base = self.mime.split(';').next().unwrap_or("").trim();
+        base.starts_with("text/")
+            || base.eq_ignore_ascii_case("UTF8_STRING")
+            || base.eq_ignore_ascii_case("STRING")
+    }
+
+    /// Treść jako tekst (zamiana niepoprawnych bajtów na `�`), jeśli format jest tekstowy.
+    pub fn as_str(&self) -> Option<String> {
+        self.is_text()
+            .then(|| String::from_utf8_lossy(&self.bytes).into_owned())
+    }
+}
+
 /// Zunifikowane zdarzenie trafiające do drzewa widgetów.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
@@ -143,6 +181,8 @@ pub enum Event {
     Text(String),
     /// Tekst wklejony ze schowka systemowego (odpowiedź na `Frame::paste_from_clipboard`).
     Paste(String),
+    /// Treść schowka inna niż czysty tekst — odpowiedź na `Frame::paste_mime`.
+    Clipboard(ClipboardData),
     /// Przeciąganie z innej aplikacji jest nad oknem (`position` w pikselach logicznych).
     ///
     /// `move_hint` mówi, że odbiorca może przenieść pliki zamiast je kopiować

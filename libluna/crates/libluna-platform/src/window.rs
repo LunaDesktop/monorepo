@@ -18,8 +18,9 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use libluna_core::{
-    Accent, ButtonState, Color, Event, IconSettings, KeyEvent, Modifiers, Point, PointerButton,
-    PointerEvent, Rect, ScrollEvent, Size, Theme, ThemePreference, ThemeSettings, WindowEvent,
+    Accent, ButtonState, ClipboardData, Color, Event, IconSettings, KeyEvent, Modifiers, Point,
+    PointerButton, PointerEvent, Rect, ScrollEvent, Size, Theme, ThemePreference, ThemeSettings,
+    WindowEvent,
 };
 use libluna_render::{
     diff_bounds, diff_bounds_in, gpu::GpuRenderer, DamageRect, Renderer, Scene, SoftwareRenderer,
@@ -29,6 +30,10 @@ use libluna_render::{
 use smithay_client_toolkit::reexports::calloop::{EventLoop, LoopHandle};
 use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
 use smithay_client_toolkit::reexports::csd_frame::WindowState;
+use smithay_client_toolkit::reexports::protocols::wp::primary_selection::zv1::client::{
+    zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1,
+    zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1,
+};
 use smithay_client_toolkit::reexports::protocols::xdg::shell::client::xdg_toplevel;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
@@ -39,9 +44,16 @@ use smithay_client_toolkit::{
         DataDeviceManagerState, ReadPipe, WritePipe,
     },
     delegate_compositor, delegate_data_device, delegate_keyboard, delegate_layer, delegate_output,
-    delegate_pointer, delegate_registry, delegate_seat, delegate_shm, delegate_xdg_shell,
-    delegate_xdg_window,
+    delegate_pointer, delegate_primary_selection, delegate_registry, delegate_seat, delegate_shm,
+    delegate_xdg_shell, delegate_xdg_window,
     output::{OutputHandler, OutputState},
+    primary_selection::{
+        device::{
+            PrimarySelectionDevice, PrimarySelectionDeviceData, PrimarySelectionDeviceHandler,
+        },
+        selection::{PrimarySelectionSource, PrimarySelectionSourceHandler},
+        PrimarySelectionManagerState,
+    },
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
     seat::{
@@ -76,6 +88,11 @@ use wayland_client::{
     },
     Connection, Dispatch, Proxy, QueueHandle,
 };
+
+/// Maksymalny rozmiar tekstu wczytywanego ze schowka (ochrona przed OOM).
+const TEXT_CLIPBOARD_LIMIT: usize = 4 * 1024 * 1024;
+/// Maksymalny rozmiar danych binarnych (obraz PNG, HTML, lista plików).
+const BINARY_CLIPBOARD_LIMIT: usize = 32 * 1024 * 1024;
 
 /// Minimalny odstęp między klatkami wywołanymi **wyłącznie** ruchem kursora.
 /// Bez tego każdy ruch myszy (setki zdarzeń/s) wysyłałby cały bufor 1920×680.
@@ -389,12 +406,21 @@ pub struct WindowActions {
     pub move_requested: bool,
     /// Żądanie zmiany rozmiaru; bitmaska: 1 = góra, 2 = dół, 4 = lewo, 8 = prawo.
     pub resize_requested: Option<u8>,
-    /// Tekst do umieszczenia w systemowym schowku (`wl_data_device`).
-    pub clipboard: Option<String>,
+    /// Treść do umieszczenia w systemowym schowku (`wl_data_device`).
+    ///
+    /// Tekst to `ClipboardData::text(…)`; obrazy i inne formaty idą przez
+    /// [`Frame::copy_bytes`].
+    pub clipboard: Option<ClipboardData>,
     /// Pliki do przeciągnięcia poza aplikację (Wayland DnD, `text/uri-list`).
     pub drag: Option<Vec<PathBuf>>,
     /// Prośba o odczyt schowka; wynik przyjdzie jako [`Event::Paste`].
     pub paste_requested: bool,
+    /// Prośba o odczyt konkretnego typu MIME; wynik jako [`Event::Clipboard`].
+    pub paste_mime: Option<String>,
+    /// Tekst do **selekcji pierwotnej** (`zwp_primary_selection_v1`, middle-click).
+    pub primary: Option<String>,
+    /// Prośba o odczyt selekcji pierwotnej; wynik jako [`Event::Paste`].
+    pub primary_paste: bool,
     /// Nowy tytuł okna (dla `xdg_toplevel`); używane przy zmianie języka.
     pub title: Option<String>,
 }
@@ -480,7 +506,19 @@ impl Frame<'_> {
     /// Schowek jest ustawiany po zakończeniu klatki, z serialem ostatniego
     /// zdarzenia wejścia — dlatego wywołuj to w reakcji na kliknięcie lub klawisz.
     pub fn copy_to_clipboard(&mut self, text: impl Into<String>) {
-        self.actions.clipboard = Some(text.into());
+        self.actions.clipboard = Some(ClipboardData::text(text));
+    }
+
+    /// Kopiuje dowolne dane do systemowego schowka (`image/png`, `text/html`,
+    /// `text/uri-list`, …).
+    ///
+    /// Odbiorca dostaje dokładnie ten typ MIME (bez konwersji), więc nie trzeba
+    /// zgadywać, co aplikacja potrafi wkleić — decyduje typ oferty.
+    pub fn copy_bytes(&mut self, mime: impl Into<String>, bytes: impl Into<Vec<u8>>) {
+        self.actions.clipboard = Some(ClipboardData {
+            mime: mime.into(),
+            bytes: bytes.into(),
+        });
     }
 
     /// Prosi o odczyt systemowego schowka.
@@ -489,6 +527,28 @@ impl Frame<'_> {
     /// [`Event::Paste`](libluna_core::Event::Paste) w jednej z kolejnych klatek.
     pub fn paste_from_clipboard(&mut self) {
         self.actions.paste_requested = true;
+    }
+
+    /// Prosi o odczyt schowka w **konkretnym formacie** (np. `image/png`).
+    ///
+    /// Wynik wraca jako [`Event::Clipboard`](libluna_core::Event::Clipboard) z bajtami
+    /// dokładnie tego typu; brak oferty w tym formacie = brak zdarzenia.
+    pub fn paste_mime(&mut self, mime: impl Into<String>) {
+        self.actions.paste_mime = Some(mime.into());
+    }
+
+    /// Wstawia tekst do **selekcji pierwotnej** (X11 PRIMARY, wklejanie środkowym
+    /// przyciskiem). Wywołuj przy zmianie zaznaczenia, tak jak `copy_to_clipboard`.
+    pub fn copy_to_primary(&mut self, text: impl Into<String>) {
+        self.actions.primary = Some(text.into());
+    }
+
+    /// Prosi o odczyt selekcji pierwotnej; wynik wraca jako [`Event::Paste`].
+    ///
+    /// To jest zachowanie środkowego przycisku myszy: aplikacja decyduje, czy
+    /// w danym miejscu wkleić zaznaczenie (pole tekstowe), czy zignorować zdarzenie.
+    pub fn paste_from_primary(&mut self) {
+        self.actions.primary_paste = true;
     }
 
     /// Rozpoczyna przeciąganie plików **poza aplikację** (Wayland DnD).
@@ -715,16 +775,24 @@ where
         .handle()
         .insert_source(ping_source, |_, _, app: &mut App| {
             app.needs_redraw = true;
-            // Wątek odczytu schowka zakończył pracę — przekaż tekst do aplikacji.
+            // Wątek odczytu schowka zakończył pracę — przekaż treść do aplikacji.
             let pasted = app
-                .paste_text
+                .paste_data
                 .lock()
                 .ok()
                 .and_then(|mut guard| guard.take());
-            if let Some(text) = pasted {
-                if !text.is_empty() {
-                    app.queue(Event::Paste(text));
+            match pasted {
+                // Tekst wraca starą drogą (`Event::Paste`), żeby nie zmieniać
+                // kontraktu wszystkich aplikacji; resztę formatów dostaje
+                // `Event::Clipboard` z typem MIME.
+                Some(data) if data.is_text() => {
+                    let text = data.as_str().unwrap_or_default();
+                    if !text.is_empty() {
+                        app.queue(Event::Paste(text));
+                    }
                 }
+                Some(data) if !data.bytes.is_empty() => app.queue(Event::Clipboard(data)),
+                _ => {}
             }
             // Wątek odczytu upuszczonych plików (`text/uri-list`) zakończył pracę.
             let dropped = app.drop_data.lock().ok().and_then(|mut guard| guard.take());
@@ -744,6 +812,8 @@ where
     let shm = Shm::bind(&globals, &qh).map_err(|e| format!("wl_shm unavailable: {e}"))?;
     // Schowek jest opcjonalny: bez `wl_data_device_manager` reszta UI działa dalej.
     let data_device_manager = DataDeviceManagerState::bind(&globals, &qh).ok();
+    // Selekcja pierwotna też — starsze kompozytory jej nie mają.
+    let primary_manager = PrimarySelectionManagerState::bind(&globals, &qh).ok();
 
     // Stan wyjść tworzymy **przed** powierzchnią warstwową — pozwala to wybrać monitor,
     // do którego kotwiczymy panel (`LUNA_OUTPUT=<indeks>`). Dzięki temu każdy monitor ma
@@ -862,8 +932,12 @@ where
         axis_source: None,
         data_device_manager,
         data_device: None,
+        primary_manager,
+        primary_device: None,
         clipboard_source: None,
-        clipboard_text: None,
+        clipboard_data: None,
+        primary_source: None,
+        primary_text: None,
         drag_source: None,
         drag_paths: None,
         drag_pos: None,
@@ -871,7 +945,7 @@ where
         drop_data: Arc::new(Mutex::new(None)),
         drop_busy: Arc::new(AtomicBool::new(false)),
         conn: conn.clone(),
-        paste_text: Arc::new(Mutex::new(None)),
+        paste_data: Arc::new(Mutex::new(None)),
         paste_busy: Arc::new(AtomicBool::new(false)),
         modifiers: Modifiers::NONE,
         renderer: new_renderer(config.monospace, iw, ih),
@@ -1019,11 +1093,17 @@ struct App {
     data_device_manager: Option<DataDeviceManagerState>,
     /// Urządzenie schowka dla aktywnego seat.
     data_device: Option<DataDevice>,
+    /// Selekcja pierwotna (`zwp_primary_selection_v1`) — wklejanie środkowym przyciskiem.
+    primary_manager: Option<PrimarySelectionManagerState>,
+    primary_device: Option<PrimarySelectionDevice>,
     /// Trzymane, dopóki nasza oferta jest aktualną selekcją — inaczej `Drop`
     /// zniszczyłby `wl_data_source` i schowek „umarł” zaraz po skopiowaniu.
     clipboard_source: Option<CopyPasteSource>,
-    /// Tekst aktualnie oferowany w schowku (wysyłany na żądanie innej aplikacji).
-    clipboard_text: Option<String>,
+    /// Treść aktualnie oferowana w schowku (wysyłana na żądanie innej aplikacji).
+    clipboard_data: Option<ClipboardData>,
+    /// Źródło i treść selekcji pierwotnej (PRIMARY).
+    primary_source: Option<PrimarySelectionSource>,
+    primary_text: Option<String>,
     /// Aktywne źródło przeciągania plików — musi żyć do końca operacji.
     drag_source: Option<DragSource>,
     /// Pliki oferowane w trwającym przeciąganiu.
@@ -1038,8 +1118,8 @@ struct App {
     drop_busy: Arc<AtomicBool>,
     /// Połączenie Waylanda — `flush` po zleceniu odczytu schowka.
     conn: Connection,
-    /// Wynik odczytu schowka, przekazywany z wątku do pętli.
-    paste_text: Arc<Mutex<Option<String>>>,
+    /// Wynik odczytu schowka/selekcji, przekazywany z wątku do pętli.
+    paste_data: Arc<Mutex<Option<ClipboardData>>>,
     /// Jeden odczyt schowka naraz.
     paste_busy: Arc<AtomicBool>,
     modifiers: Modifiers,
@@ -1315,25 +1395,33 @@ impl App {
 
     /// Wykonuje akcje okna zgłoszone w trakcie klatki.
     fn apply_actions(&mut self) {
-        if let Some(text) = self.actions.clipboard.take() {
-            self.set_clipboard(text);
+        if let Some(data) = self.actions.clipboard.take() {
+            self.set_clipboard(data);
         }
         if let Some(paths) = self.actions.drag.take() {
             self.start_file_drag(paths);
         }
         if self.actions.paste_requested {
             self.actions.paste_requested = false;
-            // Jesteśmy właścicielem schowka — mamy tekst lokalnie. Odpytywanie
-            // własnego źródła przez kompozytor bywa zawodne (część kompozytorów
-            // nie wysyła źródłu jego własnej oferty), a to najczęstszy przypadek:
-            // kopiuj i wklej w tym samym terminalu.
+            self.paste_from_own_or_read(None);
+        }
+        if let Some(mime) = self.actions.paste_mime.take() {
+            self.paste_from_own_or_read(Some(mime));
+        }
+        if let Some(text) = self.actions.primary.take() {
+            self.set_primary(text);
+        }
+        if self.actions.primary_paste {
+            self.actions.primary_paste = false;
+            // Selekcja pierwotna często jest nasza (właśnie zaznaczyliśmy tekst),
+            // więc nie ma po co pytać kompozytora.
             let local = self
-                .clipboard_source
+                .primary_source
                 .as_ref()
-                .and_then(|_| self.clipboard_text.clone());
+                .and_then(|_| self.primary_text.clone());
             match local {
                 Some(text) => self.queue(Event::Paste(text)),
-                None => self.request_paste(),
+                None => self.request_primary_paste(),
             }
         }
         if self.actions.close {
@@ -1383,19 +1471,60 @@ impl App {
         }
     }
 
+    /// Wkleja z **własnego** źródła (bez rundy przez kompozytor) albo zleca odczyt
+    /// w tle. Własna oferta to najczęstszy przypadek (kopiuj → wklej w tym oknie),
+    /// a część kompozytorów nie wysyła źródłu jego własnej oferty.
+    fn paste_from_own_or_read(&mut self, wanted: Option<String>) {
+        if self.clipboard_source.is_some() {
+            if let Some(data) = self.clipboard_data.as_ref() {
+                let matches = match &wanted {
+                    Some(mime) => data.mime.eq_ignore_ascii_case(mime),
+                    None => data.is_text(),
+                };
+                if matches {
+                    if wanted.is_none() {
+                        if let Some(text) = data.as_str() {
+                            self.queue(Event::Paste(text));
+                            return;
+                        }
+                    } else {
+                        self.queue(Event::Clipboard(data.clone()));
+                        return;
+                    }
+                }
+            }
+        }
+        self.request_paste(wanted);
+    }
+
     /// Ustawia systemowy schowek przez `wl_data_device`.
     ///
     /// `wl_data_source` musi pozostać żywe, dopóki inne aplikacje mogą czytać
     /// schowek — dlatego trzymamy je w `clipboard_source`, a treść w
-    /// `clipboard_text` (wysyłana w [`DataSourceHandler::send_request`]).
-    fn set_clipboard(&mut self, text: String) {
+    /// `clipboard_data` (wysyłana w [`DataSourceHandler::send_request`]).
+    fn set_clipboard(&mut self, data: ClipboardData) {
         if self.last_serial == 0 {
             return;
         }
         let (Some(manager), Some(device)) = (&self.data_device_manager, &self.data_device) else {
             return;
         };
-        let source = manager.create_copy_paste_source(
+        let source = manager.create_copy_paste_source(&self.qh, clipboard_offer_mimes(&data));
+        source.set_selection(device, self.last_serial);
+        self.clipboard_data = Some(data);
+        // Poprzednie źródło zostanie zniszczone dopiero po podmianie — zgodnie z protokołem.
+        self.clipboard_source = Some(source);
+    }
+
+    /// Ustawia selekcję pierwotną (PRIMARY). Nie wymaga formatów — to zawsze tekst.
+    fn set_primary(&mut self, text: String) {
+        let (Some(manager), Some(device)) = (&self.primary_manager, &self.primary_device) else {
+            return;
+        };
+        if self.last_serial == 0 {
+            return;
+        }
+        let source = manager.create_selection_source(
             &self.qh,
             [
                 "text/plain;charset=utf-8",
@@ -1405,9 +1534,8 @@ impl App {
             ],
         );
         source.set_selection(device, self.last_serial);
-        self.clipboard_text = Some(text);
-        // Poprzednie źródło zostanie zniszczone dopiero po podmianie — zgodnie z protokołem.
-        self.clipboard_source = Some(source);
+        self.primary_text = Some(text);
+        self.primary_source = Some(source);
     }
 
     /// Rozpoczyna Wayland DnD z listą plików (`text/uri-list`).
@@ -1437,8 +1565,11 @@ impl App {
         self.drag_source = Some(source);
     }
 
-    /// Wczytuje tekst ze schowka w wątku tła (odpytanie oferty może czekać na źródło).
-    fn request_paste(&mut self) {
+    /// Wczytuje tekst (lub wskazany format) ze schowka w wątku tła.
+    ///
+    /// Odpytanie oferty może czekać na źródło, więc nigdy nie robimy tego w pętli
+    /// zdarzeń; wynik trafia do `paste_data` i budzi pętlę.
+    fn request_paste(&mut self, wanted: Option<String>) {
         if self.paste_busy.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -1449,18 +1580,40 @@ impl App {
         let conn = self.conn.clone();
         // Serial ostatniego wejścia jest wymagany przez `wl_data_offer.accept`.
         let serial = self.last_serial;
-        let slot = Arc::clone(&self.paste_text);
+        self.spawn_paste_reader(move || read_selection(&device, &conn, serial, wanted.as_deref()));
+    }
+
+    /// To samo dla selekcji pierwotnej (środkowy przycisk myszy).
+    fn request_primary_paste(&mut self) {
+        if self.paste_busy.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let Some(device) = self.primary_device.as_ref().map(|d| d.inner().clone()) else {
+            self.paste_busy.store(false, Ordering::SeqCst);
+            return;
+        };
+        let conn = self.conn.clone();
+        let serial = self.last_serial;
+        self.spawn_paste_reader(move || read_primary(&device, &conn, serial));
+    }
+
+    /// Uruchamia wątek czytający schowek i przekazujący wynik do pętli.
+    fn spawn_paste_reader(
+        &mut self,
+        read: impl FnOnce() -> Option<ClipboardData> + Send + 'static,
+    ) {
+        let slot = Arc::clone(&self.paste_data);
         let busy = Arc::clone(&self.paste_busy);
         let wake = self.wake.clone();
         let spawned = std::thread::Builder::new()
             .name("luna-paste".into())
             .spawn(move || {
-                let text = read_clipboard(&device, &conn, serial);
+                let data = read();
                 if let Ok(mut guard) = slot.lock() {
-                    *guard = text;
+                    *guard = data;
                 }
                 busy.store(false, Ordering::SeqCst);
-                // Wybudź pętlę: wynik trafi do aplikacji jako `Event::Paste`.
+                // Wybudź pętlę: wynik trafi do aplikacji jako `Paste`/`Clipboard`.
                 wake.wake();
             });
         if spawned.is_err() {
@@ -1794,15 +1947,21 @@ fn copy_region(dst: &mut [u8], src: &[u8], width: u32, damage: DamageRect, direc
     }
 }
 
-/// Czyta bieżącą selekcję schowka jako tekst (wątek tła).
+/// Czyta bieżącą selekcję schowka (wątek tła).
 ///
-/// Preferujemy UTF-8; limit 4 MiB chroni przed „nieskończonym” schowkiem.
+/// `wanted` to konkretny typ MIME (`None` = najlepszy wariant tekstu). Dzięki
+/// temu jedna ścieżka obsługuje `text/plain` i np. `image/png`.
 /// `flush` jest konieczny — bez niego żądanie `wl_data_offer.receive` nie
 /// dotarłoby do źródła i odczyt czekałby w nieskończoność.
-fn read_clipboard(device: &WlDataDevice, conn: &Connection, serial: u32) -> Option<String> {
+fn read_selection(
+    device: &WlDataDevice,
+    conn: &Connection,
+    serial: u32,
+    wanted: Option<&str>,
+) -> Option<ClipboardData> {
     let data = device.data::<DataDeviceData>()?;
     let offer = data.selection_offer()?;
-    let mime = pick_clipboard_mime(&offer)?;
+    let mime = pick_offer_mime(&offer, wanted)?;
     // `accept` informuje źródło o wybranym typie. Część źródeł (Xwayland,
     // niektóre narzędzia CLI) czeka na nie przed wysłaniem danych; bez tego
     // wklejanie działało tylko między aplikacjami libLuny. Wymaga świeżego
@@ -1810,10 +1969,45 @@ fn read_clipboard(device: &WlDataDevice, conn: &Connection, serial: u32) -> Opti
     if serial != 0 {
         offer.inner().accept(serial, Some(mime.clone()));
     }
-    let pipe = offer.receive(mime).ok()?;
+    let pipe = offer.receive(mime.clone()).ok()?;
     let _ = conn.flush();
-    let bytes = read_selection_pipe(&pipe)?;
-    Some(String::from_utf8_lossy(&bytes).into_owned())
+    let limit = if wanted.is_some() {
+        BINARY_CLIPBOARD_LIMIT
+    } else {
+        TEXT_CLIPBOARD_LIMIT
+    };
+    let bytes = read_selection_pipe(&pipe, limit)?;
+    Some(ClipboardData { mime, bytes })
+}
+
+/// Czyta selekcję pierwotną (PRIMARY) — zawsze jako tekst.
+///
+/// SCTK nie wystawia `zwp_primary_selection_offer_v1.accept`, ale Wayland-native
+/// źródła wysyłają dane po samym `receive`; `accept` jest tylko podpowiedzią dla
+/// źródeł X11, więc most X11 ↔ Wayland obsługuje to osobno XWM.
+fn read_primary(
+    device: &ZwpPrimarySelectionDeviceV1,
+    conn: &Connection,
+    _serial: u32,
+) -> Option<ClipboardData> {
+    let data = device.data::<PrimarySelectionDeviceData>()?;
+    let offer = data.selection_offer()?;
+    let mime = offer.with_mime_types(|types| pick_text_mime(types))?;
+    let pipe = offer.receive(mime.clone()).ok()?;
+    let _ = conn.flush();
+    let bytes = read_selection_pipe(&pipe, TEXT_CLIPBOARD_LIMIT)?;
+    Some(ClipboardData { mime, bytes })
+}
+
+/// Typ MIME, o który pytamy ofertę: konkretny (`wanted`) albo najlepszy tekst.
+fn pick_offer_mime(offer: &SelectionOffer, wanted: Option<&str>) -> Option<String> {
+    offer.with_mime_types(|types| match wanted {
+        Some(wanted) => types
+            .iter()
+            .find(|available| available.eq_ignore_ascii_case(wanted))
+            .cloned(),
+        None => pick_text_mime(types),
+    })
 }
 
 /// Wybiera najlepszy dostępny typ MIME dla wklejanego tekstu.
@@ -1821,14 +2015,33 @@ fn read_clipboard(device: &WlDataDevice, conn: &Connection, serial: u32) -> Opti
 /// Kolejność: UTF-8 → `text/plain` → `UTF8_STRING` → starsze typy X11.
 /// Porównujemy bez wielkości liter, bo klienci piszą `charset=UTF-8`
 /// i `charset=utf-8` zamiennie.
-fn pick_clipboard_mime(offer: &SelectionOffer) -> Option<String> {
-    offer.with_mime_types(|types| {
-        types
-            .iter()
-            .filter_map(|available| clipboard_mime_rank(available).map(|rank| (rank, available)))
-            .min_by_key(|(rank, _)| *rank)
-            .map(|(_, available)| available.clone())
-    })
+fn pick_text_mime(types: &[String]) -> Option<String> {
+    types
+        .iter()
+        .filter_map(|available| clipboard_mime_rank(available).map(|rank| (rank, available)))
+        .min_by_key(|(rank, _)| *rank)
+        .map(|(_, available)| available.clone())
+}
+
+/// Typy MIME oferowane dla danej treści.
+///
+/// Tekst dostaje wszystkie warianty, jakie rozumieją starsze aplikacje X11;
+/// obraz czy HTML tylko swój typ (konwersja „w locie” byłaby zgadywaniem).
+fn clipboard_offer_mimes(data: &ClipboardData) -> Vec<String> {
+    let mut out = vec![data.mime.clone()];
+    if data.is_text() {
+        for mime in [
+            "text/plain;charset=utf-8",
+            "text/plain",
+            "UTF8_STRING",
+            "STRING",
+        ] {
+            if !out.iter().any(|existing| existing == mime) {
+                out.push(mime.to_owned());
+            }
+        }
+    }
+    out
 }
 
 /// Ranga typu MIME (mniejsza = lepsza); `None` dla typów nietekstowych.
@@ -1853,10 +2066,9 @@ fn clipboard_mime_rank(mime: &str) -> Option<u8> {
 ///
 /// Źródło schowka może nie zamknąć `fd` (np. gdy aplikacja padnie) — `read_to_end`
 /// zawiesiłby wątek na zawsze i zablokował kolejne wklejania.
-fn read_selection_pipe(pipe: &ReadPipe) -> Option<Vec<u8>> {
+fn read_selection_pipe(pipe: &ReadPipe, limit: usize) -> Option<Vec<u8>> {
     use std::os::fd::AsRawFd;
 
-    const LIMIT: usize = 4 * 1024 * 1024;
     let fd = pipe.as_raw_fd();
     let mut out = Vec::new();
     let mut buf = [0u8; 16 * 1024];
@@ -1890,8 +2102,8 @@ fn read_selection_pipe(pipe: &ReadPipe) -> Option<Vec<u8>> {
         let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
         if n > 0 {
             out.extend_from_slice(&buf[..n as usize]);
-            if out.len() >= LIMIT {
-                out.truncate(LIMIT);
+            if out.len() >= limit {
+                out.truncate(limit);
                 break;
             }
         } else if n == 0 {
@@ -2123,6 +2335,12 @@ impl SeatHandler for App {
                 self.data_device = Some(manager.get_data_device(qh, &seat));
             }
         }
+        // Selekcja pierwotna (PRIMARY) ma własne urządzenie.
+        if self.primary_device.is_none() {
+            if let Some(manager) = &self.primary_manager {
+                self.primary_device = Some(manager.get_selection_device(qh, &seat));
+            }
+        }
         if capability == Capability::Keyboard && self.keyboard.is_none() {
             if let Ok(keyboard) = self.seat_state.get_keyboard(qh, &seat, None) {
                 self.keyboard = Some(keyboard);
@@ -2351,25 +2569,36 @@ impl DataSourceHandler for App {
             .as_ref()
             .is_some_and(|owned| owned.inner().id() == source.id());
         let body = if is_clipboard {
-            self.clipboard_text.clone()
-        } else if is_drag {
-            self.drag_paths.as_deref().map(|paths| {
-                if mime.contains("uri-list") {
-                    uri_list(paths)
-                } else {
-                    paths
-                        .iter()
-                        .map(|path| path.display().to_string())
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                }
+            // Ofiarujemy konkretne typy; żądanie spoza listy (np. `text/plain` dla
+            // PNG) kończy się pustym strumieniem, a nie uszkodzonymi danymi.
+            self.clipboard_data.as_ref().and_then(|data| {
+                let requested = mime.split(';').next().unwrap_or("").trim();
+                let offered = data.mime.split(';').next().unwrap_or("").trim();
+                let text_fallback = data.is_text() && clipboard_mime_rank(&mime).is_some();
+                (requested.eq_ignore_ascii_case(offered) || text_fallback)
+                    .then(|| data.bytes.clone())
             })
+        } else if is_drag {
+            self.drag_paths
+                .as_deref()
+                .map(|paths| {
+                    if mime.contains("uri-list") {
+                        uri_list(paths)
+                    } else {
+                        paths
+                            .iter()
+                            .map(|path| path.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    }
+                })
+                .map(String::into_bytes)
         } else {
             None
         };
         if let Some(body) = body {
             // Treść jest mała (limit pipe'a to zwykle 64 KiB), więc nie blokujemy pętli.
-            let _ = fd.write_all(body.as_bytes());
+            let _ = fd.write_all(&body);
             let _ = fd.flush();
         }
     }
@@ -2382,7 +2611,7 @@ impl DataSourceHandler for App {
             .is_some_and(|owned| owned.inner().id() == source.id());
         if is_clipboard {
             self.clipboard_source = None;
-            self.clipboard_text = None;
+            self.clipboard_data = None;
         }
         let is_drag = self
             .drag_source
@@ -2409,6 +2638,56 @@ impl DataSourceHandler for App {
     }
 
     fn action(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource, _: DndAction) {}
+}
+
+impl PrimarySelectionDeviceHandler for App {
+    fn selection(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &ZwpPrimarySelectionDeviceV1,
+    ) {
+    }
+}
+
+impl PrimarySelectionSourceHandler for App {
+    fn send_request(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        source: &ZwpPrimarySelectionSourceV1,
+        _mime: String,
+        mut fd: WritePipe,
+    ) {
+        use std::io::Write;
+        let is_primary = self
+            .primary_source
+            .as_ref()
+            .is_some_and(|owned| owned.inner().id() == source.id());
+        if !is_primary {
+            return;
+        }
+        if let Some(text) = self.primary_text.as_deref() {
+            let _ = fd.write_all(text.as_bytes());
+            let _ = fd.flush();
+        }
+    }
+
+    fn cancelled(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        source: &ZwpPrimarySelectionSourceV1,
+    ) {
+        let is_primary = self
+            .primary_source
+            .as_ref()
+            .is_some_and(|owned| owned.inner().id() == source.id());
+        if is_primary {
+            self.primary_source = None;
+            self.primary_text = None;
+        }
+    }
 }
 
 impl DataDeviceHandler for App {
@@ -2561,6 +2840,7 @@ delegate_xdg_shell!(App);
 delegate_xdg_window!(App);
 delegate_layer!(App);
 delegate_data_device!(App);
+delegate_primary_selection!(App);
 delegate_registry!(App);
 
 impl ProvidesRegistryState for App {

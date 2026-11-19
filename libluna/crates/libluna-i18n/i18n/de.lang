@@ -1849,3 +1849,14 @@ Hide charts = Diagramme ausblenden
 Process = Prozess
 
 Mine = Nur meine
+
+# Menedżer zadań — okno „Szczegóły procesu”
+Process details = Prozessdetails
+Close dialog = Schließen
+State = Status
+Thread = Thread
+Nice = Nice
+Disk I/O (r/w) = Datenträger-E/A (L/S)
+No access = Kein Zugriff
+No thread data = Keine Thread-Daten
++{n} more threads = +{n} weitere Threads

@@ -159,6 +159,140 @@ pub fn parse_statm_pages(text: &str) -> Option<u64> {
     text.split_whitespace().nth(1)?.parse().ok()
 }
 
+// ── Wątki i I/O procesu (szczegóły z PPM → „Szczegóły procesu”) ──
+
+/// Jeden wątek procesu odczytany z `/proc/<pid>/task/<tid>`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThreadInfo {
+    pub tid: u32,
+    /// Nazwa jądra wątku (`comm`, do 15 znaków).
+    pub name: String,
+    pub state: char,
+    /// `utime + stime` w taktach — podstawa wyliczenia CPU wątku.
+    pub cpu_jiffies: u64,
+    /// Pole `nice` (`-20..19`).
+    pub nice: i32,
+    /// Udział w **jednym** rdzeniu od poprzedniej próbki (suma może przekroczyć 100%).
+    pub cpu_percent: f32,
+}
+
+/// Wybrane pola `/proc/<pid>/task/<tid>/stat`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadStat {
+    pub tid: u32,
+    pub comm: String,
+    pub state: char,
+    pub cpu_jiffies: u64,
+    pub nice: i32,
+}
+
+/// Parsuje `/proc/<pid>/task/<tid>/stat`.
+///
+/// Format jest ten sam co `/proc/<pid>/stat`: `comm` może zawierać spacje
+/// i nawiasy, więc dzielimy dopiero po **ostatnim** `)`. Po nim zaczyna się
+/// pole 3 (`state`), czyli indeks `N - 3` dla pola `N`.
+pub fn parse_thread_stat(text: &str) -> Option<ThreadStat> {
+    let open = text.find('(')?;
+    let close = text.rfind(')')?;
+    if close <= open + 1 {
+        return None;
+    }
+    let tid = text.get(..open)?.trim().parse().ok()?;
+    let comm = text.get(open + 1..close)?.to_owned();
+    let rest: Vec<&str> = text.get(close + 1..)?.split_whitespace().collect();
+    let utime: u64 = rest.get(11)?.parse().ok()?;
+    let stime: u64 = rest.get(12)?.parse().ok()?;
+    Some(ThreadStat {
+        tid,
+        comm,
+        state: rest.first()?.chars().next()?,
+        cpu_jiffies: utime + stime,
+        nice: rest.get(16).and_then(|v| v.parse().ok()).unwrap_or(0),
+    })
+}
+
+/// Odczytuje wątki procesu i liczy ich CPU względem `prev` (`tid → jiffies`).
+///
+/// Zniknięte między próbkami wątki po prostu nie trafiają na listę. Sortowanie
+/// po CPU sprawia, że „co obciąża proces” widać na pierwszy rzut oka.
+pub fn read_threads(
+    pid: u32,
+    prev: &HashMap<u32, u64>,
+    elapsed: Duration,
+    ticks: u64,
+) -> Vec<ThreadInfo> {
+    let secs = elapsed.as_secs_f64().max(0.001);
+    let ticks = ticks.max(1);
+    let mut out = Vec::new();
+    let Ok(entries) = fs::read_dir(format!("/proc/{pid}/task")) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().parse::<u32>().is_err() {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        let Some(stat) = parse_thread_stat(&text) else {
+            continue;
+        };
+        let cpu_percent = prev
+            .get(&stat.tid)
+            .map(|before| {
+                let delta = stat.cpu_jiffies.saturating_sub(*before) as f64;
+                (delta / ticks as f64 / secs * 100.0) as f32
+            })
+            .unwrap_or(0.0);
+        out.push(ThreadInfo {
+            tid: stat.tid,
+            name: stat.comm,
+            state: stat.state,
+            cpu_jiffies: stat.cpu_jiffies,
+            nice: stat.nice,
+            cpu_percent,
+        });
+    }
+    out.sort_by(|a, b| {
+        b.cpu_percent
+            .total_cmp(&a.cpu_percent)
+            .then(a.tid.cmp(&b.tid))
+    });
+    out
+}
+
+/// Ruch dyskowy procesu z `/proc/<pid>/io` (bajty faktycznie zapisane/odczytane).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IoStats {
+    pub read_bytes: u64,
+    pub write_bytes: u64,
+}
+
+/// Parsuje `/proc/<pid>/io`; brakujące pola zostają zerami.
+pub fn parse_io(text: &str) -> IoStats {
+    let mut io = IoStats::default();
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let Ok(value) = value.trim().parse::<u64>() else {
+            continue;
+        };
+        match key {
+            "read_bytes" => io.read_bytes = value,
+            "write_bytes" => io.write_bytes = value,
+            _ => {}
+        }
+    }
+    io
+}
+
+/// Odczyt `/proc/<pid>/io`; `None` gdy brak uprawnień (np. cudzy proces bez CAP_SYS_PTRACE).
+pub fn read_io(pid: u32) -> Option<IoStats> {
+    let text = fs::read_to_string(format!("/proc/{pid}/io")).ok()?;
+    Some(parse_io(&text))
+}
+
 /// Linia poleceń z `/proc/<pid>/cmdline` (argumenty rozdzielone NUL).
 pub fn parse_cmdline(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes)
@@ -595,5 +729,50 @@ mod tests {
         assert!(snapshot.system.memory_total_kib > 0);
         assert!(snapshot.system.cpu_count >= 1);
         assert!(snapshot.system.uptime > Duration::ZERO);
+    }
+}
+
+#[cfg(test)]
+mod detail_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn parses_thread_stat_with_spaces_in_comm() {
+        let line = "77849 (Web Content (x)) S 1 77849 77849 0 -1 4194560 12345 0 0 0 12 34 0 0 20 5 3 0 5000 123 456";
+        let stat = parse_thread_stat(line).expect("thread stat");
+        assert_eq!(stat.tid, 77849);
+        assert_eq!(stat.comm, "Web Content (x)");
+        assert_eq!(stat.state, 'S');
+        assert_eq!(stat.cpu_jiffies, 46);
+        assert_eq!(stat.nice, 5);
+        assert!(parse_thread_stat("77849 (x) S").is_none());
+    }
+
+    #[test]
+    fn parses_io_bytes() {
+        let io = parse_io(
+            "rchar: 100\nwchar: 50\nsyscr: 3\nsyscw: 2\nread_bytes: 2048\nwrite_bytes: 4096\n",
+        );
+        assert_eq!(io.read_bytes, 2048);
+        assert_eq!(io.write_bytes, 4096);
+        assert_eq!(parse_io(""), IoStats::default());
+    }
+
+    #[test]
+    fn reads_own_threads_and_sorts_by_cpu() {
+        let pid = std::process::id();
+        let threads = read_threads(pid, &HashMap::new(), Duration::from_secs(1), clock_ticks());
+        assert!(
+            !threads.is_empty(),
+            "własny proces ma co najmniej jeden wątek"
+        );
+        assert!(threads.iter().any(|thread| thread.tid == pid));
+        assert!(
+            threads
+                .windows(2)
+                .all(|pair| pair[0].cpu_percent >= pair[1].cpu_percent),
+            "wątki są posortowane po CPU malejąco"
+        );
     }
 }
