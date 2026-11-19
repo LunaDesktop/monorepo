@@ -67,8 +67,11 @@ struct Press {
 }
 
 struct DesktopApp {
+    /// Wyjście, do którego przypisana jest ta instancja (`LUNA_OUTPUT`).
+    output: usize,
+    /// Czy na tym wyjściu jest panel (wtedy ikony muszą go omijać).
+    inset: bool,
     settings: DesktopSettings,
-    /// Położenie paska (góra/dół/lewo/prawo) — ikony nie mogą wchodziç pod panel.
     panel: PanelSettings,
     positions: desktop::DesktopPositions,
     entries: Vec<DesktopEntry>,
@@ -89,9 +92,15 @@ struct DesktopApp {
 
 impl DesktopApp {
     fn new() -> Self {
+        let output = std::env::var("LUNA_OUTPUT")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(0);
         let settings = DesktopSettings::load();
         Self {
-            positions: desktop::load_positions(),
+            output,
+            inset: std::env::var("LUNA_DESKTOP_INSET").map_or(true, |value| value.trim() != "0"),
+            positions: desktop::load_positions_at(output),
             settings,
             panel: PanelSettings::load(),
             entries: Vec::new(),
@@ -110,7 +119,9 @@ impl DesktopApp {
 
     /// Obszar siatki (obok paska Luny, z marginesami).
     fn area(&self, size: Size) -> Rect {
-        let content = panel::content_rect(size, THICKNESS, self.panel.position);
+        // Na monitorze bez panelu nie rezerwujemy paska — ikony mogą iść od góry.
+        let thickness = if self.inset { THICKNESS } else { 0.0 };
+        let content = panel::content_rect(size, thickness, self.panel.position);
         Rect::from_xywh(
             content.x() + MARGIN,
             content.y() + MARGIN,
@@ -149,9 +160,10 @@ impl DesktopApp {
         }
         let stamp = settings_stamp();
         if stamp != self.settings_stamp {
-            // Zmiana z Ustawień: przeładuj katalogi, rozmiar ikon i pozycje.
+            // Zmiana z Ustawień albo przeciągnięcie ikony na innym monitorze
+            // (wspólny `desktop.conf`): przeładuj katalogi, rozmiar i pozycje.
             self.settings = DesktopSettings::load();
-            self.positions = desktop::load_positions();
+            self.positions = desktop::load_positions_at(self.output);
             self.settings_stamp = stamp;
         }
         // Położenie panelu może się zmienić bez restartu pulpitu.
@@ -161,7 +173,7 @@ impl DesktopApp {
     }
 
     fn save_positions(&mut self) {
-        if desktop::save(&self.settings, &self.positions).is_ok() {
+        if desktop::save_positions_at(self.output, &self.positions).is_ok() {
             self.settings_stamp = settings_stamp();
         }
     }

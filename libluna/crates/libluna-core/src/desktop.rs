@@ -459,8 +459,68 @@ pub fn add_shortcut_to(source: &Path, folder: &Path) -> io::Result<PathBuf> {
 /// Zapisane pozycje ikon: ścieżka → (kolumna, wiersz).
 pub type DesktopPositions = HashMap<PathBuf, (i32, i32)>;
 
+/// Prefiks klucza pozycji dla pulpitu na wyjściu `output`.
+///
+/// Wyjście 0 używa historycznego `pos:<ścieżka>` (zgodność z istniejącymi
+/// plikami), a kolejne monitory dostają `pos1:`, `pos2:` itd.
+fn positions_prefix(output: usize) -> String {
+    if output == 0 {
+        "pos:".to_owned()
+    } else {
+        format!("pos{output}:")
+    }
+}
+
+/// Wyjście, do którego należy klucz `pos…`; `None` = to nie jest klucz pozycji.
+fn key_output(key: &str) -> Option<usize> {
+    let rest = key.strip_prefix("pos")?;
+    let (head, _) = rest.split_once(':')?;
+    if head.is_empty() {
+        Some(0)
+    } else {
+        head.parse().ok()
+    }
+}
+
+/// Tekst bez pozycji jednego wyjścia (reszta linii zostaje nietknięta).
+fn without_output(text: &str, output: usize) -> String {
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        if let Some((key, _)) = line.split_once('=') {
+            if key_output(key.trim()) == Some(output) {
+                continue;
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// Dokleja pozycje jednego wyjścia do tekstu pliku.
+fn with_positions(mut text: String, output: usize, positions: &DesktopPositions) -> String {
+    let mut keys: Vec<_> = positions.iter().collect();
+    keys.sort_by_key(|(path, _)| path.as_os_str().to_owned());
+    if !keys.is_empty() && !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    let prefix = positions_prefix(output);
+    for (path, (col, row)) in keys {
+        text.push_str(&format!("{prefix}{} = {col},{row}\n", path.display()));
+    }
+    text
+}
+
 /// Wczytuje pozycje z `~/.config/luna/desktop.conf` (klucze `pos:<ścieżka>`).
 pub fn load_positions() -> DesktopPositions {
+    load_positions_at(0)
+}
+
+/// Wczytuje pozycje ikon pulpitu na wskazanym wyjściu.
+///
+/// Każdy monitor ma własną siatkę (okna mają różne rozmiary), więc zapisujemy
+/// pozycje osobno: wyjście 0 → `pos:<ścieżka>`, kolejne → `pos1:<ścieżka>`.
+pub fn load_positions_at(output: usize) -> DesktopPositions {
     let mut out = DesktopPositions::new();
     let Some(path) = config_file("desktop.conf") else {
         return out;
@@ -469,7 +529,10 @@ pub fn load_positions() -> DesktopPositions {
         return out;
     };
     for (key, value) in parse_pairs(&text) {
-        let Some(raw) = key.strip_prefix("pos:") else {
+        if key_output(&key) != Some(output) {
+            continue;
+        }
+        let Some((_, raw)) = key.split_once(':') else {
             continue;
         };
         let Some((col, row)) = value.split_once(',') else {
@@ -482,16 +545,34 @@ pub fn load_positions() -> DesktopPositions {
     out
 }
 
-/// Zapisuje ustawienia razem z pozycjami ikon.
+/// Zapisuje ustawienia razem z pozycjami ikon pulpitu głównego.
+///
+/// Pozycje z pozostałych monitorów (`pos1:`…) są zachowane — inaczej zmiana
+/// ustawień w Ustawieniach kasowałaby układ ikon na drugim ekranie.
 pub fn save(settings: &DesktopSettings, positions: &DesktopPositions) -> io::Result<()> {
     let path = config_file("desktop.conf")
         .ok_or_else(|| io::Error::other("brak katalogu konfiguracji"))?;
     let mut text = settings.to_text();
-    let mut keys: Vec<_> = positions.iter().collect();
-    keys.sort_by_key(|(path, _)| path.as_os_str().to_owned());
-    for (path, (col, row)) in keys {
-        text.push_str(&format!("pos:{} = {},{}\n", path.display(), col, row));
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    for line in existing.lines() {
+        if let Some((key, _)) = line.split_once('=') {
+            if key_output(key.trim()).is_some_and(|output| output != 0) {
+                text.push_str(line.trim_end());
+                text.push('\n');
+            }
+        }
     }
+    text = with_positions(text, 0, positions);
+    save_atomic(&path, &text)
+}
+
+/// Zapisuje pozycje ikon **jednego** pulpitu, nie ruszając ustawień ani
+/// pozycji z innych monitorów.
+pub fn save_positions_at(output: usize, positions: &DesktopPositions) -> io::Result<()> {
+    let path = config_file("desktop.conf")
+        .ok_or_else(|| io::Error::other("brak katalogu konfiguracji"))?;
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let text = with_positions(without_output(&existing, output), output, positions);
     save_atomic(&path, &text)
 }
 
@@ -519,6 +600,38 @@ mod tests {
             Some(PathBuf::from("/home/ania/Pulpit"))
         );
         assert_eq!(parse_user_dirs_desktop("# nic\n", home), None);
+    }
+
+    #[test]
+    fn positions_are_stored_per_output() {
+        let mut primary = DesktopPositions::new();
+        primary.insert(PathBuf::from("/tmp/a"), (0, 0));
+        let mut second = DesktopPositions::new();
+        second.insert(PathBuf::from("/tmp/a"), (2, 1));
+
+        // Plik zawiera ustawienia, pozycję wyjścia 0 i wyjścia 1.
+        let text = "icon_size = 64\ngrid = 96\npos:/tmp/b = 1,1\npos1:/tmp/c = 3,2\n";
+        let text = with_positions(without_output(text, 0), 0, &primary);
+        let text = with_positions(without_output(&text, 1), 1, &second);
+
+        // Wyjście 0 zachowuje historyczny format bez numeru, kolejne ma `pos1:`.
+        assert!(text.contains("pos:/tmp/a = 0,0"), "{text}");
+        assert!(text.contains("pos1:/tmp/a = 2,1"), "{text}");
+        assert!(!text.contains("pos:/tmp/b"), "{text}");
+        assert!(!text.contains("pos1:/tmp/c"), "{text}");
+        assert!(text.contains("grid = 96"), "{text}");
+    }
+
+    #[test]
+    fn position_keys_carry_the_output_index() {
+        assert_eq!(key_output("pos:/tmp/a"), Some(0));
+        assert_eq!(key_output("pos1:/tmp/a"), Some(1));
+        assert_eq!(key_output("pos12:/x"), Some(12));
+        assert_eq!(key_output("grid"), None);
+        assert_eq!(key_output("position"), None);
+        assert_eq!(key_output("folder"), None);
+        assert_eq!(positions_prefix(0), "pos:");
+        assert_eq!(positions_prefix(2), "pos2:");
     }
 
     #[test]
