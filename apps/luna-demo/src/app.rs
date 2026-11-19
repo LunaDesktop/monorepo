@@ -129,21 +129,6 @@ fn run_docs() -> Result<(), Box<dyn Error>> {
                     }
                     gallery_page::key(&mut docs.gallery, full, &theme, frame.text, ke);
                 }
-                Event::Text(text) => {
-                    if docs.gallery.search.is_focused() {
-                        docs.gallery.search.insert_str(text);
-                        gallery_page::search_changed(&mut docs.gallery);
-                    } else {
-                        match docs.gallery.example.focus {
-                            Focus::Entry => docs.gallery.example.entry.insert_str(text),
-                            Focus::Password => docs.gallery.example.password.insert_str(text),
-                            Focus::Search => docs.gallery.example.search.insert_str(text),
-                            Focus::SearchBar => docs.gallery.example.bar_entry.insert_str(text),
-                            Focus::Note => docs.gallery.example.note.insert_str(text),
-                            Focus::None => {}
-                        }
-                    }
-                }
                 Event::Paste(text) => {
                     let Some(target) = docs.paste_target.take() else {
                         continue;

@@ -178,11 +178,22 @@ pub enum Event {
     Scroll(ScrollEvent),
     Key(KeyEvent),
     /// Wprowadzony tekst (po złożeniu IME).
+    /// Tekst wpisany przez użytkownika (znak lub znaki z jednego naciśnięcia).
+    ///
+    /// **Kontrakt:** platforma wysyła to zdarzenie dla każdego wpisanego znaku.
+    /// Część aplikacji czyta zamiast tego [`KeyEvent::text`] — wolno używać
+    /// **jednego** źródła, nigdy obu naraz (inaczej znak wpisze się dwa razy).
+    /// Nowe pola tekstowe powinny korzystać z `Event::Text`.
     Text(String),
     /// Tekst wklejony ze schowka systemowego (odpowiedź na `Frame::paste_from_clipboard`).
     Paste(String),
     /// Treść schowka inna niż czysty tekst — odpowiedź na `Frame::paste_mime`.
     Clipboard(ClipboardData),
+    /// Inna aplikacja zmieniła zawartość schowka (tylko przy `watch_clipboard`).
+    ///
+    /// Menedżer schowka woła wtedy `paste_from_clipboard()`, żeby dopisać wpis
+    /// do historii. Zdarzenie nie niesie treści, bo jej odczyt może czekać na źródło.
+    ClipboardChanged,
     /// Przeciąganie z innej aplikacji jest nad oknem (`position` w pikselach logicznych).
     ///
     /// `move_hint` mówi, że odbiorca może przenieść pliki zamiast je kopiować

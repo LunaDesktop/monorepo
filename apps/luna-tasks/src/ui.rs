@@ -1342,7 +1342,7 @@ pub fn handle_events(
                 }
             }
             Event::Key(key) if key.state == ButtonState::Pressed => handle_key(app, key),
-            Event::Text(input) | Event::Paste(input) => {
+            Event::Paste(input) => {
                 if app.search.is_focused() {
                     app.search.insert_str(input);
                     app.recompute();

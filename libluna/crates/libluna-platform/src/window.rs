@@ -152,6 +152,10 @@ pub struct AppConfig {
     pub escape_to_exit: bool,
     /// Czy tekst ma być rysowany fontem o stałej szerokości (terminal, edytor kodu).
     pub monospace: bool,
+    /// Czy aplikacja chce wiedzieć o zmianach schowka (menedżer schowka).
+    ///
+    /// Włącza `Event::ClipboardChanged` przy każdym `wl_data_device.selection`.
+    pub watch_clipboard: bool,
 }
 
 /// Region wejścia powierzchni.
@@ -345,6 +349,7 @@ impl AppConfig {
             transparent: false,
             escape_to_exit: false,
             monospace: false,
+            watch_clipboard: false,
         }
     }
 
@@ -377,6 +382,15 @@ impl AppConfig {
 
     pub fn system_dark(mut self, dark: bool) -> Self {
         self.system_dark = dark;
+        self
+    }
+
+    /// Włącza powiadomienia o zmianie schowka (`Event::ClipboardChanged`).
+    ///
+    /// Domyślnie wyłączone: zwykłe aplikacje nie potrzebują budzić się, gdy ktoś
+    /// inny coś skopiuje — korzysta z tego tylko menedżer schowka.
+    pub fn watch_clipboard(mut self, watch: bool) -> Self {
+        self.watch_clipboard = watch;
         self
     }
 
@@ -929,6 +943,8 @@ where
         seat: None,
         last_serial: 0,
         last_pointer_serial: 0,
+        last_pointer_pos: None,
+        last_title_click: None,
         axis_source: None,
         data_device_manager,
         data_device: None,
@@ -942,6 +958,7 @@ where
         drag_paths: None,
         drag_pos: None,
         drag_move: false,
+        watch_clipboard: config.watch_clipboard,
         drop_data: Arc::new(Mutex::new(None)),
         drop_busy: Arc::new(AtomicBool::new(false)),
         conn: conn.clone(),
@@ -1085,6 +1102,10 @@ struct App {
     last_serial: u32,
     /// Serial ostatniego **wciśnięcia wskaźnika** (wymagany przez `move`/`resize`).
     last_pointer_serial: u32,
+    /// Pozycja ostatniego wciśnięcia — do rozpoznania dwukliku w nagłówku.
+    last_pointer_pos: Option<Point>,
+    /// Poprzednie wciśnięcie w pasek tytułu (pozycja + czas).
+    last_title_click: Option<(Point, Instant)>,
     /// Ostatnie `axis_source` z `wl_pointer` — sctk dostarcza je w osobnym zdarzeniu
     /// o zerowej wartości, a kolejne `axis` nie powtarza źródła. Bez zapamiętania
     /// nie da się odróżnić rolki od gładzika przy skalowaniu kroku.
@@ -1112,6 +1133,8 @@ struct App {
     drag_pos: Option<Point>,
     /// Czy kompozytor wybrał przenoszenie (a nie kopiowanie).
     drag_move: bool,
+    /// Czy nasłuchiwać zmian schowka (`Event::ClipboardChanged`).
+    watch_clipboard: bool,
     /// Wynik odczytu `text/uri-list` z upuszczonej oferty.
     drop_data: Arc<Mutex<Option<(Point, bool, Vec<PathBuf>)>>>,
     /// Jeden odczyt upuszczonych danych naraz.
@@ -1431,6 +1454,9 @@ impl App {
             self.exit = true;
         }
         let (want_move, want_resize) = (self.actions.move_requested, self.actions.resize_requested);
+        // Detekcja dwukliku musi być **przed** pożyczeniem `self.target` (metoda
+        // bierze `&mut self`, a `window` pożycza pole `target`).
+        let title_double = want_move && self.register_title_click();
         if std::env::var("LUNA_DEBUG_INPUT").is_ok() && (want_move || want_resize.is_some()) {
             eprintln!(
                 "platform: actions move={want_move} resize={want_resize:?} seat={} target_window={}",
@@ -1445,7 +1471,7 @@ impl App {
             if self.actions.minimize {
                 window.set_minimized();
             }
-            if self.actions.toggle_maximize {
+            if self.actions.toggle_maximize || title_double {
                 self.maximized = !self.maximized;
                 if self.maximized {
                     window.set_maximized();
@@ -1461,7 +1487,7 @@ impl App {
                             "platform: move={want_move} resize={want_resize:?} serial={serial}"
                         );
                     }
-                    if want_move {
+                    if want_move && !title_double {
                         window.move_(&seat, serial);
                     } else if let Some(edges) = want_resize {
                         window.resize(&seat, serial, resize_edge(edges));
@@ -1469,6 +1495,22 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Wykrywa **podwójne wciśnięcie w nagłówek** okna.
+    ///
+    /// Aplikacje libLuny zgłaszają `begin_move` przy każdym wciśnięciu w pasek
+    /// tytułu, więc to najpewniejsze miejsce na standardowe „dwuklik =
+    /// maksymalizacja / przywrócenie”: nie trzeba powtarzać tej logiki w każdym
+    /// oknie osobno. Drugi klik nie zaczyna już przeciągania.
+    fn register_title_click(&mut self) -> bool {
+        let Some(position) = self.last_pointer_pos else {
+            return false;
+        };
+        let now = Instant::now();
+        let double = is_title_double_click(self.last_title_click, now, position);
+        self.last_title_click = if double { None } else { Some((position, now)) };
+        double
     }
 
     /// Wkleja z **własnego** źródła (bez rundy przez kompozytor) albo zleca odczyt
@@ -1992,7 +2034,7 @@ fn read_primary(
 ) -> Option<ClipboardData> {
     let data = device.data::<PrimarySelectionDeviceData>()?;
     let offer = data.selection_offer()?;
-    let mime = offer.with_mime_types(|types| pick_text_mime(types))?;
+    let mime = offer.with_mime_types(pick_text_mime)?;
     let pipe = offer.receive(mime.clone()).ok()?;
     let _ = conn.flush();
     let bytes = read_selection_pipe(&pipe, TEXT_CLIPBOARD_LIMIT)?;
@@ -2170,6 +2212,23 @@ fn map_button(code: u32) -> PointerButton {
 }
 
 /// Bitmaska krawędzi (1=góra, 2=dół, 4=lewo, 8=prawo) → `xdg_toplevel::ResizeEdge`.
+/// Maksymalny odstęp między kliknięciami, które liczą się jako dwuklik.
+const TITLE_DOUBLE_CLICK: Duration = Duration::from_millis(400);
+/// Ile pikseli może „uciec” kursor między kliknięciami (drżenie ręki).
+const TITLE_DOUBLE_CLICK_SLOP: f64 = 8.0;
+
+/// Czy `position` w `now` jest drugim kliknięciem po `last`.
+///
+/// Wydzielone z [`App::register_title_click`], żeby dało się to przetestować
+/// bez okna Waylanda.
+fn is_title_double_click(last: Option<(Point, Instant)>, now: Instant, position: Point) -> bool {
+    last.is_some_and(|(previous, at)| {
+        now.saturating_duration_since(at) < TITLE_DOUBLE_CLICK
+            && (previous.x - position.x).abs() <= TITLE_DOUBLE_CLICK_SLOP
+            && (previous.y - position.y).abs() <= TITLE_DOUBLE_CLICK_SLOP
+    })
+}
+
 fn resize_edge(bits: u8) -> xdg_toplevel::ResizeEdge {
     match bits & 0xf {
         1 => xdg_toplevel::ResizeEdge::Top,
@@ -2419,6 +2478,13 @@ impl KeyboardHandler for App {
             modifiers: self.modifiers,
             repeat: false,
         }));
+        // Tekst wpisywany do pól edycyjnych. To **jedyne** źródło tekstu dla
+        // aplikacji korzystających z `Event::Text` (Ustawienia, Sklep, pola
+        // edytora). Aplikacje, które czytają `KeyEvent.text`, po prostu ignorują
+        // to zdarzenie — ale **nie mogą** obsługiwać obu naraz (dublowanie znaków).
+        if let Some(text) = typed_text(&self.modifiers, event.utf8.as_deref()) {
+            self.queue(Event::Text(text));
+        }
     }
 
     fn release_key(
@@ -2492,6 +2558,7 @@ impl PointerHandler for App {
                     // Serial jest wymagany przez `xdg_toplevel.move`/`resize`.
                     self.last_serial = serial;
                     self.last_pointer_serial = serial;
+                    self.last_pointer_pos = Some(position);
                     self.queue(Event::PointerButton(PointerEvent {
                         position,
                         button: map_button(button),
@@ -2729,7 +2796,13 @@ impl DataDeviceHandler for App {
         });
     }
 
-    fn selection(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {}
+    fn selection(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {
+        // Menedżer schowka chce wiedzieć o każdej zmianie selekcji — także o tej
+        // własnej (aplikacja deduplikuje treść).
+        if self.watch_clipboard {
+            self.queue(Event::ClipboardChanged);
+        }
+    }
 
     fn drop_performed(&mut self, _: &Connection, _: &QueueHandle<Self>, device: &WlDataDevice) {
         self.read_drop(device);
@@ -2825,8 +2898,22 @@ impl DataOfferHandler for App {
         _: &Connection,
         _: &QueueHandle<Self>,
         _: &mut DragOffer,
-        _: DndAction,
+        action: DndAction,
     ) {
+        // Kompozytor przysyła wybraną akcję po `set_actions` odbiorcy oraz po
+        // zmianie modyfikatorów (Shift = przenieś). Bez tego `drag_move` było
+        // ustawiane tylko raz, przy wejściu kursora.
+        let moving = action.contains(DndAction::Move);
+        if moving == self.drag_move {
+            return;
+        }
+        self.drag_move = moving;
+        if let Some(position) = self.drag_pos {
+            self.queue(Event::DragHover {
+                position,
+                move_hint: moving,
+            });
+        }
     }
 }
 
@@ -3029,6 +3116,34 @@ mod tests {
     }
 
     #[test]
+    fn title_double_click_needs_two_close_clicks_in_time() {
+        let start = Instant::now();
+        let position = Point::new(120.0, 16.0);
+        let first = Some((position, start));
+
+        // Dwa kliknięcia w to samo miejsce w 200 ms = dwuklik.
+        assert!(is_title_double_click(
+            first,
+            start + Duration::from_millis(200),
+            position
+        ));
+        // Za późno — to dwa osobne kliknięcia (przeciąganie okna).
+        assert!(!is_title_double_click(
+            first,
+            start + Duration::from_millis(700),
+            position
+        ));
+        // Za daleko — użytkownik przesunął kursor, więc nie ma dwukliku.
+        assert!(!is_title_double_click(
+            first,
+            start + Duration::from_millis(100),
+            Point::new(200.0, 16.0)
+        ));
+        // Pierwsze kliknięcie nigdy nie jest dwuklikiem.
+        assert!(!is_title_double_click(None, start, position));
+    }
+
+    #[test]
     fn resize_edges_map_to_xdg_edges() {
         assert_eq!(resize_edge(1), xdg_toplevel::ResizeEdge::Top);
         assert_eq!(resize_edge(2), xdg_toplevel::ResizeEdge::Bottom);
@@ -3097,6 +3212,57 @@ mod tests {
     }
 
     #[test]
+    fn clipboard_offers_text_fallbacks_only_for_text() {
+        let text = ClipboardData::text("cześć");
+        let mimes = clipboard_offer_mimes(&text);
+        assert_eq!(mimes[0], "text/plain;charset=utf-8");
+        // Starsze aplikacje X11 potrzebują `STRING`/`UTF8_STRING`.
+        assert!(mimes.iter().any(|m| m == "UTF8_STRING"));
+        assert!(mimes.iter().any(|m| m == "STRING"));
+        assert_eq!(mimes.len(), 4, "bez duplikatów: {mimes:?}");
+
+        // Obraz nie udaje tekstu — oferujemy tylko jego własny typ.
+        let png = ClipboardData {
+            mime: "image/png".to_owned(),
+            bytes: vec![0x89, b'P', b'N', b'G'],
+        };
+        assert_eq!(clipboard_offer_mimes(&png), vec!["image/png"]);
+        assert!(!png.is_text());
+        assert_eq!(png.as_str(), None);
+    }
+
+    #[test]
+    fn pasted_bytes_are_treated_as_text_only_when_the_mime_says_so() {
+        let html = ClipboardData {
+            mime: "text/html".to_owned(),
+            bytes: b"<b>x</b>".to_vec(),
+        };
+        assert!(html.is_text());
+        assert_eq!(html.as_str().as_deref(), Some("<b>x</b>"));
+
+        // Niepoprawne UTF-8 nie może wywrócić wklejania (lossy, nie panic).
+        let broken = ClipboardData {
+            mime: "text/plain".to_owned(),
+            bytes: vec![0xff, 0xfe],
+        };
+        assert_eq!(broken.as_str().as_deref(), Some("\u{fffd}\u{fffd}"));
+    }
+
+    #[test]
+    fn text_mime_ranking_is_shared_with_primary_selection() {
+        let types = vec![
+            "image/png".to_owned(),
+            "text/plain".to_owned(),
+            "text/plain;charset=utf-8".to_owned(),
+        ];
+        assert_eq!(
+            pick_text_mime(&types).as_deref(),
+            Some("text/plain;charset=utf-8")
+        );
+        assert_eq!(pick_text_mime(&["image/png".to_owned()]), None);
+    }
+
+    #[test]
     fn mouse_side_buttons_map_to_back_and_forward() {
         // Większość myszy: BTN_SIDE/BTN_EXTRA (X11: 8/9).
         assert_eq!(map_button(0x113), PointerButton::Back);
@@ -3107,4 +3273,47 @@ mod tests {
         assert_eq!(map_button(0x112), PointerButton::Middle);
         assert_eq!(map_button(0x999), PointerButton::Other(0x999));
     }
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::typed_text;
+    use libluna_core::Modifiers;
+
+    #[test]
+    fn typed_text_ignores_shortcuts_and_control_characters() {
+        let plain = Modifiers::NONE;
+        assert_eq!(typed_text(&plain, Some("ą")), Some("ą".to_owned()));
+        assert_eq!(typed_text(&plain, Some("\u{8}")), None);
+        assert_eq!(typed_text(&plain, Some("")), None);
+        assert_eq!(typed_text(&plain, None), None);
+
+        let mut ctrl = Modifiers::NONE;
+        ctrl.ctrl = true;
+        assert_eq!(typed_text(&ctrl, Some("c")), None, "Ctrl+C to skrót");
+
+        // AltGr przychodzi jako ctrl+alt+level3 — to nadal tekst.
+        let mut altgr = Modifiers::NONE;
+        altgr.ctrl = true;
+        altgr.alt = true;
+        altgr.level3 = true;
+        assert_eq!(typed_text(&altgr, Some("ą")), Some("ą".to_owned()));
+
+        let mut logo = Modifiers::NONE;
+        logo.logo = true;
+        assert_eq!(typed_text(&logo, Some("a")), None, "Super to skrót");
+    }
+}
+
+/// Tekst z pojedynczego naciśnięcia klawisza (do pól edycyjnych).
+///
+/// Skróty (`Ctrl`/`Super`) nie są tekstem; `AltGr` (`level3`) zostaje, żeby dało
+/// się wpisać ą/ć/ę/ł/ń/ó/ś/ź/ż. Puste i sterujące znaki odrzucamy.
+fn typed_text(modifiers: &Modifiers, utf8: Option<&str>) -> Option<String> {
+    let text = utf8?;
+    let shortcut = (modifiers.ctrl && !modifiers.level3) || modifiers.logo;
+    if shortcut || text.is_empty() || text.chars().any(char::is_control) {
+        return None;
+    }
+    Some(text.to_owned())
 }

@@ -1985,8 +1985,7 @@ pub fn handle_events(
             Event::Key(key) if key.state == ButtonState::Pressed => {
                 handle_key(app, key);
             }
-            Event::Text(input) => insert_text(app, input),
-            Event::Paste(input) => insert_text(app, input),
+            Event::Paste(input) => insert_text(app, &input),
             Event::Window(WindowEvent::CloseRequested) => app.pending_close = true,
             _ => {}
         }

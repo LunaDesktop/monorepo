@@ -710,7 +710,8 @@ pub fn handle_events(
             Event::Key(key) if key.state == ButtonState::Pressed => {
                 handle_key(app, key);
             }
-            Event::Text(input) | Event::Paste(input) => app.insert_text(input),
+            // Wklejanie ze schowka; wpisywanie klawiszy idzie przez `handle_key`.
+            Event::Paste(input) => app.insert_text(&input),
             Event::Window(WindowEvent::CloseRequested) => app.pending_close = true,
             _ => {}
         }
@@ -951,7 +952,15 @@ fn handle_key(app: &mut App, key: &KeyEvent) {
         KEY_ENTER | KEY_KP_ENTER => app.press(Key::Equals),
         KEY_BACKSPACE => app.press(Key::Backspace),
         KEY_F1 => app.show_about(),
-        _ => {}
+        _ => {
+            // Wpisywanie liczb i operatorów. Platforma dostarcza tekst w
+            // `KeyEvent.text` (a nie w `Event::Text`), więc to jedyna ścieżka.
+            if let Some(text) = &key.text {
+                if !text.is_empty() && !text.chars().any(char::is_control) {
+                    app.insert_text(text);
+                }
+            }
+        }
     }
 }
 
