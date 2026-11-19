@@ -496,28 +496,30 @@ fn wants_ssd(is_x11: bool, is_popup: bool, deco: Option<crate::decoration::DecoM
 /// Czy klient oczekuje, że **kompozytor** narysuje pasek tytułu, mimo że nie
 /// negocjował `zxdg_toplevel_decoration_v1`.
 ///
-/// Firefox (i część forków: LibreWolf, Waterfox, Thunderbird, Floorp) pod
-/// Waylandem wyłącza własny pasek tytułu i nie rysuje przycisków okna — zostawia
-/// tylko zakładki i pasek adresu. Bufor ma przy tym marginesy cieni CSD (np.
-/// 24×22 px), więc wygląda jak zwykłe CSD, ale bez naszego SSD okna nie da się
-/// zamknąć ani przesunąć myszą. Uzupełniamy więc brakujący pasek.
+/// Współczesny Firefox (także ESR i forki Gecko: LibreWolf, Waterfox, Floorp,
+/// Thunderbird) rysuje **własne** przyciski okna w pasku kart — to zwykłe CSD.
+/// Dokładanie naszego paska dawało wtedy podwójne kontrolki i zasłaniało menu
+/// przeglądarki, więc domyślnie **nie** dorysowujemy nic.
 ///
-/// **Zen Browser to wyjątek**: ma własny pasek i pokazuje kontrolki okna przy
-/// najechaniu na górę okna. Dokładanie SSD dawało podwójne przyciski i migotanie
-/// przy pokazywaniu/ukrywaniu kontrolek Zen, więc zostawiamy mu CSD.
-///
-/// Wyłączenie całości (gdyby jakaś wersja przeglądarki rysowała własne kontrolki):
-/// `SELENE_BROWSER_SSD=0`.
+/// Wyjątkiem jest konfiguracja, w której przeglądarka nie rysuje żadnych
+/// przycisków (`browser.tabs.inTitlebar = false`) — wtedy okna nie da się
+/// zamknąć ani przesunąć myszą. Dla takiego przypadku jest jawne wejście:
+/// `SELENE_BROWSER_SSD=1` (albo `true`/`on`).
 fn expects_system_titlebar(app_id: &str, title: &str) -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let enabled = *ENABLED.get_or_init(|| {
-        !std::env::var("SELENE_BROWSER_SSD").is_ok_and(|v| {
-            v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("off")
+        std::env::var("SELENE_BROWSER_SSD").is_ok_and(|v| {
+            v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("on")
         })
     });
-    if !enabled {
-        return false;
-    }
+    enabled && is_gecko_browser(app_id, title)
+}
+
+/// Czy okno należy do rodziny przeglądarek Gecko (Firefox ESR, forki, poczta).
+///
+/// Wydzielone, żeby dało się to sprawdzić testem bez zależności od zmiennej
+/// środowiskowej (`SELENE_BROWSER_SSD`).
+fn is_gecko_browser(app_id: &str, title: &str) -> bool {
     let id = app_id.to_ascii_lowercase();
     const IDS: &[&str] = &[
         "firefox",
@@ -916,8 +918,8 @@ fn composite(
             .map(|win| (win.x, win.y, win.width, win.height));
         if let Some((x, y, cw, ch)) = geom {
             eprintln!(
-                "selene/win: \"{}\" x11={} popup={} deco={:?} ssd={} widoczne={}x{} @ ({:.0},{:.0}) cien=({:.0},{:.0})",
-                title, is_x11, is_popup, deco_mode, ssd, cw, ch, x, y, off_x, off_y
+                "selene/win: \"{}\" app={:?} x11={} popup={} deco={:?} ssd={} widoczne={}x{} @ ({:.0},{:.0}) cien=({:.0},{:.0})",
+                title, app_id, is_x11, is_popup, deco_mode, ssd, cw, ch, x, y, off_x, off_y
             );
         }
     }
@@ -1466,9 +1468,6 @@ mod ssd_tests {
         // dawało podwójne przyciski i migotanie.
         assert!(!expects_system_titlebar("zen", "Settings — Zen Browser"));
         assert!(!expects_system_titlebar("", "Settings — Zen Browser"));
-        // Pozostałe forki Firefoksa nadal dostają uzupełniający pasek.
-        assert!(expects_system_titlebar("firefox", "Mozilla Firefox"));
-        assert!(expects_system_titlebar("librewolf", "LibreWolf"));
     }
 
     #[test]
@@ -1478,17 +1477,30 @@ mod ssd_tests {
     }
 
     #[test]
-    fn firefox_family_gets_system_titlebar() {
-        // Firefox i większość forków nie rysują własnych przycisków okna pod
-        // Waylandem — bez naszego SSD okna nie da się zamknąć ani przesunąć myszą.
-        // (Wyjątkiem jest Zen — patrz `zen_browser_keeps_its_own_window_controls`.)
-        assert!(expects_system_titlebar("firefox", ""));
-        assert!(expects_system_titlebar("org.mozilla.firefox", ""));
-        assert!(expects_system_titlebar("", "Strona — Mozilla Firefox"));
-        // Klienty z własnym paskiem (GTK4/libadwaita, Chromium) muszą zostać bez zmian.
-        assert!(!expects_system_titlebar("org.gnome.Nautilus", "Pliki"));
-        assert!(!expects_system_titlebar("google-chrome", "Google Chrome"));
-        assert!(!expects_system_titlebar("eu.luna.Store", "Sklep"));
+    fn gecko_family_is_recognized_for_opt_in() {
+        // Rozpoznanie rodziny Gecko jest potrzebne tylko wtedy, gdy użytkownik
+        // jawnie poprosi o uzupełniający pasek (`SELENE_BROWSER_SSD=1`).
+        assert!(is_gecko_browser("firefox", ""));
+        assert!(is_gecko_browser("firefox-esr", ""));
+        assert!(is_gecko_browser("org.mozilla.firefox", ""));
+        assert!(is_gecko_browser("", "Strona — Mozilla Firefox"));
+        assert!(is_gecko_browser("librewolf", "LibreWolf"));
+        assert!(is_gecko_browser("thunderbird", ""));
+        // Klienty z własnym paskiem (GTK4/libadwaita, Chromium, Zen) nie pasują.
+        assert!(!is_gecko_browser("org.gnome.Nautilus", "Pliki"));
+        assert!(!is_gecko_browser("google-chrome", "Google Chrome"));
+        assert!(!is_gecko_browser("eu.luna.Store", "Sklep"));
+        assert!(!is_gecko_browser("zen", "Zen Browser"));
+    }
+
+    /// Domyślnie **nie** dokładamy paska tytułu przeglądarkom: Firefox ESR
+    /// (i inne Gecko) rysuje własne przyciski okna, a podwójne kontrolki
+    /// to zgłoszony błąd. Fallback jest opt-in: `SELENE_BROWSER_SSD=1`.
+    #[test]
+    fn browser_titlebar_is_opt_in() {
+        assert!(!expects_system_titlebar("firefox-esr", "Mozilla Firefox"));
+        assert!(!expects_system_titlebar("firefox", ""));
+        assert!(!expects_system_titlebar("", "Strona — Mozilla Firefox"));
     }
 
     #[test]
