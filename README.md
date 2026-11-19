@@ -106,6 +106,7 @@ luna/                        # meta-repozytorium (dev + integracja)
     luna-editor/             # edytor tekstu i kodu z podświetlaniem składni
     luna-clock/              # czas: zegar, minutnik, stoper, strefy i prywatny kalendarz
     luna-calculator/         # kalkulator standardowy i naukowy
+    luna-tasks/              # menedżer procesów i monitor systemu
     luna-settings/          # centrum ustawień środowiska i systemu
     luna-store/              # sklep: pacman/pag/apt/dnf/emerge/Flatpak + aktualizacje
     luna-welcome/            # powitanie, nowości i skrót do instalatora (live ISO)
@@ -127,11 +128,13 @@ Mapowanie pojęć GTK/GDK/Gsk/libadwaita → libLuna: [`docs/architecture.md`](d
 Plan dalszej pracy: [`docs/roadmap.md`](docs/roadmap.md).
 Czas i kalendarz: [`docs/clock.md`](docs/clock.md).
 Kalkulator: [`docs/calculator.md`](docs/calculator.md).
+Menedżer zadań: [`docs/tasks.md`](docs/tasks.md).
 Centrum ustawień: [`docs/settings.md`](docs/settings.md).
 Sklep z oprogramowaniem: [`docs/store.md`](docs/store.md).
 Powitanie i instalacja: [`docs/welcome.md`](docs/welcome.md), [`docs/installer.md`](docs/installer.md).
 Wtyczki Edytora i dokumentacja dla twórców: [`docs/plugins.md`](docs/plugins.md).
 Zestaw ikon: [`docs/icons.md`](docs/icons.md).
+Kursory pulpitu (motyw `Luna-Cursors`): [`docs/cursors.md`](docs/cursors.md).
 Menedżer logowania: [`docs/greeter.md`](docs/greeter.md).
 Osobne repozytoria i aktualizacja pojedynczych pakietów: [`docs/repositories.md`](docs/repositories.md).
 Gry, Steam Flatpak, uprawnienia `uinput` i portal XDG: [`docs/steam.md`](docs/steam.md).
@@ -573,6 +576,13 @@ Style instalowane z plików (`examples/luna/themes/nord.theme`, `paper.theme`) �
 ![Ustawienia — styl Nord](docs/images/settings-nord.png)
 ![Ustawienia — styl Paper](docs/images/settings-paper.png)
 
+Wybór tapety (Ustawienia → **Wygląd** i **Ekran logowania**) — kafel jest podglądem
+tapety 16:9 z nazwą pliku na obrazie, a **„Więcej tapet”** to popover ze źródłami
+(Obrazy, tapety systemowe, katalog domowy, „Zaskocz mnie”, przeglądanie dysku):
+
+![Wybór tapety](docs/images/luna-settings-wallpaper-picker.png)
+![Więcej tapet](docs/images/luna-settings-wallpaper-more.png)
+
 Podgląd kilku motywów (headless, `cargo run --manifest-path apps/luna-demo/Cargo.toml --bin styles`) — ten sam realny
 interfejs w każdym stylu:
 
@@ -626,6 +636,30 @@ Szczegóły: [`docs/calculator.md`](docs/calculator.md).
 ![Luna Calculator — ustawienia](docs/images/calculator-settings.png)
 
 ![Luna Calculator — o aplikacji](docs/images/calculator-about.png)
+
+Menedżer zadań (`luna-tasks`) — lista procesów z `/proc`: PID, nazwa, CPU,
+pamięć i użytkownik, sortowanie po kliknięciu nagłówka, wyszukiwanie w pasku
+tytułu (lupka obok kontrolek okna) po PID, nazwie, poleceniu i koncie, kolorowanie
+stanu i zużycia oraz panel szczegółów. Zakres listy przełącza kompaktowy
+przełącznik **Moje** w pasku tytułu (pełna nazwa w menu). **Zakończ proces** wysyła `SIGTERM`,
+**Wymuś zamknięcie** — `SIGKILL`; PID 1 jest chroniony, a `starttime` chroni
+przed recyklingiem PID. PPM otwiera menu kontekstowe (zakończenie, kopiowanie
+PID/polecenia, odświeżenie, zakres), a opcja **Pokaż wykresy** (`Ctrl+G`) dodaje
+historię CPU, pamięci i zaznaczonego procesu z ostatniej minuty. Bez sieci
+i bez historii procesów.
+Szczegóły: [`docs/tasks.md`](docs/tasks.md).
+
+![Luna Tasks — wykresy](docs/images/tasks-charts.png)
+
+![Luna Tasks — lista procesów](docs/images/tasks-list.png)
+
+![Luna Tasks — wyszukiwanie](docs/images/tasks-search.png)
+
+![Luna Tasks — menu kontekstowe](docs/images/tasks-context.png)
+
+![Luna Tasks — szczegóły i menu](docs/images/tasks-menu.png)
+
+![Luna Tasks — potwierdzenie zakończenia](docs/images/tasks-confirm.png)
 
 Edytor tekstu i kodu (`luna-editor`) — lekki edytor na `CodeView` z libLuny:
 zakładki w headerbarze, numery linii, podświetlanie składni (Rust, TOML, JSON,

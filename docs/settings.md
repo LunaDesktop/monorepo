@@ -10,7 +10,7 @@ język, użytkownicy, sterowniki).
 - Działa `apps/luna-settings` na libLunie (`NavList` z sekcjami, `PreferencesPage`,
   `ActionRow`, `Switch`, `Slider`, `ViewSwitcher`, `Button`, `HeaderBar`).
 - Sekcja **Środowisko**: **Wygląd i ikony** (motyw, akcent, styl, ikony i podgląd
-  w jednym miejscu), **Ekran logowania** (tapety z miniaturami, **wybór dowolnego PNG
+  w jednym miejscu), **Ekran logowania** (tapety w kaflach z podglądem, **wybór dowolnego PNG
   z dysku**, formularz hasła administratora), **Ekran blokady** (per użytkownik),
   **Powiadomienia** (DND + róg ekranu + test), **Język i region** (wyszukiwany wybór
   języka, locale i strefy, NTP) oraz **Przestrzenie robocze** (liczba, nazwy i
@@ -48,8 +48,8 @@ język, użytkownicy, sterowniki).
 | Strona | Zakres | Backend / zależność | Stan |
 |---|---|---|---|
 | **O systemie** | host, kernel, architektura, użytkownik, wersje Luny/Selene | `/proc`, `/etc/os-release` | ✅ |
-| **Wygląd i ikony** | jasny/ciemny/auto, akcent, styl z pliku oraz **ikony** (dołączony Luna-Icons, styl wektorowy i zewnętrzne zestawy freedesktop) z podglądem; **tapeta pulpitu** (miniatury + wybór PNG z dysku, zmiana bez wylogowania) | `ThemeSettings`, `theme_file`, `~/.config/luna/icons.conf`, `~/.config/luna/wallpaper.conf` | ✅ |
-| **Ekran logowania** | tapety PNG w **siatce 3×N z miniaturami**, kafel **„Więcej tapet”** (źródła: Obrazy, Tapety systemowe, katalog domowy, **Zaskocz mnie**, przeglądanie dysku), tryb/akcent, zegar greetera; **szkic zmian + „Zastosuj zmiany” + formularz hasła administratora** (`sudo`) | `/etc/luna/greeter.conf`, `luna-greeter-config` | ✅ |
+| **Wygląd i ikony** | jasny/ciemny/auto, akcent, styl z pliku oraz **ikony** (dołączony Luna-Icons, styl wektorowy i zewnętrzne zestawy freedesktop) z podglądem; **tapeta pulpitu** (kafle z pełnym podglądem 16:9 + wybór PNG z dysku, zmiana bez wylogowania) | `ThemeSettings`, `theme_file`, `~/.config/luna/icons.conf`, `~/.config/luna/wallpaper.conf` | ✅ |
+| **Ekran logowania** | tapety PNG w **siatce kafli 3×N z podglądem 16:9**, kafel **„Więcej tapet”** (popover ze źródłami: Obrazy, Tapety systemowe, katalog domowy, **Zaskocz mnie**, przeglądanie dysku), tryb/akcent, zegar greetera; **szkic zmian + „Zastosuj zmiany” + formularz hasła administratora** (`sudo`) | `/etc/luna/greeter.conf`, `luna-greeter-config` | ✅ |
 | **Ekran blokady** | tryb/akcent, zegar, tapeta pulpitu lub jednolite tło oraz **automatyczna blokada po bezczynności** | `~/.config/luna/lock.conf`, `~/.config/luna/idle.conf`, `luna-lock` (bez roota) | ✅ |
 | **Język i region** | wyszukiwany wybór języka, locale (`locale -a`/`SUPPORTED`) i strefy (`zone.tab`/`timedatectl`); zapis `locale.conf` + `region.conf`; język działa **na żywo** we wszystkich aplikacjach Luny; przełącznik NTP | `libluna-i18n`, `libluna-platform`, sesja (`LC_TIME`, `TZ`), `timedatectl` | ✅ |
 | **Powiadomienia** | DND, pozycja toastów w jednym z czterech rogów, **przycisk „Wyślij test”** (D-Bus), status daemona | `~/.config/luna/notifications.conf`, `luna-shell` | ✅ |
@@ -265,12 +265,22 @@ Legenda: ✅ działa, ◐ tylko odczyt/częściowo, ⏳ zaplanowane.
   działa **bez wylogowania**; wybór z dysku nie wymaga uprawnień administratora
   (inaczej niż tapeta ekranu logowania, która trafia do `/etc/luna/greeter.conf`).
 - **Wybór tapety** (`Ekran logowania` → „Wybierz z dysku”, `Wygląd` → tapeta pulpitu)
-  pokazuje **siatkę miniatur 3 w rzędzie** (prawdziwe podglądy PNG, cache 384×216).
-  Pierwszy kafel to **„Więcej tapet”**: Obrazy, Tapety systemowe domyślne
-  (`/usr/share/wallpapers`, `/usr/share/backgrounds`), katalog domowy, **„Zaskocz
-  mnie”** (losowa tapeta z bieżącego katalogu, od razu zastosowana) oraz
-  **„Przeglądaj dysk…”**, który przełącza na listę plików. Kafel przełącznika obok
-  nazwy folderu wraca do siatki; strzałki/Enter obsługują wybór z klawiatury.
+  pokazuje **siatkę kafli 3 w rzędzie w proporcji 16:9** — kafel *jest* podglądem
+  tapety (PNG dekodowany raz, cache 384×216), a **nazwa pliku leży na obrazie**
+  w półprzezroczystym pasku u dołu, więc nie ma osobnego podpisu pod kaflami.
+  Zaznaczenie to **pierścień w kolorze akcentu + znacznik ✓**, hover — cieńsza
+  obwódka akcentu. Kafle nawigacyjne (**„Więcej tapet”**, katalog nadrzędny)
+  rysują **wektorowe ikony Luny w kółku** — świadomie nie korzystają z kolorowych
+  ikon zewnętrznego zestawu (Papirus), bo mieszały wygląd z resztą systemu.
+  **„Więcej tapet”** to **popover podpinany pod kafel** (nie drugie okno
+  dialogowe na wierzchu): Obrazy, Tapety systemowe (`/usr/share/wallpapers`,
+  `/usr/share/backgrounds`), katalog domowy, **„Zaskocz mnie”** (losowa tapeta
+  z bieżącego katalogu, od razu zastosowana) oraz **„Przeglądaj dysk…”**, który
+  przełącza na listę plików. Gdy dwa źródła mają tę samą nazwę (np. oba katalogi
+  systemowe), wiersz dostaje po prawej **nazwę katalogu** (`wallpapers` /
+  `backgrounds`), żeby nie wyglądały na duplikat. Kafel przełącznika obok nazwy
+  folderu wraca do siatki; strzałki/Enter obsługują wybór z klawiatury, Esc zamyka
+  sam popover, nie cały wybór.
   Dla **pulpitu** kliknięcie kafla daje **podgląd na żywo** (zapis
   `wallpaper.conf`, Selene podmienia tło od razu); **„Anuluj”/Esc przywraca**
   poprzednią tapetę, a „Wybierz” zostawia nową. Ekran logowania zostaje przy

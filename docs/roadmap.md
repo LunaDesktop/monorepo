@@ -258,6 +258,12 @@ a na końcu odtworzył realne aplikacje środowiska Luna z makiet.
 - **Luna Calculator** (`apps/luna-calculator`) — kalkulator standardowy i naukowy
   z lokalnym parserem wyrażeń, trybami `DEG`/`RAD`, podglądem wyniku i obsługą
   klawiatury. Szczegóły: **[`docs/calculator.md`](calculator.md)**.
+- **Luna Tasks** (`apps/luna-tasks`) — menedżer procesów i monitor systemu:
+  lista z `/proc`, sortowanie i wyszukiwanie w pasku tytułu, kolorowanie stanu
+  i zużycia, menu kontekstowe (PPM), panel szczegółów oraz zakończenie procesu
+  (`SIGTERM`) i wymuszone zamknięcie (`SIGKILL`). PID 1 jest chroniony,
+  `starttime` chroni przed recyklingiem PID, a bez fokusu okno nie odpytuje
+  `/proc`. Szczegóły: **[`docs/tasks.md`](tasks.md)**.
 
 ## Później (poza MVP)
 - **Pakiety ikon** (kolejny krok razem z centrum ustawień): manifest `icons.toml`

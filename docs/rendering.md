@@ -57,7 +57,38 @@ implementacji. Przy braku EGL platforma wraca do CPU z jednym logiem.
   reszta powierzchni była pusta/stara i panel „migał” tapetą lub starą klatką
   (widoczne jako przesunięty pasek).
 
-## 2. Benchmark
+## 2. Tekst w ramkach (kontrakt)
+
+Każdy napis rysowany w ograniczonym prostokącie musi się w nim zmieścić —
+nie tylko wizualnie, ale też w geometrii sceny. libLuna daje do tego trzy
+poziomy pomocy w `libluna-widgets`:
+
+| API | Kiedy używać |
+|---|---|
+| `display::ellipsize_weighted(text, max_width, size, weight, text)` | jedna linia — tytuły, etykiety, nazwy aplikacji |
+| `PaintCtx::label_left_fit` / `label_right_fit` | jak wyżej, bez ręcznego pomiaru; zwraca rzeczywistą szerokość |
+| `PaintCtx::paragraph(rect, text, size, line_height, weight, color, max_lines)` | akapit — zawija do szerokości, łamie długie słowa po znakach i **zawsze** zakłada `push_clip(rect)` |
+
+Zasady:
+
+- `wrap_text` zachowuje jawne `\n`, a słowo dłuższe niż linia (ścieżka
+  `/home/…/zed-editor`, URI `zed-cli:///…`, długi URL) łamie po znakach.
+  Bez tego pojedyncze „słowo” wychodziło za kartę — tak było w panelu zadań
+  i w toaście powiadomienia.
+- `paragraph` przycina rysowanie do `rect`, więc nawet pojedynczy glif szerszy
+  od ramki nie wycieknie. Gdy linii jest więcej niż `max_lines`, ostatnia
+  dostaje wielokropek.
+- Ręczne `label_left`/`label_right` bez limitu szerokości są dozwolone tylko
+  wtedy, gdy tekst jest z góry krótki (stała etykieta, skrót klawiszowy).
+- Nowy kod w aplikacjach nie powinien kopiować własnego `wrap_lines` —
+  wcześniej każda aplikacja miała inną wersję, a część nie łamała długich słów.
+
+Testy pilnują kontraktu: `display.rs` sprawdza szerokości linii po zawinięciu
+długiej ścieżki, `ctx.rs` — limit `label_*_fit` i wysokość akapitu, a
+`luna/src/notifications.rs` skanuje polecenia sceny i upewnia się, że każdy
+`TextRun` mieści się w prostokącie clipu karty powiadomienia.
+
+## 3. Benchmark
 
 ```sh
 # obowiązkowo release — na debug liczby nie mają sensu
@@ -149,7 +180,7 @@ Wnioski:
   bufor), żeby porównywać piksele. To świadomy koszt pamięci za mniejszy ruch do
   kompozytora i brak pustych commitów.
 
-## 3. Kiedy GPU ma sens
+## 4. Kiedy GPU ma sens
 
 Nie „bo tak”, tylko po pomiarach na **najsłabszym wspieranym sprzęcie**:
 
@@ -168,7 +199,7 @@ Nie „bo tak”, tylko po pomiarach na **najsłabszym wspieranym sprzęcie**:
 Anti-cel: GPU nie naprawi źle zbudowanej sceny (np. 1800 komend na klatkę).
 Dlatego kolejność to **damage → mniej komend → ewentualnie GPU**.
 
-## 4. Następne kroki (renderer)
+## 5. Następne kroki (renderer)
 
 - [x] **Damage lite**: `libluna_render::damage::diff_bounds` porównuje klatki,
       pomija identyczne `commit` i zawęża `damage_buffer` do zmienionego prostokąta.
@@ -217,7 +248,7 @@ Dlatego kolejność to **damage → mniej komend → ewentualnie GPU**.
 - [ ] Benchmark w CI z progiem (`--json` + porównanie do baseline).
 - [ ] Porównanie z GTK4 na tych samych scenach (Definition of Done z roadmapy).
 
-## 5. Diagnostyka w działającej sesji
+## 6. Diagnostyka w działającej sesji
 
 - `LUNA_STATS=1` — platforma wypisuje klatki/s, ile z nich pominięto (`damage lite`)
   oraz czas rysowania i wysyłki. Po scene fingerprint na bezczynnym ekranie Ustawień
