@@ -148,6 +148,17 @@ if [ -r "$luna_locale_file" ]; then
         pl) luna_locale="pl_PL.UTF-8" ;;
         en) luna_locale="en_US.UTF-8" ;;
         de) luna_locale="de_DE.UTF-8" ;;
+        fr) luna_locale="fr_FR.UTF-8" ;;
+        es) luna_locale="es_ES.UTF-8" ;;
+        pt) luna_locale="pt_PT.UTF-8" ;;
+        it) luna_locale="it_IT.UTF-8" ;;
+        nl) luna_locale="nl_NL.UTF-8" ;;
+        ru) luna_locale="ru_RU.UTF-8" ;;
+        uk) luna_locale="uk_UA.UTF-8" ;;
+        tr) luna_locale="tr_TR.UTF-8" ;;
+        sv) luna_locale="sv_SE.UTF-8" ;;
+        cs) luna_locale="cs_CZ.UTF-8" ;;
+        sw) luna_locale="sw_KE.UTF-8" ;;
         *)  luna_locale="" ;;
     esac
     if [ -n "$luna_lang" ]; then
@@ -374,13 +385,31 @@ if [ "${t0:-0}" != 0 ] && command -v date >/dev/null 2>&1; then
     fi
 fi
 
-# Ikony pulpitu (pliki, foldery, skróty `.desktop`). Osobny proces, bo jest
-# powierzchnią warstwową pod oknami — restart pulpitu nie restartuje paska.
+# Ikony pulpitu (pliki, foldery, skróty `.desktop`). Osobny proces na każde
+# wyjście: powierzchnia warstwowa wiąże się z konkretnym monitorem przez
+# `LUNA_OUTPUT`, więc bez tego drugi ekran nie ma ikon, menu PPM ani
+# przeciągania. Pozycje ikon są zapisywane per monitor (`pos1:` w `desktop.conf`).
 if command -v luna-desktop >/dev/null 2>&1; then
-    # Jedna instancja — ikony mają być tylko na jednym pulpicie. Uruchamianie
-    # kopii na każdym monitorze dublowałoby te same pliki na wszystkich ekranach.
-    ts "uruchamiam luna-desktop"
-    luna-desktop >/dev/null 2>&1 &
+    nouts=1
+    panels=1
+    if [ -f "$rt/luna-outputs" ]; then
+        n="$(cat "$rt/luna-outputs" 2>/dev/null)"
+        case "$n" in
+            ''|*[!0-9]*) n=1 ;;
+        esac
+        if [ "$n" -ge 1 ]; then nouts="$n"; fi
+    fi
+    if [ "${LUNA_PANELS:-primary}" = "all" ]; then
+        panels="$nouts"
+    fi
+    ts "uruchamiam luna-desktop x$nouts (ikony na każdym monitorze)"
+    i=0
+    while [ "$i" -lt "$nouts" ]; do
+        # Rezerwa na panel tylko tam, gdzie panel naprawdę jest.
+        if [ "$i" -lt "$panels" ]; then inset=1; else inset=0; fi
+        LUNA_OUTPUT="$i" LUNA_DESKTOP_INSET="$inset" luna-desktop >/dev/null 2>&1 &
+        i=$((i + 1))
+    done
 else
     ts "brak luna-desktop w PATH"
 fi
