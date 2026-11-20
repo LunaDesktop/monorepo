@@ -67,6 +67,7 @@ Show = Show
 Hide = Hide
 Close = Close
 Move to workspace {n} = Move to workspace {n}
+Move to monitor {n} = Move to monitor {n}
 
 # --- Luna Files (file manager) ---
 Folder = Folder

@@ -66,6 +66,7 @@ Show = Pokaż
 Hide = Schowaj
 Close = Zamknij program
 Move to workspace {n} = Przenieś na przestrzeń {n}
+Move to monitor {n} = Przenieś na monitor {n}
 
 # --- Luna Files (menedżer plików) ---
 Folder = Folder

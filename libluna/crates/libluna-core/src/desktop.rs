@@ -482,6 +482,122 @@ fn key_output(key: &str) -> Option<usize> {
     }
 }
 
+/// Wyjście z klucza przypisania `monitor<N>:<ścieżka>`; `None` = inny klucz.
+fn assignment_output(key: &str) -> Option<usize> {
+    let rest = key.strip_prefix("monitor")?;
+    let (head, _) = rest.split_once(':')?;
+    head.parse().ok()
+}
+
+/// Przypisania ikon do monitorów: ścieżka → numer wyjścia.
+pub type DesktopAssignments = HashMap<PathBuf, usize>;
+
+/// Wczytuje przypisania z `desktop.conf` (klucze `monitor<N>:<ścieżka> = 1`).
+pub fn load_assignments() -> DesktopAssignments {
+    config_file("desktop.conf")
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|text| assignments_from_text(&text))
+        .unwrap_or_default()
+}
+
+/// Wyciąga przypisania z treści `desktop.conf` (bez dotykania dysku).
+pub fn assignments_from_text(text: &str) -> DesktopAssignments {
+    let mut out = DesktopAssignments::new();
+    for (key, _) in parse_pairs(text) {
+        let Some(output) = assignment_output(&key) else {
+            continue;
+        };
+        if let Some((_, raw)) = key.split_once(':') {
+            out.insert(PathBuf::from(raw), output);
+        }
+    }
+    out
+}
+
+/// Wyjście, na którym ikona ma zapisaną pozycję (dowolny monitor).
+///
+/// Gdy ikona ma pozycję na kilku pulpitach, wybieramy najwyższe wyjście —
+/// tak wygląda układ po przeciągnięciu jej na dodatkowy monitor.
+pub fn position_outputs() -> HashMap<PathBuf, usize> {
+    config_file("desktop.conf")
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|text| position_outputs_from_text(&text))
+        .unwrap_or_default()
+}
+
+/// Wyciąga wyjścia pozycji z treści `desktop.conf` (bez dotykania dysku).
+pub fn position_outputs_from_text(text: &str) -> HashMap<PathBuf, usize> {
+    let mut out: HashMap<PathBuf, usize> = HashMap::new();
+    for (key, _) in parse_pairs(text) {
+        let Some(output) = key_output(&key) else {
+            continue;
+        };
+        let Some((_, raw)) = key.split_once(':') else {
+            continue;
+        };
+        let path = PathBuf::from(raw);
+        out.entry(path)
+            .and_modify(|current| *current = (*current).max(output))
+            .or_insert(output);
+    }
+    out
+}
+
+/// Wyjście, na którym ikona ma się pokazywać.
+///
+/// Kolejność decyzji:
+/// 1. jawne przypisanie (`monitor<N>:` — ustawiane menu pulpitów),
+/// 2. zapisana pozycja (ikona przeciągnięta na dany monitor),
+/// 3. pulpit główny (wyjście 0) — nowe pliki pojawiają się na pierwszym ekranie.
+pub fn icon_output(
+    path: &Path,
+    assignments: &DesktopAssignments,
+    position_outputs: &HashMap<PathBuf, usize>,
+) -> usize {
+    assignments
+        .get(path)
+        .or_else(|| position_outputs.get(path))
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Przypisuje ikonę do monitora.
+///
+/// `output` to numer wyjścia (0 = pulpit główny). Stare przypisania tej ikony
+/// znikają, a jej pozycja na docelowym pulpicie jest czyszczona — ikona trafi
+/// w pierwsze wolne miejsce na nowym ekranie.
+pub fn assign_to_output(path: &Path, output: usize) -> io::Result<()> {
+    let config = config_file("desktop.conf")
+        .ok_or_else(|| io::Error::other("brak katalogu konfiguracji"))?;
+    let existing = std::fs::read_to_string(&config).unwrap_or_default();
+    let text = assigned_text(&existing, path, output);
+    save_atomic(&config, &text)
+}
+
+/// Przepisuje treść `desktop.conf` z nowym przypisaniem ikony.
+fn assigned_text(text: &str, path: &Path, output: usize) -> String {
+    let mut out = String::with_capacity(text.len() + 64);
+    for line in text.lines() {
+        if let Some((key, _)) = line.split_once('=') {
+            let key = key.trim();
+            if let Some((_, raw)) = key.split_once(':') {
+                let is_assignment = assignment_output(key).is_some();
+                let is_target_position = key_output(key) == Some(output);
+                if (is_assignment || is_target_position) && Path::new(raw) == path {
+                    continue;
+                }
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&format!("monitor{output}:{} = 1\n", path.display()));
+    out
+}
+
 /// Tekst bez pozycji jednego wyjścia (reszta linii zostaje nietknięta).
 fn without_output(text: &str, output: usize) -> String {
     let mut out = String::with_capacity(text.len());
@@ -556,7 +672,11 @@ pub fn save(settings: &DesktopSettings, positions: &DesktopPositions) -> io::Res
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
     for line in existing.lines() {
         if let Some((key, _)) = line.split_once('=') {
-            if key_output(key.trim()).is_some_and(|output| output != 0) {
+            let key = key.trim();
+            // Pozycje dodatkowych monitorów i przypisania ikon zostają — inaczej
+            // zapis ustawień z Ustawień kasowałby układ z drugiego ekranu.
+            if key_output(key).is_some_and(|output| output != 0) || assignment_output(key).is_some()
+            {
                 text.push_str(line.trim_end());
                 text.push('\n');
             }
@@ -723,5 +843,60 @@ mod tests {
         let stem = source.file_stem().unwrap().to_string_lossy().to_string();
         assert_eq!(stem, "app");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn icon_output_prefers_assignment_then_position() {
+        let path = PathBuf::from("/home/ania/Pulpit/raport.pdf");
+        let mut assignments = DesktopAssignments::new();
+        let mut positions = HashMap::new();
+
+        // Nic nie zapisane — ikona zostaje na pulpicie głównym.
+        assert_eq!(icon_output(&path, &assignments, &positions), 0);
+
+        // Pozycja na drugim monitorze przenosi ikonę (zgodność ze starymi
+        // układami: przeciągnięcie zapisywało tylko `pos1:`).
+        positions.insert(path.clone(), 1);
+        assert_eq!(icon_output(&path, &assignments, &positions), 1);
+
+        // Jawne przypisanie ma pierwszeństwo nad pozycją.
+        assignments.insert(path.clone(), 2);
+        assert_eq!(icon_output(&path, &assignments, &positions), 2);
+    }
+
+    #[test]
+    fn assignments_and_positions_are_parsed_from_text() {
+        let text = "icon_size = 64\n\
+                    pos:/tmp/a = 0,0\n\
+                    pos1:/tmp/b = 2,1\n\
+                    monitor1:/tmp/c = 1\n\
+                    monitor2:/tmp/c = 1\n";
+        let assignments = assignments_from_text(text);
+        // Ostatni wpis wygrywa — plik ma jedno przypisanie na ikonę.
+        assert_eq!(assignments.get(Path::new("/tmp/c")), Some(&2));
+
+        let positions = position_outputs_from_text(text);
+        assert_eq!(positions.get(Path::new("/tmp/a")), Some(&0));
+        assert_eq!(positions.get(Path::new("/tmp/b")), Some(&1));
+        assert!(positions.get(Path::new("/tmp/c")).is_none());
+    }
+
+    #[test]
+    fn assigning_an_icon_keeps_other_lines_and_clears_the_target_position() {
+        let text = "icon_size = 64\n\
+                    pos:/tmp/a = 0,0\n\
+                    pos1:/tmp/a = 3,2\n\
+                    pos1:/tmp/b = 1,1\n\
+                    monitor0:/tmp/a = 1\n";
+        let out = assigned_text(text, Path::new("/tmp/a"), 1);
+        assert!(out.contains("icon_size = 64"), "{out}");
+        // Pozycja na docelowym pulpicie znika — ikona trafi w wolne miejsce.
+        assert!(!out.contains("pos1:/tmp/a"), "{out}");
+        // Inne ikony i pozycja na pierwszym pulpicie zostają nietknięte.
+        assert!(out.contains("pos:/tmp/a = 0,0"), "{out}");
+        assert!(out.contains("pos1:/tmp/b = 1,1"), "{out}");
+        // Stare przypisania tej ikony są zastąpione jednym nowym.
+        assert!(!out.contains("monitor0:/tmp/a"), "{out}");
+        assert_eq!(out.matches("monitor1:/tmp/a").count(), 1, "{out}");
     }
 }

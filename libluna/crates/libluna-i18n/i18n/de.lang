@@ -66,6 +66,7 @@ Show = Anzeigen
 Hide = Ausblenden
 Close = Programm schließen
 Move to workspace {n} = In Arbeitsfläche {n} verschieben
+Move to monitor {n} = Auf Monitor {n} verschieben
 
 # --- Luna Files (Dateimanager) ---
 Folder = Ordner

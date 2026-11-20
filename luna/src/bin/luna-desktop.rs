@@ -10,17 +10,20 @@
 //! - przeciągnięcie ikony zmienia jej pozycję (zapis w `desktop.conf`),
 //! - `Shift` + przeciągnięcie wysyła plik do innej aplikacji (Wayland DnD),
 //! - upuszczenie plików z Plików kopiuje/przenosi je na pulpit,
-//! - klik prawym przyciskiem otwiera menu kontekstowe.
+//! - klik prawym przyciskiem otwiera menu kontekstowe,
+//! - każdy monitor ma **własny zestaw ikon**: plik trafia na jeden ekran
+//!   (menu „Przenieś na monitor…”), a nowe pliki startują na pulpicie głównym.
 //!
 //! Uruchom: `cargo run -p luna --bin luna-desktop`.
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use libluna_core::desktop::{self, DesktopEntry, DesktopItemKind, DesktopSettings};
 use libluna_core::{
     ButtonState, Event, PanelSettings, Point, PointerButton, Rect, ScrollEvent, Size, Theme,
 };
-use libluna_i18n::tr;
+use libluna_i18n::{tr, tr_args};
 use libluna_platform::{run, AppConfig, Frame, InputRegion, LayerConfig};
 use libluna_render::TextEngine;
 use libluna_widgets::PaintCtx;
@@ -55,6 +58,27 @@ enum MenuAction {
     Trash,
     NewFolder,
     Refresh,
+    /// Przenosi ikonę na wskazany monitor (0 = pulpit główny).
+    MoveTo(usize),
+}
+
+fn output_count() -> usize {
+    // Sesja przekazuje liczbę monitorów plikiem `luna-outputs` (pisze go Selene).
+    if let Some(value) = std::env::var("LUNA_OUTPUTS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+    {
+        return value.clamp(1, 16);
+    }
+    let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR").filter(|value| !value.is_empty())
+    else {
+        return 1;
+    };
+    std::fs::read_to_string(Path::new(&runtime).join("luna-outputs"))
+        .ok()
+        .and_then(|text| text.trim().parse::<usize>().ok())
+        .map(|count| count.clamp(1, 16))
+        .unwrap_or(1)
 }
 
 /// Trwające wciśnięcie przycisku na ikonie.
@@ -69,11 +93,17 @@ struct Press {
 struct DesktopApp {
     /// Wyjście, do którego przypisana jest ta instancja (`LUNA_OUTPUT`).
     output: usize,
+    /// Ile jest monitorów (menu „Przenieś na monitor…”).
+    outputs: usize,
     /// Czy na tym wyjściu jest panel (wtedy ikony muszą go omijać).
     inset: bool,
     settings: DesktopSettings,
     panel: PanelSettings,
     positions: desktop::DesktopPositions,
+    /// Przypisania ikon do monitorów i pozycje z pozostałych pulpitów — na ich
+    /// podstawie decydujemy, które ikony pokazać na **tym** ekranie.
+    assignments: desktop::DesktopAssignments,
+    position_outputs: std::collections::HashMap<std::path::PathBuf, usize>,
     entries: Vec<DesktopEntry>,
     next_scan: Instant,
     /// Ostatnia znana modyfikacja `desktop.conf` (zmiany z Ustawień).
@@ -99,10 +129,13 @@ impl DesktopApp {
         let settings = DesktopSettings::load();
         Self {
             output,
+            outputs: output_count().max(output + 1),
             inset: std::env::var("LUNA_DESKTOP_INSET").map_or(true, |value| value.trim() != "0"),
             positions: desktop::load_positions_at(output),
             settings,
             panel: PanelSettings::load(),
+            assignments: desktop::load_assignments(),
+            position_outputs: desktop::position_outputs(),
             entries: Vec::new(),
             next_scan: Instant::now(),
             settings_stamp: settings_stamp(),
@@ -164,11 +197,23 @@ impl DesktopApp {
             // (wspólny `desktop.conf`): przeładuj katalogi, rozmiar i pozycje.
             self.settings = DesktopSettings::load();
             self.positions = desktop::load_positions_at(self.output);
+            self.assignments = desktop::load_assignments();
+            self.position_outputs = desktop::position_outputs();
+            self.outputs = output_count().max(self.output + 1);
             self.settings_stamp = stamp;
         }
         // Położenie panelu może się zmienić bez restartu pulpitu.
         self.panel = PanelSettings::load();
-        self.entries = desktop::scan(&self.settings.folders);
+        // Każdy monitor ma własny zestaw ikon: plik pokazujemy tylko na wyjściu,
+        // do którego należy (jawne przypisanie albo zapisana pozycja), a nowe
+        // pliki startują na pulpicie głównym. Bez tego ten sam zestaw był
+        // rysowany na wszystkich ekranach.
+        let mut entries = desktop::scan(&self.settings.folders);
+        entries.retain(|entry| {
+            desktop::icon_output(&entry.path, &self.assignments, &self.position_outputs)
+                == self.output
+        });
+        self.entries = entries;
         self.next_scan = Instant::now() + RESCAN_EVERY;
     }
 
@@ -214,6 +259,19 @@ impl DesktopApp {
                 });
             }
         }
+        // Przenoszenie ikony na inny monitor — każdy ekran ma własny zestaw
+        // ikon, więc to jedyny sposób, żeby ją tam pokazać.
+        if target.is_some() {
+            for output in 0..self.outputs {
+                if output == self.output {
+                    continue;
+                }
+                rows.push(MenuRow {
+                    label: tr_args("Move to monitor {n}", &[("n", &(output + 1).to_string())]),
+                    action: MenuAction::MoveTo(output),
+                });
+            }
+        }
         Menu { at, target, rows }
     }
 
@@ -241,6 +299,18 @@ impl DesktopApp {
                 }
             }
             MenuAction::Refresh => {}
+            MenuAction::MoveTo(output) => {
+                if let Some(item) = target.and_then(|i| placed.get(i)) {
+                    let path = item.entry.path.clone();
+                    if desktop::assign_to_output(&path, output).is_ok() {
+                        // Przypisanie jest teraz źródłem prawdy — lokalna pozycja
+                        // na tym pulpicie już nie obowiązuje.
+                        self.positions.remove(&path);
+                        self.assignments = desktop::load_assignments();
+                        self.position_outputs = desktop::position_outputs();
+                    }
+                }
+            }
         }
         self.menu = None;
         self.rescan();
