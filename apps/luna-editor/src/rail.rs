@@ -241,12 +241,19 @@ pub fn handle_menu_events(
 fn apply_menu(app: &mut App, plugin: usize, action: Option<MenuAction>) {
     match action {
         Some(MenuAction::Settings) => crate::plugin_ui::open_settings_for(app, plugin),
-        Some(MenuAction::Run) => run_command(app, plugin),
+        Some(MenuAction::Run) => {
+            // Prompt/panel muszą być na wierzchu, a nie pod starym formularzem.
+            crate::plugin_ui::dismiss(app);
+            run_command(app, plugin);
+        }
         Some(MenuAction::Update) => {
+            crate::plugin_ui::dismiss(app);
             app.plugin_ui.selected = plugin;
+            app.plugin_ui.open = true;
             crate::plugin_ui::update_selected(app);
         }
         Some(MenuAction::Manage) => {
+            crate::plugin_ui::dismiss(app);
             app.open_plugins();
             app.plugin_ui.selected = plugin;
         }
@@ -288,7 +295,7 @@ pub fn activate(app: &mut App, index: usize) {
 }
 
 /// Rysuje szynę: kafelki wtyczek, stopkę i dymek aktywnego kafelka.
-pub fn paint(app: &App, ctx: &mut PaintCtx, rail: Rect, viewport: Size) {
+pub fn paint(app: &App, ctx: &mut PaintCtx, rail: Rect, _viewport: Size) {
     if rail.width() <= 0.0 {
         return;
     }
@@ -360,15 +367,8 @@ pub fn paint(app: &App, ctx: &mut PaintCtx, rail: Rect, viewport: Size) {
         theme.colors.text,
     );
 
-    // Menu kontekstowe rysujemy nad szyną; dymek wtedy nie jest potrzebny.
-    if let Some(open) = &app.plugin_ui.rail_menu {
-        let width = open.menu.width(ctx.text, &theme);
-        let panel = open
-            .menu
-            .place(open.anchor, width, Rect::from_size(viewport), &theme);
-        open.menu.paint(ctx, panel);
-        return;
-    }
+    // Menu kontekstowe rysuje warstwa nakładek (`paint_menu`), nad panelami
+    // wtyczek — inaczej chowało się pod formularzem ustawień.
 
     // Dymek po lewej stronie szyny (nie zasłania edytora na dłużej niż hover).
     let (anchor, title, hint) = match hover {
@@ -398,6 +398,18 @@ pub fn paint(app: &App, ctx: &mut PaintCtx, rail: Rect, viewport: Size) {
         None => return,
     };
     paint_tooltip(ctx, rail, anchor, &title, &hint);
+}
+
+/// Rysuje menu kontekstowe szyny **nad** panelami wtyczek i edytora.
+pub fn paint_menu(app: &App, ctx: &mut PaintCtx, viewport: Size) {
+    let Some(open) = &app.plugin_ui.rail_menu else {
+        return;
+    };
+    let width = open.menu.width(ctx.text, ctx.theme);
+    let panel = open
+        .menu
+        .place(open.anchor, width, Rect::from_size(viewport), ctx.theme);
+    open.menu.paint(ctx, panel);
 }
 
 fn paint_tile(ctx: &mut PaintCtx, rect: Rect, active: bool, hovered: bool) {

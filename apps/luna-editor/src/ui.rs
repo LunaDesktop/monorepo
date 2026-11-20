@@ -324,18 +324,6 @@ pub fn paint(app: &mut App, scene: &mut Scene, size: Size, theme: &Theme, text: 
     crate::chat::paint(app, &mut ctx, &lay);
     crate::rail::paint(app, &mut ctx, lay.rail, size);
 
-    if app.menu_open {
-        if let Some(panel) = menu_panel(app, &lay, size, theme, text) {
-            app.menu.paint(&mut ctx, panel);
-        }
-    }
-    if let Some(tree) = &app.tree_menu {
-        let width = tree.menu.width(text, theme);
-        let panel = tree
-            .menu
-            .place(tree.anchor, width, Rect::from_size(size), theme);
-        tree.menu.paint(&mut ctx, panel);
-    }
     if app.browser.is_some() {
         paint_browser(app, &mut ctx, size);
     }
@@ -349,6 +337,23 @@ pub fn paint(app: &mut App, scene: &mut Scene, size: Size, theme: &Theme, text: 
         paint_settings(app, &mut ctx, size);
     }
     crate::plugin_ui::paint(app, &mut ctx, size);
+
+    // Menu muszą być nad panelami wtyczek/ustawień — inaczej giną pod nimi
+    // i wyglądają jak „pozostałość” po zamkniętym formularzu.
+    if app.menu_open {
+        if let Some(panel) = menu_panel(app, &lay, size, theme, text) {
+            app.menu.paint(&mut ctx, panel);
+        }
+    }
+    if let Some(tree) = &app.tree_menu {
+        let width = tree.menu.width(text, theme);
+        let panel = tree
+            .menu
+            .place(tree.anchor, width, Rect::from_size(size), theme);
+        tree.menu.paint(&mut ctx, panel);
+    }
+    crate::rail::paint_menu(app, &mut ctx, size);
+
     if let Some(confirm) = &app.confirm {
         confirm.dialog.paint(&mut ctx, size);
     }
@@ -1446,6 +1451,33 @@ pub fn handle_events(
             app.request_close();
             continue;
         }
+        // Pasek tytułu i prawy szyn są ponad panelami wtyczek: klik w menu
+        // zamyka formularz ustawień, a PPM na kafelku otwiera menu nad nim.
+        let modal = app.error.is_some()
+            || app.confirm.is_some()
+            || app.overwrite.is_some()
+            || app.pending_delete.is_some();
+        if !modal {
+            if let Event::PointerButton(button) = event {
+                if button.button == PointerButton::Left
+                    && button.state == ButtonState::Pressed
+                    && lay.menu.contains(button.position)
+                {
+                    crate::plugin_ui::dismiss(app);
+                    app.settings_open = false;
+                    app.tree_menu = None;
+                    app.menu_open = !app.menu_open;
+                    continue;
+                }
+                if button.button == PointerButton::Right
+                    && button.state == ButtonState::Pressed
+                    && lay.rail.contains(button.position)
+                {
+                    crate::rail::handle_click(app, event, lay.rail);
+                    continue;
+                }
+            }
+        }
         if app.error.is_some() {
             handle_alert(app, event, size, theme, text, AlertTarget::Error);
         } else if app.confirm.is_some() {
@@ -1454,6 +1486,10 @@ pub fn handle_events(
             handle_alert(app, event, size, theme, text, AlertTarget::Overwrite);
         } else if app.pending_delete.is_some() {
             handle_alert(app, event, size, theme, text, AlertTarget::Delete);
+        } else if app.menu_open {
+            handle_menu(app, event, &lay, size, theme, text);
+        } else if crate::rail::menu_open(app) {
+            crate::rail::handle_menu_events(app, event, size, theme, text);
         } else if crate::plugin_ui::is_open(app) {
             crate::plugin_ui::handle_events(app, event, size, theme, text);
         } else if app.settings_open {
@@ -1468,10 +1504,6 @@ pub fn handle_events(
             handle_tree_menu(app, event, size, theme, text);
         } else if crate::chat::handle_events(app, event, &lay, theme, text) {
             // Zdarzenie obsłużone przez panel czatu.
-        } else if app.menu_open {
-            handle_menu(app, event, &lay, size, theme, text);
-        } else if crate::rail::menu_open(app) {
-            crate::rail::handle_menu_events(app, event, size, theme, text);
         } else if crate::rail::handle_click(app, event, lay.rail) {
             // Kliknięcie w prawą szynę (wtyczki/akcje) — edytor go nie widzi.
         } else {
@@ -2424,17 +2456,9 @@ fn handle_editor_key(app: &mut App, key: &KeyEvent, lay: &Layout, theme: &Theme)
                 app.view_mut().clear_selection();
             }
         }
-        _ => {
-            if let Some(value) = &key.text {
-                let plain: String = value
-                    .chars()
-                    .filter(|ch| *ch == '\n' || *ch == '\t' || !ch.is_control())
-                    .collect();
-                if !plain.is_empty() {
-                    app.insert_text(&plain);
-                }
-            }
-        }
+        // Tekst wpisany przychodzi wyłącznie jako `Event::Text` — platforma
+        // wysyła je razem z `KeyEvent.text`, więc czytanie obu dublowało znaki.
+        _ => {}
     }
 }
 
@@ -2498,15 +2522,9 @@ fn handle_find_key(app: &mut App, key: &KeyEvent) {
             _ => {
                 if key.modifiers.ctrl {
                     false
-                } else if let Some(value) = &key.text {
-                    let plain: String = value.chars().filter(|ch| !ch.is_control()).collect();
-                    if plain.is_empty() {
-                        false
-                    } else {
-                        find.entry.insert_str(&plain);
-                        true
-                    }
                 } else {
+                    // `Event::Text` zajmuje się wpisywaniem — tu tylko
+                    // decydujemy, że nic więcej nie robimy.
                     false
                 }
             }
@@ -2589,6 +2607,75 @@ mod tests {
             size(),
             &theme,
             &text,
+        );
+    }
+
+    #[test]
+    fn typed_character_is_inserted_once() {
+        // Platforma wysyła `KeyEvent.text` **i** `Event::Text`; edytor musi
+        // czytać tylko jedno z nich, inaczej każda litera wpada dwa razy.
+        let mut app = App::new();
+        app.new_file();
+        let theme = theme();
+        let text = TextEngine::none();
+        let key = KeyEvent {
+            keysym: 0x61,
+            keycode: 0,
+            text: Some("a".to_owned()),
+            state: ButtonState::Pressed,
+            modifiers: Default::default(),
+            repeat: false,
+        };
+        handle_events(
+            &mut app,
+            &[Event::Key(key), Event::Text("a".to_owned())],
+            size(),
+            &theme,
+            &text,
+        );
+        assert_eq!(app.doc().view.text(), "a");
+    }
+
+    #[test]
+    fn header_menu_dismisses_plugin_panels_and_settings() {
+        let mut app = App::new();
+        app.plugin_ui.open = true;
+        app.settings_open = true;
+        let theme = theme();
+        let text = TextEngine::none();
+        let lay = test_layout(&app, &theme);
+        handle_events(
+            &mut app,
+            &[Event::PointerButton(PointerEvent {
+                position: lay.menu.center(),
+                button: PointerButton::Left,
+                state: ButtonState::Pressed,
+                modifiers: Default::default(),
+            })],
+            size(),
+            &theme,
+            &text,
+        );
+        assert!(
+            !app.plugin_ui.open,
+            "panel wtyczek nie może zostać pod menu"
+        );
+        assert!(!app.settings_open, "ustawienia nie mogą prześwitywać");
+        assert!(app.menu_open);
+    }
+
+    #[test]
+    fn right_click_on_a_plugin_tile_opens_menu_over_the_panel() {
+        let mut app = chat_app();
+        app.plugin_ui.open = true;
+        let theme = theme();
+        let lay = test_layout(&app, &theme);
+        // Kafelek wtyczki: PAD (6) + połowa boku kafelka (17).
+        let position = Point::new(lay.rail.center().x, lay.rail.y() + 6.0 + 17.0);
+        right_click(&mut app, position);
+        assert!(
+            app.plugin_ui.rail_menu.is_some(),
+            "PPM musi otworzyć menu szyny mimo otwartego panelu wtyczki"
         );
     }
 

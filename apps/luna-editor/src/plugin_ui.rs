@@ -920,9 +920,6 @@ fn handle_manager(app: &mut App, event: &Event, size: Size, theme: &Theme, _text
         Event::Paste(value) if app.plugin_ui.url.is_focused() => {
             app.plugin_ui.url.insert_str(&plain_text(value));
         }
-        Event::Paste(value) if app.plugin_ui.url.is_focused() => {
-            app.plugin_ui.url.insert_str(value);
-        }
         _ => {}
     }
 }
@@ -1407,7 +1404,7 @@ fn handle_prompt(app: &mut App, event: &Event, size: Size, theme: &Theme, _text:
         }
         Event::Paste(value) => {
             if let Some(prompt) = app.plugin_ui.prompt.as_mut() {
-                prompt.entry.insert_str(value);
+                prompt.entry.insert_str(&plain_text(value));
             }
         }
         _ => {}
@@ -1415,8 +1412,8 @@ fn handle_prompt(app: &mut App, event: &Event, size: Size, theme: &Theme, _text:
 }
 
 fn insert_key_text(entry: &mut Entry, key: &KeyEvent) {
-    // `Event::Text` nie jest wysyłany przez platformę — tekst jest w `key.text`.
-    // `AltGr` (`level3`) przychodzi jako ctrl+alt, więc nie blokujemy go.
+    // Ten panel czyta tekst z `key.text` (nie ma tu `Event::Text`) —
+    // dodanie obu źródeł dublowałoby znaki.
     let plain_shortcut = (key.modifiers.ctrl && !key.modifiers.level3) || key.modifiers.logo;
     if plain_shortcut {
         return;
@@ -1696,6 +1693,15 @@ pub fn tick(app: &mut App, size: Size, theme: &Theme) {
 /// Czy któryś z dialogów wtyczek jest otwarty (blokuje edytor).
 pub fn is_open(app: &App) -> bool {
     app.plugin_ui.open || app.plugin_ui.prompt.is_some() || app.plugin_ui.form.is_some()
+}
+
+/// Zamyka wszystkie okna wtyczek (np. gdy użytkownik otwiera menu edytora).
+pub fn dismiss(app: &mut App) {
+    close_form(app);
+    app.plugin_ui.prompt = None;
+    app.plugin_ui.open = false;
+    app.plugin_ui.rail_menu = None;
+    app.plugin_ui.url.set_focused(false);
 }
 
 #[cfg(test)]
