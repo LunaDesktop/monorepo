@@ -1466,6 +1466,7 @@ pub fn handle_events(
                     crate::plugin_ui::dismiss(app);
                     app.settings_open = false;
                     app.tree_menu = None;
+                    app.menu.reset_scroll();
                     app.menu_open = !app.menu_open;
                     continue;
                 }
@@ -2052,6 +2053,15 @@ fn handle_menu(
         Event::Key(key) if key.state == ButtonState::Pressed && key.keysym == 0xff1b => {
             app.menu_open = false;
         }
+        Event::Scroll(scroll) => {
+            if let Some(panel) = panel {
+                if panel.contains(scroll.position) {
+                    // Menu dłuższe niż okno przewija się jak lista.
+                    app.menu
+                        .scroll_by(scroll.notches_y() * SCROLL_STEP, panel.height(), theme);
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -2224,6 +2234,7 @@ fn handle_click(
         return;
     }
     if lay.menu.contains(point) {
+        app.menu.reset_scroll();
         app.menu_open = true;
         app.menu.set_hovered(None);
         return;

@@ -71,6 +71,8 @@ pub struct MenuRow {
 pub struct Menu {
     entries: Vec<MenuEntry>,
     hovered: Option<usize>,
+    /// Przewinięcie zawartości, gdy menu nie mieści się w oknie.
+    scroll: f64,
 }
 
 impl Menu {
@@ -78,7 +80,24 @@ impl Menu {
         Self {
             entries,
             hovered: None,
+            scroll: 0.0,
         }
+    }
+
+    /// Przewija menu o `delta` pikseli (dodatnia wartość = w dół).
+    pub fn scroll_by(&mut self, delta: f64, panel_height: f64, theme: &Theme) {
+        let max = (self.height(theme) - panel_height).max(0.0);
+        self.scroll = (self.scroll + delta).clamp(0.0, max);
+    }
+
+    /// Wraca na początek przy ponownym otwarciu menu.
+    pub fn reset_scroll(&mut self) {
+        self.scroll = 0.0;
+    }
+
+    /// Bieżące przewinięcie (do testów i pasków przewijania).
+    pub fn scroll(&self) -> f64 {
+        self.scroll
     }
 
     pub fn entries(&self) -> &[MenuEntry] {
@@ -129,8 +148,11 @@ impl Menu {
     /// (przy prawej krawędzi wyrównuje do prawej, przy dolnej otwiera do góry).
     pub fn place(&self, anchor: Rect, width: f64, viewport: Rect, theme: &Theme) -> Rect {
         let m = theme.metrics.menu;
-        let height = self.height(theme);
+        let content_height = self.height(theme);
         let margin = m.margin;
+        // Menu dłuższe niż okno dostaje wysokość widoku i staje się przewijalne.
+        let max_height = (viewport.height() - 2.0 * margin).max(0.0);
+        let height = content_height.min(max_height);
 
         let mut x = anchor.x();
         if x + width > viewport.right() - margin {
@@ -142,16 +164,21 @@ impl Menu {
         if y + height > viewport.bottom() - margin {
             y = anchor.y() - height - m.anchor_gap;
         }
-        y = y.max(viewport.y() + margin);
+        let min_y = viewport.y() + margin;
+        let max_y = (viewport.bottom() - margin - height).max(min_y);
+        y = y.clamp(min_y, max_y);
 
         Rect::from_xywh(x, y, width, height)
     }
 
-    /// Rozkłada wiersze od góry panelu.
+    /// Rozkłada wiersze od góry panelu (z uwzględnieniem przewinięcia).
     pub fn rows(&self, panel: Rect, theme: &Theme) -> Vec<MenuRow> {
         let m = theme.metrics.menu;
+        let content_height = self.height(theme);
+        let max_scroll = (content_height - panel.height()).max(0.0);
+        let scroll = self.scroll.clamp(0.0, max_scroll);
         let mut rows = Vec::with_capacity(self.entries.len());
-        let mut y = panel.y() + m.pad_v;
+        let mut y = panel.y() + m.pad_v - scroll;
         for (i, entry) in self.entries.iter().enumerate() {
             let (h, selectable) = match entry {
                 MenuEntry::Action { enabled, .. } => (m.item_h, *enabled),
@@ -170,6 +197,9 @@ impl Menu {
 
     /// Indeks akcji pod punktem `p` (sekcje, separatory i akcje wyłączone → `None`).
     pub fn index_at(&self, panel: Rect, p: Point, theme: &Theme) -> Option<usize> {
+        if !panel.contains(p) {
+            return None;
+        }
         self.rows(panel, theme)
             .into_iter()
             .find(|row| row.selectable && row.rect.contains(p))
@@ -201,8 +231,16 @@ impl Menu {
         let body = theme.typography.body.size;
         let caption = theme.typography.caption.size;
         let m = theme.metrics.menu;
+        let content_height = self.height(&theme);
+        let max_scroll = (content_height - panel.height()).max(0.0);
+        let scroll = self.scroll.clamp(0.0, max_scroll);
 
+        // Zawartość dłuższa niż panel jest przycinana, a nie rysowana poza oknem.
+        ctx.scene.push_clip(panel);
         for row in self.rows(panel, &theme) {
+            if row.rect.bottom() <= panel.y() || row.rect.y() >= panel.bottom() {
+                continue;
+            }
             match &self.entries[row.entry] {
                 MenuEntry::Separator => {
                     let y = row.rect.center().y;
@@ -264,6 +302,29 @@ impl Menu {
                 }
             }
         }
+        ctx.scene.pop_clip();
+
+        if max_scroll > 0.0 {
+            let track = Rect::from_xywh(
+                panel.right() - 5.0,
+                panel.y() + 6.0,
+                3.0,
+                (panel.height() - 12.0).max(0.0),
+            );
+            let ratio = (panel.height() / content_height).clamp(0.0, 1.0);
+            let thumb_height = (track.height() * ratio).max(24.0).min(track.height());
+            let progress = if max_scroll > 0.0 {
+                (scroll / max_scroll).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let thumb_y = track.y() + (track.height() - thumb_height) * progress;
+            ctx.scene.fill_rounded_rect(
+                Rect::from_xywh(track.x(), thumb_y, track.width(), thumb_height),
+                1.5,
+                colors.dim_text.scale_alpha(0.35),
+            );
+        }
     }
 }
 
@@ -322,5 +383,53 @@ mod tests {
         let anchor = Rect::from_xywh(10.0, 380.0, 20.0, 20.0);
         let placed = m.place(anchor, 200.0, viewport, &theme);
         assert!(placed.bottom() <= anchor.y());
+    }
+
+    #[test]
+    fn tall_menu_is_clamped_to_the_viewport_and_scrolls() {
+        let theme = Theme::light();
+        let entries = (0..40)
+            .map(|index| MenuEntry::action(format!("Item {index}")))
+            .collect();
+        let mut menu = Menu::new(entries);
+        let viewport = Rect::from_xywh(0.0, 40.0, 300.0, 400.0);
+        let anchor = Rect::from_xywh(10.0, 50.0, 20.0, 20.0);
+        let panel = menu.place(anchor, 200.0, viewport, &theme);
+        assert!(
+            panel.bottom() <= viewport.bottom() - theme.metrics.menu.margin + 0.001,
+            "menu nie może wychodziü poza dół okna"
+        );
+        assert!(panel.height() < menu.height(&theme));
+
+        let rows = menu.rows(panel, &theme);
+        assert!(panel.contains(rows[0].rect.center()));
+
+        // Przewiń na koniec — pierwszy wiersz znika, ostatni jest widoczny.
+        menu.scroll_by(10_000.0, panel.height(), &theme);
+        let rows = menu.rows(panel, &theme);
+        assert!(rows[0].rect.center().y < panel.y());
+        assert!(panel.contains(rows.last().unwrap().rect.center()));
+        assert!(menu.scroll() > 0.0);
+    }
+
+    #[test]
+    fn clicks_outside_the_panel_are_ignored_after_scrolling() {
+        let theme = Theme::light();
+        let entries = (0..40)
+            .map(|index| MenuEntry::action(format!("Item {index}")))
+            .collect();
+        let mut menu = Menu::new(entries);
+        let viewport = Rect::from_xywh(0.0, 0.0, 300.0, 300.0);
+        let anchor = Rect::from_xywh(10.0, 0.0, 20.0, 20.0);
+        let panel = menu.place(anchor, 200.0, viewport, &theme);
+        menu.scroll_by(400.0, panel.height(), &theme);
+        assert_eq!(
+            menu.index_at(
+                panel,
+                Point::new(panel.center().x, panel.y() - 10.0),
+                &theme
+            ),
+            None
+        );
     }
 }

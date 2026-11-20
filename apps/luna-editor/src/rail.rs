@@ -234,6 +234,14 @@ pub fn handle_menu_events(
         Event::Key(key) if key.state == ButtonState::Pressed && key.keysym == KEY_ESCAPE => {
             app.plugin_ui.rail_menu = None;
         }
+        Event::Scroll(scroll) => {
+            if panel.contains(scroll.position) {
+                if let Some(open) = app.plugin_ui.rail_menu.as_mut() {
+                    open.menu
+                        .scroll_by(scroll.notches_y() * 64.0, panel.height(), theme);
+                }
+            }
+        }
         _ => {}
     }
 }
