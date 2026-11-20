@@ -942,6 +942,7 @@ fn paint_compose(app: &mut App, ctx: &mut PaintCtx, lay: &Layout, size: Size) {
     };
     let body_bottom = (inner.bottom() - buttons_h - 12.0 - attachments_h).max(y + 40.0);
     let body_rect = Rect::from_xywh(inner.x(), y, inner.width(), (body_bottom - y).max(0.0));
+    app.compose_body_width = (body_rect.width() - 2.0 * ctx.theme.spacing.sm).max(0.0);
     app.compose.body.paint(ctx, body_rect);
     app.hits
         .push((Hit::ComposeField(ComposeField::Body), body_rect));
@@ -1307,10 +1308,18 @@ pub fn handle_events(
             Event::PointerButton(button)
                 if button.button == PointerButton::Left && button.state == ButtonState::Pressed =>
             {
-                handle_click(app, button.position, &lay, size, theme, text);
+                handle_click(
+                    app,
+                    button.position,
+                    &lay,
+                    size,
+                    theme,
+                    text,
+                    button.modifiers.shift,
+                );
             }
             Event::Key(key) if key.state == ButtonState::Pressed => {
-                handle_key(app, key);
+                handle_key(app, key, theme, text);
             }
             Event::Text(typed) => handle_text(app, typed),
             Event::Paste(text) => {
@@ -1361,6 +1370,7 @@ fn handle_click(
     size: Size,
     theme: &Theme,
     text: &TextEngine,
+    extend_selection: bool,
 ) {
     // Kontrolki okna mają zawsze pierwszeństwo.
     let bar = HeaderBar::new().controls(ControlsSide::Right);
@@ -1428,6 +1438,8 @@ fn handle_click(
                 return;
             }
             if field.contains(position) {
+                app.search
+                    .place_cursor(field, theme, text, position, extend_selection);
                 app.search.set_focused(true);
                 return;
             }
@@ -1435,7 +1447,7 @@ fn handle_click(
     }
 
     // Trafienia z poprzedniej klatki (foldery, wiadomości, przyciski kart).
-    if let Some((hit, _)) = app
+    if let Some((hit, rect)) = app
         .hits
         .iter()
         .rev()
@@ -1478,17 +1490,117 @@ fn handle_click(
             }
             Hit::ComposeField(field) => {
                 app.compose.field = field;
-                if field == ComposeField::Body {
-                    app.focus_compose_body();
-                } else {
-                    app.compose.focus();
+                match field {
+                    ComposeField::To => {
+                        app.compose
+                            .to
+                            .place_cursor(rect, theme, text, position, extend_selection);
+                    }
+                    ComposeField::Cc => {
+                        app.compose
+                            .cc
+                            .place_cursor(rect, theme, text, position, extend_selection);
+                    }
+                    ComposeField::Subject => {
+                        app.compose.subject.place_cursor(
+                            rect,
+                            theme,
+                            text,
+                            position,
+                            extend_selection,
+                        );
+                    }
+                    ComposeField::Body => {
+                        app.compose.body.place_cursor(
+                            rect,
+                            theme,
+                            text,
+                            position,
+                            extend_selection,
+                        );
+                    }
                 }
+                app.compose.focus();
             }
             Hit::ComposeSend => app.send_compose(),
             Hit::ComposeCancel => app.close_compose(),
             Hit::ComposeAttach => app.notify(tr("Drag files into the window to attach them")),
             Hit::AccountField(field) => {
                 app.account_form.field = field;
+                match field {
+                    AccountField::Email => {
+                        app.account_form.email.place_cursor(
+                            rect,
+                            theme,
+                            text,
+                            position,
+                            extend_selection,
+                        );
+                    }
+                    AccountField::Display => {
+                        app.account_form.display.place_cursor(
+                            rect,
+                            theme,
+                            text,
+                            position,
+                            extend_selection,
+                        );
+                    }
+                    AccountField::Login => {
+                        app.account_form.login.place_cursor(
+                            rect,
+                            theme,
+                            text,
+                            position,
+                            extend_selection,
+                        );
+                    }
+                    AccountField::Password => {
+                        app.account_form.password.place_cursor(
+                            rect,
+                            theme,
+                            text,
+                            position,
+                            extend_selection,
+                        );
+                    }
+                    AccountField::ImapHost => {
+                        app.account_form.imap_host.place_cursor(
+                            rect,
+                            theme,
+                            text,
+                            position,
+                            extend_selection,
+                        );
+                    }
+                    AccountField::ImapPort => {
+                        app.account_form.imap_port.place_cursor(
+                            rect,
+                            theme,
+                            text,
+                            position,
+                            extend_selection,
+                        );
+                    }
+                    AccountField::SmtpHost => {
+                        app.account_form.smtp_host.place_cursor(
+                            rect,
+                            theme,
+                            text,
+                            position,
+                            extend_selection,
+                        );
+                    }
+                    AccountField::SmtpPort => {
+                        app.account_form.smtp_port.place_cursor(
+                            rect,
+                            theme,
+                            text,
+                            position,
+                            extend_selection,
+                        );
+                    }
+                }
                 app.account_form.focus();
             }
             Hit::AccountSave => app.save_account(),
@@ -1545,7 +1657,7 @@ fn handle_text(app: &mut App, typed: &str) {
     }
 }
 
-fn handle_key(app: &mut App, key: &KeyEvent) {
+fn handle_key(app: &mut App, key: &KeyEvent, theme: &Theme, text: &TextEngine) {
     let ctrl = key.modifiers.ctrl;
     let shift = key.modifiers.shift;
 
@@ -1632,13 +1744,13 @@ fn handle_key(app: &mut App, key: &KeyEvent) {
                 app.view = View::Mail;
             }
         }
-        View::Compose => handle_compose_key(app, key),
+        View::Compose => handle_compose_key(app, key, theme, text),
         View::Account => handle_account_key(app, key),
         View::Mail => handle_mail_key(app, key),
     }
 }
 
-fn handle_compose_key(app: &mut App, key: &KeyEvent) {
+fn handle_compose_key(app: &mut App, key: &KeyEvent, theme: &Theme, text: &TextEngine) {
     let shift = key.modifiers.shift;
     match key.keysym {
         KEY_ESCAPE => app.close_compose(),
@@ -1657,6 +1769,14 @@ fn handle_compose_key(app: &mut App, key: &KeyEvent) {
         KEY_DELETE => app.delete_forward(),
         KEY_LEFT => app.move_cursor(-1, 0, shift),
         KEY_RIGHT => app.move_cursor(1, 0, shift),
+        KEY_UP if app.compose.field == ComposeField::Body && app.compose_body_width > 0.0 => app
+            .compose
+            .body
+            .move_visual(-1, app.compose_body_width, theme, text),
+        KEY_DOWN if app.compose.field == ComposeField::Body && app.compose_body_width > 0.0 => app
+            .compose
+            .body
+            .move_visual(1, app.compose_body_width, theme, text),
         KEY_UP => app.move_cursor(0, -1, shift),
         KEY_DOWN => app.move_cursor(0, 1, shift),
         KEY_HOME => app.cursor_home(shift),
@@ -1823,7 +1943,7 @@ mod tests {
             .copied()
             .unwrap_or_else(|| panic!("brak trafienia {want:?}"));
         let lay = layout(app, size, theme);
-        handle_click(app, rect.center(), &lay, size, theme, &text);
+        handle_click(app, rect.center(), &lay, size, theme, &text, false);
     }
 
     #[test]
@@ -1874,5 +1994,50 @@ mod tests {
             &text,
         );
         assert!(app.compose.body.text().contains("Treść wklejona"));
+    }
+
+    #[test]
+    fn click_inside_an_existing_field_sets_the_exact_cursor() {
+        let (mut app, theme) = setup();
+        let size = Size::new(1080.0, 720.0);
+        app.open_account_settings();
+        app.account_form.email.set_text("abcdef@example.org");
+
+        let text = TextEngine::system();
+        let mut scene = Scene::new();
+        paint(&mut app, &mut scene, size, &theme, &text);
+        let (_, rect) = app
+            .hits
+            .iter()
+            .find(|(hit, _)| *hit == Hit::AccountField(AccountField::Email))
+            .copied()
+            .expect("pole e-mail");
+        let lay = layout(&app, size, &theme);
+
+        // Klik przy lewej krawędzi pola → kursor na początku.
+        handle_click(
+            &mut app,
+            Point::new(rect.x() + 2.0, rect.center().y),
+            &lay,
+            size,
+            &theme,
+            &text,
+            false,
+        );
+        app.insert_text("X");
+        assert_eq!(app.account_form.email.text(), "Xabcdef@example.org");
+
+        // Klik przy prawej krawędzi → kursor na końcu (pole się przewija).
+        handle_click(
+            &mut app,
+            Point::new(rect.right() - 2.0, rect.center().y),
+            &lay,
+            size,
+            &theme,
+            &text,
+            false,
+        );
+        app.insert_text("Y");
+        assert_eq!(app.account_form.email.text(), "Xabcdef@example.orgY");
     }
 }

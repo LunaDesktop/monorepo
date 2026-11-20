@@ -395,6 +395,8 @@ pub struct App {
     pub body_loading: bool,
     pub body_scroll: f64,
     pub body_viewport: f64,
+    /// Szerokość treści edytora (bez paddingu) — do ruchu po wierszach wizualnych.
+    pub compose_body_width: f64,
 
     pub loading: bool,
     pub search: SearchEntry,
@@ -458,6 +460,7 @@ impl App {
             body_loading: false,
             body_scroll: 0.0,
             body_viewport: 0.0,
+            compose_body_width: 0.0,
             loading: false,
             search: SearchEntry::new(tr("Search messages")),
             search_active: false,
@@ -982,18 +985,6 @@ impl App {
             View::Mail => self.search.is_focused(),
             View::About => false,
         }
-    }
-
-    /// Ustawia fokus na treści i stawia kursor na końcu.
-    ///
-    /// `TextView` nie udostępnia ustawiania kursora z pozycji kliknięcia, więc
-    /// kliknięcie w treść traktujemy jak „pisz od końca” — zamiast wstawiać
-    /// znaki w losowym miejscu (domyślnie na początku).
-    pub fn focus_compose_body(&mut self) {
-        let text = self.compose.body.text().to_owned();
-        self.compose.body.set_text(text);
-        self.compose.field = ComposeField::Body;
-        self.compose.focus();
     }
 
     /// Dodaje pliki jako załączniki (DnD z menedżera plików).

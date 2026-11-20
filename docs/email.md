@@ -80,8 +80,10 @@ własnego Client ID i procesu zgody; to osobna decyzja produktowa.
 
 W polach tekstowych działają `Ctrl+A/C/X/V`, `Home`/`End`, `Shift`+strzałki
 (zaznaczanie) oraz `Tab`/`Shift+Tab` (przejście do kolejnego pola). Kliknięcie
-w pole ustawia fokus, a środkowy przycisk myszy wkleja zaznaczenie PRIMARY
-(na polach formularza i w treści wiadomości).
+w pole ustawia kursor **dokładnie w miejscu kliknięcia** (z `Shift` rozciąga
+zaznaczenie), długie wiersze treści zawijają się do szerokości edytora,
+a pola jednowierszowe przewijają tekst poziomo, żeby kursor nie znikał za
+krawędzią. Środkowy przycisk myszy wkleja zaznaczenie PRIMARY.
 
 ## Wygląd i wąskie okna
 

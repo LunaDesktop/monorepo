@@ -8,6 +8,7 @@
 
 use libluna_core::style::weight;
 use libluna_core::{Point, Rect, Theme};
+use libluna_render::TextEngine;
 
 use crate::ctx::PaintCtx;
 use crate::icon;
@@ -358,6 +359,86 @@ impl Entry {
         }
     }
 
+    /// Przesunięcie tekstu w lewo, gdy kursor wychodzi za prawe pole.
+    ///
+    /// Pola jednowierszowe nie zawijają, więc bez tego długi temat lub adres
+    /// chował kursor za krawędzią i nie dało się dopisać końcówki.
+    fn scroll_offset(&self, rect: Rect, theme: &Theme, text: &TextEngine) -> f64 {
+        if !self.focused {
+            return 0.0;
+        }
+        let m = theme.metrics.entry;
+        let text_x = self.text_x(rect, theme);
+        let clear_space = if self.clearable { m.icon + 8.0 } else { 0.0 };
+        let text_right = rect.right() - m.pad_x - clear_space - self.trailing;
+        let visible = (text_right - text_x).max(0.0);
+        if visible <= 0.0 {
+            return 0.0;
+        }
+        let size = theme.typography.body.size;
+        let caret = text
+            .measure(&self.display_prefix(), size, weight::NORMAL)
+            .width;
+        if caret > visible {
+            // Pół znaku zapasu, żeby kursor nie stykał się z krawędzią.
+            caret - visible + size * 0.5
+        } else {
+            0.0
+        }
+    }
+
+    /// Indeks bajtowy najbliższy poziomemu położeniu `width` (w pikselach od
+    /// początku tekstu). Zawsze zwraca granicę znaku.
+    fn index_at_width(&self, theme: &Theme, text: &TextEngine, width: f64) -> usize {
+        let size = theme.typography.body.size;
+        let mut best = 0;
+        let mut best_distance = f64::INFINITY;
+        let boundaries = self
+            .text
+            .char_indices()
+            .map(|(index, _)| index)
+            .chain(std::iter::once(self.text.len()));
+        for index in boundaries {
+            let prefix = self.display_prefix_at(index);
+            let prefix_width = text.measure(&prefix, size, weight::NORMAL).width;
+            let distance = (prefix_width - width).abs();
+            if distance < best_distance {
+                best_distance = distance;
+                best = index;
+            }
+        }
+        best
+    }
+
+    /// Ustawia kursor na podstawie kliknięcia w pole (z uwzględnieniem
+    /// przewinięcia tekstu). `extend` = Shift rozciąga zaznaczenie.
+    ///
+    /// Zwraca `true`, gdy punkt trafił w pole.
+    pub fn place_cursor(
+        &mut self,
+        rect: Rect,
+        theme: &Theme,
+        text: &TextEngine,
+        p: Point,
+        extend: bool,
+    ) -> bool {
+        if !rect.contains(p) {
+            return false;
+        }
+        let previous = self.cursor;
+        let shift = self.scroll_offset(rect, theme, text);
+        let relative = (p.x - self.text_x(rect, theme) + shift).max(0.0);
+        self.cursor = self.index_at_width(theme, text, relative);
+        if extend {
+            if self.anchor.is_none() {
+                self.anchor = Some(previous);
+            }
+        } else {
+            self.anchor = None;
+        }
+        true
+    }
+
     pub fn paint(&self, ctx: &mut PaintCtx, rect: Rect) {
         let theme = *ctx.theme;
         let m = theme.metrics.entry;
@@ -394,6 +475,8 @@ impl Entry {
             }
         }
         let text_x = self.text_x(rect, &theme);
+        let shift = self.scroll_offset(rect, &theme, ctx.text);
+        let draw_x = text_x - shift;
 
         if self.text.is_empty() {
             ctx.label_left(
@@ -423,8 +506,8 @@ impl Entry {
             // Podświetlenie zaznaczenia (pod tekstem).
             if let Some((a, b)) = self.selection() {
                 let size = theme.typography.body.size;
-                let x1 = text_x + ctx.measure(&self.display_prefix_at(a), size, weight::NORMAL);
-                let x2 = text_x + ctx.measure(&self.display_prefix_at(b), size, weight::NORMAL);
+                let x1 = draw_x + ctx.measure(&self.display_prefix_at(a), size, weight::NORMAL);
+                let x2 = draw_x + ctx.measure(&self.display_prefix_at(b), size, weight::NORMAL);
                 ctx.scene.fill_rect(
                     Rect::from_xywh(
                         x1,
@@ -437,7 +520,7 @@ impl Entry {
             }
             let display = self.display_text();
             ctx.label_left(
-                text_x,
+                draw_x,
                 cy,
                 &display,
                 theme.typography.body.size,
@@ -446,7 +529,7 @@ impl Entry {
             );
             if self.focused && self.caret_visible() {
                 let prefix = self.display_prefix();
-                let cx = text_x + ctx.measure(&prefix, theme.typography.body.size, weight::NORMAL);
+                let cx = draw_x + ctx.measure(&prefix, theme.typography.body.size, weight::NORMAL);
                 ctx.scene.fill_rect(
                     Rect::from_xywh(cx, rect.y() + 6.0, 1.5, (rect.height() - 12.0).max(0.0)),
                     colors.text,
@@ -701,5 +784,51 @@ mod tests {
         e.set_caret_visible(true);
         assert!(e.caret_visible());
         assert!(e.is_blinking());
+    }
+
+    #[test]
+    fn click_places_cursor_between_characters() {
+        let theme = Theme::dark();
+        let text = TextEngine::system();
+        let rect = Rect::from_xywh(0.0, 0.0, 220.0, 34.0);
+        let mut entry = Entry::new("");
+        entry.set_text("abcdef");
+        entry.set_focused(true);
+
+        let x = rect.x()
+            + theme.metrics.entry.pad_x
+            + text
+                .measure("abc", theme.typography.body.size, weight::NORMAL)
+                .width;
+        assert!(entry.place_cursor(rect, &theme, &text, Point::new(x, rect.center().y), false));
+        assert_eq!(entry.cursor(), 3);
+        entry.insert_str("X");
+        assert_eq!(entry.text(), "abcXdef");
+    }
+
+    #[test]
+    fn click_outside_the_field_is_ignored() {
+        let theme = Theme::dark();
+        let text = TextEngine::system();
+        let rect = Rect::from_xywh(0.0, 0.0, 220.0, 34.0);
+        let mut entry = Entry::new("");
+        entry.set_text("abc");
+        entry.set_focused(true);
+        entry.end();
+        assert!(!entry.place_cursor(rect, &theme, &text, Point::new(500.0, 500.0), false));
+        assert_eq!(entry.cursor(), 3);
+    }
+
+    #[test]
+    fn long_text_scrolls_so_the_caret_stays_visible() {
+        let theme = Theme::dark();
+        let text = TextEngine::system();
+        let rect = Rect::from_xywh(0.0, 0.0, 120.0, 34.0);
+        let mut entry = Entry::new("");
+        entry.set_text("x".repeat(80));
+        entry.set_focused(true);
+        // Kursor na końcu — pole musi przewinąć tekst w lewo.
+        let shift = entry.scroll_offset(rect, &theme, &text);
+        assert!(shift > 0.0, "długi tekst powinien się przewinąć");
     }
 }

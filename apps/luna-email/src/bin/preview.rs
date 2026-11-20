@@ -44,7 +44,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         .set_text("Re: Projekt graficzny na piątek");
     compose.compose.body.set_text(
         "Cześć Marto,\n\nprojekt wygląda świetnie — wariant ciemny jest dużo lepszy. \
-         Wysyłam uwagi do ikon w załączniku.\n\nDzięki!",
+         Wysyłam uwagi do ikon w załączniku. Podoba mi się też nowy układ listy \
+         wiadomości: jest czytelniejszy niż poprzedni, a kolumny nie uciekają za \
+         krawędź okna nawet przy długich tematach.\n\nDzięki!",
     );
     compose.compose.field = ComposeField::Body;
     compose.compose.focus();

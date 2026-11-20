@@ -4,6 +4,7 @@
 //! Cała logika edycji żyje w [`Entry`]; tutaj delegujemy, zachowując dawny interfejs.
 
 use libluna_core::{Point, Rect, Theme};
+use libluna_render::TextEngine;
 
 use crate::ctx::PaintCtx;
 use crate::entry::{Entry, EntryIcon};
@@ -53,6 +54,18 @@ impl SearchEntry {
 
     pub fn set_hover_clear(&mut self, hovered: bool) {
         self.entry.set_hover_clear(hovered);
+    }
+
+    /// Ustawia kursor na podstawie kliknięcia w pole wyszukiwania.
+    pub fn place_cursor(
+        &mut self,
+        rect: Rect,
+        theme: &Theme,
+        text: &TextEngine,
+        p: Point,
+        extend: bool,
+    ) -> bool {
+        self.entry.place_cursor(rect, theme, text, p, extend)
     }
 
     pub fn clear(&mut self) {

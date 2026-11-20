@@ -5,6 +5,7 @@
 
 use libluna_core::style::weight;
 use libluna_core::{Point, Rect, Theme};
+use libluna_render::TextEngine;
 
 use crate::ctx::PaintCtx;
 use crate::entry::{Entry, EntryIcon, TextInput};
@@ -176,6 +177,21 @@ impl PasswordEntry {
         } else {
             false
         }
+    }
+
+    /// Ustawia kursor na podstawie kliknięcia w pole (poza ikoną „oka”).
+    pub fn place_cursor(
+        &mut self,
+        rect: Rect,
+        theme: &Theme,
+        text: &TextEngine,
+        p: Point,
+        extend: bool,
+    ) -> bool {
+        if self.peek_at(rect, theme, p) {
+            return false;
+        }
+        self.entry.place_cursor(rect, theme, text, p, extend)
     }
 
     pub fn paint(&self, ctx: &mut PaintCtx, rect: Rect) {

@@ -2,13 +2,14 @@
 //!
 //! Widget immediate: trzyma tekst (z `\n`) i indeks kursora na granicy znaku. Aplikacja
 //! dostarcza zdarzenia klawiatury wywołaniami metod (`insert_str`, `backspace`, `move_up`…)
-//! i sama decyduje o fokusie. Rysowanie nie zawija wierszy (brak mięk korekty) — to warstwa
-//! aplikacji, gdy będzie potrzebna.
+//! i sama decyduje o fokusie. Rysowanie **zawija** zbyt długie wiersze do szerokości pola
+//! i przewija pionowo, żeby kursor zawsze był widoczny.
 //!
 //! [`Entry`](crate::Entry) to jednowierszowy odpowiednik.
 
 use libluna_core::style::weight;
-use libluna_core::{Rect, Theme};
+use libluna_core::{Point, Rect, Theme};
+use libluna_render::TextEngine;
 
 use crate::ctx::PaintCtx;
 
@@ -294,6 +295,204 @@ impl TextView {
         }
     }
 
+    /// Zakresy bajtowe wierszy **wizualnych** po zawinięciu do `max_width`.
+    ///
+    /// Nowa linia (`\n`) zawsze zaczyna nowy wiersz; zbyt długi fragment jest
+    /// łamany najpierw na spacji, a gdy słowo nie mieści się w całej linii —
+    /// po znakach. Puste wiersze mają `start == end`.
+    fn visual_lines(
+        &self,
+        max_width: f64,
+        size: f64,
+        font_weight: u16,
+        text: &TextEngine,
+    ) -> Vec<(usize, usize)> {
+        let mut lines: Vec<(usize, usize)> = Vec::new();
+        if max_width <= 0.0 {
+            return lines;
+        }
+        let mut base = 0usize;
+        for logical in self.text.split('\n') {
+            if logical.is_empty() {
+                lines.push((base, base));
+            } else {
+                let mut line_start = 0usize;
+                let mut line_width = 0.0;
+                let mut last_space: Option<usize> = None;
+                let mut index = 0usize;
+                while index < logical.len() {
+                    let Some(ch) = logical[index..].chars().next() else {
+                        break;
+                    };
+                    let next = index + ch.len_utf8();
+                    if ch == ' ' {
+                        last_space = Some(index);
+                    }
+                    let mut char_buf = [0u8; 4];
+                    let char_width = text
+                        .measure(ch.encode_utf8(&mut char_buf), size, font_weight)
+                        .width;
+                    if line_width + char_width > max_width && index > line_start {
+                        let break_at = match last_space {
+                            Some(space) if space > line_start => space,
+                            _ => index,
+                        };
+                        lines.push((base + line_start, base + break_at));
+                        if break_at == index {
+                            // Bieżący znak (spacja) nie mieści się w linii —
+                            // kończy ją i nie trafia do następnej.
+                            line_start = next;
+                            line_width = 0.0;
+                            last_space = None;
+                            index = next;
+                            continue;
+                        }
+                        // Spacja kończąca wiersz nie trafia do następnego.
+                        line_start = if Some(break_at) == last_space {
+                            break_at + 1
+                        } else {
+                            break_at
+                        };
+                        // Szerokość reszty wiersza liczymy od nowego początku.
+                        line_width = logical[line_start..index]
+                            .chars()
+                            .map(|ch| {
+                                let mut buf = [0u8; 4];
+                                text.measure(ch.encode_utf8(&mut buf), size, font_weight)
+                                    .width
+                            })
+                            .sum();
+                        last_space = None;
+                    }
+                    line_width += char_width;
+                    index = next;
+                }
+                lines.push((base + line_start, base + logical.len()));
+            }
+            base += logical.len() + 1;
+        }
+        lines
+    }
+
+    /// Indeks wiersza wizualnego zawierającego kursor.
+    fn caret_visual_line(&self, lines: &[(usize, usize)]) -> usize {
+        lines
+            .iter()
+            .position(|&(start, end)| self.cursor >= start && self.cursor <= end)
+            .unwrap_or_else(|| lines.len().saturating_sub(1))
+    }
+
+    /// Przesuwa kursor o `delta` wierszy **wizualnych** (po zawinięciu do
+    /// `width`), zachowując poziomą kolumnę. Używane przez strzałki góra/dół.
+    pub fn move_visual(
+        &mut self,
+        delta: i32,
+        width: f64,
+        theme: &Theme,
+        text: &TextEngine,
+    ) {
+        let body = theme.typography.body.size;
+        let lines = self.visual_lines(width, body, weight::NORMAL, text);
+        if lines.is_empty() {
+            return;
+        }
+        let current = self.caret_visual_line(&lines);
+        let target = (current as i32 + delta).clamp(0, lines.len() as i32 - 1) as usize;
+        if target == current {
+            return;
+        }
+        // Kolumnę mierzymy w pikselach, żeby przy zawinięciu nie skakała.
+        let (current_start, current_end) = lines[current];
+        let cursor = self.cursor.clamp(current_start, current_end);
+        let column = text
+            .measure(&self.text[current_start..cursor], body, weight::NORMAL)
+            .width;
+        let (start, end) = lines[target];
+        let mut best = start;
+        let mut best_distance = f64::INFINITY;
+        let boundaries = self.text[start..end]
+            .char_indices()
+            .map(|(offset, _)| start + offset)
+            .chain(std::iter::once(end));
+        for index in boundaries {
+            let width = text
+                .measure(&self.text[start..index], body, weight::NORMAL)
+                .width;
+            let distance = (width - column).abs();
+            if distance < best_distance {
+                best_distance = distance;
+                best = index;
+            }
+        }
+        self.cursor = best;
+        self.anchor = None;
+    }
+
+    /// Ustawia kursor na podstawie kliknięcia w treść. `extend` = Shift
+    /// rozciąga zaznaczenie. Zwraca `true`, gdy punkt trafił w pole.
+    pub fn place_cursor(
+        &mut self,
+        rect: Rect,
+        theme: &Theme,
+        text: &TextEngine,
+        p: Point,
+        extend: bool,
+    ) -> bool {
+        if !rect.contains(p) {
+            return false;
+        }
+        let pad = theme.spacing.sm;
+        let inner = Rect::from_xywh(
+            rect.x() + pad,
+            rect.y() + pad,
+            (rect.width() - 2.0 * pad).max(0.0),
+            (rect.height() - 2.0 * pad).max(0.0),
+        );
+        let body = theme.typography.body.size;
+        let lh = theme.typography.body.line_height;
+        let lines = self.visual_lines(inner.width(), body, weight::NORMAL, text);
+        if lines.is_empty() {
+            self.cursor = 0;
+            return true;
+        }
+        let caret_line = self.caret_visual_line(&lines);
+        let visible = ((inner.height() / lh).floor().max(1.0)) as usize;
+        let first = if self.focused {
+            caret_line.saturating_sub(visible - 1)
+        } else {
+            0
+        };
+        let row = ((p.y - inner.y()) / lh).floor().max(0.0) as usize;
+        let (start, end) = lines[(first + row).min(lines.len() - 1)];
+        let x = (p.x - inner.x()).max(0.0);
+        let mut best = start;
+        let mut best_distance = f64::INFINITY;
+        let boundaries = self.text[start..end]
+            .char_indices()
+            .map(|(offset, _)| start + offset)
+            .chain(std::iter::once(end));
+        for index in boundaries {
+            let width = text
+                .measure(&self.text[start..index], body, weight::NORMAL)
+                .width;
+            let distance = (width - x).abs();
+            if distance < best_distance {
+                best_distance = distance;
+                best = index;
+            }
+        }
+        let previous = self.cursor;
+        self.cursor = best;
+        if extend {
+            if self.anchor.is_none() {
+                self.anchor = Some(previous);
+            }
+        } else {
+            self.anchor = None;
+        }
+        true
+    }
+
     /// Kolumna kursora w danym wierszu (licząc znaki).
     fn cursor_col(&self, line: usize) -> usize {
         let start = self.line_start(line);
@@ -332,20 +531,35 @@ impl TextView {
                 weight::NORMAL,
                 colors.dim_text,
             );
+            if self.focused {
+                ctx.scene.fill_rect(
+                    Rect::from_xywh(inner.x(), inner.y() + 2.0, 1.5, (lh - 4.0).max(0.0)),
+                    colors.text,
+                );
+            }
         } else {
-            // Podświetlenie zaznaczenia (per wiersz).
+            let lines = self.visual_lines(inner.width(), body, weight::NORMAL, ctx.text);
+            let caret_line = self.caret_visual_line(&lines);
+            let visible = ((inner.height() / lh).floor().max(1.0)) as usize;
+            // Kursor zawsze widoczny: przy dłuższym tekście przewijamy wiersze.
+            let first = if self.focused {
+                caret_line.saturating_sub(visible - 1)
+            } else {
+                0
+            };
+
             if let Some((a, b)) = self.selection() {
-                let starts = self.line_starts();
-                for (i, &start) in starts.iter().enumerate() {
-                    let end = if i + 1 < starts.len() {
-                        starts[i + 1] - 1
-                    } else {
-                        self.text.len()
-                    };
+                for (i, &(start, end)) in lines.iter().enumerate() {
+                    if i < first {
+                        continue;
+                    }
+                    let y = inner.y() + (i - first) as f64 * lh;
+                    if y > inner.bottom() {
+                        break;
+                    }
                     let lo = a.max(start);
                     let hi = b.min(end);
                     if lo < hi {
-                        let y = inner.y() + i as f64 * lh;
                         let x1 =
                             inner.x() + ctx.measure(&self.text[start..lo], body, weight::NORMAL);
                         let x2 =
@@ -357,19 +571,29 @@ impl TextView {
                     }
                 }
             }
-            for (i, line) in self.lines().enumerate() {
-                let y = inner.y() + i as f64 * lh + lh / 2.0;
+            for (i, &(start, end)) in lines.iter().enumerate() {
+                if i < first {
+                    continue;
+                }
+                let y = inner.y() + (i - first) as f64 * lh + lh / 2.0;
                 if y - lh / 2.0 > inner.bottom() {
                     break;
                 }
-                ctx.label_left(inner.x(), y, line, body, weight::NORMAL, colors.text);
+                ctx.label_left(
+                    inner.x(),
+                    y,
+                    &self.text[start..end],
+                    body,
+                    weight::NORMAL,
+                    colors.text,
+                );
             }
-            if self.focused {
-                let line = self.cursor_line();
-                let start = self.line_start(line);
-                let col_x = ctx.measure(&self.text[start..self.cursor], body, weight::NORMAL);
+            if self.focused && !lines.is_empty() {
+                let (start, end) = lines[caret_line.min(lines.len() - 1)];
+                let cursor = self.cursor.clamp(start, end);
+                let col_x = ctx.measure(&self.text[start..cursor], body, weight::NORMAL);
                 let cx = inner.x() + col_x;
-                let cy = inner.y() + line as f64 * lh;
+                let cy = inner.y() + caret_line.saturating_sub(first) as f64 * lh;
                 ctx.scene.fill_rect(
                     Rect::from_xywh(cx, cy + 2.0, 1.5, (lh - 4.0).max(0.0)),
                     colors.text,
@@ -559,5 +783,48 @@ mod tests {
         t.backspace();
         assert_eq!(t.text(), "aef");
         assert_eq!(t.cursor(), 1);
+    }
+
+    #[test]
+    fn click_on_second_line_places_cursor_there() {
+        let theme = Theme::dark();
+        let text = TextEngine::system();
+        let mut view = TextView::new("");
+        view.set_text("pierwsza linia\ndruga linia");
+        view.set_focused(true);
+
+        let rect = Rect::from_xywh(0.0, 0.0, 320.0, 160.0);
+        let pad = theme.spacing.sm;
+        let lh = theme.typography.body.line_height;
+        let x = rect.x()
+            + pad
+            + text
+                .measure("dru", theme.typography.body.size, weight::NORMAL)
+                .width;
+        let y = rect.y() + pad + lh + lh / 2.0;
+        assert!(view.place_cursor(rect, &theme, &text, Point::new(x, y), false));
+        assert_eq!(&view.text()[view.cursor()..], "ga linia");
+        view.insert_str("X");
+        assert!(view.text().ends_with("druXga linia"));
+    }
+
+    #[test]
+    fn long_lines_are_wrapped_for_painting() {
+        let theme = Theme::dark();
+        let text = TextEngine::system();
+        let view = {
+            let mut view = TextView::new("");
+            view.set_text("aaaa bbbb cccc dddd eeee ffff");
+            view
+        };
+        let lines = view.visual_lines(70.0, theme.typography.body.size, weight::NORMAL, &text);
+        assert!(
+            lines.len() > 1,
+            "długi wiersz powinien się zawinąć, dostałem {lines:?}"
+        );
+        // Każdy wiersz mieści się w tekście i nie nachodzi na następny.
+        for pair in lines.windows(2) {
+            assert!(pair[0].1 <= pair[1].0);
+        }
     }
 }
