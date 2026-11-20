@@ -55,10 +55,17 @@ if [ "$SELENE_BACKEND" = "drm" ]; then
     export SELENE_INPUT
 fi
 
-# GPU: domyślnie włączone (`LUNA_GPU=1`), z automatycznym fallbackiem do CPU w Selene,
-# jeśli EGL nie jest dostępny. W razie problemów na konkretnym sterowniku można
-# wymusić tryb czysto programowy przez `LUNA_GPU=0 luna-session`.
-: "${LUNA_GPU:=1}"
+# GPU: **opt-in**. Domyślnie ścieżka wyjścia zostaje na CPU — na NVIDII zero-copy
+# bywa odrzucane przez sterownik, a układ/mode monitorów wymaga dopracowania, więc
+# GPU włączamy świadomie: osobną sesją „Luna (eksperymentalna GPU)” w greeterze
+# albo zmienną:
+#
+#   LUNA_GPU=1 luna-session
+#
+# Bez tego Selene nie ogłasza `zwp_linux_dmabuf_v1`, więc klienty (GTK4, Chromium,
+# Flatpak, Firefox/Zen) zostają na `wl_shm`. Ścieżka GPU nie znika — gdy będzie
+# solidna, wystarczy zmienić tę jedną linię.
+: "${LUNA_GPU:=0}"
 export LUNA_GPU
 
 # NVIDIA: VA-API przez NVDEC (pakiet `nvidia-vaapi-driver`). Sterowniki 525+
