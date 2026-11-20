@@ -49,6 +49,8 @@ pub struct Layout {
     /// Nagłówek sekcji „Co nowego”.
     pub news_heading: Rect,
     pub news: Rect,
+    /// Karta „Pomóż ulepszyć Lunę” (diagnostyka).
+    pub report: Rect,
     /// Obszar siatki kafelków akcji.
     pub quick: Rect,
     /// Checkbox „Nie uruchamiaj ponownie po zalogowaniu” w stopce.
@@ -118,6 +120,10 @@ pub fn layout(app: &App, size: Size, theme: &Theme, text: &TextEngine) -> Layout
     let quick = Rect::from_xywh(content.x(), y, width, quick_h);
     y = quick.bottom() + SECTION_GAP;
 
+    // Karta „Pomóż ulepszyć Lunę” — informacja + skrót do Ustawień.
+    let report = Rect::from_xywh(content.x(), y, width, 96.0);
+    y = report.bottom() + SECTION_GAP;
+
     // „Co nowego” — nagłówek sekcji i panel z timeline.
     let news_heading = Rect::from_xywh(content.x(), y, width, SECTION_H);
     y = news_heading.bottom() + 10.0;
@@ -155,6 +161,7 @@ pub fn layout(app: &App, size: Size, theme: &Theme, text: &TextEngine) -> Layout
     let news_heading = shift(news_heading);
     let news = shift(news);
     let quick = shift(quick);
+    let report = shift(report);
 
     let mut actions = Vec::new();
     if let Some(area) = banner {
@@ -178,6 +185,15 @@ pub fn layout(app: &App, size: Size, theme: &Theme, text: &TextEngine) -> Layout
         );
         actions.push((action, rect));
     }
+    let report_widget = report_banner();
+    if let Some(button) = report_widget
+        .rects(report, theme, text)
+        .actions
+        .first()
+        .copied()
+    {
+        actions.push((Action::Diagnostics, button));
+    }
 
     Layout {
         header,
@@ -189,6 +205,7 @@ pub fn layout(app: &App, size: Size, theme: &Theme, text: &TextEngine) -> Layout
         quick_heading,
         news_heading,
         news,
+        report,
         quick,
         autostart,
         actions,
@@ -324,6 +341,13 @@ pub fn paint(app: &App, scene: &mut Scene, size: Size, theme: &Theme, text: &Tex
     section_heading(&mut ctx, lay.quick_heading, &tr("Get started"));
     paint_tiles(app, &mut ctx, &lay);
 
+    let report_focused = lay
+        .actions
+        .iter()
+        .position(|(action, _)| *action == Action::Diagnostics)
+        .is_some_and(|index| app.focus.is_focused(index));
+    paint_report_banner(app, &mut ctx, lay.report, report_focused);
+
     section_heading(&mut ctx, lay.news_heading, &tr("What's new"));
     paint_news(app, &mut ctx, lay.news);
 
@@ -441,6 +465,27 @@ fn paint_hero(app: &App, ctx: &mut PaintCtx, area: Rect, wide: bool) {
             colors.dim_text,
         );
         y += theme.typography.body.line_height;
+    }
+}
+
+/// Karta „Pomóż ulepszyć Lunę” — czysta informacja z jednym skrótem.
+fn report_banner() -> Banner {
+    Banner::new(tr("Help improve Luna"))
+        .description(tr(
+            "Optional diagnostics — you review everything first; nothing is sent automatically.",
+        ))
+        .action(tr("Review in Settings"))
+}
+
+fn paint_report_banner(app: &App, ctx: &mut PaintCtx, area: Rect, focused: bool) {
+    let banner = report_banner();
+    banner.paint(ctx, area);
+    let rects = banner.rects(area, ctx.theme, ctx.text);
+    if let Some(button_rect) = rects.actions.first().copied() {
+        let mut button = Button::new(tr("Review in Settings"));
+        button.set_hovered(app.hover == Some(Action::Diagnostics));
+        button.set_focused(focused);
+        button.paint(ctx, button_rect);
     }
 }
 
@@ -1027,13 +1072,21 @@ mod tests {
 
     #[test]
     fn tab_cycles_actions_and_wraps_to_the_checkbox() {
-        let mut app = app(false); // Store, Settings, Docs + checkbox
+        let mut app = app(false); // Store, Settings, Docs, Diagnostics + checkbox
+        let actions = layout(
+            &app,
+            Size::new(980.0, 760.0),
+            &Theme::light(),
+            &TextEngine::system(),
+        )
+        .actions
+        .len();
         press(&mut app, 0xff09, false);
         assert!(app.focus.is_focused(0));
-        press(&mut app, 0xff09, false);
-        press(&mut app, 0xff09, false);
-        press(&mut app, 0xff09, false);
-        assert!(app.focus.is_focused(3)); // checkbox
+        for _ in 0..actions {
+            press(&mut app, 0xff09, false);
+        }
+        assert!(app.focus.is_focused(actions), "checkbox");
         press(&mut app, 0xff09, false);
         assert!(app.focus.is_focused(0));
     }
@@ -1041,8 +1094,16 @@ mod tests {
     #[test]
     fn shift_tab_starts_at_the_checkbox() {
         let mut app = app(false);
+        let actions = layout(
+            &app,
+            Size::new(980.0, 760.0),
+            &Theme::light(),
+            &TextEngine::system(),
+        )
+        .actions
+        .len();
         press(&mut app, 0xff09, true);
-        assert!(app.focus.is_focused(3));
+        assert!(app.focus.is_focused(actions));
     }
 
     #[test]
@@ -1056,19 +1117,17 @@ mod tests {
 
     #[test]
     fn losing_the_installer_clamps_focus() {
-        let mut app = app(true); // Install, Store, Settings, Docs + checkbox
+        let mut app = app(true); // Install, Store, Settings, Docs, Diagnostics + checkbox
+        let theme = Theme::light();
+        let text = TextEngine::system();
+        let size = Size::new(980.0, 760.0);
+        let actions = layout(&app, size, &theme, &text).actions.len();
         press(&mut app, 0xff09, true);
-        assert!(app.focus.is_focused(4));
+        assert!(app.focus.is_focused(actions));
         app.live.live = false;
-        handle_events(
-            &mut app,
-            &[],
-            Size::new(980.0, 760.0),
-            &Theme::light(),
-            &TextEngine::system(),
-        );
-        assert!(app.focus.is_focused(3));
-        assert_eq!(app.focus.current(), Some(3));
+        handle_events(&mut app, &[], size, &theme, &text);
+        assert!(app.focus.is_focused(actions - 1));
+        assert_eq!(app.focus.current(), Some(actions - 1));
     }
 
     #[test]

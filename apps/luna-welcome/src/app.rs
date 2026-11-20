@@ -23,6 +23,8 @@ pub enum Action {
     Store,
     Settings,
     Docs,
+    /// Otwiera w Ustawieniach stronę „Pomoc i zgłaszanie problemów”.
+    Diagnostics,
     Close,
 }
 
@@ -36,6 +38,7 @@ impl Action {
             Self::Store => libluna_i18n::tr("Open the Store"),
             Self::Settings => libluna_i18n::tr("Open Settings"),
             Self::Docs => libluna_i18n::tr("Read the documentation"),
+            Self::Diagnostics => libluna_i18n::tr("Review in Settings"),
             Self::Close => libluna_i18n::tr("Close"),
         }
     }
@@ -149,6 +152,10 @@ impl App {
             Action::Store => self.spawn(std::path::Path::new("luna-store")),
             Action::Settings => self.spawn(std::path::Path::new("luna-settings")),
             Action::Docs => open_uri(&self.docs),
+            Action::Diagnostics => self.spawn_with(
+                std::path::Path::new("luna-settings"),
+                &["--page", "support"],
+            ),
             Action::Close => Ok(()),
         };
         if let Err(error) = result {
@@ -162,8 +169,13 @@ impl App {
     }
 
     fn spawn(&self, program: &std::path::Path) -> Result<(), String> {
+        self.spawn_with(program, &[])
+    }
+
+    fn spawn_with(&self, program: &std::path::Path, args: &[&str]) -> Result<(), String> {
         let mut command = Command::new(program);
         command
+            .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
