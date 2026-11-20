@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use libluna_core::{Size, Theme};
 use libluna_i18n::{set_locale, Locale};
 use libluna_render::{Scene, SoftwareRenderer, TextEngine};
+use luna_email::account::Account;
 use luna_email::app::{App, ComposeField, View};
 use luna_email::ui;
 
@@ -71,6 +72,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut about = demo();
     about.view = View::About;
     save(&mut about, WIDE, &dark, &text, "email-about.png")?;
+
+    let mut accounts = demo();
+    accounts
+        .store
+        .accounts
+        .push(Account::from_email("praca@example.org"));
+    accounts
+        .store
+        .accounts
+        .push(Account::from_email("dom@example.org"));
+    accounts.store.set_active(0);
+    accounts.rebuild_account_menu();
+    accounts.account_menu_open = true;
+    // Konta są prawdziwe, więc stopka nie powinna mówić „Tryb demo”.
+    accounts.demo = false;
+    save(&mut accounts, WIDE, &dark, &text, "email-accounts.png")?;
 
     let mut narrow = demo();
     narrow.sidebar_visible = false;

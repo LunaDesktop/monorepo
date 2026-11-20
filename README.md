@@ -680,9 +680,11 @@ Klient poczty (`luna-email`) — klasyczny układ: foldery, lista wiadomości
 (nadawca, temat, czas, skrót treści, znaczniki nieprzeczytane/gwiazdka/załącznik)
 i podgląd z odpowiedzią, przekazaniem i zapisem załączników. Odbiera przez IMAP,
 wysyła przez SMTP (z kopią w „Wysłanych”), a HTML zamienia na bezpieczny tekst
-(bez zdalnych obrazów i skryptów). Bez konta działa tryb demo z przykładową
-skrzynką. Konfiguracja: `~/.config/luna/email.conf` (`0600`, hasło można też
-podawać przez `LUNA_EMAIL_PASSWORD`). Szczegóły, skróty i ograniczenia:
+(bez zdalnych obrazów i skryptów). Obsługuje wiele kont (przełączanie z paska
+bocznego), a nowa poczta daje powiadomienie w Lunie, gdy okno jest otwarte.
+Bez konta działa tryb demo z przykładową skrzynką. Konfiguracja:
+`~/.config/luna/email.conf` (`0600`, hasło można też podawać przez
+`LUNA_EMAIL_PASSWORD`). Szczegóły, skróty i ograniczenia:
 [`docs/email.md`](docs/email.md).
 
 ![Luna Mail — skrzynka odbiorcza](docs/images/email-inbox.png)

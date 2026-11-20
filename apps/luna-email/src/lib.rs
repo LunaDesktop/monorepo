@@ -8,6 +8,7 @@ pub mod account;
 pub mod app;
 pub mod backend;
 pub mod model;
+pub mod notify;
 pub mod ui;
 
 use std::error::Error;

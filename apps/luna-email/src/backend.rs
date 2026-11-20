@@ -44,6 +44,10 @@ pub enum Command {
         folder: String,
         page: usize,
     },
+    /// Sprawdza tylko początek skrzynki (bez zmiany widoku) — do powiadomień.
+    CheckNew {
+        folder: String,
+    },
     FetchBody {
         folder: String,
         id: String,
@@ -78,6 +82,11 @@ pub enum Reply {
     Envelopes {
         folder: String,
         page: usize,
+        items: Vec<MessageSummary>,
+    },
+    /// Wynik okresowego sprawdzania nowej poczty (bez podmiany listy).
+    NewMail {
+        folder: String,
         items: Vec<MessageSummary>,
     },
     Body {
@@ -217,6 +226,7 @@ impl Session {
             Command::ListEnvelopes { folder, page } => {
                 Some(self.list_envelopes(&folder, page).await)
             }
+            Command::CheckNew { folder } => self.check_new(&folder).await,
             Command::FetchBody { folder, id } => Some(self.fetch_body(&folder, &id).await),
             Command::SetSeen { folder, id, seen } => Some(self.set_seen(&folder, &id, seen).await),
             Command::SetFlagged {
@@ -312,26 +322,7 @@ impl Session {
         };
         match backend.list_envelopes(folder, options).await {
             Ok(envelopes) => {
-                let mut items: Vec<MessageSummary> = envelopes
-                    .into_iter()
-                    .map(|envelope| MessageSummary {
-                        id: envelope.id,
-                        from_name: envelope.from.name.unwrap_or_default(),
-                        from_addr: envelope.from.addr,
-                        to_name: envelope.to.name.unwrap_or_default(),
-                        to_addr: envelope.to.addr,
-                        subject: envelope.subject,
-                        date: envelope.date.timestamp(),
-                        seen: envelope.flags.contains(&Flag::Seen),
-                        flagged: envelope.flags.contains(&Flag::Flagged),
-                        answered: envelope.flags.contains(&Flag::Answered),
-                        has_attachment: envelope.has_attachment,
-                        snippet: String::new(),
-                    })
-                    .collect();
-                // IMAP domyślnie zwraca od najstarszych; w kliencie chcemy
-                // najnowsze na górze, niezależnie od sortowania serwera.
-                items.sort_by(|a, b| b.date.cmp(&a.date));
+                let items = summaries(envelopes.into_iter());
                 Reply::Envelopes {
                     folder: folder.to_owned(),
                     page,
@@ -342,6 +333,35 @@ impl Session {
                 context: "list",
                 message: error.to_string(),
             },
+        }
+    }
+
+    /// Sprawdza początek skrzynki bez zmiany tego, co użytkownik widzi.
+    ///
+    /// Błąd jest tylko logowany — gdy sieć chwilowo padnie, nie chcemy co minutę
+    /// pokazywać toasta o błędzie połączenia.
+    async fn check_new(&mut self, folder: &str) -> Option<Reply> {
+        let backend = match self.imap().await {
+            Ok(backend) => backend,
+            Err(message) => {
+                eprintln!("luna-email: sprawdzanie poczty: {message}");
+                return None;
+            }
+        };
+        let options = ListEnvelopesOptions {
+            page_size: PAGE_SIZE,
+            page: 0,
+            query: None,
+        };
+        match backend.list_envelopes(folder, options).await {
+            Ok(envelopes) => Some(Reply::NewMail {
+                folder: folder.to_owned(),
+                items: summaries(envelopes.into_iter()),
+            }),
+            Err(error) => {
+                eprintln!("luna-email: sprawdzanie poczty: {error}");
+                None
+            }
         }
     }
 
@@ -575,6 +595,30 @@ fn smtp_config(account: &Account) -> SmtpConfig {
             account.resolved_password(),
         ))),
     }
+}
+
+/// Zamienia koperty IMAP na własne podsumowania (najnowsze na górze).
+fn summaries(envelopes: impl Iterator<Item = email::envelope::Envelope>) -> Vec<MessageSummary> {
+    let mut items: Vec<MessageSummary> = envelopes
+        .map(|envelope| MessageSummary {
+            id: envelope.id,
+            from_name: envelope.from.name.unwrap_or_default(),
+            from_addr: envelope.from.addr,
+            to_name: envelope.to.name.unwrap_or_default(),
+            to_addr: envelope.to.addr,
+            subject: envelope.subject,
+            date: envelope.date.timestamp(),
+            seen: envelope.flags.contains(&Flag::Seen),
+            flagged: envelope.flags.contains(&Flag::Flagged),
+            answered: envelope.flags.contains(&Flag::Answered),
+            has_attachment: envelope.has_attachment,
+            snippet: String::new(),
+        })
+        .collect();
+    // IMAP domyślnie zwraca od najstarszych; w kliencie chcemy najnowsze
+    // na górze, niezależnie od sortowania serwera.
+    items.sort_by(|a, b| b.date.cmp(&a.date));
+    items
 }
 
 /// Zamienia HTML na czytelny tekst, bez zewnętrznego parsera.

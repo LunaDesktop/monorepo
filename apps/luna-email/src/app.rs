@@ -5,12 +5,12 @@
 //! na wbudowanych danych demonstracyjnych — dzięki temu da się ją uruchomić
 //! i obejrzeć bez serwera poczty.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::time::{Duration, Instant};
 
 use libluna_core::{Point, Rect, ThemeSettings};
-use libluna_i18n::{load_catalogs_from_dirs, preferred_locale, set_locale, tr};
+use libluna_i18n::{load_catalogs_from_dirs, preferred_locale, set_locale, tr, tr_args};
 use libluna_platform::{run as run_app, AppConfig, Frame, WakeHandle};
 use libluna_widgets::{
     Entry, Menu, MenuButton, MenuEntry, PasswordEntry, SearchEntry, TextView, WindowControl,
@@ -22,9 +22,13 @@ use crate::model::{
     forward_body, forward_subject, initials, now_secs, reply_body, reply_subject, validate_draft,
     AttachmentInfo, Draft, FolderInfo, FolderKind, MessageBody, MessageSummary,
 };
+use crate::notify;
 
 /// Jak długo widać potwierdzenie akcji w stopce.
 pub const TOAST_FOR: Duration = Duration::from_secs(3);
+
+/// Co ile sprawdzamy skrzynkę odbiorczą, gdy aplikacja jest otwarta.
+pub const POLL_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Odstęp między kliknięciami liczony jako dwuklik.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
@@ -198,6 +202,8 @@ pub struct AccountForm {
     pub field: AccountField,
     /// Komunikat pod formularzem (błąd albo podpowiedź presetu).
     pub message: Option<String>,
+    /// Drugie kliknięcie „Usuń konto” potwierdza operację.
+    pub confirm_remove: bool,
 }
 
 impl Default for AccountForm {
@@ -213,6 +219,7 @@ impl Default for AccountForm {
             smtp_port: Entry::new("465"),
             field: AccountField::Email,
             message: None,
+            confirm_remove: false,
         }
     }
 }
@@ -261,6 +268,7 @@ impl AccountForm {
         }
         self.field = AccountField::Email;
         self.message = None;
+        self.confirm_remove = false;
         self.focus();
     }
 
@@ -355,6 +363,8 @@ pub enum Hit {
     ComposeCancel,
     ComposeAttach,
     AccountField(AccountField),
+    AccountMenu,
+    AccountRemove,
     AccountSave,
     AccountCancel,
     AccountDetect,
@@ -380,6 +390,14 @@ pub struct App {
     pub menu_button: MenuButton,
     pub menu: Menu,
     pub menu_panel: Option<Rect>,
+    /// Menu kont w pasku bocznym.
+    pub account_menu_open: bool,
+    pub account_menu: Menu,
+
+    /// Id wiadomości z początku skrzynki — punkt odniesienia dla powiadomień.
+    pub inbox_baseline: Option<HashSet<String>>,
+    /// Kiedy ostatnio sprawdzaliśmy nową pocztę.
+    pub last_poll: Option<Instant>,
 
     pub folders: Vec<FolderInfo>,
     pub folder_index: usize,
@@ -448,6 +466,10 @@ impl App {
             menu_button: MenuButton::burger(),
             menu: build_menu(),
             menu_panel: None,
+            account_menu_open: false,
+            account_menu: Menu::new(Vec::new()),
+            inbox_baseline: None,
+            last_poll: None,
             folders: Vec::new(),
             folder_index: 0,
             messages: Vec::new(),
@@ -526,6 +548,154 @@ impl App {
             .map(|folder| folder.name.clone())
     }
 
+    /// Nazwa skrzynki odbiorczej (do sprawdzania nowej poczty).
+    pub fn inbox_folder(&self) -> String {
+        self.folders
+            .iter()
+            .find(|folder| folder.kind == FolderKind::Inbox)
+            .map(|folder| folder.name.clone())
+            .unwrap_or_else(|| "INBOX".to_owned())
+    }
+
+    /// Lista kont pokazywana po kliknięciu wiersza konta w pasku bocznym.
+    pub fn rebuild_account_menu(&mut self) {
+        let mut entries = vec![MenuEntry::section(tr("Accounts"))];
+        if self.store.accounts.is_empty() {
+            entries.push(MenuEntry::action(tr("No accounts yet")).disabled());
+        } else {
+            for (index, account) in self.store.accounts.iter().enumerate() {
+                let label = if index == self.store.active {
+                    format!("{}  ({})", account.email, tr("active"))
+                } else {
+                    account.email.clone()
+                };
+                entries.push(MenuEntry::action(label));
+            }
+        }
+        entries.push(MenuEntry::separator());
+        entries.push(MenuEntry::action(tr("Add account…")));
+        entries.push(MenuEntry::action(tr("Account settings")));
+        self.account_menu = Menu::new(entries);
+    }
+
+    /// Otwiera menu kont (klik w wiersz konta w pasku bocznym).
+    pub fn open_account_menu(&mut self) {
+        self.rebuild_account_menu();
+        // W wąskim oknie pasek jest szufladą — bez tego menu nie miałoby
+        // do czego się przyczepić.
+        self.sidebar_visible = true;
+        self.account_menu_open = true;
+    }
+
+    /// Przełącza aktywne konto i podłącza je od nowa.
+    pub fn switch_account(&mut self, index: usize) {
+        if index >= self.store.accounts.len() || index == self.store.active {
+            self.account_menu_open = false;
+            return;
+        }
+        self.store.set_active(index);
+        if let Err(error) = self.store.save() {
+            eprintln!("luna-email: nie można zapisać aktywnego konta: {error}");
+        }
+        self.worker = None;
+        self.reset_mail_state();
+        self.demo = false;
+        self.connect();
+        self.notify(tr("Account switched"));
+        self.account_menu_open = false;
+    }
+
+    /// Nowe konto: pusty formularz (zapis doda je do listy).
+    pub fn open_account_settings_new(&mut self) {
+        self.account_form.load(None);
+        self.view = View::Account;
+        self.account_menu_open = false;
+    }
+
+    /// Usuwa aktywne konto (po potwierdzeniu w UI).
+    pub fn remove_active_account(&mut self) {
+        if self.store.accounts.is_empty() {
+            return;
+        }
+        self.store.remove(self.store.active);
+        if let Err(error) = self.store.save() {
+            eprintln!("luna-email: nie można zapisać kont: {error}");
+        }
+        self.worker = None;
+        self.reset_mail_state();
+        self.account_menu_open = false;
+        self.view = View::Mail;
+        self.notify(tr("Account removed"));
+        if self.store.accounts.is_empty() {
+            self.demo = true;
+            self.load_demo();
+        } else {
+            self.demo = false;
+            self.connect();
+        }
+    }
+
+    /// Czyści wszystko, co zależy od konta (foldery, wiadomości, cache).
+    fn reset_mail_state(&mut self) {
+        self.folders.clear();
+        self.messages.clear();
+        self.visible.clear();
+        self.cache.clear();
+        self.folder_index = 0;
+        self.selected = 0;
+        self.list_scroll = 0.0;
+        self.open_id = None;
+        self.open_body = None;
+        self.inbox_baseline = None;
+        self.last_poll = None;
+    }
+
+    /// Wysyła zapytanie o nową pocztę (bez zmiany widoku).
+    pub fn request_poll(&mut self) {
+        if self.demo || self.worker.is_none() || self.folders.is_empty() {
+            return;
+        }
+        let folder = self.inbox_folder();
+        if let Some(worker) = &self.worker {
+            worker.send(Command::CheckNew { folder });
+        }
+        self.last_poll = Some(Instant::now());
+    }
+
+    /// Wywoływane raz na klatkę przez pętlę: planuje kolejne sprawdzenie.
+    ///
+    /// Zwraca czas do następnego sprawdzenia (do `request_frame_after`),
+    /// albo `None`, gdy nie ma czego sprawdzać (demo / brak konta).
+    pub fn tick_poll(&mut self) -> Option<Duration> {
+        if self.demo || self.worker.is_none() || self.folders.is_empty() {
+            return None;
+        }
+        let due = self
+            .last_poll
+            .map_or(true, |at| at.elapsed() >= POLL_INTERVAL);
+        if due {
+            self.request_poll();
+        }
+        Some(
+            self.last_poll
+                .map(|at| POLL_INTERVAL.saturating_sub(at.elapsed()))
+                .unwrap_or(POLL_INTERVAL),
+        )
+    }
+
+    /// Aktualizuje licznik nieprzeczytanych w pasku folderów.
+    fn update_folder_unread(&mut self, folder: &str, items: &[MessageSummary]) {
+        let unread = items.iter().filter(|item| !item.seen).count();
+        if let Some(entry) = self.folders.iter_mut().find(|entry| entry.name == folder) {
+            entry.unread = unread;
+        }
+    }
+
+    /// Zapisuje nowy punkt odniesienia dla powiadomień (skrzynka odbiorcza).
+    fn set_inbox_baseline(&mut self, items: &[MessageSummary]) {
+        self.inbox_baseline = Some(items.iter().map(|item| item.id.clone()).collect());
+    }
+
     /// Podłącza wątek sieciowy do aktywnego konta.
     pub fn connect(&mut self) {
         let Some(account) = self.store.active_account().cloned() else {
@@ -583,6 +753,9 @@ impl App {
                 self.visible.clear();
                 self.open_id = None;
                 self.open_body = None;
+                // Nowe konto/sesja: punkt odniesienia ustali pierwsza lista.
+                self.inbox_baseline = None;
+                self.last_poll = Some(Instant::now());
                 self.request_folder();
             }
             Reply::Envelopes {
@@ -594,11 +767,80 @@ impl App {
                 if folder != self.folder_name() || page != 0 {
                     return;
                 }
+                // Każde wczytanie skrzynki odbiorczej jest nowym punktem
+                // odniesienia — inaczej po ręcznym odświeżeniu dostalibyśmy
+                // powiadomienie o wiadomościach, które już widzieliśmy.
+                if folder == self.inbox_folder() {
+                    self.set_inbox_baseline(&items);
+                    self.update_folder_unread(&folder, &items);
+                }
                 self.messages = items;
                 self.recompute();
                 self.selected = 0;
                 self.list_scroll = 0.0;
                 self.request_body();
+            }
+            Reply::NewMail { folder, items } => {
+                let ids: HashSet<String> = items.iter().map(|item| item.id.clone()).collect();
+                let previous = self.inbox_baseline.replace(ids);
+                self.update_folder_unread(&folder, &items);
+                // Pierwsze sprawdzenie tylko ustala bazę — bez toasta.
+                let Some(previous) = previous else {
+                    return;
+                };
+                let new_messages: Vec<&MessageSummary> = items
+                    .iter()
+                    .filter(|message| !previous.contains(&message.id))
+                    .collect();
+                if new_messages.is_empty() {
+                    return;
+                }
+                if let Some(newest) = new_messages.iter().max_by_key(|message| message.date) {
+                    notify::new_mail(
+                        new_messages.len(),
+                        Some((newest.sender(), newest.subject.as_str())),
+                    );
+                }
+                let text = if new_messages.len() == 1 {
+                    tr("New message")
+                } else {
+                    tr_args(
+                        "{n} new messages",
+                        &[("n", &new_messages.len().to_string())],
+                    )
+                };
+                self.notify(text);
+                // Gdy patrzymy na skrzynkę, dopisujemy nowe wiadomości bez
+                // resetowania zaznaczenia i podglądu.
+                if folder == self.folder_name() {
+                    let selected_id = self.selected_message_id();
+                    let snippets: HashMap<String, String> = self
+                        .messages
+                        .iter()
+                        .filter(|message| !message.snippet.is_empty())
+                        .map(|message| (message.id.clone(), message.snippet.clone()))
+                        .collect();
+                    let mut items = items;
+                    for item in &mut items {
+                        if item.snippet.is_empty() {
+                            if let Some(snippet) = snippets.get(&item.id) {
+                                item.snippet = snippet.clone();
+                            }
+                        }
+                    }
+                    self.messages = items;
+                    self.recompute();
+                    if let Some(id) = selected_id {
+                        if let Some(position) = self
+                            .visible
+                            .iter()
+                            .position(|index| self.messages[*index].id == id)
+                        {
+                            self.selected = position;
+                        }
+                    }
+                    self.ensure_visible();
+                }
             }
             Reply::Body { id, body } => {
                 self.body_loading = false;
@@ -1096,12 +1338,11 @@ impl App {
             return;
         }
         self.account_form.message = Some(tr("Account saved").to_owned());
+        self.account_form.confirm_remove = false;
         self.demo = false;
         self.view = View::Mail;
-        self.messages.clear();
-        self.visible.clear();
-        self.folders.clear();
-        self.cache.clear();
+        self.worker = None;
+        self.reset_mail_state();
         self.connect();
     }
 
@@ -1110,6 +1351,7 @@ impl App {
         let account = self.store.active_account().cloned();
         self.account_form.load(account.as_ref());
         self.view = View::Account;
+        self.account_menu_open = false;
     }
 
     /// Wprowadza tekst do aktywnego pola.
@@ -1681,6 +1923,8 @@ fn build_menu() -> Menu {
         MenuEntry::action(tr("Delete message")).shortcut("Del"),
         MenuEntry::separator(),
         MenuEntry::section(tr("Luna")),
+        MenuEntry::action(tr("Switch account")),
+        MenuEntry::action(tr("Add account…")),
         MenuEntry::action(tr("Account settings")),
         MenuEntry::action(tr("About Luna Mail")),
         MenuEntry::action(tr("Quit")).shortcut("Ctrl+Q"),
@@ -1768,6 +2012,10 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         // jeszcze uchwytu budzenia).
         if app.connecting || app.loading || app.body_loading {
             frame.request_frame_after(Duration::from_millis(120));
+        }
+        // Nowa poczta: sprawdzamy skrzynkę co minutę, dopóki okno jest otwarte.
+        if let Some(remaining) = app.tick_poll() {
+            frame.request_frame_after(remaining.max(Duration::from_secs(1)));
         }
     })
 }
@@ -2162,6 +2410,62 @@ mod tests {
     fn account_form_rejects_incomplete_data() {
         let form = AccountForm::default();
         assert!(form.to_account().is_err());
+    }
+
+    #[test]
+    fn new_mail_starts_with_a_silent_baseline_then_notifies() {
+        let mut app = app_with_demo();
+        app.inbox_baseline = None;
+        let first = MessageSummary {
+            id: "1".to_owned(),
+            subject: "Pierwsza".to_owned(),
+            seen: false,
+            ..MessageSummary::default()
+        };
+        // Pierwsze sprawdzenie tylko ustala punkt odniesienia.
+        app.apply_reply(Reply::NewMail {
+            folder: app.folder_name(),
+            items: vec![first.clone()],
+        });
+        assert!(app.toast.is_none());
+        assert_eq!(app.inbox_baseline.as_ref().map(HashSet::len), Some(1));
+
+        let second = MessageSummary {
+            id: "2".to_owned(),
+            from_name: "Marta".to_owned(),
+            subject: "Druga".to_owned(),
+            date: first.date + 10,
+            seen: false,
+            ..MessageSummary::default()
+        };
+        app.apply_reply(Reply::NewMail {
+            folder: app.folder_name(),
+            items: vec![second, first],
+        });
+        assert!(app.toast.is_some());
+        assert_eq!(app.inbox_baseline.as_ref().map(HashSet::len), Some(2));
+        // Licznik nieprzeczytanych w pasku folderów też się aktualizuje.
+        let inbox = app
+            .folders
+            .iter()
+            .find(|folder| folder.kind == FolderKind::Inbox)
+            .expect("skrzynka");
+        assert_eq!(inbox.unread, 2);
+    }
+
+    #[test]
+    fn account_menu_lists_accounts_and_actions() {
+        let mut app = App::demo();
+        app.store
+            .accounts
+            .push(Account::from_email("ala@example.org"));
+        app.store
+            .accounts
+            .push(Account::from_email("bob@example.org"));
+        app.store.set_active(0);
+        app.rebuild_account_menu();
+        // sekcja + 2 konta + separator + „Dodaj konto” + „Ustawienia konta”
+        assert_eq!(app.account_menu.entries().len(), 6);
     }
 
     #[test]

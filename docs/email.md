@@ -28,9 +28,21 @@ telemetrii — łączy się wyłącznie z serwerami IMAP/SMTP wskazanymi w konfi
 
 ## Konfiguracja konta
 
-Ustawienia otwiera menu (☰) → **Ustawienia konta** albo przycisk na pustym
-podglądzie. Formularz pozwala wpisać adres, nazwę, login, hasło i serwery.
-**Wykryj ustawienia** rozpoznaje popularnych dostawców po domenie:
+Ustawienia otwiera menu (☰) → **Ustawienia konta**, klik w wiersz konta
+w pasku bocznym albo przycisk na pustym podglądzie. Formularz pozwala wpisać
+adres, nazwę, login, hasło i serwery. **Wykryj ustawienia** rozpoznaje
+popularnych dostawców po domenie:
+
+### Wiele kont
+
+Można dodać dowolną liczbę kont — każde ma własne foldery, cache i kopię
+w „Wysłanych”. Klik w wiersz konta u góry paska bocznego otwiera listę:
+przełączenie konta, **Dodaj konto…** i **Ustawienia konta**. To samo jest
+w menu (☰). Aktywne konto jest zapamiętywane w `email.conf`, a jego nazwa
+pojawia się także w stopce. W ustawieniach jest **Usuń konto** (wymaga
+drugiego kliknięcia — „Potwierdź usunięcie”).
+
+![Luna Mail — przełączanie kont](images/email-accounts.png)
 
 | Domena | IMAP | SMTP |
 |---|---|---|
@@ -92,6 +104,22 @@ treścią (przycisk ☰/lista w lewym górnym rogu), a lista i podgląd dzielą
 pozostałą szerokość. Długie tematy, adresy i początek treści są skracane
 wielokropkiem **w granicach swojej kolumny** — także w powiadomieniach i menu.
 
+## Powiadomienia o nowej poczcie
+
+Gdy okno Luna Mail jest otwarte, aplikacja sprawdza początek skrzynki
+odbiorczej **co minutę** i porównuje identyfikatory wiadomości z poprzednim
+sprawdzeniem. Nowe wiadomości dają:
+
+- toast systemowy przez `org.freedesktop.Notifications` (serwerem w Lunie jest
+  `luna-shell`), z nadawcą i tematem najnowszej wiadomości,
+- krótkie potwierdzenie w stopce aplikacji,
+- odświeżenie listy bez resetowania zaznaczenia i podglądu.
+
+Kliknięcie powiadomienia aktywuje Luna Mail (hint `desktop-entry`).
+Powiadomienia dotyczą **aktywnego konta** — przełączenie konta przenosi też
+sprawdzanie skrzynki. Działają **tylko przy otwartej aplikacji**: nie ma jeszcze
+osobnego demona w tle; to świadome ograniczenie pierwszej wersji.
+
 ## Prywatność i bezpieczeństwo
 
 - Aplikacja łączy się tylko z hostami z konfiguracji; brak analityki i „domyślnych”
@@ -107,6 +135,8 @@ wielokropkiem **w granicach swojej kolumny** — także w powiadomieniach i menu
 
 - Brak OAuth2, PGP/S/MIME, wątków (threading) i filtrów serwerowych — na razie
   wyszukiwanie działa po pobranej stronie.
+- Powiadomienia o nowej poczcie działają tylko przy otwartym oknie (sprawdzanie
+  co minutę); nie ma demona w tle.
 - Brak trwałego cache offline: po restarcie lista jest pobierana ponownie.
 - Wysyłka HTML nie jest jeszcze dostępna (edytor jest tekstowy).
 - Brak okna wyboru plików (portal) — załączniki dodaje się przez przeciągnięcie.
@@ -118,7 +148,7 @@ cargo run --manifest-path apps/luna-email/Cargo.toml --bin preview
 ```
 
 Tworzy `docs/images/email-inbox.png`, `email-compose.png`, `email-account.png`,
-`email-about.png` i `email-narrow.png` bez kompozytora.
+`email-accounts.png`, `email-about.png` i `email-narrow.png` bez kompozytora.
 
 ## Testy
 

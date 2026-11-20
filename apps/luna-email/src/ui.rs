@@ -6,13 +6,14 @@
 
 use libluna_core::style::weight;
 use libluna_core::{
-    ButtonState, Event, Insets, KeyEvent, Point, PointerButton, Rect, Size, Theme, WindowEvent,
+    ButtonState, Event, IconTheme, Insets, KeyEvent, Point, PointerButton, Rect, Size, Theme,
+    WindowEvent,
 };
 use libluna_i18n::{tr, tr_args};
 use libluna_render::{Scene, TextEngine};
 use libluna_widgets::{
-    paint_icon, wrap_text, Avatar, Button, ButtonVariant, ControlsSide, HeaderBar, IconName,
-    PaintCtx, WindowControl,
+    paint_icon, paint_icon_themed, wrap_text, Avatar, Button, ButtonVariant, ControlsSide,
+    HeaderBar, IconName, PaintCtx, WindowControl,
 };
 
 use crate::app::{sender_initials, AccountField, App, ComposeField, Hit, View};
@@ -192,12 +193,44 @@ pub fn paint(app: &mut App, scene: &mut Scene, size: Size, theme: &Theme, text: 
         let panel = menu_panel(app, lay.menu_btn, size, theme, text);
         app.menu.paint(&mut ctx, panel);
     }
+    if app.account_menu_open && app.view == View::Mail {
+        if let Some(panel) = account_menu_panel(app, &lay, size, theme, text) {
+            app.account_menu.paint(&mut ctx, panel);
+        }
+    }
     paint_toast(app, &mut ctx, size);
 }
 
 fn menu_panel(app: &App, anchor: Rect, size: Size, theme: &Theme, text: &TextEngine) -> Rect {
     let width = app.menu.width(text, theme).max(232.0);
     app.menu.place(anchor, width, Rect::from_size(size), theme)
+}
+
+/// Obszar kliknięcia wiersza konta w pasku bocznym.
+fn account_anchor(lay: &Layout) -> Option<Rect> {
+    lay.sidebar.map(|sidebar| {
+        Rect::from_xywh(
+            sidebar.x() + 6.0,
+            sidebar.y() + PAD - 4.0,
+            sidebar.width() - 12.0,
+            44.0,
+        )
+    })
+}
+
+fn account_menu_panel(
+    app: &App,
+    lay: &Layout,
+    size: Size,
+    theme: &Theme,
+    text: &TextEngine,
+) -> Option<Rect> {
+    let anchor = account_anchor(lay)?;
+    let width = app.account_menu.width(text, theme).max(240.0);
+    Some(
+        app.account_menu
+            .place(anchor, width, Rect::from_size(size), theme),
+    )
 }
 
 fn paint_header(app: &mut App, ctx: &mut PaintCtx, lay: &Layout, _size: Size) {
@@ -263,15 +296,15 @@ fn paint_header(app: &mut App, ctx: &mut PaintCtx, lay: &Layout, _size: Size) {
 }
 
 fn icon_button(ctx: &mut PaintCtx, rect: Rect, icon: IconName, enabled: bool, _hovered: bool) {
-    if !enabled {
-        let color = ctx.theme.colors.dim_text.scale_alpha(0.45);
-        let inner = rect.deflate(Insets::symmetric(6.0, 6.0));
-        paint_icon(ctx, icon, inner, color);
-        return;
-    }
-    let color = ctx.theme.colors.text;
+    let color = if enabled {
+        ctx.theme.colors.text
+    } else {
+        ctx.theme.colors.dim_text.scale_alpha(0.45)
+    };
     let inner = rect.deflate(Insets::symmetric(6.0, 6.0));
-    paint_icon(ctx, icon, inner, color);
+    // Pasek tytułu Luny jest monochromatyczny — pastelowe ikony zostają
+    // w treści, ale kontrolki nie mogą wyglądać jak z innego systemu.
+    paint_icon_themed(ctx, icon, inner, color, IconTheme::Monochrome);
 }
 
 fn paint_sidebar(app: &mut App, ctx: &mut PaintCtx, lay: &Layout) {
@@ -285,13 +318,24 @@ fn paint_sidebar(app: &mut App, ctx: &mut PaintCtx, lay: &Layout) {
         colors.border,
     );
 
-    // Konto na górze paska (avatar + adres).
+    // Konto na górze paska (avatar + adres). Klik otwiera listę kont.
+    let account_row = account_anchor(lay).unwrap_or(Rect::ZERO);
+    if app.account_menu_open {
+        ctx.scene
+            .fill_rounded_rect(account_row, ctx.theme.radius.small, colors.shade);
+    }
     let avatar_rect = Rect::from_xywh(sidebar.x() + PAD, sidebar.y() + PAD, 32.0, 32.0);
     let label = app
         .account()
         .map(|account| account.label())
         .unwrap_or_else(|| tr("Demo mode").to_owned());
     Avatar::new(sender_initials_label(app)).paint(ctx, avatar_rect);
+    let chevron = Rect::from_xywh(
+        sidebar.right() - PAD - 14.0,
+        avatar_rect.center().y - 7.0,
+        14.0,
+        14.0,
+    );
     ctx.label_left_fit(
         avatar_rect.right() + 8.0,
         avatar_rect.center().y,
@@ -299,8 +343,16 @@ fn paint_sidebar(app: &mut App, ctx: &mut PaintCtx, lay: &Layout) {
         ctx.theme.typography.body.size,
         weight::NORMAL,
         colors.text,
-        (sidebar.right() - 8.0 - (avatar_rect.right() + 8.0)).max(0.0),
+        (chevron.x() - 6.0 - (avatar_rect.right() + 8.0)).max(0.0),
     );
+    paint_icon_themed(
+        ctx,
+        IconName::ChevronRight,
+        chevron,
+        colors.dim_text,
+        IconTheme::Monochrome,
+    );
+    app.hits.push((Hit::AccountMenu, account_row));
     let separator_y = avatar_rect.bottom() + PAD;
     ctx.scene.fill_rect(
         Rect::from_xywh(
@@ -1146,7 +1198,23 @@ fn paint_account(app: &mut App, ctx: &mut PaintCtx, lay: &Layout, size: Size) {
     let detect_w = detect.width(ctx.text, ctx.theme);
     let save_rect = Rect::from_xywh(inner.right() - save_w, y, save_w, buttons_h);
     let cancel_rect = Rect::from_xywh(save_rect.x() - 8.0 - cancel_w, y, cancel_w, buttons_h);
-    let detect_rect = Rect::from_xywh(inner.x(), y, detect_w, buttons_h);
+
+    let mut left = inner.x();
+    if app.store.active_account().is_some() {
+        let remove = Button::new(if app.account_form.confirm_remove {
+            tr("Confirm removal")
+        } else {
+            tr("Remove account")
+        })
+        .variant(ButtonVariant::Destructive);
+        let remove_w = remove.width(ctx.text, ctx.theme);
+        let remove_rect = Rect::from_xywh(left, y, remove_w, buttons_h);
+        remove.paint(ctx, remove_rect);
+        app.hits.push((Hit::AccountRemove, remove_rect));
+        left = remove_rect.right() + 8.0;
+    }
+
+    let detect_rect = Rect::from_xywh(left, y, detect_w, buttons_h);
     detect.paint(ctx, detect_rect);
     cancel.paint(ctx, cancel_rect);
     save.paint(ctx, save_rect);
@@ -1383,6 +1451,34 @@ fn handle_click(
         return;
     }
 
+    // Menu kont z paska bocznego jest nad treścią, ale pod kontrolkami okna.
+    if app.account_menu_open {
+        if let Some(panel) = account_menu_panel(app, lay, size, theme, text) {
+            if panel.contains(position) {
+                if let Some(index) = app.account_menu.click_at(panel, position, theme) {
+                    app.account_menu_open = false;
+                    let accounts = app.store.accounts.len();
+                    if (1..=accounts).contains(&index) {
+                        app.switch_account(index - 1);
+                        // Szuflada w wąskim oknie nie może zasłaniać treści.
+                        if size.width < 860.0 {
+                            app.sidebar_visible = false;
+                        }
+                    } else if index == accounts + 2 {
+                        app.open_account_settings_new();
+                    } else if index == accounts + 3 {
+                        app.open_account_settings();
+                    }
+                }
+            } else {
+                app.account_menu_open = false;
+            }
+        } else {
+            app.account_menu_open = false;
+        }
+        return;
+    }
+
     // Menu jest nad wszystkim.
     if app.menu_button.is_open() {
         let panel = menu_panel(app, lay.menu_btn, size, theme, text);
@@ -1399,6 +1495,7 @@ fn handle_click(
 
     if app.view == View::Mail {
         if lay.menu_btn.contains(position) {
+            app.account_menu_open = false;
             app.menu_button.toggle();
             return;
         }
@@ -1527,6 +1624,7 @@ fn handle_click(
             Hit::ComposeAttach => app.notify(tr("Drag files into the window to attach them")),
             Hit::AccountField(field) => {
                 app.account_form.field = field;
+                app.account_form.confirm_remove = false;
                 match field {
                     AccountField::Email => {
                         app.account_form.email.place_cursor(
@@ -1603,6 +1701,19 @@ fn handle_click(
                 }
                 app.account_form.focus();
             }
+            Hit::AccountMenu => {
+                app.menu_button.set_open(false);
+                app.open_account_menu();
+            }
+            Hit::AccountRemove => {
+                if app.account_form.confirm_remove {
+                    app.remove_active_account();
+                } else {
+                    app.account_form.confirm_remove = true;
+                    app.account_form.message =
+                        Some(tr("Click again to remove this account").to_owned());
+                }
+            }
             Hit::AccountSave => app.save_account(),
             Hit::AccountCancel => {
                 app.view = View::Mail;
@@ -1637,9 +1748,11 @@ fn menu_action(app: &mut App, index: usize) {
         8 => app.mark_seen(false, true),
         9 => app.toggle_flag(),
         10 => app.delete_selected(),
-        13 => app.open_account_settings(),
-        14 => app.view = View::About,
-        15 => app.pending_close = true,
+        13 => app.open_account_menu(),
+        14 => app.open_account_settings_new(),
+        15 => app.open_account_settings(),
+        16 => app.view = View::About,
+        17 => app.pending_close = true,
         _ => {}
     }
 }

@@ -218,7 +218,9 @@ Selene.
   nieprzeczytane, gwiazdka, załącznik) i podgląd z odpowiedzią, przekazaniem oraz
   zapisem załączników. Odbiór przez IMAP, wysyłka przez SMTP (z kopią
   w „Wysłanych”), HTML zamieniany na bezpieczny tekst bez skryptów i zdalnych
-  obrazów. Bez konta działa tryb demo z przykładową skrzynką. Konfiguracja:
+  obrazów. Obsługuje wiele kont (przełączanie z paska bocznego), a nowa poczta
+  daje powiadomienie w Lunie, gdy okno jest otwarte. Bez konta działa tryb demo
+  z przykładową skrzynką. Konfiguracja:
   `~/.config/luna/email.conf` (`0600`; hasło można też podać przez
   `LUNA_EMAIL_PASSWORD`). Wejście z wpisu `eu.luna.Email.desktop`; podglądy:
   `cargo run --manifest-path apps/luna-email/Cargo.toml --bin preview` →
