@@ -666,7 +666,7 @@ void main() {
 }";
 
 const FS_SHAPE: &str = "\
-precision mediump float;
+precision highp float;
 varying vec2 local;
 uniform vec4 rect;
 uniform vec4 color;
@@ -684,9 +684,15 @@ float sd_round(vec2 p, vec2 size, float r) {
     return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
 }
 float sd_segment(vec2 p, vec2 a, vec2 b) {
+    // Liczymy wzdłuż znormalizowanego kierunku: `dot(ba, ba)` przy długich
+    // odcinkach przekraczało zakres `mediump` i poziome linie znikały
+    // (zostawała kropka na początku).
     vec2 pa = p - a, ba = b - a;
-    float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);
-    return length(pa - ba * h);
+    float len = length(ba);
+    if (len < 1e-4) return length(pa);
+    vec2 dir = ba / len;
+    float t = clamp(dot(pa, dir), 0.0, len);
+    return length(pa - dir * t);
 }
 void main() {
     if (local.x < clip.x || local.y < clip.y ||
@@ -703,12 +709,15 @@ void main() {
         // Odcinek z zaokrąglonymi końcami: radius = połowa grubości.
         d = sd_segment(local, line.xy, line.zw) - radius;
     } else {
-        // Okrąg: rect.xy = środek, radius = promień (mode 3/4).
-        float dd = length(local - rect.xy) - radius;
+        // Okrąg: `rect` opisuje quad (róg + rozmiar), więc środek liczymy z quada.
+        // Wcześniej brano `rect.xy` jako środek — dawało to ćwiartkę okręgu
+        // przy narożniku (ikony bez kół: lupa, zegar, użytkownik, info).
+        vec2 center = rect.xy + rect.zw * 0.5;
+        float dd = length(local - center) - radius;
         if (mode == 3) {
             d = dd;
         } else {
-            d = abs(dd + border * 0.5) - border * 0.5;
+            d = abs(dd) - border * 0.5;
         }
     }
     float a = clamp(0.5 - d, 0.0, 1.0);
@@ -2213,10 +2222,18 @@ impl Renderer for GpuRenderer {
                 } => {
                     self.flush_run(&mut run, &mut run_bounds, k, &clip_stack);
                     let (clip, round) = clip_for(&clip_stack, screen);
+                    // Quad poszerzony o pół grubości — zewnętrzna połowa obrysu
+                    // nie może wypaść poza quad (GL tnie fragmenty do quada).
                     let r = radius * k;
+                    let pad = width * k * 0.5;
                     let c = Point::new(center.x * k, center.y * k);
                     self.draw_shape(
-                        Rect::from_xywh(c.x - r, c.y - r, 2.0 * r, 2.0 * r),
+                        Rect::from_xywh(
+                            c.x - r - pad,
+                            c.y - r - pad,
+                            2.0 * (r + pad),
+                            2.0 * (r + pad),
+                        ),
                         *color,
                         4,
                         r,
@@ -2662,7 +2679,7 @@ impl ShapeProgram {
                 color: (gl.get_uniform_location)(id, b"color\0".as_ptr() as *const Glchar),
                 mode: (gl.get_uniform_location)(id, b"mode\0".as_ptr() as *const Glchar),
                 radius: (gl.get_uniform_location)(id, b"radius\0".as_ptr() as *const Glchar),
-                width: (gl.get_uniform_location)(id, b"width\0".as_ptr() as *const Glchar),
+                width: (gl.get_uniform_location)(id, b"border\0".as_ptr() as *const Glchar),
                 line: (gl.get_uniform_location)(id, b"line\0".as_ptr() as *const Glchar),
                 clip: (gl.get_uniform_location)(id, b"clip\0".as_ptr() as *const Glchar),
                 round: (gl.get_uniform_location)(id, b"round\0".as_ptr() as *const Glchar),
@@ -2904,6 +2921,86 @@ mod tests {
         assert_eq!(px(12, 12), (0xff, 0x40, 0x20));
         assert_eq!(px(0, 0), (0x10, 0x20, 0x30));
         assert!(gpu.encode_png().is_some());
+    }
+
+    /// Długie poziome linie (separatory, obwódki, podkreślenia) muszą być
+    /// narysowane na całej długości. Wcześniej `dot(ba, ba)` w `sd_segment`
+    /// przekraczał zakres `mediump` i pozioma kreska zostawała kropką na
+    /// początku — cały interfejs wyglądał wtedy na „rozjechany render”.
+    #[test]
+    fn gpu_draws_long_horizontal_line() {
+        if !available() {
+            eprintln!("pominięto: brak EGL/GPU");
+            return;
+        }
+        let mut gpu = match GpuRenderer::new(320, 80) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("pominięto: {e}");
+                return;
+            }
+        };
+        let mut scene = Scene::new();
+        scene.fill_rect(
+            Rect::from_xywh(0.0, 0.0, 320.0, 80.0),
+            Color::from_rgba8(0x00, 0x00, 0x00, 0xff),
+        );
+        scene.stroke_line(
+            Point::new(10.0, 40.0),
+            Point::new(310.0, 40.0),
+            2.0,
+            Color::from_rgba8(0xff, 0xff, 0xff, 0xff),
+        );
+        gpu.draw(&scene, 1.0, Color::from_rgba8(0x00, 0x00, 0x00, 0xff));
+        let px = |x: usize, y: usize| {
+            let i = (y * 320 + x) * 4;
+            gpu.data()[i]
+        };
+        for x in [12, 80, 160, 240, 308] {
+            assert!(px(x, 40) > 200, "linia nie narysowana w x={x}");
+        }
+        assert!(px(160, 20) < 20, "tło musi zostać czarne");
+    }
+
+    /// Obrysy (okrąg i zaokrąglony prostokąt) muszą mieć **pełną grubość** i być
+    /// wyśrodkowane na ścieżce. Test pilnuje dwóch realnych błędów, które dawały
+    /// nieczytelne ikony w całym środowisku:
+    ///  * SDF okręgu liczył odległość od **narożnika** quada, nie od środka,
+    ///  * uniform grubości nazywał się w shaderze `border`, a kod szukał `width`
+    ///    (lokalizacja `-1` → grubość zawsze 0 → 1-px włoskowata linia).
+    #[test]
+    fn gpu_strokes_circles_and_rounded_rects_like_cpu() {
+        if !available() {
+            eprintln!("pominięto: brak EGL/GPU");
+            return;
+        }
+        let mut gpu = match GpuRenderer::new(64, 64) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("pominięto: {e}");
+                return;
+            }
+        };
+        let mut scene = Scene::new();
+        let white = Color::from_rgba8(0xff, 0xff, 0xff, 0xff);
+        // Okrąg: środek (20,20), promień 12, grubość 4.
+        scene.stroke_circle(Point::new(20.0, 20.0), 12.0, 4.0, white);
+        // Ramka: (40,40)-(60,60), grubość 4.
+        scene.stroke_rounded_rect(Rect::from_xywh(40.0, 40.0, 20.0, 20.0), 4.0, 4.0, white);
+        gpu.draw(&scene, 1.0, Color::from_rgba8(0, 0, 0, 0xff));
+        let px = |x: usize, y: usize| {
+            let i = (y * 64 + x) * 4;
+            gpu.data()[i] as u32
+        };
+        // Środek okręgu i środek ramki — puste.
+        assert!(px(20, 20) < 32, "środek okręgu zamalowany: {}", px(20, 20));
+        assert!(px(50, 50) < 32, "środek ramki zamalowany: {}", px(50, 50));
+        // Punkt na promieniu (20+12, 20) — pełny obrys (grubość 4 → pełne krycie).
+        assert!(px(32, 20) > 200, "brak obrysu okręgu: {}", px(32, 20));
+        // Górna krawędź ramki (50, 40) — pełny obrys.
+        assert!(px(50, 40) > 200, "brak obrysu ramki: {}", px(50, 40));
+        // Środek boku ramki też (lewa krawędź).
+        assert!(px(40, 50) > 200, "brak lewej krawędzi: {}", px(40, 50));
     }
 
     /// Tekstura z `wl_shm` (`DrawCommand::Image`) musi być widoczna — to treść
