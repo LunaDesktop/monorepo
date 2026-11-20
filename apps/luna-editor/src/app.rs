@@ -1572,28 +1572,14 @@ fn menu_entries() -> Vec<MenuEntry> {
     ]
 }
 
-/// Menu bazowe + polecenia wtyczek (na końcu, po separatorze).
+/// Menu aplikacji. Polecenia wtyczek **nie** trafiają tutaj — mają własny
+/// panel („Wtyczki…”) i menu kontekstowe szyny, więc nie zaśmiecają pozycji
+/// po „O aplikacji”.
 fn menu_entries_with_plugins(
-    plugins: &[crate::plugins::Plugin],
+    _plugins: &[crate::plugins::Plugin],
 ) -> (Vec<MenuEntry>, Vec<Option<(usize, usize)>>) {
-    let mut entries = menu_entries();
-    let mut map: Vec<Option<(usize, usize)>> = vec![None; entries.len()];
-    let with_commands = plugins.iter().any(|plugin| !plugin.commands.is_empty());
-    if with_commands {
-        entries.push(MenuEntry::separator());
-        map.push(None);
-    }
-    for (plugin_index, plugin) in plugins.iter().enumerate() {
-        if plugin.commands.is_empty() {
-            continue;
-        }
-        entries.push(MenuEntry::section(plugin.name.clone()));
-        map.push(None);
-        for (command_index, command) in plugin.commands.iter().enumerate() {
-            entries.push(MenuEntry::action(command.title.clone()));
-            map.push(Some((plugin_index, command_index)));
-        }
-    }
+    let entries = menu_entries();
+    let map = vec![None; entries.len()];
     (entries, map)
 }
 
@@ -1708,6 +1694,32 @@ mod tests {
     #[test]
     fn menu_indices_match_entries() {
         assert_eq!(menu_entries().len(), MENU_ABOUT + 1);
+    }
+
+    #[test]
+    fn plugin_commands_are_not_appended_to_the_app_menu() {
+        let plugin = plugins::Plugin {
+            dir: std::path::PathBuf::from("/tmp/ai"),
+            id: "ai".into(),
+            name: "AI Writer".into(),
+            version: "1".into(),
+            author: String::new(),
+            description: String::new(),
+            entry: "run.sh".into(),
+            interpreter: Some("sh".into()),
+            commands: vec![plugins::PluginCommand {
+                id: "ask".into(),
+                title: "Zapytaj AI…".into(),
+                prompt: true,
+                context: plugins::Context::Document,
+                output: plugins::Output::Insert,
+            }],
+            settings: Vec::new(),
+            chat: false,
+        };
+        let (entries, map) = menu_entries_with_plugins(&[plugin]);
+        assert_eq!(entries.len(), MENU_ABOUT + 1);
+        assert!(map.iter().all(Option::is_none));
     }
 
     #[test]
