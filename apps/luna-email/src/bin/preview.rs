@@ -12,6 +12,8 @@ use libluna_i18n::{set_locale, Locale};
 use libluna_render::{Scene, SoftwareRenderer, TextEngine};
 use luna_email::account::Account;
 use luna_email::app::{App, ComposeField, View};
+use luna_email::cli::ComposeRequest;
+use luna_email::model::AttachmentInfo;
 use luna_email::ui;
 
 const WIDE: Size = Size {
@@ -88,6 +90,23 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Konta są prawdziwe, więc stopka nie powinna mówić „Tryb demo”.
     accounts.demo = false;
     save(&mut accounts, WIDE, &dark, &text, "email-accounts.png")?;
+
+    // Ten sam formularz, który otwiera Ustawienia → „Wyślij raport” (mailto:).
+    let mut report = demo();
+    report.apply_compose_request(ComposeRequest {
+        to: vec!["luna@mijsys.pl".to_owned()],
+        cc: Vec::new(),
+        subject: "[luna-report] Luna 0.1.0 (system+session)".to_owned(),
+        body: "Opis problemu:\nPanel znika po odłączeniu monitora.\n\nRaport został zapisany obok i dołączony jako załącznik.\n\nSekcje: system, session".to_owned(),
+        attachments: Vec::new(),
+    });
+    report.compose.attachments.push(AttachmentInfo {
+        name: "luna-report.txt".to_owned(),
+        mime: "text/plain".to_owned(),
+        size: 4_096,
+        data: Vec::new(),
+    });
+    save(&mut report, WIDE, &dark, &text, "email-report.png")?;
 
     let mut narrow = demo();
     narrow.sidebar_visible = false;

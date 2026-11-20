@@ -1900,6 +1900,8 @@ Update plugin = Plugin aktualisieren
 no translation = keine Übersetzung
 No Luna translation for {language} yet — the interface stays in English = Keine Luna-Übersetzung für {language} — Oberfläche auf Englisch
 No Luna translation yet — the interface stays in English = Keine Luna-Übersetzung — Oberfläche auf Englisch
+Saved locally; e-mail opens your mail app with {address} — Luna Mail attaches the report automatically = Lokal gespeichert; die E-Mail öffnet dein Mailprogramm mit {address} — Luna Mail hängt den Bericht automatisch an
+Report saved to {path} — Luna Mail opened with the attachment = Bericht gespeichert unter {path} — Luna Mail mit Anhang geöffnet
 
 # Luna Mail — E-Mail-Client.
 Luna Mail = Luna Mail

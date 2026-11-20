@@ -104,6 +104,27 @@ treścią (przycisk ☰/lista w lewym górnym rogu), a lista i podgląd dzielą
 pozostałą szerokość. Długie tematy, adresy i początek treści są skracane
 wielokropkiem **w granicach swojej kolumny** — także w powiadomieniach i menu.
 
+## `mailto:` i „Wyślij raport”
+
+Luna Mail przyjmuje URI `mailto:` (RFC 6068) oraz jawne argumenty:
+
+```sh
+luna-email 'mailto:luna@mijsys.pl?subject=Raport&body=Opis'
+luna-email --to ala@example.org --subject "Temat" --body "Treść"
+luna-email --to ala@example.org --body-file /tmp/raport.txt --attach /tmp/raport.txt
+```
+
+Ustawienia → **Pomoc i zgłaszanie problemów** → **Wyślij raport** zapisuje raport,
+a następnie uruchamia `luna-email --attach <raport> 'mailto:…'`. Dzięki temu
+formularz jest od razu wypełniony (adres, temat, opis problemu), a raport jest
+**już załączony** — wystarczy kliknąć „Wyślij”. Jeżeli Luna Mail nie jest
+zainstalowana, Ustawienia wracają do `xdg-email`/`gio` (bez załącznika).
+
+Wpis `.desktop` deklaruje `MimeType=x-scheme-handler/mailto` i `Exec=luna-email %u`,
+więc `xdg-open mailto:…` i `gio open mailto:…` też trafiają do kompozytora.
+
+![Luna Mail — raport z Ustawień](images/email-report.png)
+
 ## Powiadomienia o nowej poczcie
 
 Gdy okno Luna Mail jest otwarte, aplikacja sprawdza początek skrzynki
@@ -148,7 +169,8 @@ cargo run --manifest-path apps/luna-email/Cargo.toml --bin preview
 ```
 
 Tworzy `docs/images/email-inbox.png`, `email-compose.png`, `email-account.png`,
-`email-accounts.png`, `email-about.png` i `email-narrow.png` bez kompozytora.
+`email-accounts.png`, `email-report.png`, `email-about.png` i `email-narrow.png`
+bez kompozytora.
 
 ## Testy
 

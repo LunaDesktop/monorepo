@@ -682,7 +682,9 @@ i podgląd z odpowiedzią, przekazaniem i zapisem załączników. Odbiera przez 
 wysyła przez SMTP (z kopią w „Wysłanych”), a HTML zamienia na bezpieczny tekst
 (bez zdalnych obrazów i skryptów). Obsługuje wiele kont (przełączanie z paska
 bocznego), a nowa poczta daje powiadomienie w Lunie, gdy okno jest otwarte.
-Bez konta działa tryb demo z przykładową skrzynką. Konfiguracja:
+Obsługuje też `mailto:` — „Wyślij raport” w Ustawieniach otwiera gotowy
+formularz z raportem już załączonym. Bez konta działa tryb demo z przykładową
+skrzynką. Konfiguracja:
 `~/.config/luna/email.conf` (`0600`, hasło można też podawać przez
 `LUNA_EMAIL_PASSWORD`). Szczegóły, skróty i ograniczenia:
 [`docs/email.md`](docs/email.md).

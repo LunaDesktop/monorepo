@@ -1674,11 +1674,27 @@ impl SettingsApp {
             }
         };
         let link = report.mailto(&self.report_sections, &self.report_note, &path);
+        let shown = path.display().to_string();
+        // Najpierw Luna Mail: jako natywny klient dostaje raport od razu jako
+        // załącznik. `xdg-email` nie potrafi przekazać pliku, więc zostaje
+        // tylko jako zapas dla systemów bez Luny.
+        let binary = std::env::var("LUNA_EMAIL_BIN").unwrap_or_else(|_| "luna-email".to_owned());
+        let luna_mail = Command::new(binary)
+            .arg("--attach")
+            .arg(&path)
+            .arg(&link)
+            .spawn();
+        if luna_mail.is_ok() {
+            self.show_status(tr_args(
+                "Report saved to {path} — Luna Mail opened with the attachment",
+                &[("path", &shown)],
+            ));
+            return;
+        }
         let opened = Command::new("xdg-email")
             .arg(&link)
             .spawn()
             .or_else(|_| Command::new("gio").arg("open").arg(&link).spawn());
-        let shown = path.display().to_string();
         if opened.is_ok() {
             self.show_status(tr_args(
                 "Report saved to {path} — attach it in your mail app",

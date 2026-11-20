@@ -18,6 +18,7 @@ use libluna_widgets::{
 
 use crate::account::{Account, AccountStore, Encryption, Preset};
 use crate::backend::{Command, MailWorker, Reply};
+use crate::cli::ComposeRequest;
 use crate::model::{
     forward_body, forward_subject, initials, now_secs, reply_body, reply_subject, validate_draft,
     AttachmentInfo, Draft, FolderInfo, FolderKind, MessageBody, MessageSummary,
@@ -446,15 +447,20 @@ pub struct App {
 impl App {
     /// Start: konta z pliku albo dane demo.
     pub fn launch() -> Self {
-        Self::with_store(AccountStore::load())
+        Self::with_store(AccountStore::load(), None)
+    }
+
+    /// Start z gotowym szkicem (mailto / argumenty wiersza poleceń).
+    pub fn launch_with(request: ComposeRequest) -> Self {
+        Self::with_store(AccountStore::load(), Some(request))
     }
 
     /// Aplikacja bez czytania konfiguracji — podglądy i testy.
     pub fn demo() -> Self {
-        Self::with_store(AccountStore::default())
+        Self::with_store(AccountStore::default(), None)
     }
 
-    fn with_store(store: AccountStore) -> Self {
+    fn with_store(store: AccountStore, request: Option<ComposeRequest>) -> Self {
         let demo = store.accounts.is_empty();
         let mut app = Self {
             store,
@@ -508,6 +514,9 @@ impl App {
             app.load_demo();
         } else {
             app.connect();
+        }
+        if let Some(request) = request {
+            app.apply_compose_request(request);
         }
         app
     }
@@ -1152,6 +1161,31 @@ impl App {
             });
         }
         self.notify(tr("Moving message…"));
+    }
+
+    /// Otwiera edytor z gotowym szkicem (mailto / argumenty startowe).
+    pub fn apply_compose_request(&mut self, request: ComposeRequest) {
+        self.compose = ComposeState::default();
+        if !request.to.is_empty() {
+            self.compose.to.set_text(request.to.join(", "));
+        }
+        if !request.cc.is_empty() {
+            self.compose.cc.set_text(request.cc.join(", "));
+        }
+        self.compose.subject.set_text(request.subject);
+        self.compose.body.set_text(request.body);
+        if !request.attachments.is_empty() {
+            self.attach_paths(&request.attachments);
+        }
+        // Kursor tam, gdzie zwykle dopisuje się treść — pole odbiorcy jest
+        // już wypełnione przez aplikację wywołującą.
+        self.compose.field = if self.compose.body.is_empty() {
+            ComposeField::Subject
+        } else {
+            ComposeField::Body
+        };
+        self.compose.focus();
+        self.view = View::Compose;
     }
 
     /// Nowa wiadomość od zera.
@@ -1932,11 +1966,14 @@ fn build_menu() -> Menu {
 }
 
 /// Pętla aplikacji.
-pub fn run() -> Result<(), Box<dyn Error>> {
+pub fn run(request: Option<ComposeRequest>) -> Result<(), Box<dyn Error>> {
     set_locale(preferred_locale());
     load_catalogs_from_dirs();
 
-    let mut app = App::launch();
+    let mut app = match request {
+        Some(request) => App::launch_with(request),
+        None => App::launch(),
+    };
     let settings = ThemeSettings::load();
     let system_dark = libluna_core::appearance::system_dark();
     let config = AppConfig::new(tr("Luna Mail"))
@@ -2410,6 +2447,24 @@ mod tests {
     fn account_form_rejects_incomplete_data() {
         let form = AccountForm::default();
         assert!(form.to_account().is_err());
+    }
+
+    #[test]
+    fn compose_request_opens_a_prefilled_form() {
+        let mut app = App::demo();
+        app.apply_compose_request(ComposeRequest {
+            to: vec!["luna@mijsys.pl".to_owned()],
+            cc: vec!["kopia@example.org".to_owned()],
+            subject: "[luna-report] Luna".to_owned(),
+            body: "Opis problemu".to_owned(),
+            attachments: Vec::new(),
+        });
+        assert_eq!(app.view, View::Compose);
+        assert_eq!(app.compose.to.text(), "luna@mijsys.pl");
+        assert_eq!(app.compose.cc.text(), "kopia@example.org");
+        assert_eq!(app.compose.subject.text(), "[luna-report] Luna");
+        assert_eq!(app.compose.body.text(), "Opis problemu");
+        assert_eq!(app.compose.field, ComposeField::Body);
     }
 
     #[test]

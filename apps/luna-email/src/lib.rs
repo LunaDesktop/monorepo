@@ -7,6 +7,7 @@
 pub mod account;
 pub mod app;
 pub mod backend;
+pub mod cli;
 pub mod model;
 pub mod notify;
 pub mod ui;
@@ -15,5 +16,10 @@ use std::error::Error;
 
 /// Binarka `luna-email`.
 pub fn run_email() -> Result<(), Box<dyn Error>> {
-    app::run()
+    app::run(None)
+}
+
+/// Start z gotowym szkicem (`mailto:` albo `--to/--subject/--attach`).
+pub fn run_email_with(request: cli::ComposeRequest) -> Result<(), Box<dyn Error>> {
+    app::run(Some(request))
 }

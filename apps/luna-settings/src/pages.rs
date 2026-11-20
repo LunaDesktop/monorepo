@@ -1296,7 +1296,7 @@ fn support(app: &SettingsApp) -> Vec<Group> {
                 ),
                 info_row(
                     tr("Where reports go"),
-                    tr_args("Saved locally; e-mail opens your mail app with {address} — you attach the file yourself", &[("address", diagnostics::REPORT_EMAIL)]),
+                    tr_args("Saved locally; e-mail opens your mail app with {address} — Luna Mail attaches the report automatically", &[("address", diagnostics::REPORT_EMAIL)]),
                 ),
                 info_row(
                     tr("Retention"),
