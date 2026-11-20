@@ -144,7 +144,7 @@ fn map_region(fd: &OwnedFd, size: usize) -> (*mut c_void, bool) {
 }
 
 fn debug() -> bool {
-    std::env::var("SELENE_STATS").is_ok()
+    crate::stats_enabled()
 }
 
 /// Dane bufora (`wl_buffer`): albo pula shm, albo bufor `dmabuf` klienta GPU.
@@ -276,19 +276,33 @@ impl BufferData {
                     }
                     continue;
                 }
-                let dst32 =
-                    unsafe { std::slice::from_raw_parts_mut(row_dst.as_mut_ptr() as *mut u32, w) };
-                let src32 =
-                    unsafe { std::slice::from_raw_parts(row_src.as_ptr() as *const u32, w) };
-                for (d, &s) in dst32.iter_mut().zip(src32.iter()) {
-                    let mut v =
-                        (s & 0xFF00_FF00) | ((s & 0x00FF_0000) >> 16) | ((s & 0x0000_00FF) << 16);
-                    if force_alpha {
-                        v |= 0xFF00_0000;
-                    } else if s & 0xFF00_0000 != 0xFF00_0000 {
-                        opaque = false;
+                if (row_src.as_ptr() as usize) % 4 == 0 && (row_dst.as_mut_ptr() as usize) % 4 == 0 {
+                    let dst32 = unsafe {
+                        std::slice::from_raw_parts_mut(row_dst.as_mut_ptr() as *mut u32, w)
+                    };
+                    let src32 =
+                        unsafe { std::slice::from_raw_parts(row_src.as_ptr() as *const u32, w) };
+                    for (d, &s) in dst32.iter_mut().zip(src32.iter()) {
+                        let mut v = (s & 0xFF00_FF00)
+                            | ((s & 0x00FF_0000) >> 16)
+                            | ((s & 0x0000_00FF) << 16);
+                        if force_alpha {
+                            v |= 0xFF00_0000;
+                        } else if s & 0xFF00_0000 != 0xFF00_0000 {
+                            opaque = false;
+                        }
+                        *d = v;
                     }
-                    *d = v;
+                } else {
+                    for (d, s) in row_dst.chunks_exact_mut(4).zip(row_src.chunks_exact(4)) {
+                        d[0] = s[2];
+                        d[1] = s[1];
+                        d[2] = s[0];
+                        d[3] = if force_alpha { 255 } else { s[3] };
+                        if !force_alpha && s[3] != 255 {
+                            opaque = false;
+                        }
+                    }
                 }
             }
         }

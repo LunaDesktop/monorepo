@@ -77,282 +77,408 @@ impl SoftwareRenderer {
 
     /// Rasteryzuje scenę. `scale` przelicza piksele logiczne sceny na fizyczne.
     pub fn draw(&mut self, scene: &Scene, scale: f64, background: Color) {
-        let SoftwareRenderer {
-            pixmap,
-            text,
-            paths,
-        } = self;
-        let scale = Scale::new(scale);
-        let transform = Transform::from_scale(scale.factor() as f32, scale.factor() as f32);
+        let full = (self.pixmap.width(), self.pixmap.height());
+        draw_into(
+            &mut self.pixmap,
+            &mut self.text,
+            &mut self.paths,
+            scene,
+            scale,
+            background,
+            (0, 0),
+            full,
+            None,
+        );
+    }
 
-        // Gdy scena zaczyna się od tła pokrywającego cały bufor, wypełnianie kolorem
-        // jest zbyteczne — tło i tak nadpisze wszystkie piksele.
-        let bg_covers = scene.commands().iter().any(|c| {
-            matches!(c, DrawCommand::Background { data }
-                if data.width == pixmap.width() && data.height == pixmap.height())
-        });
-        if !bg_covers {
-            pixmap.fill(ts_color(background));
+    /// Rasteryzuje tylko obszar `damage` (w pikselach logicznych), kopiując go do
+    /// głównego bufora. Gdy `damage == None` lub obejmuje >= 50% ekranu, rysuje całość.
+    pub fn draw_damage(
+        &mut self,
+        scene: &Scene,
+        scale: f64,
+        background: Color,
+        damage: Option<Rect>,
+    ) {
+        let Some(dmg) = damage else {
+            self.draw(scene, scale, background);
+            return;
+        };
+        let k = Scale::new(scale).factor();
+        let full_w = self.pixmap.width();
+        let full_h = self.pixmap.height();
+        let x0 = (dmg.x() * k).floor().max(0.0) as i32;
+        let y0 = (dmg.y() * k).floor().max(0.0) as i32;
+        let x1 = (dmg.right() * k).ceil().min(f64::from(full_w)) as i32;
+        let y1 = (dmg.bottom() * k).ceil().min(f64::from(full_h)) as i32;
+        if x1 <= x0 || y1 <= y0 {
+            return;
         }
+        let dw = (x1 - x0) as u32;
+        let dh = (y1 - y0) as u32;
+        if u64::from(dw) * u64::from(dh) >= (u64::from(full_w) * u64::from(full_h)) / 2 {
+            self.draw(scene, scale, background);
+            return;
+        }
+        let Some(mut tile) = Pixmap::new(dw, dh) else {
+            self.draw(scene, scale, background);
+            return;
+        };
+        let logical_dmg = Rect::from_xywh(
+            f64::from(x0) / k,
+            f64::from(y0) / k,
+            f64::from(dw) / k,
+            f64::from(dh) / k,
+        );
+        draw_into(
+            &mut tile,
+            &mut self.text,
+            &mut self.paths,
+            scene,
+            scale,
+            background,
+            (x0, y0),
+            (full_w, full_h),
+            Some(logical_dmg),
+        );
+        let src = tile.data();
+        let dst = self.pixmap.data_mut();
+        let row_bytes = dw as usize * 4;
+        let full_stride = full_w as usize * 4;
+        let x_off = x0 as usize * 4;
+        for row in 0..dh as usize {
+            let s0 = row * row_bytes;
+            let d0 = (y0 as usize + row) * full_stride + x_off;
+            dst[d0..d0 + row_bytes].copy_from_slice(&src[s0..s0 + row_bytes]);
+        }
+    }
+}
 
-        let mut clip_stack: Vec<(Rect, f64)> = Vec::new();
-        let mut mask: Option<Mask> = None;
+#[allow(clippy::too_many_arguments)]
+fn draw_into(
+    pixmap: &mut Pixmap,
+    text: &mut TextEngine,
+    paths: &mut PathCache,
+    scene: &Scene,
+    scale: f64,
+    background: Color,
+    offset_px: (i32, i32),
+    full_size: (u32, u32),
+    damage: Option<Rect>,
+) {
+    let scale = Scale::new(scale);
+    let k = scale.factor();
+    let ox_l = f64::from(offset_px.0) / k;
+    let oy_l = f64::from(offset_px.1) / k;
+    let transform = Transform::from_scale(k as f32, k as f32)
+        .post_translate(-offset_px.0 as f32, -offset_px.1 as f32);
 
-        for cmd in scene.commands() {
-            match cmd {
-                DrawCommand::FillRect { rect, color } => {
-                    // Ścieżka dla zwykłego prostokąta to zbędny narzut: tiny-skia
-                    // ma szybkie `fill_rect` (skan linii, bez budowania `Path`).
-                    if color.a > 0.0 {
-                        // Jednolity, osiowo wyrównany prostokąt (tak rysujemy tło,
-                        // przygaszenie okien i paski) blendujemy bezpośrednio —
-                        // pomijamy generyczny pipeline tiny-skia z f32 na piksel.
-                        if !fast_solid_rect(pixmap, *rect, *color, scale.factor(), mask.as_ref()) {
-                            if let Some(r) = ts_rect(*rect) {
-                                pixmap.fill_rect(r, &paint_rect(*color), transform, mask.as_ref());
-                            }
-                        }
-                    }
+    // Gdy scena zaczyna się od tła pokrywającego cały bufor, wypełnianie kolorem
+    // jest zbyteczne — tło i tak nadpisze wszystkie piksele.
+    let bg_covers = scene.commands().iter().any(|c| {
+        matches!(c, DrawCommand::Background { data }
+            if data.width == full_size.0 && data.height == full_size.1)
+    });
+    if !bg_covers {
+        pixmap.fill(ts_color(background));
+    }
+
+    let mut clip_stack: Vec<(Rect, f64)> = Vec::new();
+    let mut mask: Option<Mask> = None;
+    let hits_damage = |r: Rect| -> bool { damage.is_none_or(|d| r.intersects(&d)) };
+
+    for cmd in scene.commands() {
+        match cmd {
+            DrawCommand::FillRect { rect, color } => {
+                if !hits_damage(*rect) {
+                    continue;
                 }
-                DrawCommand::FillRoundedRect {
-                    rect,
-                    radius,
-                    color,
-                } => {
-                    if *radius <= 0.0 {
-                        if color.a > 0.0 {
-                            if let Some(r) = ts_rect(*rect) {
-                                pixmap.fill_rect(r, &paint_rect(*color), transform, mask.as_ref());
-                            }
-                        }
-                    } else if let Some(path) = paths.rect(*rect, *radius) {
-                        fill(pixmap, path, *color, transform, mask.as_ref());
-                    }
-                }
-                DrawCommand::StrokeRoundedRect {
-                    rect,
-                    radius,
-                    width,
-                    color,
-                } => {
-                    if let Some(path) = paths.rect(*rect, *radius) {
-                        stroke(pixmap, path, *width, *color, transform, mask.as_ref());
-                    }
-                }
-                DrawCommand::StrokeLine {
-                    from,
-                    to,
-                    width,
-                    color,
-                } => {
-                    if color.a > 0.0 && *width > 0.0 {
-                        if let Some(path) = paths.line(*from, *to) {
-                            let stroke = Stroke {
-                                width: *width as f32,
-                                line_cap: LineCap::Round,
-                                line_join: LineJoin::Round,
-                                ..Default::default()
-                            };
-                            pixmap.stroke_path(
-                                path,
-                                &paint(*color),
-                                &stroke,
-                                transform,
-                                mask.as_ref(),
-                            );
-                        }
-                    }
-                }
-                DrawCommand::FillCircle {
-                    center,
-                    radius,
-                    color,
-                } => {
-                    if let Some(path) = paths.circle(*center, *radius) {
-                        fill(pixmap, path, *color, transform, mask.as_ref());
-                    }
-                }
-                DrawCommand::StrokeCircle {
-                    center,
-                    radius,
-                    width,
-                    color,
-                } => {
-                    if let Some(path) = paths.circle(*center, *radius) {
-                        stroke(pixmap, path, *width, *color, transform, mask.as_ref());
-                    }
-                }
-                DrawCommand::StrokePolyline {
-                    points,
-                    width,
-                    color,
-                } => {
-                    if let Some(path) = paths.polyline(points) {
-                        stroke(pixmap, path, *width, *color, transform, mask.as_ref());
-                    }
-                }
-                DrawCommand::FillPolygon { points, color } => {
-                    if let Some(path) = paths.polygon(points) {
-                        fill(pixmap, path, *color, transform, mask.as_ref());
-                    }
-                }
-                DrawCommand::PushClip { rect } => {
-                    let (effective, radius) = match clip_stack.last() {
-                        Some((current, _)) => {
-                            (current.intersection(rect).unwrap_or(Rect::ZERO), 0.0)
-                        }
-                        None => (*rect, 0.0),
-                    };
-                    clip_stack.push((effective, radius));
-                    mask = paths
-                        .rect(effective, radius)
-                        .and_then(|path| build_mask(pixmap, path, transform));
-                }
-                DrawCommand::PushClipRounded { rect, radius } => {
-                    let (effective, effective_radius) = match clip_stack.last() {
-                        Some((current, current_radius)) => (
-                            current.intersection(rect).unwrap_or(Rect::ZERO),
-                            radius.min(*current_radius),
-                        ),
-                        None => (*rect, *radius),
-                    };
-                    clip_stack.push((effective, effective_radius));
-                    mask = paths
-                        .rect(effective, effective_radius)
-                        .and_then(|path| build_mask(pixmap, path, transform));
-                }
-                DrawCommand::PopClip => {
-                    clip_stack.pop();
-                    mask = clip_stack.last().copied().and_then(|(rect, radius)| {
-                        paths
-                            .rect(rect, radius)
-                            .and_then(|path| build_mask(pixmap, path, transform))
-                    });
-                }
-                DrawCommand::Text(run) => {
-                    let (w, h) = (pixmap.width() as usize, pixmap.height() as usize);
-                    // Tekst nie korzysta z maski kształtów — obcinamy wprost piksele.
-                    let k = scale.factor();
-                    let clip = clip_stack.last().map(|(r, _)| crate::text::ClipRect {
-                        x0: (r.x() * k).floor() as i64,
-                        y0: (r.y() * k).floor() as i64,
-                        x1: (r.right() * k).ceil() as i64,
-                        y1: (r.bottom() * k).ceil() as i64,
-                    });
-                    text.draw(
-                        pixmap.data_mut(),
-                        w,
-                        h,
-                        scale.to_physical(run.origin.x),
-                        scale.to_physical(run.origin.y),
-                        &run.text,
-                        run.size,
-                        run.weight,
-                        run.color,
-                        scale.factor(),
-                        clip,
+                if color.a > 0.0 {
+                    let shifted = Rect::from_xywh(
+                        rect.x() - ox_l,
+                        rect.y() - oy_l,
+                        rect.width(),
+                        rect.height(),
                     );
-                }
-                DrawCommand::Image { rect, data } => {
-                    if rect.width() <= 0.0 || rect.height() <= 0.0 {
-                        continue;
-                    }
-                    // Bez kopiowania: widok na piksele sceny.
-                    let Some(src) = PixmapRef::from_bytes(&data.rgba, data.width, data.height)
-                    else {
-                        continue;
-                    };
-                    let k = scale.factor() as f32;
-                    let is_1to1 = (scale.factor() - 1.0).abs() < 0.001
-                        && (rect.width().round() as u32) == data.width
-                        && (rect.height().round() as u32) == data.height;
-
-                    if is_1to1 && data.opaque {
-                        let (px, py) = (
-                            (rect.x() * k as f64).round() as i32,
-                            (rect.y() * k as f64).round() as i32,
-                        );
-                        match mask.as_ref() {
-                            // Nieprzezroczysty obraz pod clipem: nadal można pominąć
-                            // generyczny pipeline tiny-skia i blendować tylko piksele
-                            // objęte maską (większość bufora to pełne krycie → kopiowanie).
-                            Some(m) => blit_opaque_masked(pixmap, data, px, py, m),
-                            None => blit_opaque(pixmap, data, px, py),
-                        }
-                        continue;
-                    }
-
-                    if is_1to1 && mask.is_none() && data.sparse {
-                        // Rzadki obraz (panel, popup): większość pikseli ma `alpha == 0`.
-                        // Blit z pomijaniem zer jest znacznie tańszy niż blendowanie
-                        // całego prostokąta 1920×680 (~7 ms/klatkę).
-                        blend_sparse(
-                            pixmap,
-                            data,
-                            (rect.x() * k as f64).round() as i32,
-                            (rect.y() * k as f64).round() as i32,
-                        );
-                        continue;
-                    }
-
-                    if is_1to1 && mask.is_none() {
-                        // Błyskawiczna ścieżka tiny-skia: bezpośredni blit zoptymalizowany pod SIMD
-                        // bez narzutu macierzy transformacji i interpolacji.
-                        pixmap.draw_pixmap(
-                            (rect.x() * k as f64).round() as i32,
-                            (rect.y() * k as f64).round() as i32,
-                            src,
-                            &PixmapPaint::default(),
-                            Transform::identity(),
-                            None,
-                        );
-                    } else {
-                        let sx = (rect.width() as f32 / data.width as f32) * k;
-                        let sy = (rect.height() as f32 / data.height as f32) * k;
-                        let t = Transform::from_scale(sx, sy)
-                            .post_translate(rect.x() as f32 * k, rect.y() as f32 * k);
-                        let paint = PixmapPaint {
-                            quality: if data.nearest {
-                                FilterQuality::Nearest
-                            } else {
-                                FilterQuality::Bilinear
-                            },
-                            ..PixmapPaint::default()
-                        };
-                        pixmap.draw_pixmap(0, 0, src, &paint, t, mask.as_ref());
-                    }
-                }
-                DrawCommand::ImageDmabuf { rect, .. } => {
-                    // CPU nie potrafi odczytać dmabuf — rysujemy neutralny zastępczy
-                    // prostokąt. W praktyce Selene ogłasza dmabuf tylko z GPU.
-                    if rect.width() > 0.0 && rect.height() > 0.0 {
+                    if !fast_solid_rect(pixmap, shifted, *color, k, mask.as_ref()) {
                         if let Some(r) = ts_rect(*rect) {
-                            pixmap.fill_rect(
-                                r,
-                                &paint(Color::from_rgba8(0x22, 0x24, 0x2c, 0xff)),
-                                transform,
-                                mask.as_ref(),
-                            );
+                            pixmap.fill_rect(r, &paint_rect(*color), transform, mask.as_ref());
                         }
                     }
                 }
-                DrawCommand::Background { data } => {
-                    // Tło pulpitu: pełnoekranowy obraz kopiujemy wprost (jeden `memcpy`)
-                    // zamiast mieszać 2 mln pikseli. Gdy rozmiar nie zgadza się z buforem
-                    // (np. podgląd), rysujemy ze skalowaniem.
-                    if data.width == pixmap.width() && data.height == pixmap.height() {
-                        pixmap.data_mut().copy_from_slice(&data.rgba);
-                    } else if let Some(src) =
-                        PixmapRef::from_bytes(&data.rgba, data.width, data.height)
-                    {
-                        let sx = pixmap.width() as f32 / data.width as f32;
-                        let sy = pixmap.height() as f32 / data.height as f32;
-                        let paint = PixmapPaint {
-                            quality: FilterQuality::Bilinear,
-                            ..PixmapPaint::default()
-                        };
-                        pixmap.draw_pixmap(0, 0, src, &paint, Transform::from_scale(sx, sy), None);
+            }
+            DrawCommand::FillRoundedRect {
+                rect,
+                radius,
+                color,
+            } => {
+                if !hits_damage(*rect) {
+                    continue;
+                }
+                if *radius <= 0.0 {
+                    if color.a > 0.0 {
+                        if let Some(r) = ts_rect(*rect) {
+                            pixmap.fill_rect(r, &paint_rect(*color), transform, mask.as_ref());
+                        }
                     }
+                } else if let Some(path) = paths.rect(*rect, *radius) {
+                    fill(pixmap, path, *color, transform, mask.as_ref());
+                }
+            }
+            DrawCommand::StrokeRoundedRect {
+                rect,
+                radius,
+                width,
+                color,
+            } => {
+                let pad = (*width).max(1.0);
+                let bounds = Rect::from_xywh(
+                    rect.x() - pad,
+                    rect.y() - pad,
+                    rect.width() + 2.0 * pad,
+                    rect.height() + 2.0 * pad,
+                );
+                if !hits_damage(bounds) {
+                    continue;
+                }
+                if let Some(path) = paths.rect(*rect, *radius) {
+                    stroke(pixmap, path, *width, *color, transform, mask.as_ref());
+                }
+            }
+            DrawCommand::StrokeLine {
+                from,
+                to,
+                width,
+                color,
+            } => {
+                let pad = (*width).max(1.0);
+                let min_x = from.x.min(to.x) - pad;
+                let min_y = from.y.min(to.y) - pad;
+                let max_x = from.x.max(to.x) + pad;
+                let max_y = from.y.max(to.y) + pad;
+                if !hits_damage(Rect::from_xywh(min_x, min_y, max_x - min_x, max_y - min_y)) {
+                    continue;
+                }
+                if color.a > 0.0 && *width > 0.0 {
+                    if let Some(path) = paths.line(*from, *to) {
+                        let stroke = Stroke {
+                            width: *width as f32,
+                            line_cap: LineCap::Round,
+                            line_join: LineJoin::Round,
+                            ..Default::default()
+                        };
+                        pixmap.stroke_path(
+                            path,
+                            &paint(*color),
+                            &stroke,
+                            transform,
+                            mask.as_ref(),
+                        );
+                    }
+                }
+            }
+            DrawCommand::FillCircle {
+                center,
+                radius,
+                color,
+            } => {
+                let bounds = Rect::from_xywh(
+                    center.x - radius - 1.0,
+                    center.y - radius - 1.0,
+                    radius * 2.0 + 2.0,
+                    radius * 2.0 + 2.0,
+                );
+                if !hits_damage(bounds) {
+                    continue;
+                }
+                if let Some(path) = paths.circle(*center, *radius) {
+                    fill(pixmap, path, *color, transform, mask.as_ref());
+                }
+            }
+            DrawCommand::StrokeCircle {
+                center,
+                radius,
+                width,
+                color,
+            } => {
+                let r = radius + (*width).max(1.0);
+                let bounds = Rect::from_xywh(center.x - r, center.y - r, r * 2.0, r * 2.0);
+                if !hits_damage(bounds) {
+                    continue;
+                }
+                if let Some(path) = paths.circle(*center, *radius) {
+                    stroke(pixmap, path, *width, *color, transform, mask.as_ref());
+                }
+            }
+            DrawCommand::StrokePolyline {
+                points,
+                width,
+                color,
+            } => {
+                if let Some(path) = paths.polyline(points) {
+                    stroke(pixmap, path, *width, *color, transform, mask.as_ref());
+                }
+            }
+            DrawCommand::FillPolygon { points, color } => {
+                if let Some(path) = paths.polygon(points) {
+                    fill(pixmap, path, *color, transform, mask.as_ref());
+                }
+            }
+            DrawCommand::PushClip { rect } => {
+                let (effective, radius) = match clip_stack.last() {
+                    Some((current, _)) => (current.intersection(rect).unwrap_or(Rect::ZERO), 0.0),
+                    None => (*rect, 0.0),
+                };
+                clip_stack.push((effective, radius));
+                mask = paths
+                    .rect(effective, radius)
+                    .and_then(|path| build_mask(pixmap, path, transform));
+            }
+            DrawCommand::PushClipRounded { rect, radius } => {
+                let (effective, effective_radius) = match clip_stack.last() {
+                    Some((current, current_radius)) => (
+                        current.intersection(rect).unwrap_or(Rect::ZERO),
+                        radius.min(*current_radius),
+                    ),
+                    None => (*rect, *radius),
+                };
+                clip_stack.push((effective, effective_radius));
+                mask = paths
+                    .rect(effective, effective_radius)
+                    .and_then(|path| build_mask(pixmap, path, transform));
+            }
+            DrawCommand::PopClip => {
+                clip_stack.pop();
+                mask = clip_stack.last().copied().and_then(|(rect, radius)| {
+                    paths
+                        .rect(rect, radius)
+                        .and_then(|path| build_mask(pixmap, path, transform))
+                });
+            }
+            DrawCommand::Text(run) => {
+                let (w, h) = (pixmap.width() as usize, pixmap.height() as usize);
+                // Tekst nie korzysta z maski kształtów — obcinamy wprost piksele.
+                let clip = clip_stack.last().map(|(r, _)| crate::text::ClipRect {
+                    x0: (r.x() * k).floor() as i64 - i64::from(offset_px.0),
+                    y0: (r.y() * k).floor() as i64 - i64::from(offset_px.1),
+                    x1: (r.right() * k).ceil() as i64 - i64::from(offset_px.0),
+                    y1: (r.bottom() * k).ceil() as i64 - i64::from(offset_px.1),
+                });
+                text.draw(
+                    pixmap.data_mut(),
+                    w,
+                    h,
+                    scale.to_physical(run.origin.x) - f64::from(offset_px.0),
+                    scale.to_physical(run.origin.y) - f64::from(offset_px.1),
+                    &run.text,
+                    run.size,
+                    run.weight,
+                    run.color,
+                    k,
+                    clip,
+                );
+            }
+            DrawCommand::Image { rect, data } => {
+                if rect.width() <= 0.0 || rect.height() <= 0.0 || !hits_damage(*rect) {
+                    continue;
+                }
+                let Some(src) = PixmapRef::from_bytes(&data.rgba, data.width, data.height) else {
+                    continue;
+                };
+                let kf = k as f32;
+                let is_1to1 = (k - 1.0).abs() < 0.001
+                    && (rect.width().round() as u32) == data.width
+                    && (rect.height().round() as u32) == data.height;
+
+                if is_1to1 && data.opaque {
+                    let (px, py) = (
+                        (rect.x() * k).round() as i32 - offset_px.0,
+                        (rect.y() * k).round() as i32 - offset_px.1,
+                    );
+                    match mask.as_ref() {
+                        Some(m) => blit_opaque_masked(pixmap, data, px, py, m),
+                        None => blit_opaque(pixmap, data, px, py),
+                    }
+                    continue;
+                }
+
+                if is_1to1 && mask.is_none() && data.sparse {
+                    blend_sparse(
+                        pixmap,
+                        data,
+                        (rect.x() * k).round() as i32 - offset_px.0,
+                        (rect.y() * k).round() as i32 - offset_px.1,
+                    );
+                    continue;
+                }
+
+                if is_1to1 && mask.is_none() {
+                    pixmap.draw_pixmap(
+                        (rect.x() * k).round() as i32 - offset_px.0,
+                        (rect.y() * k).round() as i32 - offset_px.1,
+                        src,
+                        &PixmapPaint::default(),
+                        Transform::identity(),
+                        None,
+                    );
+                } else {
+                    let sx = (rect.width() as f32 / data.width as f32) * kf;
+                    let sy = (rect.height() as f32 / data.height as f32) * kf;
+                    let t = Transform::from_scale(sx, sy).post_translate(
+                        rect.x() as f32 * kf - offset_px.0 as f32,
+                        rect.y() as f32 * kf - offset_px.1 as f32,
+                    );
+                    let paint = PixmapPaint {
+                        quality: if data.nearest {
+                            FilterQuality::Nearest
+                        } else {
+                            FilterQuality::Bilinear
+                        },
+                        ..PixmapPaint::default()
+                    };
+                    pixmap.draw_pixmap(0, 0, src, &paint, t, mask.as_ref());
+                }
+            }
+            DrawCommand::ImageDmabuf { rect, .. } => {
+                if rect.width() > 0.0 && rect.height() > 0.0 && hits_damage(*rect) {
+                    if let Some(r) = ts_rect(*rect) {
+                        pixmap.fill_rect(
+                            r,
+                            &paint(Color::from_rgba8(0x22, 0x24, 0x2c, 0xff)),
+                            transform,
+                            mask.as_ref(),
+                        );
+                    }
+                }
+            }
+            DrawCommand::Background { data } => {
+                if data.width == full_size.0 && data.height == full_size.1 {
+                    if offset_px == (0, 0) && pixmap.width() == full_size.0 && pixmap.height() == full_size.1 {
+                        pixmap.data_mut().copy_from_slice(&data.rgba);
+                    } else {
+                        let dw = pixmap.width() as usize;
+                        let dh = pixmap.height() as usize;
+                        let dst = pixmap.data_mut();
+                        let row_bytes = dw * 4;
+                        let src_stride = data.width as usize * 4;
+                        let x_off = offset_px.0 as usize * 4;
+                        for row in 0..dh {
+                            let s0 = (offset_px.1 as usize + row) * src_stride + x_off;
+                            let d0 = row * row_bytes;
+                            dst[d0..d0 + row_bytes].copy_from_slice(&data.rgba[s0..s0 + row_bytes]);
+                        }
+                    }
+                } else if let Some(src) = PixmapRef::from_bytes(&data.rgba, data.width, data.height)
+                {
+                    let sx = full_size.0 as f32 / data.width as f32;
+                    let sy = full_size.1 as f32 / data.height as f32;
+                    let t = Transform::from_scale(sx, sy)
+                        .post_translate(-offset_px.0 as f32, -offset_px.1 as f32);
+                    let paint = PixmapPaint {
+                        quality: FilterQuality::Bilinear,
+                        ..PixmapPaint::default()
+                    };
+                    pixmap.draw_pixmap(0, 0, src, &paint, t, None);
                 }
             }
         }
@@ -382,6 +508,10 @@ impl crate::Renderer for SoftwareRenderer {
 
     fn draw(&mut self, scene: &Scene, scale: f64, background: Color) {
         SoftwareRenderer::draw(self, scene, scale, background);
+    }
+
+    fn draw_damage(&mut self, scene: &Scene, scale: f64, background: Color, damage: Option<Rect>) {
+        SoftwareRenderer::draw_damage(self, scene, scale, background, damage);
     }
 
     fn encode_png(&self) -> Option<Vec<u8>> {
@@ -928,6 +1058,41 @@ mod tests {
             outside[0] > 200 && outside[2] > 200,
             "poza clipem: {outside:?}"
         );
+    }
+
+    #[test]
+    fn draw_damage_matches_full_draw() {
+        let bg = Color::from_rgba8(20, 24, 30, 255);
+        let mut s1 = Scene::new();
+        s1.fill_rect(
+            Rect::from_xywh(10.0, 10.0, 40.0, 40.0),
+            Color::from_rgba8(200, 40, 40, 255),
+        )
+        .fill_rect(
+            Rect::from_xywh(80.0, 80.0, 30.0, 20.0),
+            Color::from_rgba8(40, 200, 80, 128),
+        );
+
+        let mut s2 = Scene::new();
+        s2.fill_rect(
+            Rect::from_xywh(10.0, 10.0, 40.0, 40.0),
+            Color::from_rgba8(200, 40, 40, 255),
+        )
+        .fill_rect(
+            Rect::from_xywh(80.0, 80.0, 30.0, 20.0),
+            Color::from_rgba8(40, 80, 220, 128),
+        );
+
+        let mut r_dmg = SoftwareRenderer::new(160, 160);
+        r_dmg.draw(&s1, 1.0, bg);
+        let dmg = s1.damage_bounds(&s2, r_dmg.text_engine());
+        assert!(dmg.is_some());
+        r_dmg.draw_damage(&s2, 1.0, bg, dmg);
+
+        let mut r_full = SoftwareRenderer::new(160, 160);
+        r_full.draw(&s2, 1.0, bg);
+
+        assert_eq!(r_dmg.data(), r_full.data());
     }
 
     #[test]

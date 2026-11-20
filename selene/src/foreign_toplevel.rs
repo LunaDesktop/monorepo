@@ -376,6 +376,7 @@ mod tests {
             saved: None,
             image_size_override: None,
             dmabuf: None,
+            commit_seq: 0,
             data: std::sync::Arc::new(libluna_render::ImageData::new(1, 1, vec![0, 0, 0, 0])),
         });
         let bytes = state_bytes(&s, 0);

@@ -107,6 +107,8 @@ luna/                        # meta-repozytorium (dev + integracja)
     luna-clock/              # czas: zegar, minutnik, stoper, strefy i prywatny kalendarz
     luna-calculator/         # kalkulator standardowy i naukowy
     luna-tasks/              # menedżer procesów i monitor systemu
+    luna-clipboard/          # historia schowka z przypinaniem wpisów
+    luna-email/              # klient poczty IMAP/SMTP: foldery, podgląd, wysyłka
     luna-settings/          # centrum ustawień środowiska i systemu
     luna-store/              # sklep: pacman/pag/apt/dnf/emerge/Flatpak + aktualizacje
     luna-welcome/            # powitanie, nowości i skrót do instalatora (live ISO)
@@ -478,6 +480,9 @@ XDG_CONFIG_HOME="$PWD/examples" cargo run --manifest-path apps/luna-demo/Cargo.t
   motywem przez `Frame::set_preference` / `set_accent` (zapis + natychmiastowe przerysowanie).
   `Frame::close/minimize/toggle_maximize` to **realne akcje okna** (`xdg_toplevel`),
   a `Frame::set_title` pozwala zmienić tytuł okna bez restartu (np. po zmianie języka).
+  **Podwójny klik w pasku tytułu** maksymalizuje okno i przywraca poprzedni rozmiar —
+  platforma rozpoznaje go po dwóch zgłoszeniach `begin_move` pod rząd (w promieniu
+  8 px i w 400 ms), więc każde okno libLuny dostaje to zachowanie bez własnego kodu.
   **Klatki animacji**: aplikacja czyta `Frame::delta_time()` i woła `Frame::request_frame()`,
   dopóki trwa animacja — okno odświeża się wtedy płynnie (~60 Hz), a bez tego tylko na zdarzenia.
 - `libluna-widgets`: **widgety wielokrotnego użycia** w modelu immediate — `ViewSwitcher`
@@ -660,6 +665,31 @@ Szczegóły: [`docs/tasks.md`](docs/tasks.md).
 ![Luna Tasks — szczegóły i menu](docs/images/tasks-menu.png)
 
 ![Luna Tasks — potwierdzenie zakończenia](docs/images/tasks-confirm.png)
+
+Historia schowka (`luna-clipboard`) — ostatnie skopiowane teksty z filtrem po
+całej treści, przypinaniem (`Ctrl+P`, gwiazdka w wierszu) i wklejaniem z powrotem
+(`Enter` lub dwuklik). Przypięte wpisy nigdy nie wypadają z historii. Plik
+`~/.config/luna/clipboard.conf` ma prawa `0600`, a aplikacja nie łączy się z siecią.
+Szczegóły: [`docs/clipboard.md`](docs/clipboard.md).
+
+![Luna Clipboard — historia](docs/images/clipboard-list.png)
+
+![Luna Clipboard — pusty schowek](docs/images/clipboard-empty.png)
+
+Klient poczty (`luna-email`) — klasyczny układ: foldery, lista wiadomości
+(nadawca, temat, czas, skrót treści, znaczniki nieprzeczytane/gwiazdka/załącznik)
+i podgląd z odpowiedzią, przekazaniem i zapisem załączników. Odbiera przez IMAP,
+wysyła przez SMTP (z kopią w „Wysłanych”), a HTML zamienia na bezpieczny tekst
+(bez zdalnych obrazów i skryptów). Bez konta działa tryb demo z przykładową
+skrzynką. Konfiguracja: `~/.config/luna/email.conf` (`0600`, hasło można też
+podawać przez `LUNA_EMAIL_PASSWORD`). Szczegóły, skróty i ograniczenia:
+[`docs/email.md`](docs/email.md).
+
+![Luna Mail — skrzynka odbiorcza](docs/images/email-inbox.png)
+
+![Luna Mail — nowa wiadomość](docs/images/email-compose.png)
+
+![Luna Mail — ustawienia konta](docs/images/email-account.png)
 
 Edytor tekstu i kodu (`luna-editor`) — lekki edytor na `CodeView` z libLuny:
 zakładki w headerbarze, numery linii, podświetlanie składni (Rust, TOML, JSON,

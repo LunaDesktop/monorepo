@@ -129,6 +129,28 @@ fn initial_locks(devices: &[Device]) -> (bool, bool) {
     (false, false)
 }
 
+/// Otwiera nieblokujący watch `inotify` na `/dev/input` dla nowych urządzeń `event*`.
+fn open_hotplug() -> Option<OwnedFd> {
+    use std::os::fd::FromRawFd;
+    let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+    if fd < 0 {
+        return None;
+    }
+    let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+    let path = b"/dev/input\0";
+    let wd = unsafe {
+        libc::inotify_add_watch(
+            owned.as_raw_fd(),
+            path.as_ptr().cast(),
+            libc::IN_CREATE | libc::IN_ATTRIB,
+        )
+    };
+    if wd < 0 {
+        return None;
+    }
+    Some(owned)
+}
+
 /// Wejście evdev: zestaw urządzeń + wirtualny kursor.
 pub struct EvdevInput {
     devices: Vec<Device>,
@@ -149,6 +171,7 @@ pub struct EvdevInput {
     #[allow(dead_code)]
     keymap: Option<xkbcommon::xkb::Keymap>,
     xkb: Option<xkbcommon::xkb::State>,
+    hotplug: Option<OwnedFd>,
 }
 
 impl EvdevInput {
@@ -218,7 +241,53 @@ impl EvdevInput {
             abs_dirty: false,
             keymap,
             xkb,
+            hotplug: open_hotplug(),
         })
+    }
+
+    /// Deskryptor `inotify` dla `/dev/input` (hotplug nowych urządzeń).
+    pub fn hotplug_fd(&self) -> Option<std::os::fd::RawFd> {
+        self.hotplug.as_ref().map(|fd| fd.as_raw_fd())
+    }
+
+    /// Otwiera nowo podłączone urządzenia `/dev/input/event*` po zdarzeniu inotify.
+    pub fn handle_hotplug(&mut self) {
+        let Some(ref hfd) = self.hotplug else {
+            return;
+        };
+        let mut buf = [0u8; 512];
+        while rustix::io::read(hfd, &mut buf).is_ok_and(|n| n > 0) {}
+        let Ok(dir) = std::fs::read_dir("/dev/input") else {
+            return;
+        };
+        let mut paths: Vec<String> = dir
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .map(|n| n.to_string_lossy().starts_with("event"))
+                    .unwrap_or(false)
+            })
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        paths.sort();
+        for path in paths {
+            if self.devices.iter().any(|d| d.path == path) {
+                continue;
+            }
+            let Ok(fd) = rustix::fs::open(
+                path.as_str(),
+                OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
+                Mode::empty(),
+            ) else {
+                continue;
+            };
+            let abs = abs_axes(&fd);
+            if crate::stats_enabled() {
+                eprintln!("selene/evdev: hotplug urządzenia: {path}");
+            }
+            self.devices.push(Device { fd, path, abs });
+        }
     }
 
     /// Surowe deskryptory do `poll` (do wykrywania gotowości).
@@ -274,7 +343,7 @@ impl EvdevInput {
             }
         }
         for idx in dead.into_iter().rev() {
-            if std::env::var_os("SELENE_STATS").is_some() {
+            if crate::stats_enabled() {
                 if let Some(dev) = self.devices.get(idx) {
                     eprintln!("selene/evdev: urządzenie zniknęło: {}", dev.path);
                 }
@@ -646,6 +715,7 @@ mod tests {
             abs_dirty: false,
             keymap: Some(km.clone()),
             xkb: Some(xkb::State::new(&km)),
+            hotplug: None,
         };
         let mut send = |t: u16, c: u16, v: i32| {
             writer.write_all(&raw(t, c, v)).expect("write");
@@ -833,6 +903,7 @@ mod tests {
             abs_dirty: false,
             keymap: None,
             xkb: None,
+            hotplug: None,
         };
         let mut out = Vec::new();
         input.apply(None, Decoded::Motion(10.0, 5.0), (1280.0, 800.0), &mut out);
@@ -871,6 +942,7 @@ mod tests {
             abs_dirty: false,
             keymap: None,
             xkb: None,
+            hotplug: None,
         };
         let mut out = Vec::new();
         input.apply(
@@ -913,6 +985,7 @@ mod tests {
             abs_dirty: false,
             keymap: None,
             xkb: None,
+            hotplug: None,
         };
         let mut out = Vec::new();
         input.apply(

@@ -1238,7 +1238,7 @@ impl DrmBackend {
         // page-flipu: pokazalibyśmy nieodświeżony bufor, czyli migotanie.
         if !copied {
             self.outputs[idx].force_full_frames = 2;
-            if std::env::var("SELENE_STATS").is_ok() {
+            if crate::stats_enabled() {
                 eprintln!(
                     "selene/drm: {} pominięty flip — klatka {} B, wyjście {}x{}",
                     name,
@@ -1374,7 +1374,7 @@ impl DrmBackend {
             return false;
         };
         let reject = |reason: &str| {
-            if std::env::var("SELENE_STATS").is_ok() {
+            if crate::stats_enabled() {
                 eprintln!(
                     "selene/drm: skanout odrzucony na wyjściu {idx}: {reason} (fourcc 0x{:08x}, modifier 0x{:016x})",
                     frame.fourcc, frame.modifier

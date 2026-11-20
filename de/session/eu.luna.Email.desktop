@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=Luna Mail
+Name[pl]=Luna Mail
+Name[de]=Luna Mail
+Comment=Classic mail client (IMAP/SMTP)
+Comment[pl]=Klasyczny klient poczty (IMAP/SMTP)
+Comment[de]=Klassischer Mail-Client (IMAP/SMTP)
+Exec=luna-email
+Icon=internet-mail
+Terminal=false
+Categories=Network;Email;Office;
+Keywords=mail;email;imap;smtp;inbox;message;
+Keywords[pl]=poczta;mail;email;imap;smtp;odebrane;wiadomości;
+Keywords[de]=Mail;E-Mail;IMAP;SMTP;Posteingang;Nachricht;
+StartupNotify=true

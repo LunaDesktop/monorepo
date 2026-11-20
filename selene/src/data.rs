@@ -25,7 +25,7 @@ use wayland_server::protocol::wl_data_device::{
     Event as DeviceEvent, Request as DeviceRequest, WlDataDevice,
 };
 use wayland_server::protocol::wl_data_device_manager::{
-    Request as ManagerRequest, WlDataDeviceManager,
+    DndAction, Request as ManagerRequest, WlDataDeviceManager,
 };
 use wayland_server::protocol::wl_data_offer::{
     Event as OfferEvent, Request as OfferRequest, WlDataOffer,
@@ -33,7 +33,9 @@ use wayland_server::protocol::wl_data_offer::{
 use wayland_server::protocol::wl_data_source::{
     Event as SourceEvent, Request as SourceRequest, WlDataSource,
 };
-use wayland_server::{Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource};
+use wayland_server::{
+    Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource, WEnum,
+};
 
 use crate::state::State;
 use crate::sync::LockExt;
@@ -62,9 +64,20 @@ fn debug_clipboard() -> bool {
 
 /// Typy MIME oferowane przez źródło — wspólne dla `wl_data_source`,
 /// selekcji pierwotnej i `ext_data_control_source_v1`.
-#[derive(Default)]
 pub struct MimeData {
     pub mimes: Mutex<Vec<String>>,
+    /// Akcje zadeklarowane przez źródło (`wl_data_source.set_actions`).
+    /// Domyślnie tylko `copy` — tak zachowuje się klient, który nic nie zadeklarował.
+    pub dnd_actions: Mutex<DndAction>,
+}
+
+impl Default for MimeData {
+    fn default() -> Self {
+        Self {
+            mimes: Mutex::new(Vec::new()),
+            dnd_actions: Mutex::new(DndAction::Copy),
+        }
+    }
 }
 
 impl MimeData {
@@ -77,6 +90,14 @@ impl MimeData {
 
     pub fn snapshot(&self) -> Vec<String> {
         self.mimes.lock_or_recover().clone()
+    }
+
+    pub fn actions(&self) -> DndAction {
+        *self.dnd_actions.lock_or_recover()
+    }
+
+    pub fn set_actions(&self, actions: DndAction) {
+        *self.dnd_actions.lock_or_recover() = actions;
     }
 }
 
@@ -254,6 +275,22 @@ impl Dispatch<WlDataSource, MimeData> for State {
                 }
                 data.add(mime_type);
             }
+            SourceRequest::SetActions { dnd_actions } => {
+                // Źródło deklaruje, co potrafi (`copy`/`move`). Przeliczamy akcję
+                // dla celu, bo do tej pory znaliśmy tylko preferencję odbiorcy.
+                let actions = dnd_action(dnd_actions, DndAction::Copy);
+                data.set_actions(actions);
+                if let Some(dnd) = state.dnd.as_mut() {
+                    if dnd
+                        .source
+                        .as_ref()
+                        .is_some_and(|source| source.id() == resource.id())
+                    {
+                        dnd.chosen = resolve_dnd_action(actions, dnd.actions, dnd.preferred);
+                    }
+                }
+                publish_dnd_action(state);
+            }
             SourceRequest::Destroy => {
                 // Jeśli to była bieżąca selekcja — wyczyść i powiadom klientów,
                 // żeby nie trzymali oferty wskazującej na martwe źródło.
@@ -286,7 +323,6 @@ pub(crate) fn clear_if_current(
 }
 
 /// Stan trwającego przeciągania (drag & drop).
-#[derive(Default)]
 pub struct DndState {
     /// Źródło danych przeciągania (jeśli klient je podał).
     pub source: Option<WlDataSource>,
@@ -294,6 +330,100 @@ pub struct DndState {
     pub slot: Option<usize>,
     /// Oferta przekazana bieżącemu celowi.
     pub offer: Option<WlDataOffer>,
+    /// Akcje obsługiwane przez cel (`wl_data_offer.set_actions`).
+    pub actions: DndAction,
+    /// Akcja preferowana przez cel.
+    pub preferred: DndAction,
+    /// Akcja wybrana przez kompozytor (przecięcie ofert źródła i celu).
+    pub chosen: DndAction,
+}
+
+impl Default for DndState {
+    fn default() -> Self {
+        Self {
+            source: None,
+            slot: None,
+            offer: None,
+            // `DndAction` to bitflagi bez `Default`; rozsądny start to kopiowanie.
+            actions: DndAction::Copy,
+            preferred: DndAction::Copy,
+            chosen: DndAction::empty(),
+        }
+    }
+}
+
+/// `WEnum<DndAction>` → bitflagi; nieznana wartość z przyszłej wersji protokołu
+/// nie może wywrócić przeciągania, więc spadamy do `fallback`.
+fn dnd_action(value: WEnum<DndAction>, fallback: DndAction) -> DndAction {
+    value.into_result().unwrap_or(fallback)
+}
+
+/// Wybiera akcję przeciągania: preferencja celu, o ile obie strony ją znają.
+///
+/// Gdy nic nie pasuje, zwracamy pusty zbiór — cel pokaże wtedy „zakaz”,
+/// a upuszczenie nie wykona ani kopiowania, ani przenoszenia.
+fn resolve_dnd_action(source: DndAction, dest: DndAction, preferred: DndAction) -> DndAction {
+    let common = source & dest;
+    if common.is_empty() {
+        return DndAction::empty();
+    }
+    if !(common & preferred).is_empty() {
+        preferred
+    } else {
+        common
+    }
+}
+
+/// Wysyła wybraną akcję celowi (`wl_data_offer.action`) i źródłu
+/// (`wl_data_source.action`) — oba zdarzenia istnieją dopiero od wersji 3.
+fn publish_dnd_action(state: &mut State) {
+    let Some(dnd) = state.dnd.as_ref() else {
+        return;
+    };
+    let chosen = dnd.chosen;
+    let (Some(offer), source) = (dnd.offer.clone(), dnd.source.clone()) else {
+        return;
+    };
+    if offer.version() >= 3 {
+        let _ = offer.send_event(OfferEvent::Action {
+            dnd_action: WEnum::Value(chosen),
+        });
+    }
+    if let Some(source) = source {
+        if source.version() >= 3 {
+            let _ = source.send_event(SourceEvent::Action {
+                dnd_action: WEnum::Value(chosen),
+            });
+        }
+    }
+}
+
+/// Przelicza akcję przeciągania po zmianie modyfikatorów.
+///
+/// `Shift` przełącza kopiowanie na przenoszenie (jak w GTK i w większości
+/// menedżerów plików), o ile źródło naprawdę oferuje `move`.
+pub fn refresh_dnd_action(state: &mut State) {
+    let shift = state.sent_mods.shift;
+    let Some(dnd) = state.dnd.as_mut() else {
+        return;
+    };
+    let source_actions = dnd
+        .source
+        .as_ref()
+        .and_then(|source| source.data::<MimeData>())
+        .map(MimeData::actions)
+        .unwrap_or(DndAction::Copy);
+    let preferred = if shift && source_actions.contains(DndAction::Move) {
+        DndAction::Move
+    } else {
+        dnd.preferred
+    };
+    let chosen = resolve_dnd_action(source_actions, dnd.actions, preferred);
+    if chosen == dnd.chosen {
+        return;
+    }
+    dnd.chosen = chosen;
+    publish_dnd_action(state);
 }
 
 impl Dispatch<WlDataDevice, DataDeviceData> for State {
@@ -397,6 +527,31 @@ impl Dispatch<WlDataOffer, DataOfferData> for State {
                     src.send(mime_type, fd.as_fd());
                 }
             }
+            OfferRequest::SetActions {
+                dnd_actions,
+                preferred_action,
+            } => {
+                // Cel mówi, co obsługuje i co woli. Kompozytor wybiera część
+                // wspólną z ofertą źródła i odsyła wynik obu stronom.
+                let actions = dnd_action(dnd_actions, DndAction::Copy | DndAction::Move);
+                let preferred = dnd_action(preferred_action, DndAction::Copy);
+                let Some(dnd) = state.dnd.as_mut() else {
+                    return;
+                };
+                if dnd.offer.as_ref().map(|offer| offer.id()) != Some(resource.id()) {
+                    return;
+                }
+                let source_actions = dnd
+                    .source
+                    .as_ref()
+                    .and_then(|source| source.data::<MimeData>())
+                    .map(MimeData::actions)
+                    .unwrap_or(DndAction::Copy);
+                dnd.actions = actions;
+                dnd.preferred = preferred;
+                dnd.chosen = resolve_dnd_action(source_actions, actions, preferred);
+                publish_dnd_action(state);
+            }
             OfferRequest::Finish => {
                 // Cel zakończył transfer — domknij przeciąganie (jeśli to jego oferta).
                 let is_dnd = state
@@ -448,6 +603,8 @@ pub fn dnd_motion(state: &mut State, handle: &DisplayHandle, pos: (f64, f64)) {
 
 /// Upuszczenie w trakcie przeciągania: `drop` do celu, powiadomienie źródła.
 pub fn dnd_drop(state: &mut State, _handle: &DisplayHandle) {
+    // Ostatnia szansa, żeby źródło i cel poznały wybraną akcję przed `drop`.
+    publish_dnd_action(state);
     let Some(dnd) = state.dnd.take() else {
         return;
     };
@@ -885,6 +1042,39 @@ mod tests {
         );
         // Sam obraz nie ma czego mostkować do X11 (jeszcze).
         assert!(choose_text_mime(&["image/png".to_owned()]).is_none());
+    }
+
+    #[test]
+    fn dnd_action_is_the_intersection_with_the_destination_preference() {
+        let (copy, moves) = (DndAction::Copy, DndAction::Move);
+        let both = copy | moves;
+        // Cel woli kopiowanie i obie strony je znają.
+        assert_eq!(resolve_dnd_action(both, both, copy), copy);
+        // Źródło tylko kopiuje (np. przeglądarka) — mimo preferencji `move`.
+        assert_eq!(resolve_dnd_action(copy, both, moves), copy);
+        // Cel nie obsługuje `move`, ale źródło tak — zostaje wspólne `copy`.
+        assert_eq!(resolve_dnd_action(both, copy, moves), copy);
+        // Zero wspólnych akcji = brak akcji (UI pokaże „zakaz”).
+        assert!(resolve_dnd_action(copy, moves, moves).is_empty());
+    }
+
+    #[test]
+    fn unknown_dnd_action_values_fall_back_instead_of_panicking() {
+        // Nowa akcja z przyszłej wersji protokołu nie może wywrócić przeciągania.
+        let unknown = WEnum::Unknown(0xdead);
+        assert_eq!(dnd_action(unknown, DndAction::Copy), DndAction::Copy);
+        assert_eq!(
+            dnd_action(WEnum::Value(DndAction::Move), DndAction::Copy),
+            DndAction::Move
+        );
+    }
+
+    #[test]
+    fn source_dnd_actions_default_to_copy_only() {
+        let data = MimeData::default();
+        assert_eq!(data.actions(), DndAction::Copy);
+        data.set_actions(DndAction::Copy | DndAction::Move);
+        assert!(data.actions().contains(DndAction::Move));
     }
 
     #[test]

@@ -681,6 +681,7 @@ pub fn spawn_drm(
         // wielosekundowej przerwie. Jądro mogło zgubić stan CRTC, a zdarzenia
         // flipów sprzed snu nie dotyczą już nowych klatek.
         let mut last_loop = std::time::Instant::now();
+        let mut last_frame_tick = std::time::Instant::now();
         let mut seen_wake = 0u64;
         loop {
             let now = std::time::Instant::now();
@@ -1068,21 +1069,42 @@ pub fn spawn_drm(
             }
 
             // Zwolnienia buforów czekają na prezentację. Gdy scena się nie zmieniła
-            // (np. okno jest na innej przestrzeni), wymuś klatkę — inaczej klient
-            // nigdy nie dostanie `wl_buffer.release` i stanie. Callbacki NIE wymuszają
-            // pełnego renderu obu monitorów — inaczej animacje zbijały fps do ~13.
-            if !any_changed && present.has_pending_releases() {
-                for value in changed.iter_mut() {
-                    *value = true;
-                }
+            // (np. okno jest na innej przestrzeni), wymuś klatkę tylko na pierwszym
+            // wyjściu — wystarczy do awansu `present.submitted()` i oddania bufora,
+            // bez przerysowywania wszystkich monitorów.
+            if !any_changed && present.has_pending_releases() && !changed.is_empty() {
+                changed[0] = true;
                 any_changed = true;
+            }
+
+            // Frame callbacki dla powierzchni bez zmian w scenie: oddajemy w tempie
+            // ~60 Hz niezależnie od ruchu kursora sprzętowego i częstych wybudzeń.
+            if present.has_pending_frames() && last_frame_tick.elapsed() >= Duration::from_millis(16)
+            {
+                present.tick_frames();
+                last_frame_tick = std::time::Instant::now();
             }
 
             // Klatka wyrenderowana i czekająca na wolny bufor swojego wyjścia
             // to też „jest co robić” — nie wolno wtedy zasypiać.
             let any_deferred = deferred.iter().any(|d| *d);
 
-            if !any_changed && !cur_changed && !any_deferred {
+            if !any_changed && !any_deferred {
+                if cur_changed {
+                    last_cur = cur;
+                    if hw_cursor {
+                        apply_hw_cursor(
+                            &mut backend,
+                            &sizes,
+                            &origins,
+                            cur,
+                            &cursor_gfx,
+                            cursor_hotspot,
+                            &mut cursor_shown,
+                            image_changed,
+                        );
+                    }
+                }
                 if backend.has_pending_flips() {
                     let t = std::time::Instant::now();
                     backend.wait_flips_any(Duration::from_millis(50));
@@ -1090,10 +1112,13 @@ pub fn spawn_drm(
                     release_presented(&backend, &inflight, &present);
                 }
                 if present.has_pending_frames() {
-                    // Pacing ~60 Hz bez przerysowywania pulpitu; jeśli w międzyczasie
-                    // przyjdzie commit lub wejście, wstajemy natychmiast zamiast spać 16 ms.
-                    if !render_wake.wait_timeout(&mut seen_wake, Duration::from_millis(16)) {
+                    let remaining =
+                        Duration::from_millis(16).saturating_sub(last_frame_tick.elapsed());
+                    if remaining.is_zero()
+                        || !render_wake.wait_timeout(&mut seen_wake, remaining)
+                    {
                         present.tick_frames();
+                        last_frame_tick = std::time::Instant::now();
                     }
                 } else {
                     render_wake.wait_timeout(&mut seen_wake, Duration::from_millis(100));
@@ -1166,20 +1191,33 @@ pub fn spawn_drm(
                             _ => None,
                         };
                         gpu_renderers[i].draw_damage(&scene, 1.0, bg, damage);
-                        frame_damage[i] = damage;
+                        frame_damage[i] = if deferred[i] {
+                            match (frame_damage[i], damage) {
+                                (Some(a), Some(b)) => Some(a.union(&b)),
+                                _ => None,
+                            }
+                        } else {
+                            damage
+                        };
                         prev_scene[i] = Some(scene);
                     }
                 } else {
                     let theme = &theme;
                     let text_engine = &text_engine;
                     std::thread::scope(|scope| {
-                        for (i, renderer) in renderers.iter_mut().enumerate() {
+                        for (i, ((renderer, prev_slot), dmg_slot)) in renderers
+                            .iter_mut()
+                            .zip(prev_scene.iter_mut())
+                            .zip(frame_damage.iter_mut())
+                            .enumerate()
+                        {
                             if !changed[i] {
                                 continue;
                             }
                             let (w, h) = sizes[i];
                             let (ox, oy) = origins[i];
                             let model = &model;
+                            let was_deferred = deferred[i];
                             scope.spawn(move || {
                                 let mut scene = Scene::new();
                                 build_scene(
@@ -1197,7 +1235,19 @@ pub fn spawn_drm(
                                     &theme,
                                     &text_engine,
                                 );
-                                renderer.draw(&scene, 1.0, bg);
+                                let damage = prev_slot
+                                    .as_ref()
+                                    .and_then(|prev| prev.damage_bounds(&scene, renderer.text_engine()));
+                                renderer.draw_damage(&scene, 1.0, bg, damage);
+                                *dmg_slot = if was_deferred {
+                                    match (*dmg_slot, damage) {
+                                        (Some(a), Some(b)) => Some(a.union(&b)),
+                                        _ => None,
+                                    }
+                                } else {
+                                    damage
+                                };
+                                *prev_slot = Some(scene);
                             });
                         }
                     });
@@ -1275,7 +1325,9 @@ pub fn spawn_drm(
                             Some(r) => backend.present_region(i, pixels, Some(r)),
                             None => backend.present(i, pixels),
                         };
-                        prev_damage[i] = frame_damage[i];
+                        prev_damage[i] = frame_damage[i].take();
+                    } else {
+                        frame_damage[i] = None;
                     }
                     if !flipped && !flip_error_logged {
                         eprintln!(
@@ -1402,14 +1454,13 @@ pub fn save_screenshots(renderers: &[&dyn Renderer], infos: &[(String, u32, u32,
     }
 }
 
-/// Czy wyjście ma używać GPU: `SELENE_GPU` lub `LUNA_GPU` ustawione na niepustą
-/// wartość inną niż `0`. Brak EGL wciąż spada do CPU (nigdy nie zabija sesji).
+/// Czy wyjście ma używać GPU: domyślnie włączone (jak w labwc/cosmic),
+/// wyłączane przez `SELENE_GPU=0` lub `LUNA_GPU=0`. Brak EGL wciąż spada do CPU
+/// (sesja nigdy nie ginie z powodu GPU).
 fn gpu_requested() -> bool {
-    ["SELENE_GPU", "LUNA_GPU"].iter().any(|name| {
-        std::env::var(name)
-            .map(|v| !v.is_empty() && v != "0")
-            .unwrap_or(false)
-    })
+    !["SELENE_GPU", "LUNA_GPU"]
+        .iter()
+        .any(|name| std::env::var(name).is_ok_and(|v| v == "0"))
 }
 
 /// Katalog na zrzuty: `XDG_PICTURES_DIR` → `~/.config/user-dirs.dirs` → `$HOME/Pictures`
@@ -1660,6 +1711,7 @@ fn output_signature(
                 acc.wrapping_mul(31).wrapping_add(u64::from(*b))
             }));
             mix(std::sync::Arc::as_ptr(&w.data) as u64);
+            mix(w.commit_seq);
         }
     }
     if let Some(c) = cursor {
@@ -1728,6 +1780,7 @@ fn scene_signature(
                 acc.wrapping_mul(31).wrapping_add(u64::from(*b))
             }));
             mix(std::sync::Arc::as_ptr(&w.data) as u64);
+            mix(w.commit_seq);
         }
     }
     if let Some(c) = cursor {
@@ -2614,6 +2667,7 @@ mod tests {
             saved: None,
             image_size_override: None,
             dmabuf: None,
+            commit_seq: 0,
             data: Arc::new(ImageData::new(100, 80, rgba)),
         }]));
         let mut scene = Scene::new();
@@ -2706,6 +2760,7 @@ mod tests {
             saved: None,
             image_size_override: None,
             dmabuf: None,
+            commit_seq: 0,
             data: data.clone(),
         };
         let model: WindowModel = Arc::new(Mutex::new(vec![
@@ -2767,6 +2822,7 @@ mod tests {
             saved: None,
             image_size_override: None,
             dmabuf: None,
+            commit_seq: 0,
             data,
         }];
         let model: WindowModel = Arc::new(Mutex::new(windows));
@@ -2856,6 +2912,7 @@ mod tests {
             saved: None,
             image_size_override: None,
             dmabuf: None,
+            commit_seq: 0,
             data: Arc::new(ImageData::new(w, h, rgba)),
         }]));
         let mut scene = Scene::new();
@@ -2965,6 +3022,7 @@ mod tests {
             saved: None,
             image_size_override: None,
             dmabuf: None,
+            commit_seq: 0,
             data,
         }];
         let model: WindowModel = Arc::new(Mutex::new(windows));
@@ -3039,6 +3097,7 @@ mod tests {
             saved: None,
             image_size_override: None,
             dmabuf: None,
+            commit_seq: 0,
             data,
         }];
         let model: WindowModel = Arc::new(Mutex::new(windows));

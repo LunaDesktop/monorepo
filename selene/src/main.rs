@@ -19,6 +19,7 @@ mod evdev;
 mod foreign_toplevel;
 mod fractional_scale;
 mod idle_inhibit;
+mod idle_notify;
 mod input;
 mod keyboard_shortcuts_inhibit;
 mod layer;
@@ -55,7 +56,13 @@ mod xwm;
 use std::error::Error;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+/// Czy włączono logi diagnostyczne `SELENE_STATS` (cache'owane raz na start procesu).
+pub fn stats_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("SELENE_STATS").is_some())
+}
 
 use libluna_core::Event;
 use crate::protocols::input_method_v2::zwp_input_method_manager_v2::ZwpInputMethodManagerV2;
@@ -65,6 +72,7 @@ use wayland_protocols::ext::workspace::v1::server::ext_workspace_manager_v1::Ext
 use wayland_protocols::wp::content_type::v1::server::wp_content_type_manager_v1::WpContentTypeManagerV1;
 use wayland_protocols::wp::cursor_shape::v1::server::wp_cursor_shape_manager_v1::WpCursorShapeManagerV1;
 use wayland_protocols::wp::fractional_scale::v1::server::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1;
+use wayland_protocols::ext::idle_notify::v1::server::ext_idle_notifier_v1::ExtIdleNotifierV1;
 use wayland_protocols::wp::idle_inhibit::zv1::server::zwp_idle_inhibit_manager_v1::ZwpIdleInhibitManagerV1;
 use wayland_protocols::wp::keyboard_shortcuts_inhibit::zv1::server::zwp_keyboard_shortcuts_inhibit_manager_v1::ZwpKeyboardShortcutsInhibitManagerV1;
 use wayland_protocols::wp::linux_dmabuf::zv1::server::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1;
@@ -99,10 +107,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     libluna_i18n::set_locale(libluna_i18n::Locale::from_env());
     libluna_i18n::load_catalogs_from_dirs();
 
-    // `SELENE_GPU=1` włącza backend GPU dla warstwy wyjściowej (nested rysuje przez
-    // libluna-platform, który wybiera backend po `LUNA_GPU`). Brak EGL = fallback CPU;
-    // sesja nigdy nie może zginąć z powodu GPU. Etap 2 z `docs/gpu.md`.
-    if std::env::var("SELENE_GPU").is_ok() && std::env::var_os("LUNA_GPU").is_none() {
+    // Domyślnie próbujemy backendu GPU (jak w labwc/cosmic); `SELENE_GPU=0` lub
+    // `LUNA_GPU=0` wymusza CPU. Brak EGL = automatyczny fallback CPU; sesja nigdy
+    // nie może zginąć z powodu GPU.
+    let gpu_disabled = ["SELENE_GPU", "LUNA_GPU"]
+        .iter()
+        .any(|name| std::env::var(name).is_ok_and(|v| v == "0"));
+    if !gpu_disabled && std::env::var_os("LUNA_GPU").is_none() {
         std::env::set_var("LUNA_GPU", "1");
     }
 
@@ -216,6 +227,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     handle.create_global::<State, ZwpPointerConstraintsV1, ()>(1, ());
     // Wideo/prezentacje nie wygaszają ekranu.
     handle.create_global::<State, ZwpIdleInhibitManagerV1, ()>(1, ());
+    // Klienci (odtwarzacze, przeglądarki) dowiadują się, że użytkownik odszedł.
+    handle.create_global::<State, ExtIdleNotifierV1, ()>(1, ());
     // IME: pole tekstowe w aplikacji + input method (fcitx5/ibus/własna).
     handle.create_global::<State, ZwpTextInputManagerV3, ()>(1, ());
     handle.create_global::<State, ZwpInputMethodManagerV2, ()>(1, ());
@@ -450,6 +463,15 @@ fn main() -> Result<(), Box<dyn Error>> {
             &present_wake,
             rustix::event::PollFlags::IN,
         ));
+        let hotplug_fd = evdev_input
+            .as_ref()
+            .and_then(|e| e.hotplug_fd())
+            .map(|r| unsafe { BorrowedFd::borrow_raw(r) });
+        let hotplug_idx = hotplug_fd.as_ref().map(|fd| {
+            let idx = fds.len();
+            fds.push(rustix::event::PollFd::new(fd, rustix::event::PollFlags::IN));
+            idx
+        });
         // Budzimy się co ~16 ms przy skrypcie wejścia (dopisane polecenia) oraz gdy
         // kursor stoi w „gorącym rogu” — poświata musi rosnąć, a aktywacja nie może
         // zależeć od dalszego ruchu myszy. Bez tego budzimy się najpóźniej co sekundę,
@@ -480,22 +502,42 @@ fn main() -> Result<(), Box<dyn Error>> {
             while present_wake_read.read(&mut buf).is_ok_and(|n| n > 0) {}
         }
 
+        if let Some(idx) = hotplug_idx {
+            if fds[idx].revents().contains(rustix::event::PollFlags::IN) {
+                if let Some(input) = evdev_input.as_mut() {
+                    input.handle_hotplug();
+                }
+            }
+        }
+
+        let mut scene_dirty = corner_wait || script_input.is_some();
+
         // Odliczanie przytrzymania w rogu (rysowanie poświaty i ewentualna akcja).
         crate::seat::tick_corner(&mut state);
         // Automatyczne wygaszenie/blokada/usypianie po bezczynności.
         crate::seat::tick_idle(&mut state);
+        // `ext_idle_notify_v1`: `idled`/`resumed` dla odtwarzaczy i przeglądarek.
+        crate::idle_notify::tick(&mut state);
 
         // Sterowanie z powłoki (np. przeniesienie okna na inną przestrzeń).
         if let (Some(c), Some(_)) = (&control, &control_fd) {
             let idx = 3 + input_fds.len();
             if fds[idx].revents().contains(rustix::event::PollFlags::IN) {
                 c.accept(&mut state);
+                scene_dirty = true;
             }
         }
 
         // Wejście evdev → trasowanie (jak z magistrali).
-        if (0..input_fds.len()).any(|i| fds[3 + i].revents().contains(rustix::event::PollFlags::IN))
-        {
+        // Sprawdzamy także ERR/HUP, żeby odpięte urządzenie zostało od razu usunięte
+        // w `read_events()` zamiast kręcić pętlą `poll()` na 100% CPU.
+        if (0..input_fds.len()).any(|i| {
+            fds[3 + i].revents().intersects(
+                rustix::event::PollFlags::IN
+                    | rustix::event::PollFlags::ERR
+                    | rustix::event::PollFlags::HUP,
+            )
+        }) {
             if let Some(input) = evdev_input.as_mut() {
                 let bounds = {
                     let outs = state.outputs.lock_or_recover();
@@ -519,6 +561,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 for event in &batch {
                     seat::handle_input(&mut state, &handle, event);
                 }
+                scene_dirty = true;
             }
         }
 
@@ -542,6 +585,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             for event in &batch {
                 seat::handle_input(&mut state, &handle, event);
             }
+            scene_dirty = true;
+        }
+
+        if fds[1].revents().contains(rustix::event::PollFlags::IN) {
+            scene_dirty = true;
         }
 
         // Odporność: panika albo błąd w obsłudze pojedynczego klienta nie może zabić
@@ -551,18 +599,15 @@ fn main() -> Result<(), Box<dyn Error>> {
             Ok(Err(e)) => return Err(e.into()),
             Err(_) => eprintln!("{}", libluna_i18n::tr("client request panicked; ignoring")),
         }
-        match catch_unwind(AssertUnwindSafe(|| display.flush_clients())) {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => return Err(e.into()),
-            Err(_) => eprintln!("{}", libluna_i18n::tr("client request panicked; ignoring")),
-        }
 
         // X11: tytuły okien i życzenia stanu od klientów (XWM działa w osobnym wątku).
         xwm::sync(&mut state);
         // Most schowka X11 → Wayland: XWM publikuje migawkę tekstu, my rozsyłamy oferty.
         crate::data::sync_x11_selection(&mut state, &handle);
-        // Obudź wątek DRM, jeśli komit/wejście/XWM mogło zmienić scenę.
-        render_wake.notify();
+        // Obudź wątek DRM tylko jeśli komit/wejście/sterowanie mogło zmienić scenę.
+        if scene_dirty {
+            render_wake.notify();
+        }
         // Nowe okno/popup pod **nieruchomym** kursorem musi dostać `wl_pointer.enter`.
         // Bez tego menu przeglądarki nie podświetla pozycji, dopóki nie ruszysz myszą,
         // a pierwszy klik bywa traktowany jak klik poza menu.
@@ -579,6 +624,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         while state.output_globals < want_outputs {
             handle.create_global::<State, wl_output::WlOutput, usize>(4, state.output_globals);
             state.output_globals += 1;
+        }
+
+        // Wysyłamy wszystkie zakolejkowane zdarzenia (w tym `wl_pointer.enter`,
+        // `wl_surface.enter` i `wl_output`) od razu przed kolejnym `poll()`.
+        match catch_unwind(AssertUnwindSafe(|| display.flush_clients())) {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => eprintln!("{}", libluna_i18n::tr("client request panicked; ignoring")),
         }
 
         if stats && stats_report.elapsed().as_secs_f64() >= 2.0 {

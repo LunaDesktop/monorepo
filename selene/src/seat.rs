@@ -1962,12 +1962,17 @@ pub(crate) fn tick_idle(state: &mut State) {
 }
 
 /// Ile milisekund do najbliższej akcji bezczynności (`None` = nic nie czeka).
+///
+/// Uwzględnia też progi `ext_idle_notify_v1` — inaczej klient z powiadomieniem
+/// (np. odtwarzacz czekający 2 s) nie dostałby `idled`, dopóki pętla nie obudzi
+/// się z innego powodu.
 pub(crate) fn idle_wait_ms(state: &State) -> Option<i64> {
+    let notify = crate::idle_notify::wait_ms(state);
     if state.locked || crate::idle_inhibit::inhibited(state) {
-        return None;
+        return notify;
     }
     let idle_secs = state.idle_last_input.elapsed().as_secs();
-    state
+    let screen = state
         .idle
         .next_deadline_secs(
             idle_secs,
@@ -1975,7 +1980,11 @@ pub(crate) fn idle_wait_ms(state: &State) -> Option<i64> {
             state.idle_lock_fired,
             state.idle_suspend_fired,
         )
-        .map(|secs| (secs.max(0.05) * 1000.0) as i64)
+        .map(|secs| (secs.max(0.05) * 1000.0) as i64);
+    match (notify, screen) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
 }
 
 /// Uruchamia ekran blokady (`luna-lock` tworzy overlay i przejmuje klawiaturę).
@@ -3234,6 +3243,8 @@ fn sync_modifiers(state: &mut State, keysym: u32, st: ButtonState) {
                 });
             }
         }
+        // Shift w trakcie przeciągania przełącza kopiowanie ↔ przenoszenie.
+        crate::data::refresh_dnd_action(state);
     }
 }
 
@@ -3557,6 +3568,7 @@ mod tests {
             saved: None,
             image_size_override: None,
             dmabuf: None,
+            commit_seq: 0,
             data: Arc::new(ImageData::empty(200, 120)),
         }
     }

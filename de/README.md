@@ -205,6 +205,24 @@ Selene.
   `cargo run --manifest-path apps/luna-tasks/Cargo.toml --bin preview` →
   `docs/images/tasks-*.png`.
   Szczegóły i prywatność: [`docs/tasks.md`](../docs/tasks.md).
+- **Luna Clipboard** (`luna-clipboard`, `apps/luna-clipboard`) — historia schowka:
+  ostatnie skopiowane teksty, filtr po całej treści, przypinanie (`Ctrl+P` albo
+  gwiazdka) i wklejanie z powrotem (`Enter`/dwuklik). Przypięte wpisy nie wypadają
+  z historii; plik `~/.config/luna/clipboard.conf` jest zapisywany atomowo z prawami
+  `0600`, a aplikacja nie łączy się z siecią. Wejście z wpisu
+  `eu.luna.Clipboard.desktop`; podglądy:
+  `cargo run --manifest-path apps/luna-clipboard/Cargo.toml --bin preview` →
+  `docs/images/clipboard-*.png`. Szczegóły: [`docs/clipboard.md`](../docs/clipboard.md).
+- **Luna Mail** (`luna-email`, `apps/luna-email`) — klasyczny klient poczty:
+  pasek folderów, lista wiadomości (nadawca, temat, czas, skrót treści,
+  nieprzeczytane, gwiazdka, załącznik) i podgląd z odpowiedzią, przekazaniem oraz
+  zapisem załączników. Odbiór przez IMAP, wysyłka przez SMTP (z kopią
+  w „Wysłanych”), HTML zamieniany na bezpieczny tekst bez skryptów i zdalnych
+  obrazów. Bez konta działa tryb demo z przykładową skrzynką. Konfiguracja:
+  `~/.config/luna/email.conf` (`0600`; hasło można też podać przez
+  `LUNA_EMAIL_PASSWORD`). Wejście z wpisu `eu.luna.Email.desktop`; podglądy:
+  `cargo run --manifest-path apps/luna-email/Cargo.toml --bin preview` →
+  `docs/images/email-*.png`. Szczegóły: [`docs/email.md`](../docs/email.md).
 - **Wielojęzyczność na żywo**: `libluna-platform` obserwuje `~/.config/luna/locale.conf`,
   przeładowuje katalogi `libluna-i18n`, ustawia `LANGUAGE`/`LANG` i odrysowuje okno;
   aplikacje z cache'owanymi napisami (sidebar, nawigacja, tytuł okna) odświeżają je po

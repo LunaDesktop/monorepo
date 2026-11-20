@@ -1,6 +1,13 @@
 //! `wl_compositor`, `wl_surface`, `wl_region`, `wl_callback` — rdzeń powierzchni.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
+
+fn empty_image() -> Arc<ImageData> {
+    static EMPTY: OnceLock<Arc<ImageData>> = OnceLock::new();
+    EMPTY
+        .get_or_init(|| Arc::new(ImageData::empty(1, 1).with_sparse(true)))
+        .clone()
+}
 
 use libluna_core::{Point, Rect};
 use libluna_render::ImageData;
@@ -416,8 +423,12 @@ impl Dispatch<wl_surface::WlSurface, SurfaceData> for State {
                 win.fullscreen = false;
                 win.input_capture = false;
                 win.input = None;
-                // Zwolnij bufor ostatniej klatki (może mieć kilka MB).
-                win.data = std::sync::Arc::new(ImageData::empty(1, 1));
+                // Zwolnij bufor ostatniej klatki (może mieć kilka MB) oraz zasoby dmabuf (fd).
+                win.data = empty_image();
+                win.dmabuf = None;
+                win.image_size_override = None;
+                win.saved = None;
+                win.title.clear();
             }
             // Fokus nie może wskazywać na powierzchnię, której już nie ma.
             crate::seat::clear_focus_if(state, slot);
@@ -425,7 +436,7 @@ impl Dispatch<wl_surface::WlSurface, SurfaceData> for State {
             if was_focused && was_popup {
                 crate::seat::refocus_after_popup(state);
             }
-            if std::env::var("SELENE_STATS").is_ok() {
+            if crate::stats_enabled() {
                 eprintln!("selene/win: powierzchnia zniszczona slot={slot}");
             }
         }
@@ -637,7 +648,7 @@ fn composite(
     // a rozmiar obrazu bierze `Window::image_size()` z `DmabufImage`.
     let dmabuf = buf_data.dmabuf.clone();
     let image = if dmabuf.is_some() {
-        std::sync::Arc::new(ImageData::empty(1, 1).with_sparse(true))
+        empty_image()
     } else {
         let Some((rgba, opaque)) = buf_data.to_rgba_with_opacity() else {
             return;
@@ -1073,7 +1084,7 @@ fn composite_ime_popup(state: &mut State, surface: &wl_surface::WlSurface, data:
     }
     let dmabuf = buf_data.dmabuf.clone();
     let image = if dmabuf.is_some() {
-        std::sync::Arc::new(ImageData::empty(1, 1).with_sparse(true))
+        empty_image()
     } else {
         let Some((rgba, opaque)) = buf_data.to_rgba_with_opacity() else {
             return;
@@ -1714,6 +1725,7 @@ mod ssd_tests {
             saved: None,
             image_size_override: None,
             dmabuf: None,
+            commit_seq: 0,
             data: Arc::new(ImageData::empty(10, 10)),
         };
         let windows = vec![
@@ -1833,12 +1845,20 @@ fn upsert_window_at(
                 win.input = input.clone();
                 win.input_capture = input_capture;
                 win.data = image;
+                win.commit_seq = win.commit_seq.wrapping_add(1);
             }
             i
         }
         None => {
-            let i = windows.len();
-            windows.push(Window {
+            let reusable = windows.iter().enumerate().position(|(i, w)| {
+                !w.mapped
+                    && state.slots.get(i).is_some_and(|s| !s.is_alive())
+                    && !state.pointer_focus.as_ref().is_some_and(|(s, _)| *s == i)
+                    && !state.keyboard_focus.as_ref().is_some_and(|(s, _)| *s == i)
+                    && !state.drag.as_ref().is_some_and(|d| d.slot == i)
+                    && !state.resize.as_ref().is_some_and(|r| r.slot == i)
+            });
+            let new_win = Window {
                 x,
                 y,
                 width: w,
@@ -1861,7 +1881,16 @@ fn upsert_window_at(
                 data: image,
                 image_size_override: None,
                 dmabuf: None,
-            });
+                commit_seq: 1,
+            };
+            let i = if let Some(slot_idx) = reusable {
+                windows[slot_idx] = new_win;
+                slot_idx
+            } else {
+                let i = windows.len();
+                windows.push(new_win);
+                i
+            };
             *slot = Some(i);
             created = true;
             i

@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=Clipboard History
+Name[pl]=Historia schowka
+Name[de]=Zwischenablage
+Comment=Clipboard history with pinning
+Comment[pl]=Historia schowka z przypinaniem wpisów
+Comment[de]=Zwischenablageverlauf mit Anheften
+Exec=luna-clipboard
+Icon=edit-paste
+Terminal=false
+Categories=Utility;
+Keywords=clipboard;copy;paste;history;
+Keywords[pl]=schowek;kopiuj;wklej;historia;
+Keywords[de]=Zwischenablage;kopieren;einfügen;Verlauf;

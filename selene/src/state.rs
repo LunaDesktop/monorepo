@@ -106,6 +106,8 @@ pub struct Window {
     /// Bufor GPU klienta (`zwp_linux_dmabuf_v1`); import robi backend rysujący.
     /// Gdy jest ustawiony, `data` to pusta atrapa 1×1 (bez kopii pikseli na CPU).
     pub dmabuf: Option<Arc<libluna_render::DmabufImage>>,
+    /// Licznik zacommitowanych klatek tego okna — wykrywa zmiany sceny także dla `dmabuf`.
+    pub commit_seq: u64,
 }
 
 impl Window {
@@ -649,6 +651,8 @@ pub struct State {
     pub ime: ImeState,
     /// Inhibitory bezczynności (`zwp_idle_inhibit_v1`) — wideo/prezentacje.
     pub idle_inhibitors: Vec<ZwpIdleInhibitorV1>,
+    /// Klienci nasłuchujący bezczynności (`ext_idle_notify_v1`).
+    pub idle_notifications: Vec<crate::idle_notify::IdleNotification>,
     /// Bieżąca selekcja pierwotna (`zwp_primary_selection_v1`) — środkowy przycisk.
     pub primary_selection: Option<SelectionSource>,
     /// Urządzenia selekcji pierwotnej zarejestrowane przez klientów.
@@ -770,6 +774,7 @@ impl Default for State {
             pending_activation: None,
             ime: ImeState::default(),
             idle_inhibitors: Vec::new(),
+            idle_notifications: Vec::new(),
             primary_selection: None,
             primary_devices: Vec::new(),
             data_devices: Vec::new(),
@@ -1042,6 +1047,7 @@ mod tests {
             saved: None,
             image_size_override: None,
             dmabuf: None,
+            commit_seq: 0,
             data: std::sync::Arc::new(libluna_render::ImageData::empty(1, 1)),
         }
     }

@@ -20,11 +20,12 @@ kompozytora, na którym codzienna praca nie wymaga obejść.
 | `zwp_keyboard_shortcuts_inhibit_v1` | inhibitor skrótów pulpitu dla gry/emulatora/zdalnego pulpitu; przy aktywnym inhibitorze `keyboard_key` nie zjada Super/Alt+Tab/Alt+F4/Print ani skrótów z `shortcuts.conf`, a stan `active`/`inactive` idzie do klienta przy zmianie fokusu |
 | `wl_seat` v5 | pointer + keyboard, `frame`, powtórzenia klawiszy, XKB (pl/en/de) |
 | `wl_pointer.set_cursor` + `wp_cursor_shape_v1` v2 | kursory klientów: własny obraz (`set_cursor`), **także bufor `dmabuf`** (Zed/GPUI), i nazwane kształty (I-beam, łapka, resize); motyw XCursor z `SELENE_CURSOR_THEME`/`XCURSOR_THEME`/GTK z rozwinięciem listy `Inherits` (`Pagan-Cursors` → `Adwaita`), fallback = wbudowana strzałka; za duży obraz (>64 px) rysowany w scenie; kursor jest widoczny od pierwszego kadru (start na środku monitora, bez czekania na ruch myszy) |
-| `wl_data_device_manager` v3 | schowek i drag & drop wewnątrz sesji; `wl_data_offer.accept` jest przekazywane źródłu jako `wl_data_source.target` (bez tego XWayland/CLI nie wysyłają danych), oferty mają wersję klienta, nie na sztywno v3 |
+| `wl_data_device_manager` v3 | schowek i drag & drop wewnątrz sesji; `wl_data_offer.accept` jest przekazywane źródłu jako `wl_data_source.target` (bez tego XWayland/CLI nie wysyłają danych), oferty mają wersję klienta, nie na sztywno v3; **negocjacja akcji** (`set_actions`/`action`): kompozytor liczy część wspólną ofert źródła i celu, wysyła wybór obu stronom, a `Shift` w trakcie przeciągania przełącza kopiowanie ↔ przenoszenie |
 | most schowka **Wayland ↔ X11 (tekst)** | Xwayland **nie implementuje** `wl_data_device`, więc most robi kompozytor (jak KWin/Mutter). Wayland → X11: przy `set_selection` pobieramy tekst od źródła (rura + `poll` w pętli głównej), a XWM wystawia go jako `CLIPBOARD` (`TARGETS`, `UTF8_STRING`, `STRING`, `TEXT`, `text/plain*`). X11 → Wayland: XWM wykrywa właściciela `CLIPBOARD`, pobiera tekst (`TARGETS` + dane), a pętla główna ustawia go jako selekcję Waylanda; odświeżanie co 0,5 s łapie zmianę treści przy tym samym oknie (Zed). Dzięki temu „Chrome → Zed” i „Zed → Chrome” działają |
 | `zwp_primary_selection_v1` | selekcja pierwotna — wklejanie środkowym przyciskiem (terminale, edytory, XWayland) |
 | `zwp_pointer_constraints_v1` | blokada kursora w miejscu (mouselook) i zamknięcie w regionie; `oneshot` kończy się po pierwszym przycisku; `luna-control cursor` pokazuje aktywną blokadę |
 | `zwp_idle_inhibit_v1` | wideo/prezentacje nie wygaszają ekranu ani nie uruchamiają blokady/usypiania |
+| `ext_idle_notify_v1` | klienci (odtwarzacze, przeglądarki) dostają `idled`/`resumed` po własnym progu `timeout`; ten sam zegar co wygaszanie, inhibitor wstrzymuje powiadomienia, a pętla budzi się na najbliższy próg |
 | `zwp_text_input_v3` + `zwp_input_method_v2` | IME: fcitx5/ibus, kompozycja CJK, preedit/commit, `delete_surrounding_text`, grab klawiatury i `zwp_virtual_keyboard_v1` dla przepuszczonych klawiszy; okno kandydatów (`zwp_input_popup_surface_v2`) rysowane przy polu tekstowym |
 | `xdg_activation_v1` | tokeny aktywacji (portale, launchery): nowe okno dostaje fokus i jest podnoszone; token jednorazowy, 10 s |
 | `ext_data_control_v1` | menedżer schowka: historia i przetrwanie zamknięcia źródła; źródła menedżera są tłumaczone na wspólny model i widoczne dla zwykłych klientów (także selekcja pierwotna) |
@@ -57,29 +58,32 @@ kompozytora, na którym codzienna praca nie wymaga obejść.
    ekranu; `wp_fractional_scale_v1` już ogłasza skalę 1×.
 3. **`ext_session_lock` / screencopy** — standardowa blokada sesji i zrzuty ekranu
    aplikacji; dziś `luna-lock` używa warstwy `overlay`.
-4. **`ext_idle_notify_v1`** — bezczynność zgłaszana klientom (przeglądarki, odtwarzacze).
-5. **`wp_presentation_time`** — znaczniki prezentacji klatki (gry, pomiary opóźnienia).
-6. **`zwp_xwayland_keyboard_grab_v1`** — grab klawiatury dla aplikacji X11
+4. **`wp_presentation_time`** — znaczniki prezentacji klatki (gry, pomiary opóźnienia).
+5. **`zwp_xwayland_keyboard_grab_v1`** — grab klawiatury dla aplikacji X11
    (pełnoekranowe gry, maszyny wirtualne, zdalny pulpit).
-7. **`zwp_pointer_gestures_v1` / `zwp_tablet_manager_v2`** — gesty touchpada i tablety
+6. **`zwp_pointer_gestures_v1` / `zwp_tablet_manager_v2`** — gesty touchpada i tablety
    graficzne (wymaga wejścia wielodotykowego z backendu).
-8. **`zwlr_output_management_v1`, `zwlr_screencopy_v1`** — zmiana trybów i zrzuty
+7. **`zwlr_output_management_v1`, `zwlr_screencopy_v1`** — zmiana trybów i zrzuty
    ekranu narzędziami trzecich stron (dziś: `luna-control`).
-9. **X11: XDND i skalowanie `_XWAYLAND_GLOBAL_OUTPUT_SCALE`** — przeciąganie między
+8. **X11: XDND i skalowanie `_XWAYLAND_GLOBAL_OUTPUT_SCALE`** — przeciąganie między
    X11 a Waylandem i HiDPI dla okien X11.
-10. **Kadrowanie `wp_viewport.set_source`** — destination już skaluje bufor; wycinek
-    źródłowy wymaga jeszcze shadera/CPU cropu.
-11. **Wieloplanowe YUV** — formaty są już negocjowane i przekazywane do EGL;
+9. **Kadrowanie `wp_viewport.set_source`** — destination już skaluje bufor; wycinek
+   źródłowy wymaga jeszcze shadera/CPU cropu.
+10. **Wieloplanowe YUV** — formaty są już negocjowane i przekazywane do EGL;
     ostateczna konwersja zależy od sterownika (na Mesa działa, na NVIDIA bywa
     wymagany shader YUV).
 
-Dodatkowo warto dodać akcje DnD dla `wl_data_device` (`set_actions`/`action`);
-`ext_data_control_v1` sam nie ma drag & drop.
+Akcje DnD (`set_actions`/`action`) są już negocjowane wewnątrz sesji: cel dostaje
+`wl_data_offer.action`, źródło `wl_data_source.action`, a `Shift` przełącza
+kopiowanie ↔ przenoszenie. `ext_data_control_v1` nadal nie ma drag & drop
+(ograniczenie protokołu).
 
-Most schowka obsługuje **tekst** w obie strony. Do zrobienia zostają: obrazy
-(`image/png`), HTML, pliki (`text/uri-list`) oraz selekcja pierwotna
-(`PRIMARY`/middle-click). Warto też dodać lekki menedżer historii
-(`ext_data_control_v1`), żeby schowek przetrwał zamknięcie źródła.
+Most schowka obsługuje **tekst** w obie strony, a aplikacje libLuny potrafią
+dodatkowo kopiować i wklejać **dowolne typy MIME** (`image/png`, `text/html`,
+`text/uri-list`) oraz korzystać z **selekcji pierwotnej** (middle-click,
+`Frame::copy_to_primary`/`paste_from_primary`). Do zrobienia zostaje most
+**X11 → obraz** (XWM cache'uje jeden typ tekstowy). Historia schowka jest już
+dostępna w [`luna-clipboard`](clipboard.md).
 
 ## Dekoracje okien (SSD/CSD)
 
