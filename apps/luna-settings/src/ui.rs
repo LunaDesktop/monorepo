@@ -14,10 +14,10 @@ use libluna_i18n::tr;
 use libluna_render::wallpaper::decode_png;
 use libluna_render::{ImageData, Scene, TextEngine};
 use libluna_widgets::{
-    clipboard_command, hover_fill, paint_icon, paint_icon_themed, ActionRow, Button, ButtonVariant,
-    CheckButton, ControlsSide, Entry, HeaderBar, IconName, PaintCtx, PreferencesGroup,
-    PreferencesPage, ScrollDrag, Slider, Switch, TextClipboardCommand, TitleAlign, ViewSwitcher,
-    WindowControl,
+    clipboard_command, hover_fill, paint_icon, paint_icon_themed, wrap_text, ActionRow, Button,
+    ButtonVariant, CheckButton, ControlsSide, Entry, HeaderBar, IconName, PaintCtx,
+    PreferencesGroup, PreferencesPage, ScrollDrag, Slider, Switch, TextClipboardCommand,
+    TitleAlign, ViewSwitcher, WindowControl,
 };
 
 use crate::app::{AccountField, AccountForm, SettingsApp, TextPasteTarget};
@@ -643,6 +643,9 @@ pub fn paint(app: &SettingsApp, scene: &mut Scene, size: Size, theme: &Theme, te
     if app.picker.is_some() {
         paint_picker(app, &mut ctx, size);
     }
+    if app.report_preview.is_some() {
+        paint_report_preview(app, &mut ctx, size);
+    }
     if app.editor.is_some() {
         paint_editor(app, &mut ctx, size);
     }
@@ -1196,6 +1199,10 @@ pub fn handle_events(
     }
     if app.info_sheet.is_open() {
         handle_info_events(app, events, size, theme, text);
+        return;
+    }
+    if app.report_preview.is_some() {
+        handle_report_preview_events(app, events, size, theme, text);
         return;
     }
 
@@ -3878,6 +3885,224 @@ fn paint_wired_editor(app: &SettingsApp, ctx: &mut PaintCtx, size: Size) {
     dialog_button(app, lay.cancel, tr("Cancel"), ButtonVariant::Default).paint(ctx, lay.cancel);
 }
 
+const PREVIEW_PAD: f64 = 18.0;
+const PREVIEW_LINE_H: f64 = 18.0;
+
+struct ReportPreviewLayout {
+    card: Rect,
+    title: Rect,
+    caption: Rect,
+    body: Rect,
+    close: Rect,
+}
+
+fn report_preview_layout(size: Size) -> ReportPreviewLayout {
+    let w = (size.width * 0.84).min(1020.0);
+    let h = (size.height * 0.84).min(720.0);
+    let card = Rect::from_xywh(
+        ((size.width - w) / 2.0).max(0.0),
+        ((size.height - h) / 2.0).max(0.0),
+        w,
+        h,
+    );
+    let title = Rect::from_xywh(
+        card.x() + PREVIEW_PAD,
+        card.y() + 12.0,
+        (card.width() - 2.0 * PREVIEW_PAD - 32.0).max(0.0),
+        24.0,
+    );
+    let caption = Rect::from_xywh(card.x() + PREVIEW_PAD, title.bottom(), title.width(), 18.0);
+    let close = Rect::from_xywh(
+        card.right() - PREVIEW_PAD - 26.0,
+        card.y() + 10.0,
+        26.0,
+        26.0,
+    );
+    let body = Rect::from_xywh(
+        card.x() + PREVIEW_PAD,
+        caption.bottom() + 10.0,
+        card.width() - 2.0 * PREVIEW_PAD,
+        (card.bottom() - PREVIEW_PAD - (caption.bottom() + 10.0)).max(0.0),
+    );
+    ReportPreviewLayout {
+        card,
+        title,
+        caption,
+        body,
+        close,
+    }
+}
+
+fn preview_content_height(preview: &crate::app::ReportPreview) -> f64 {
+    preview.lines.len() as f64 * PREVIEW_LINE_H
+}
+
+fn preview_max_scroll(preview: &crate::app::ReportPreview, body: Rect) -> f64 {
+    (preview_content_height(preview) - body.height()).max(0.0)
+}
+
+/// Zawija tekst przy pierwszym otwarciu (albo po zmianie szerokości okna).
+///
+/// Wydzielone publicznie, bo podglądy headless (`--bin preview`) rysują
+/// modal bez pętli zdarzeń.
+pub fn prepare_report_preview(app: &mut SettingsApp, size: Size, text: &TextEngine) {
+    let lay = report_preview_layout(size);
+    let Some(preview) = app.report_preview.as_mut() else {
+        return;
+    };
+    let width = (lay.body.width() - 6.0).max(40.0);
+    if !preview.lines.is_empty() && (preview.wrapped_width - width).abs() < 0.5 {
+        return;
+    }
+    preview.lines = wrap_text(
+        &preview.text,
+        width,
+        PREVIEW_LINE_H * 0.72,
+        weight::NORMAL,
+        text,
+    );
+    preview.wrapped_width = width;
+}
+
+fn paint_report_preview(app: &SettingsApp, ctx: &mut PaintCtx, size: Size) {
+    let Some(preview) = &app.report_preview else {
+        return;
+    };
+    let theme = *ctx.theme;
+    let lay = report_preview_layout(size);
+    ctx.scene
+        .fill_rect(Rect::from_size(size), Color::rgba(0.0, 0.0, 0.0, 0.45));
+    ctx.scene
+        .fill_rounded_rect(lay.card, theme.radius.large, theme.colors.card_bg);
+    ctx.scene
+        .stroke_rounded_rect(lay.card, theme.radius.large, 1.0, theme.colors.border);
+
+    ctx.label_left(
+        lay.title.x(),
+        lay.title.center().y,
+        &tr("Report preview"),
+        theme.typography.heading.size,
+        weight::BOLD,
+        theme.colors.text,
+    );
+    ctx.label_left(
+        lay.caption.x(),
+        lay.caption.center().y,
+        &tr("Exactly this text will be saved or sent"),
+        theme.typography.caption.size,
+        weight::NORMAL,
+        theme.colors.dim_text,
+    );
+
+    let close_hover = app.pointer.is_some_and(|p| lay.close.contains(p));
+    if close_hover {
+        ctx.scene
+            .fill_rounded_rect(lay.close, lay.close.height() / 2.0, hover_fill(&theme));
+    }
+    let icon = 12.0;
+    paint_icon(
+        ctx,
+        IconName::Close,
+        Rect::from_xywh(
+            lay.close.center().x - icon / 2.0,
+            lay.close.center().y - icon / 2.0,
+            icon,
+            icon,
+        ),
+        if close_hover {
+            theme.colors.text
+        } else {
+            theme.colors.dim_text
+        },
+    );
+
+    ctx.scene.push_clip(lay.body);
+    let mut y = lay.body.y() - preview.scroll;
+    for line in &preview.lines {
+        if y + PREVIEW_LINE_H >= lay.body.y() && y <= lay.body.bottom() {
+            ctx.label_left(
+                lay.body.x() + 2.0,
+                y + PREVIEW_LINE_H / 2.0,
+                line,
+                PREVIEW_LINE_H * 0.72,
+                weight::NORMAL,
+                theme.colors.text,
+            );
+        }
+        y += PREVIEW_LINE_H;
+        if y > lay.body.bottom() + PREVIEW_LINE_H {
+            break;
+        }
+    }
+    ctx.scene.pop_clip();
+
+    // Pasek przewijania (prosty suwak po prawej).
+    let max = preview_max_scroll(preview, lay.body);
+    if max > 0.0 {
+        let track = Rect::from_xywh(lay.body.right() + 4.0, lay.body.y(), 3.0, lay.body.height());
+        let ratio = (lay.body.height() / preview_content_height(preview)).clamp(0.08, 1.0);
+        let thumb_h = (track.height() * ratio).max(16.0);
+        let t = (preview.scroll / max).clamp(0.0, 1.0);
+        let thumb = Rect::from_xywh(
+            track.x(),
+            track.y() + (track.height() - thumb_h) * t,
+            3.0,
+            thumb_h,
+        );
+        ctx.scene
+            .fill_rounded_rect(track, 1.5, theme.colors.border.with_alpha(0.5));
+        ctx.scene
+            .fill_rounded_rect(thumb, 1.5, theme.colors.dim_text);
+    }
+}
+
+fn handle_report_preview_events(
+    app: &mut SettingsApp,
+    events: &[Event],
+    size: Size,
+    _theme: &Theme,
+    text: &TextEngine,
+) {
+    prepare_report_preview(app, size, text);
+    let lay = report_preview_layout(size);
+    let max = app
+        .report_preview
+        .as_ref()
+        .map(|preview| preview_max_scroll(preview, lay.body))
+        .unwrap_or(0.0);
+    for event in events {
+        match event {
+            Event::Key(key) if key.state == ButtonState::Pressed => match key.keysym {
+                0xff1b => app.report_preview = None,
+                0xff56 => {
+                    if let Some(preview) = app.report_preview.as_mut() {
+                        preview.scroll = (preview.scroll + lay.body.height() * 0.8).min(max);
+                    }
+                }
+                0xff55 => {
+                    if let Some(preview) = app.report_preview.as_mut() {
+                        preview.scroll = (preview.scroll - lay.body.height() * 0.8).max(0.0);
+                    }
+                }
+                _ => {}
+            },
+            Event::Scroll(scroll) => {
+                if let Some(preview) = app.report_preview.as_mut() {
+                    preview.scroll = (preview.scroll - scroll.dy * 3.0).clamp(0.0, max);
+                }
+            }
+            Event::PointerButton(button)
+                if button.state == ButtonState::Pressed && button.button == PointerButton::Left =>
+            {
+                if lay.close.contains(button.position) || !lay.card.contains(button.position) {
+                    app.report_preview = None;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4080,6 +4305,25 @@ mod tests {
     }
 
     #[test]
+    fn report_preview_opens_and_escape_closes() {
+        let theme = Theme::dark();
+        let text = TextEngine::none();
+        let size = Size::new(1080.0, 760.0);
+        let mut app = SettingsApp::new(&ThemeSettings::load());
+        app.go_to(pages::Page::Support);
+        app.preview_report();
+        let preview = app.report_preview.as_ref().expect("podgląd raportu");
+        assert!(
+            preview.text.contains("raport diagnostyczny"),
+            "{}",
+            preview.text
+        );
+        assert!(preview.text.contains("====="), "sekcje w podglądzie");
+        handle_events(&mut app, &[key(0xff1b, None)], size, &theme, &text);
+        assert!(app.report_preview.is_none(), "Esc zamyka podgląd");
+    }
+
+    #[test]
     fn picker_typing_filters_and_escape_closes() {
         let theme = Theme::dark();
         let text = TextEngine::none();
@@ -4088,7 +4332,11 @@ mod tests {
         app.open_picker(pages::PickerKind::Language);
         handle_events(
             &mut app,
-            &[key(0x64, Some("d")), key(0x65, Some("e")), key(0x75, Some("u"))],
+            &[
+                key(0x64, Some("d")),
+                key(0x65, Some("e")),
+                key(0x75, Some("u")),
+            ],
             size,
             &theme,
             &text,

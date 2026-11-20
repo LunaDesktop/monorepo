@@ -6,6 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
+use libluna_core::diagnostics::{self as diagnostics, SectionKind};
 use libluna_core::{
     Accent, GreeterSettings, IconTheme, LockWallpaper, OutputMode, PanelLook, PanelPosition,
     ThemePreference, TrayStyle,
@@ -41,11 +42,12 @@ pub enum Page {
     Power,
     Printers,
     System,
+    Support,
     About,
 }
 
 impl Page {
-    pub const ALL: [Page; 20] = [
+    pub const ALL: [Page; 21] = [
         Page::Appearance,
         Page::Login,
         Page::LockScreen,
@@ -65,6 +67,7 @@ impl Page {
         Page::Power,
         Page::Printers,
         Page::System,
+        Page::Support,
         Page::About,
     ];
 
@@ -90,6 +93,7 @@ impl Page {
             Page::Power => "power",
             Page::Printers => "printers",
             Page::System => "system",
+            Page::Support => "support",
             Page::About => "about",
         }
     }
@@ -122,6 +126,7 @@ impl Page {
             Page::Power => "Power",
             Page::Printers => "Printers",
             Page::System => "System",
+            Page::Support => "Help and Problem Reporting",
             Page::About => "About Luna",
         }
     }
@@ -148,6 +153,7 @@ impl Page {
             Page::Power => "Battery, power profiles and sleep",
             Page::Printers => "Printers and print queues (CUPS)",
             Page::System => "System and environment information",
+            Page::Support => "Diagnostics with private data removed",
             Page::About => "About the Luna desktop",
         }
     }
@@ -173,6 +179,7 @@ impl Page {
             Page::Power => IconName::Battery,
             Page::Printers => IconName::Printer,
             Page::System => IconName::Info,
+            Page::Support => IconName::Info,
             Page::About => IconName::Moon,
         }
     }
@@ -186,6 +193,18 @@ pub enum Action {
     SetAccent(Accent),
     SetStyle(usize),
     SetLanguage(usize),
+    /// Opis problemu do raportu diagnostycznego.
+    OpenReportNote,
+    /// Włącza/wyłącza sekcję raportu (indeks w [`SectionKind::ALL`]).
+    ToggleReportSection(usize),
+    /// Pokazuje podgląd dokładnie tego, co zostałoby wysłane.
+    PreviewReport,
+    /// Zapisuje raport do pliku.
+    SaveReport,
+    /// Zapisuje raport i otwiera klienta poczty z gotowym adresem.
+    EmailReport,
+    /// Globalna zgoda na zbieranie diagnostyki.
+    ToggleReporting,
     /// Otwiera wyszukiwany wybór (język, locale, strefa, ikony).
     OpenPicker(PickerKind),
     SetIconTheme(IconTheme),
@@ -600,6 +619,7 @@ pub fn groups(app: &SettingsApp) -> Vec<Group> {
         Page::Power => power(app),
         Page::Printers => printers(app),
         Page::System => system(),
+        Page::Support => support(app),
         Page::About => about(app),
     }
 }
@@ -1208,6 +1228,85 @@ fn language(app: &SettingsApp) -> Vec<Group> {
                 info_row(
                     tr("Other applications"),
                     tr("Luna apps switch immediately; other programs pick up the language after restart"),
+                ),
+            ],
+        ),
+    ]
+}
+
+fn support(app: &SettingsApp) -> Vec<Group> {
+    let note = app.report_note.trim().to_owned();
+    let note_hint = if note.is_empty() {
+        tr("What happened and what you expected")
+    } else {
+        note.clone()
+    };
+    let mut rows = vec![
+        row_sub(
+            tr("Describe the problem"),
+            note_hint,
+            Control::Button {
+                label: tr("Edit…"),
+                suggested: false,
+            },
+            Action::OpenReportNote,
+        ),
+        row_sub(
+            tr("Diagnostics collection"),
+            tr("Optional; nothing is sent automatically"),
+            Control::Switch(diagnostics::enabled()),
+            Action::ToggleReporting,
+        ),
+    ];
+    for (index, kind) in SectionKind::ALL.iter().enumerate() {
+        rows.push(row_sub(
+            tr(kind.title_key()),
+            tr(kind.hint_key()),
+            Control::Switch(app.report_sections.get(index).copied().unwrap_or(true)),
+            Action::ToggleReportSection(index),
+        ));
+    }
+    rows.push(row_sub(
+        tr("Report"),
+        tr("You can read the whole text before sending"),
+        Control::Buttons {
+            labels: vec![tr("Preview"), tr("Save…"), tr("Send by e-mail")],
+            actions: vec![
+                Action::PreviewReport,
+                Action::SaveReport,
+                Action::EmailReport,
+            ],
+            suggested: 0,
+        },
+        Action::None,
+    ));
+
+    vec![
+        group(tr("Report a problem"), rows),
+        group(
+            tr("Privacy"),
+            vec![
+                info_row(
+                    tr("What we collect"),
+                    tr("Only the sections above — clipboard, passwords, keyrings, browser data and files are never included"),
+                ),
+                info_row(
+                    tr("Filtering"),
+                    tr("Home folder, user, host name, IP/MAC addresses, e-mails, URLs and tokens become <...> before you see them"),
+                ),
+                info_row(
+                    tr("Where reports go"),
+                    tr_args("Saved locally; e-mail opens your mail app with {address} — you attach the file yourself", &[("address", diagnostics::REPORT_EMAIL)]),
+                ),
+                info_row(
+                    tr("Retention"),
+                    tr("Reports are stored locally until you delete them"),
+                ),
+                value_row(
+                    tr("Consent file"),
+                    libluna_core::config::config_file("reporting.conf")
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|| "—".to_owned()),
                 ),
             ],
         ),
@@ -3311,6 +3410,35 @@ mod tests {
         }
         assert_eq!(Page::by_name(" Network "), Some(Page::Network));
         assert_eq!(Page::by_name("nope"), None);
+    }
+
+    #[test]
+    fn support_page_offers_privacy_controls_and_report_actions() {
+        let app = app_with(Page::Support);
+        let groups = groups(&app);
+        let rows: Vec<&Row> = groups.iter().flat_map(|group| group.rows.iter()).collect();
+        let toggles = rows
+            .iter()
+            .filter(|row| matches!(row.action, Action::ToggleReportSection(_)))
+            .count();
+        assert_eq!(toggles, 3, "trzy sekcje raportu");
+        let buttons = rows
+            .iter()
+            .find_map(|row| match &row.control {
+                Control::Buttons { actions, .. } => Some(actions.clone()),
+                _ => None,
+            })
+            .expect("przyciski raportu");
+        assert_eq!(
+            buttons,
+            vec![
+                Action::PreviewReport,
+                Action::SaveReport,
+                Action::EmailReport
+            ]
+        );
+        assert!(rows.iter().any(|row| row.action == Action::ToggleReporting));
+        assert!(rows.iter().any(|row| row.action == Action::OpenReportNote));
     }
 
     fn app_with(page: Page) -> SettingsApp {

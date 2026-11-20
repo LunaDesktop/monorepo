@@ -16,7 +16,7 @@ use luna::network::{
     WifiNetwork, WiredConfig,
 };
 use luna::system::BatteryStatus;
-use luna_settings::app::{AccountField, AccountMode, SettingsApp};
+use luna_settings::app::{AccountField, AccountMode, ReportPreview, SettingsApp};
 use luna_settings::pages::{Monitor, Page, PickerKind};
 use luna_settings::ui;
 
@@ -626,6 +626,47 @@ fn main() -> Result<(), Box<dyn Error>> {
     let png = renderer.encode_png().ok_or("failed to encode PNG")?;
     std::fs::write("docs/images/luna-settings-language-picker.png", png)?;
     println!("saved docs/images/luna-settings-language-picker.png ({W}x{H})");
+
+    // Strona „Pomoc i zgłaszanie problemów”.
+    app.picker = None;
+    app.go_to(Page::Support);
+    let mut scene = Scene::new();
+    ui::paint(
+        &app,
+        &mut scene,
+        Size::new(W as f64, H as f64),
+        &theme,
+        &text,
+    );
+    let mut renderer = SoftwareRenderer::new(W, H);
+    renderer.draw(&scene, 1.0, Color::from_rgba8(0x1a, 0x1d, 0x27, 0xff));
+    let png = renderer.encode_png().ok_or("failed to encode PNG")?;
+    std::fs::write("docs/images/luna-settings-support.png", png)?;
+    println!("saved docs/images/luna-settings-support.png ({W}x{H})");
+
+    // Podgląd raportu diagnostycznego (przykładowa treść, bez danych użytkownika).
+    let sample = libluna_core::diagnostics::Report::sample();
+    app.report_preview = Some(ReportPreview {
+        text: sample.preview(&[true; 3]),
+        lines: Vec::new(),
+        wrapped_width: 0.0,
+        scroll: 0.0,
+    });
+    ui::prepare_report_preview(&mut app, Size::new(W as f64, H as f64), &text);
+    let mut scene = Scene::new();
+    ui::paint(
+        &app,
+        &mut scene,
+        Size::new(W as f64, H as f64),
+        &theme,
+        &text,
+    );
+    let mut renderer = SoftwareRenderer::new(W, H);
+    renderer.draw(&scene, 1.0, Color::from_rgba8(0x1a, 0x1d, 0x27, 0xff));
+    let png = renderer.encode_png().ok_or("failed to encode PNG")?;
+    std::fs::write("docs/images/luna-settings-report.png", png)?;
+    println!("saved docs/images/luna-settings-report.png ({W}x{H})");
+    app.report_preview = None;
 
     // Panel Info (techniczne szczegóły strony w dolnym panelu).
     app.picker = None;

@@ -16,12 +16,14 @@ język, użytkownicy, sterowniki).
   języka, locale i strefy, NTP) oraz **Przestrzenie robocze** (liczba, nazwy i
   przełączanie dolnymi rogami ekranu).
 - Sekcja **Sprzęt**: **Sieć** (Wi-Fi przez NetworkManager), **Ekrany**, **Dźwięk**,
-  **Zasilanie**. Sekcja **Informacje**: **System**, **O Luna**.
+  **Zasilanie**. Sekcja **Informacje**: **System**, **Pomoc i zgłaszanie problemów**,
+  **O Luna**.
 - Szczegóły techniczne (ścieżki konfiguracji, backendy, ograniczenia) nie zaśmiecają
   treści stron — są w panelu **Info** (przycisk w nagłówku okna, `BottomSheet`).
 - Wejście: Quick Panel na pasku (ikona koła zębatego), wpis `.desktop`, `scripts/install.sh`.
 - Podglądy headless: `cargo run --manifest-path apps/luna-settings/Cargo.toml --bin preview` →
-  `docs/images/luna-settings-*.png` (w tym `luna-settings-language-picker.png`).
+  `docs/images/luna-settings-*.png` (w tym `luna-settings-language-picker.png`,
+  `luna-settings-support.png` i `luna-settings-report.png`).
 - Kolejne kroki: Bluetooth, użytkownicy, autostart, prywatność, drukarki,
   backend sterowników; pełne sterowanie monitorami po stronie Selene.
 
@@ -48,6 +50,7 @@ język, użytkownicy, sterowniki).
 | Strona | Zakres | Backend / zależność | Stan |
 |---|---|---|---|
 | **O systemie** | host, kernel, architektura, użytkownik, wersje Luny/Selene | `/proc`, `/etc/os-release` | ✅ |
+| **Pomoc i zgłaszanie problemów** | zgoda na diagnostykę (opt-in, domyślnie wyłączona), opis problemu, wybór sekcji (**system**, **log sesji**, **konfiguracja**), **podgląd dokładnie tego tekstu**, zapis do `~/.local/state/luna/reports/` i wysyłka e-mailem (`luna@mijsys.pl`); filtr prywatności zamienia katalog domowy, użytkownika, host, adresy IP/MAC, e-maile, URL-e i tokeny na `<...>` | `libluna-core::diagnostics`, `~/.config/luna/reporting.conf`, `~/.local/state/luna/session.log` | ✅ |
 | **Wygląd i ikony** | jasny/ciemny/auto, akcent, styl z pliku oraz **ikony** (dołączony Luna-Icons, styl wektorowy i zewnętrzne zestawy freedesktop) z podglądem; **tapeta pulpitu** (kafle z pełnym podglądem 16:9 + wybór PNG z dysku, zmiana bez wylogowania) | `ThemeSettings`, `theme_file`, `~/.config/luna/icons.conf`, `~/.config/luna/wallpaper.conf` | ✅ |
 | **Ekran logowania** | tapety PNG w **siatce kafli 3×N z podglądem 16:9**, kafel **„Więcej tapet”** (popover ze źródłami: Obrazy, Tapety systemowe, katalog domowy, **Zaskocz mnie**, przeglądanie dysku), tryb/akcent, zegar greetera; **szkic zmian + „Zastosuj zmiany” + formularz hasła administratora** (`sudo`) | `/etc/luna/greeter.conf`, `luna-greeter-config` | ✅ |
 | **Ekran blokady** | tryb/akcent, zegar, tapeta pulpitu lub jednolite tło oraz **automatyczna blokada po bezczynności** | `~/.config/luna/lock.conf`, `~/.config/luna/idle.conf`, `luna-lock` (bez roota) | ✅ |
@@ -344,6 +347,32 @@ Legenda: ✅ działa, ◐ tylko odczyt/częściowo, ⏳ zaplanowane.
   `theme.conf`, `locale.conf`, `region.conf`, `icons.conf`, `lock.conf`,
   `notifications.conf`, `workspaces.conf`, `input.conf`. Powłoka, locker i ustawienia
   czytają ten sam format `klucz = wartość`.
+
+## Diagnostyka i zgłaszanie problemów
+
+Zbieranie jest **opt-in** (domyślnie wyłączone) i zapisuje się w
+`~/.config/luna/reporting.conf`. Nic nie jest wysyłane automatycznie.
+
+- **Zakres (allowlista)**: wersje i jądro, CPU/GPU/monitory z `/proc` i `/sys`,
+  zmienne sesji, ogon `~/.local/state/luna/session.log` (ostatnia sesja, max ~800 linii)
+  oraz wybrane `~/.config/luna/*.conf`. **Nigdy**: schowek, hasła, keyring,
+  dane przeglądarek, pliki użytkownika.
+- **Filtr prywatności** (`libluna_core::diagnostics`): katalog domowy → `~`,
+  użytkownik → `<user>`, host → `<host>`, `IP/MAC` → `<ip>`/`<mac>`, e-maile → `<email>`,
+  URL-e → `<url>`, tokeny (`ghp_…`, `xoxb-…`, `AKIA…`, `Bearer …`) i wartości
+  `hasło=/token=/sekret=` → `<token>`/`<redacted>`.
+- **Podgląd** pokazuje dokładnie ten sam tekst, który trafi do pliku lub e-maila
+  (włącznie z informacją, które sekcje są pominięte).
+- **Zapis**: `~/.local/state/luna/reports/luna-report-RRRRMMDD-GGMMSS.txt`.
+- **E-mail**: przycisk otwiera klienta poczty z adresem `luna@mijsys.pl` i gotowym
+  tematem `[luna-report] …`; raport dołączasz jako załącznik (protokół `mailto:`
+  nie obsługuje załączników — dlatego plik jest najpierw zapisywany lokalnie).
+- **`luna-welcome`** pokazuje kartę „Pomóż ulepszyć Lunę” z jednym skrótem do
+  tej strony i informacją, że nic nie jest wysyłane automatycznie.
+
+![Ustawienia — Pomoc i zgłaszanie problemów](images/luna-settings-support.png)
+
+![Podgląd raportu diagnostycznego](images/luna-settings-report.png)
 
 ## Język — przełączanie na żywo
 

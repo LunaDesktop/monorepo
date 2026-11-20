@@ -6,10 +6,12 @@
 
 use std::error::Error;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::mpsc;
 use std::time::Duration;
 
 use libluna_core::accounts::UserAccount;
+use libluna_core::diagnostics::{self as diagnostics, Report};
 use libluna_core::idle::IdleSettings;
 use libluna_core::shortcuts::{Binding, ShortcutAction, ShortcutSettings};
 use libluna_core::theme_file::StyledTheme;
@@ -113,6 +115,19 @@ pub enum EditorPurpose {
     ColorProfilePath,
     /// Katalog dodawany do pulpitu.
     DesktopFolder,
+    /// Opis problemu do raportu diagnostycznego.
+    ReportNote,
+}
+
+/// Podgląd raportu diagnostycznego (modal).
+pub struct ReportPreview {
+    /// Surowy tekst raportu (do ponownego zawinięcia po zmianie rozmiaru).
+    pub text: String,
+    /// Zawinięte linie do rysowania (liczone przy otwarciu).
+    pub lines: Vec<String>,
+    /// Szerokość, przy której zawinięto linie.
+    pub wrapped_width: f64,
+    pub scroll: f64,
 }
 
 /// Mały edytor tekstu (np. nazwa przestrzeni roboczej).
@@ -587,6 +602,12 @@ pub struct SettingsApp {
     pub picker: Option<Picker>,
     pub picker_hover: Option<usize>,
     pub editor: Option<TextEditor>,
+    /// Opis problemu i wybrane sekcje raportu diagnostycznego.
+    pub report_note: String,
+    pub report_sections: [bool; 3],
+    /// Ostania zebrana migawka (podgląd/zapis/e-mail używają tej samej treści).
+    pub report_cache: Option<Report>,
+    pub report_preview: Option<ReportPreview>,
     /// Wybór tapety ekranu logowania z dysku.
     pub wallpaper_picker: Option<WallpaperPicker>,
     /// Panel techniczny („Configuration”/„Information”) otwierany przyciskiem Info.
@@ -821,6 +842,10 @@ impl SettingsApp {
             picker: None,
             picker_hover: None,
             editor: None,
+            report_note: String::new(),
+            report_sections: [true; 3],
+            report_cache: None,
+            report_preview: None,
             wallpaper_picker: None,
             info_sheet: BottomSheet::new(),
             info_scroll: ScrollArea::new(),
@@ -1584,6 +1609,89 @@ impl SettingsApp {
         });
     }
 
+    /// Otwiera pole opisu problemu do raportu diagnostycznego.
+    pub fn open_report_note(&mut self) {
+        let mut entry = Entry::new(tr("What happened?"));
+        entry.set_text(self.report_note.clone());
+        entry.set_focused(true);
+        self.editor = Some(TextEditor {
+            title: tr("Describe the problem"),
+            entry,
+            purpose: EditorPurpose::ReportNote,
+        });
+    }
+
+    /// Migawka raportu — jedna treść dla podglądu, zapisu i e-maila.
+    fn report(&mut self) -> &Report {
+        if self.report_cache.is_none() {
+            self.report_cache = Some(Report::collect());
+        }
+        self.report_cache.as_ref().expect("raport został zebrany")
+    }
+
+    /// Otwiera modal z dokładnie tą treścią, która zostałaby wysłana.
+    pub fn preview_report(&mut self) {
+        let sections = self.report_sections;
+        let text = self.report().preview(&sections);
+        self.report_preview = Some(ReportPreview {
+            text,
+            lines: Vec::new(),
+            wrapped_width: 0.0,
+            scroll: 0.0,
+        });
+    }
+
+    /// Zapisuje raport w `~/.local/state/luna/reports/`.
+    pub fn save_report(&mut self) {
+        let report = self.report().clone();
+        match report.save(&self.report_sections) {
+            Ok(path) => {
+                let path = path.display().to_string();
+                self.show_status(tr_args("Report saved to {path}", &[("path", &path)]));
+            }
+            Err(err) => {
+                let error = err.to_string();
+                self.show_status(tr_args(
+                    "Could not save the report: {error}",
+                    &[("error", &error)],
+                ));
+            }
+        }
+    }
+
+    /// Zapisuje raport i otwiera klienta poczty z gotowym adresem.
+    pub fn email_report(&mut self) {
+        let report = self.report().clone();
+        let path = match report.save(&self.report_sections) {
+            Ok(path) => path,
+            Err(err) => {
+                let error = err.to_string();
+                self.show_status(tr_args(
+                    "Could not save the report: {error}",
+                    &[("error", &error)],
+                ));
+                return;
+            }
+        };
+        let link = report.mailto(&self.report_sections, &self.report_note, &path);
+        let opened = Command::new("xdg-email")
+            .arg(&link)
+            .spawn()
+            .or_else(|_| Command::new("gio").arg("open").arg(&link).spawn());
+        let shown = path.display().to_string();
+        if opened.is_ok() {
+            self.show_status(tr_args(
+                "Report saved to {path} — attach it in your mail app",
+                &[("path", &shown)],
+            ));
+        } else {
+            self.show_status(tr_args(
+                "Report saved to {path} — attach it to an e-mail to {address}",
+                &[("path", &shown), ("address", diagnostics::REPORT_EMAIL)],
+            ));
+        }
+    }
+
     /// Otwiera pole ścieżki katalogu pokazywanego na pulpicie.
     pub fn open_desktop_folder_editor(&mut self) {
         let mut entry = Entry::new(tr("Folder path"));
@@ -1605,6 +1713,10 @@ impl SettingsApp {
         };
         let value = editor.entry.text().trim().to_owned();
         match editor.purpose {
+            EditorPurpose::ReportNote => {
+                self.report_note = value;
+                self.report_cache = None;
+            }
             EditorPurpose::WorkspaceName(index) => self.save_workspace_name(index, &value),
             EditorPurpose::HiddenNetwork => {
                 if value.is_empty() {
@@ -2701,6 +2813,39 @@ impl SettingsApp {
                     ));
                 }
             }
+            Action::ToggleReporting => {
+                let next = !diagnostics::enabled();
+                match diagnostics::set_enabled(next) {
+                    Ok(()) => self.show_status(if next {
+                        tr("Diagnostics collection enabled")
+                    } else {
+                        tr("Diagnostics collection disabled")
+                    }),
+                    Err(err) => self.show_status(tr_args(
+                        "Could not save the setting: {error}",
+                        &[("error", &err.to_string())],
+                    )),
+                }
+            }
+            Action::OpenReportNote => self.open_report_note(),
+            Action::ToggleReportSection(index) => {
+                if let Some(flag) = self.report_sections.get_mut(index) {
+                    *flag = !*flag;
+                }
+                // Podgląd ma pokazywać aktualny wybór sekcji.
+                if self.report_preview.is_some() {
+                    let sections = self.report_sections;
+                    let text = self.report().preview(&sections);
+                    if let Some(preview) = self.report_preview.as_mut() {
+                        preview.text = text;
+                        preview.lines.clear();
+                        preview.wrapped_width = 0.0;
+                    }
+                }
+            }
+            Action::PreviewReport => self.preview_report(),
+            Action::SaveReport => self.save_report(),
+            Action::EmailReport => self.email_report(),
             Action::SelectMonitor(index) => {
                 if index < self.monitors.len() {
                     self.selected_monitor = index;
@@ -3330,7 +3475,10 @@ fn nav_entries() -> (NavList, Vec<Option<Page>>) {
                 Page::Printers,
             ],
         ),
-        ("Information", vec![Page::System, Page::About]),
+        (
+            "Information",
+            vec![Page::System, Page::Support, Page::About],
+        ),
     ];
     let mut entries = Vec::new();
     let mut pages = Vec::new();
