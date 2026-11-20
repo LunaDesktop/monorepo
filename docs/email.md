@@ -79,7 +79,9 @@ własnego Client ID i procesu zgody; to osobna decyzja produktowa.
 | `F1` | o aplikacji |
 
 W polach tekstowych działają `Ctrl+A/C/X/V`, `Home`/`End`, `Shift`+strzałki
-(zaznaczanie) oraz `Tab`/`Shift+Tab` (przejście do kolejnego pola).
+(zaznaczanie) oraz `Tab`/`Shift+Tab` (przejście do kolejnego pola). Kliknięcie
+w pole ustawia fokus, a środkowy przycisk myszy wkleja zaznaczenie PRIMARY
+(na polach formularza i w treści wiadomości).
 
 ## Wygląd i wąskie okna
 

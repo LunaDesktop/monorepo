@@ -350,9 +350,11 @@ pub enum Hit {
     Message(usize),
     Attachment(usize),
     RemoveAttachment(usize),
+    ComposeField(ComposeField),
     ComposeSend,
     ComposeCancel,
     ComposeAttach,
+    AccountField(AccountField),
     AccountSave,
     AccountCancel,
     AccountDetect,
@@ -411,6 +413,7 @@ pub struct App {
     pub pending_maximize: bool,
     pub pending_move: bool,
     pub pending_paste: bool,
+    pub pending_paste_primary: bool,
     pub pending_copy: Option<String>,
 
     /// Wczytane treści (klucz `folder/id`) — nie pytamy serwera dwa razy.
@@ -470,6 +473,7 @@ impl App {
             pending_maximize: false,
             pending_move: false,
             pending_paste: false,
+            pending_paste_primary: false,
             pending_copy: None,
             cache: HashMap::new(),
             last_click: None,
@@ -969,6 +973,27 @@ impl App {
     pub fn close_compose(&mut self) {
         self.view = View::Mail;
         self.compose.error = None;
+    }
+
+    /// Czy bieżący widok przyjmuje tekst z klawiatury (dla wklejania PRIMARY).
+    pub fn wants_text_input(&self) -> bool {
+        match self.view {
+            View::Compose | View::Account => true,
+            View::Mail => self.search.is_focused(),
+            View::About => false,
+        }
+    }
+
+    /// Ustawia fokus na treści i stawia kursor na końcu.
+    ///
+    /// `TextView` nie udostępnia ustawiania kursora z pozycji kliknięcia, więc
+    /// kliknięcie w treść traktujemy jak „pisz od końca” — zamiast wstawiać
+    /// znaki w losowym miejscu (domyślnie na początku).
+    pub fn focus_compose_body(&mut self) {
+        let text = self.compose.body.text().to_owned();
+        self.compose.body.set_text(text);
+        self.compose.field = ComposeField::Body;
+        self.compose.focus();
     }
 
     /// Dodaje pliki jako załączniki (DnD z menedżera plików).
@@ -1715,6 +1740,10 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             app.pending_paste = false;
             frame.paste_from_clipboard();
         }
+        if app.pending_paste_primary {
+            app.pending_paste_primary = false;
+            frame.paste_from_primary();
+        }
         if let Some(text) = app.pending_copy.take() {
             frame.copy_to_clipboard(text);
         }
@@ -2021,7 +2050,8 @@ mod tests {
     use super::*;
 
     fn app_with_demo() -> App {
-        let mut app = App::launch();
+        // `App::demo()` nie czyta `~/.config` i nie uruchamia wątku sieciowego.
+        let mut app = App::demo();
         app.load_demo();
         app
     }

@@ -15,7 +15,7 @@ use libluna_widgets::{
     PaintCtx, WindowControl,
 };
 
-use crate::app::{sender_initials, App, ComposeField, Hit, View};
+use crate::app::{sender_initials, AccountField, App, ComposeField, Hit, View};
 use crate::model::{format_full_date, format_when, FolderKind};
 
 /// Wysokość wiersza listy wiadomości (wspólna z przewijaniem i trafieniami).
@@ -905,6 +905,12 @@ fn paint_compose(app: &mut App, ctx: &mut PaintCtx, lay: &Layout, size: Size) {
             1 => app.compose.cc.paint(ctx, rect),
             _ => app.compose.subject.paint(ctx, rect),
         }
+        let field = match index {
+            0 => ComposeField::To,
+            1 => ComposeField::Cc,
+            _ => ComposeField::Subject,
+        };
+        app.hits.push((Hit::ComposeField(field), rect));
         y += field_h + 8.0;
     }
 
@@ -937,6 +943,8 @@ fn paint_compose(app: &mut App, ctx: &mut PaintCtx, lay: &Layout, size: Size) {
     let body_bottom = (inner.bottom() - buttons_h - 12.0 - attachments_h).max(y + 40.0);
     let body_rect = Rect::from_xywh(inner.x(), y, inner.width(), (body_bottom - y).max(0.0));
     app.compose.body.paint(ctx, body_rect);
+    app.hits
+        .push((Hit::ComposeField(ComposeField::Body), body_rect));
     y = body_bottom + 8.0;
 
     for (index, attachment) in app.compose.attachments.iter().take(4).enumerate() {
@@ -1042,6 +1050,7 @@ fn paint_account(app: &mut App, ctx: &mut PaintCtx, lay: &Layout, size: Size) {
 
     let field_h = ctx.theme.metrics.entry.height.max(32.0);
     let label_w = 142.0;
+    let port_w = 64.0;
     let input_x = inner.x() + label_w;
     let input_w = (inner.right() - input_x).max(0.0);
     let mut y = inner.y() + 50.0;
@@ -1058,26 +1067,31 @@ fn paint_account(app: &mut App, ctx: &mut PaintCtx, lay: &Layout, size: Size) {
     };
 
     row(ctx, y, &tr("E-mail address"));
-    app.account_form
-        .email
-        .paint(ctx, Rect::from_xywh(input_x, y, input_w, field_h));
+    let email_rect = Rect::from_xywh(input_x, y, input_w, field_h);
+    app.account_form.email.paint(ctx, email_rect);
+    app.hits
+        .push((Hit::AccountField(AccountField::Email), email_rect));
     y += field_h + 8.0;
 
     row(ctx, y, &tr("Display name"));
-    app.account_form
-        .display
-        .paint(ctx, Rect::from_xywh(input_x, y, input_w, field_h));
+    let display_rect = Rect::from_xywh(input_x, y, input_w, field_h);
+    app.account_form.display.paint(ctx, display_rect);
+    app.hits
+        .push((Hit::AccountField(AccountField::Display), display_rect));
     y += field_h + 8.0;
 
     row(ctx, y, &tr("Login"));
-    app.account_form
-        .login
-        .paint(ctx, Rect::from_xywh(input_x, y, input_w, field_h));
+    let login_rect = Rect::from_xywh(input_x, y, input_w, field_h);
+    app.account_form.login.paint(ctx, login_rect);
+    app.hits
+        .push((Hit::AccountField(AccountField::Login), login_rect));
     y += field_h + 8.0;
 
     row(ctx, y, &tr("Password"));
     let password_rect = Rect::from_xywh(input_x, y, input_w, field_h);
     app.account_form.password.paint(ctx, password_rect);
+    app.hits
+        .push((Hit::AccountField(AccountField::Password), password_rect));
     app.hits.push((
         Hit::PasswordPeek,
         app.account_form
@@ -1088,26 +1102,25 @@ fn paint_account(app: &mut App, ctx: &mut PaintCtx, lay: &Layout, size: Size) {
 
     // IMAP: host + port.
     row(ctx, y, &tr("IMAP server"));
-    let port_w = 64.0;
-    app.account_form.imap_host.paint(
-        ctx,
-        Rect::from_xywh(input_x, y, input_w - port_w - 8.0, field_h),
-    );
-    app.account_form.imap_port.paint(
-        ctx,
-        Rect::from_xywh(inner.right() - port_w, y, port_w, field_h),
-    );
+    let imap_host_rect = Rect::from_xywh(input_x, y, input_w - port_w - 8.0, field_h);
+    let imap_port_rect = Rect::from_xywh(inner.right() - port_w, y, port_w, field_h);
+    app.account_form.imap_host.paint(ctx, imap_host_rect);
+    app.account_form.imap_port.paint(ctx, imap_port_rect);
+    app.hits
+        .push((Hit::AccountField(AccountField::ImapHost), imap_host_rect));
+    app.hits
+        .push((Hit::AccountField(AccountField::ImapPort), imap_port_rect));
     y += field_h + 8.0;
 
     row(ctx, y, &tr("SMTP server"));
-    app.account_form.smtp_host.paint(
-        ctx,
-        Rect::from_xywh(input_x, y, input_w - port_w - 8.0, field_h),
-    );
-    app.account_form.smtp_port.paint(
-        ctx,
-        Rect::from_xywh(inner.right() - port_w, y, port_w, field_h),
-    );
+    let smtp_host_rect = Rect::from_xywh(input_x, y, input_w - port_w - 8.0, field_h);
+    let smtp_port_rect = Rect::from_xywh(inner.right() - port_w, y, port_w, field_h);
+    app.account_form.smtp_host.paint(ctx, smtp_host_rect);
+    app.account_form.smtp_port.paint(ctx, smtp_port_rect);
+    app.hits
+        .push((Hit::AccountField(AccountField::SmtpHost), smtp_host_rect));
+    app.hits
+        .push((Hit::AccountField(AccountField::SmtpPort), smtp_port_rect));
     y += field_h + 8.0;
 
     if let Some(message) = &app.account_form.message {
@@ -1285,6 +1298,13 @@ pub fn handle_events(
                 app.menu.set_hovered(None);
             }
             Event::PointerButton(button)
+                if button.button == PointerButton::Middle
+                    && button.state == ButtonState::Pressed
+                    && app.wants_text_input() =>
+            {
+                app.pending_paste_primary = true;
+            }
+            Event::PointerButton(button)
                 if button.button == PointerButton::Left && button.state == ButtonState::Pressed =>
             {
                 handle_click(app, button.position, &lay, size, theme, text);
@@ -1293,6 +1313,14 @@ pub fn handle_events(
                 handle_key(app, key);
             }
             Event::Text(typed) => handle_text(app, typed),
+            Event::Paste(text) => {
+                app.paste_text(text);
+            }
+            Event::Clipboard(data) if data.mime == "text/plain" => {
+                if let Ok(text) = std::str::from_utf8(&data.bytes) {
+                    app.paste_text(text);
+                }
+            }
             Event::Drop { paths, .. } => {
                 if app.view == View::Compose {
                     app.attach_paths(paths);
@@ -1448,9 +1476,21 @@ fn handle_click(
                     app.compose.attachments.remove(index);
                 }
             }
+            Hit::ComposeField(field) => {
+                app.compose.field = field;
+                if field == ComposeField::Body {
+                    app.focus_compose_body();
+                } else {
+                    app.compose.focus();
+                }
+            }
             Hit::ComposeSend => app.send_compose(),
             Hit::ComposeCancel => app.close_compose(),
             Hit::ComposeAttach => app.notify(tr("Drag files into the window to attach them")),
+            Hit::AccountField(field) => {
+                app.account_form.field = field;
+                app.account_form.focus();
+            }
             Hit::AccountSave => app.save_account(),
             Hit::AccountCancel => {
                 app.view = View::Mail;
@@ -1724,7 +1764,8 @@ mod tests {
 
     fn setup() -> (App, Theme) {
         set_locale(Locale::new("pl"));
-        let mut app = App::launch();
+        // `App::demo()` nie czyta `~/.config` i nie uruchamia wątku sieciowego.
+        let mut app = App::demo();
         app.load_demo();
         (app, Theme::dark())
     }
@@ -1769,5 +1810,69 @@ mod tests {
             assert!(lay.preview.right() <= width + 0.5);
             assert!(lay.list.width() > 0.0);
         }
+    }
+
+    fn click_hit(app: &mut App, theme: &Theme, size: Size, want: Hit) {
+        let text = TextEngine::system();
+        let mut scene = Scene::new();
+        paint(app, &mut scene, size, theme, &text);
+        let (_, rect) = app
+            .hits
+            .iter()
+            .find(|(hit, _)| *hit == want)
+            .copied()
+            .unwrap_or_else(|| panic!("brak trafienia {want:?}"));
+        let lay = layout(app, size, theme);
+        handle_click(app, rect.center(), &lay, size, theme, &text);
+    }
+
+    #[test]
+    fn clicking_an_account_field_focuses_it_and_paste_lands_there() {
+        let (mut app, theme) = setup();
+        let size = Size::new(1080.0, 720.0);
+        app.open_account_settings();
+        click_hit(
+            &mut app,
+            &theme,
+            size,
+            Hit::AccountField(AccountField::Email),
+        );
+        assert_eq!(app.account_form.field, AccountField::Email);
+        assert!(app.account_form.email.is_focused());
+
+        let text = TextEngine::system();
+        handle_events(
+            &mut app,
+            &[Event::Paste("ala@example.org".into())],
+            size,
+            &theme,
+            &text,
+        );
+        assert_eq!(app.account_form.email.text(), "ala@example.org");
+    }
+
+    #[test]
+    fn clicking_compose_body_focuses_it_and_paste_lands_there() {
+        let (mut app, theme) = setup();
+        let size = Size::new(1080.0, 720.0);
+        app.compose_new();
+        click_hit(
+            &mut app,
+            &theme,
+            size,
+            Hit::ComposeField(ComposeField::Body),
+        );
+        assert_eq!(app.compose.field, ComposeField::Body);
+        assert!(app.compose.body.is_focused());
+
+        let text = TextEngine::system();
+        handle_events(
+            &mut app,
+            &[Event::Paste("Treść wklejona".into())],
+            size,
+            &theme,
+            &text,
+        );
+        assert!(app.compose.body.text().contains("Treść wklejona"));
     }
 }
