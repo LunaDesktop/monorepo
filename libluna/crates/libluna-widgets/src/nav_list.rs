@@ -155,16 +155,20 @@ impl NavList {
         let body = theme.typography.body.size;
         let pad_x = theme.metrics.nav.pad_x;
 
+        ctx.scene.push_clip(rect);
         for row in self.rows(rect, ctx.theme) {
             match &self.entries[row.entry] {
                 NavEntry::Section(title) => {
-                    ctx.label_left(
-                        row.rect.x() + pad_x + 8.0,
+                    let sec_x = row.rect.x() + pad_x + 8.0;
+                    let max_w = (row.rect.right() - pad_x - 8.0 - sec_x).max(0.0);
+                    ctx.label_left_fit(
+                        sec_x,
                         row.rect.center().y,
                         title,
                         caption,
                         weight::BOLD,
                         colors.dim_text,
+                        max_w,
                     );
                 }
                 NavEntry::Item(label) => {
@@ -207,10 +211,12 @@ impl NavList {
                     } else {
                         weight::NORMAL
                     };
-                    ctx.label_left(label_x, item.center().y, label, body, weight, fg);
+                    let max_w = (item.right() - 8.0 - label_x).max(0.0);
+                    ctx.label_left_fit(label_x, item.center().y, label, body, weight, fg, max_w);
                 }
             }
         }
+        ctx.scene.pop_clip();
     }
 
     /// Ustawia podświetlenie na podstawie pozycji wskaźnika (wygodne w `PointerMotion`).
@@ -289,5 +295,35 @@ mod tests {
         assert_eq!(l.icons[0], Some(IconName::Home));
         assert_eq!(l.icons[2], Some(IconName::Archive));
         assert_eq!(l.icons[3], None);
+    }
+
+    #[test]
+    fn long_label_is_ellipsized_within_rect() {
+        let l = NavList::new(vec![
+            NavEntry::Item("Domowy".into()),
+            NavEntry::Item("Ventoy — 55 GiB wolnego bardzo długa nazwa".into()),
+        ]);
+        let theme = Theme::dark();
+        let text = libluna_render::TextEngine::system();
+        let mut scene = libluna_render::Scene::new();
+        let mut ctx = PaintCtx::new(&mut scene, &theme, &text);
+        l.paint(&mut ctx, Rect::from_xywh(0.0, 0.0, 160.0, 120.0));
+        let runs: Vec<(&str, f64)> = scene
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                libluna_render::DrawCommand::Text(run) => Some((run.text.as_str(), run.size)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].0, "Domowy");
+        assert!((runs[0].1 - theme.typography.body.size).abs() < 0.01);
+        assert!(
+            runs[1].0.ends_with('…'),
+            "oczekiwano wielokropka: {}",
+            runs[1].0
+        );
+        assert!((runs[1].1 - theme.typography.body.size).abs() < 0.01);
     }
 }
