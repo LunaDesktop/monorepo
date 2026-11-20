@@ -2318,50 +2318,35 @@ impl SettingsApp {
 
     /// Odbiera wynik operacji sieciowej (bez blokowania UI).
     pub fn poll_wifi(&mut self) {
-        let pending = {
-            let Some(rx) = &self.network_pending else {
-                return;
-            };
-            match rx.try_recv() {
-                Ok(result) => Some(result),
-                Err(mpsc::TryRecvError::Empty) => None,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    Some(Err(tr("NetworkManager did not respond")))
-                }
-            }
-        };
-        if let Some(result) = pending {
+        // Zwykła operacja w tle: połączenie zapisanego profilu, rozłączenie,
+        // zapominanie sieci albo zmiana autopołączenia.
+        if let Some(result) = receive_network(self.network_pending.as_ref()) {
             self.network_pending = None;
-            self.finish_network(result, true);
+            self.finish_network(result, true, tr("Network updated"));
         }
-        let result = {
-            let Some(prompt) = &mut self.wifi_prompt else {
-                return;
-            };
-            let Some(rx) = prompt.pending.as_ref() else {
-                return;
-            };
-            match rx.try_recv() {
-                Ok(result) => Some(result),
-                Err(mpsc::TryRecvError::Empty) => None,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    Some(Err(tr("NetworkManager did not respond")))
-                }
-            }
-        };
+        // Połączenie z hasłem ma własny kanał w oknie formularza. Odpytujemy go
+        // **zawsze** — wcześniej wczesny `return` przy braku `network_pending`
+        // zostawiał okno hasła otwarte mimo udanego połączenia.
+        let result = receive_network(
+            self.wifi_prompt
+                .as_ref()
+                .and_then(|prompt| prompt.pending.as_ref()),
+        );
         if let Some(result) = result {
-            self.finish_network(result, false);
+            self.finish_network(result, false, tr("Connected to Wi-Fi"));
         }
     }
 
-    fn finish_network(&mut self, result: Result<(), String>, toast: bool) {
+    /// Kończy operację sieciową. `success` to komunikat pokazywany po połączeniu
+    /// (dla formularza hasła „Connected to Wi-Fi”, dla reszty „Network updated”).
+    fn finish_network(&mut self, result: Result<(), String>, toast: bool, success: String) {
         match result {
             Ok(()) => {
                 self.wifi_prompt = None;
                 self.wifi_retry = None;
                 self.network_monitor.scan();
                 self.network_next = std::time::Instant::now() + Duration::from_secs(2);
-                self.show_status(tr("Network updated"));
+                self.show_status(success);
             }
             Err(raw) => {
                 let secret_problem = {
@@ -3526,6 +3511,18 @@ where
     rx
 }
 
+/// Wynik operacji sieciowej, jeśli już jest (bez blokowania wątku UI).
+fn receive_network(
+    receiver: Option<&mpsc::Receiver<Result<(), String>>>,
+) -> Option<Result<(), String>> {
+    let receiver = receiver?;
+    match receiver.try_recv() {
+        Ok(result) => Some(result),
+        Err(mpsc::TryRecvError::Empty) => None,
+        Err(mpsc::TryRecvError::Disconnected) => Some(Err(tr("NetworkManager did not respond"))),
+    }
+}
+
 /// Nazwa drukarki wyliczona z adresu IPP (np. `ipp://biuro.local:631/ipp/print` → `biuro.local`).
 fn printer_name_from_uri(uri: &str) -> Option<String> {
     let rest = uri.split_once("://")?.1;
@@ -4404,6 +4401,7 @@ mod tests {
         app.finish_network(
             Err("secrets were required: the Wi-Fi password was rejected".to_owned()),
             true,
+            tr("Network updated"),
         );
         let prompt = app.wifi_prompt.as_ref().expect("formularz hasła");
         assert_eq!(prompt.ssid, "Dom");
@@ -4422,8 +4420,60 @@ mod tests {
         app.finish_network(
             Err("NetworkManager: activation failed (reason 53)".to_owned()),
             true,
+            tr("Network updated"),
         );
         assert!(app.wifi_prompt.is_none());
         assert!(app.wifi_retry.is_none());
+    }
+
+    /// Formularz hasła ma własny kanał wyniku — po udanym połączeniu musi się
+    /// zamknąć i pokazać „Connected to Wi-Fi”, nawet gdy nie ma innej operacji
+    /// sieciowej w tle (`network_pending` jest wtedy `None`).
+    #[test]
+    fn wifi_password_dialog_closes_and_reports_connected() {
+        let mut app = app();
+        let (tx, rx) = mpsc::channel();
+        tx.send(Ok(())).expect("wynik do kanału");
+        app.wifi_prompt = Some(WifiPrompt {
+            ssid: "Dom".to_owned(),
+            device: "/dev/mock".to_owned(),
+            security: Security::Wpa2,
+            hidden: false,
+            password: PasswordEntry::new(tr("Wi-Fi password")),
+            error: None,
+            pending: Some(rx),
+        });
+
+        app.poll_wifi();
+
+        assert!(app.wifi_prompt.is_none(), "okno hasła powinno się zamknąć");
+        assert_eq!(app.status.message(), tr("Connected to Wi-Fi"));
+    }
+
+    /// Błędne hasło nie może zamknąć formularza — pokazujemy błąd w oknie.
+    #[test]
+    fn wifi_password_dialog_stays_open_on_failure() {
+        let mut app = app();
+        let (tx, rx) = mpsc::channel();
+        tx.send(Err("secrets were required".to_owned()))
+            .expect("wynik do kanału");
+        app.wifi_prompt = Some(WifiPrompt {
+            ssid: "Dom".to_owned(),
+            device: "/dev/mock".to_owned(),
+            security: Security::Wpa2,
+            hidden: false,
+            password: PasswordEntry::new(tr("Wi-Fi password")),
+            error: None,
+            pending: Some(rx),
+        });
+
+        app.poll_wifi();
+
+        let prompt = app.wifi_prompt.as_ref().expect("okno zostaje otwarte");
+        assert!(
+            prompt.pending.is_none(),
+            "spinner znika — można poprawić hasło"
+        );
+        assert!(prompt.error.is_some(), "błąd widoczny w formularzu");
     }
 }
