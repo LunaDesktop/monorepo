@@ -161,11 +161,15 @@ pub fn fits_plane(image: &ImageData, cap: (u32, u32)) -> bool {
     image.width > 0 && image.height > 0 && image.width <= cap.0 && image.height <= cap.1
 }
 
-/// Wbudowana strzałka (gdy system nie ma motywu XCursor).
+/// Domyślna strzałka: najpierw z motywu XCursor (`left_ptr`), a w razie braku
+/// motywu w systemie — wbudowana strzałka wektorowa.
 pub fn default_arrow() -> (Arc<ImageData>, (i32, i32)) {
     static ARROW: OnceLock<(Arc<ImageData>, (i32, i32))> = OnceLock::new();
     ARROW
         .get_or_init(|| {
+            if let Some(themed) = shape("left_ptr") {
+                return themed;
+            }
             let mut scene = Scene::new();
             draw_arrow(&mut scene, Point::new(1.0, 1.0));
             let mut renderer = SoftwareRenderer::new(FALLBACK_SIZE, FALLBACK_SIZE);
