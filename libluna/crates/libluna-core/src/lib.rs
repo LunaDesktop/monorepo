@@ -21,6 +21,7 @@ pub mod clock_state;
 pub mod color;
 pub mod config;
 pub mod desktop;
+pub mod diagnostics;
 pub mod display;
 pub mod egg;
 pub mod equalizer;
