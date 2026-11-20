@@ -4087,8 +4087,10 @@ fn handle_report_preview_events(
                 _ => {}
             },
             Event::Scroll(scroll) => {
+                // Jak w pickerze: dodatnie `dy` = kółko w dół = dalej w treści.
+                let step = scroll.notches_y() * PREVIEW_LINE_H * 2.0;
                 if let Some(preview) = app.report_preview.as_mut() {
-                    preview.scroll = (preview.scroll - scroll.dy * 3.0).clamp(0.0, max);
+                    preview.scroll = (preview.scroll + step).clamp(0.0, max);
                 }
             }
             Event::PointerButton(button)
@@ -4321,6 +4323,44 @@ mod tests {
         assert!(preview.text.contains("====="), "sekcje w podglądzie");
         handle_events(&mut app, &[key(0xff1b, None)], size, &theme, &text);
         assert!(app.report_preview.is_none(), "Esc zamyka podgląd");
+    }
+
+    #[test]
+    fn report_preview_wheel_scrolls_in_the_natural_direction() {
+        let theme = Theme::dark();
+        let text = TextEngine::none();
+        let size = Size::new(1080.0, 760.0);
+        let mut app = SettingsApp::new(&ThemeSettings::load());
+        app.go_to(pages::Page::Support);
+        let long = (0..200)
+            .map(|i| format!("linia {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.report_preview = Some(crate::app::ReportPreview {
+            text: long,
+            lines: Vec::new(),
+            wrapped_width: 0.0,
+            scroll: 0.0,
+        });
+
+        // Kółko w dół przesuwa treść do przodu (jak w pickerze i na stronach).
+        let down = Event::Scroll(ScrollEvent {
+            position: Point::new(size.width / 2.0, size.height / 2.0),
+            dx: 0.0,
+            dy: libluna_core::SCROLL_NOTCH_PX,
+        });
+        handle_events(&mut app, &[down], size, &theme, &text);
+        let after_down = app.report_preview.as_ref().expect("podgląd").scroll;
+        assert!(after_down > 0.0, "scroll={after_down}");
+
+        // Kółko w górę wraca na początek.
+        let up = Event::Scroll(ScrollEvent {
+            position: Point::new(size.width / 2.0, size.height / 2.0),
+            dx: 0.0,
+            dy: -libluna_core::SCROLL_NOTCH_PX,
+        });
+        handle_events(&mut app, &[up], size, &theme, &text);
+        assert_eq!(app.report_preview.as_ref().expect("podgląd").scroll, 0.0);
     }
 
     #[test]
