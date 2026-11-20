@@ -488,6 +488,8 @@ pub enum IconName {
     Clock,
     Store,
     Edit,
+    /// Schowek — historia schowka (np. `luna-clipboard`).
+    Clipboard,
     Wifi,
     Volume,
     Battery,
@@ -542,7 +544,7 @@ pub enum IconName {
 
 impl IconName {
     /// Wszystkie ikony z pakietu (kolejność = kolejność w galerii).
-    pub const ALL: [IconName; 53] = [
+    pub const ALL: [IconName; 54] = [
         IconName::Menu,
         IconName::Search,
         IconName::Files,
@@ -553,6 +555,7 @@ impl IconName {
         IconName::Clock,
         IconName::Store,
         IconName::Edit,
+        IconName::Clipboard,
         IconName::Wifi,
         IconName::Volume,
         IconName::Battery,
@@ -611,6 +614,7 @@ impl IconName {
             IconName::Clock => "Clock",
             IconName::Store => "Store",
             IconName::Edit => "Edit",
+            IconName::Clipboard => "Clipboard",
             IconName::Wifi => "Wifi",
             IconName::Volume => "Volume",
             IconName::Battery => "Battery",
@@ -738,6 +742,7 @@ fn external_names(name: IconName) -> &'static [&'static str] {
         IconName::Clock => &["preferences-system-time", "appointment-new", "clock"],
         IconName::Store => &["system-software-install", "store"],
         IconName::Edit => &["accessories-text-editor", "text-editor"],
+        IconName::Clipboard => &["edit-paste", "edit-copy"],
         IconName::Wifi => &["network-wireless", "network-wireless-signal-excellent"],
         IconName::Volume => &["audio-volume-high", "audio-speakers"],
         IconName::Battery => &["battery-good", "battery-full"],
@@ -1356,6 +1361,24 @@ pub fn paint_icon_themed(
                 ],
                 color,
             );
+        }
+        IconName::Clipboard => {
+            // Kartka z klipsem — kontur, żeby czytała się także przy 16 px.
+            scene.stroke_rounded_rect(
+                Rect::from_xywh(g.p(4.5, 4.2).x, g.p(4.5, 4.2).y, g.d(15.0), g.d(16.8)),
+                g.d(2.0),
+                w,
+                color,
+            );
+            scene.stroke_rounded_rect(
+                Rect::from_xywh(g.p(9.0, 2.6).x, g.p(9.0, 2.6).y, g.d(6.0), g.d(3.2)),
+                g.d(1.2),
+                w,
+                color,
+            );
+            for y in [10.5, 14.0, 17.5] {
+                scene.stroke_line(g.p(8.0, y), g.p(16.0, y), w * 0.8, color);
+            }
         }
         IconName::Wifi => {
             scene.fill_circle(g.p(12.0, 18.0), g.d(1.4), color);
@@ -2103,6 +2126,14 @@ fn paint_pastel(paint: &mut PaintCtx, name: IconName, g: &Grid) {
                 PASTEL_PEACH.soft,
             );
             p.poly(&[(4.2, 20.8), (5.4, 15.8), (8.6, 17.8)], PASTEL_PEACH.ink);
+        }
+        IconName::Clipboard => {
+            p.rect(4.5, 4.2, 15.0, 16.8, 2.2, PASTEL_PAPER.soft);
+            p.outline(4.5, 4.2, 15.0, 16.8, 2.2, 1.1, PASTEL_PAPER.ink);
+            p.rect(9.0, 2.6, 6.0, 3.2, 1.2, PASTEL_SKY.base);
+            for y in [10.5, 14.0, 17.5] {
+                p.line(8.0, y, 16.0, y, 1.1, PASTEL_SKY.ink);
+            }
         }
         IconName::Wifi => {
             for r in [4.0, 7.0, 10.2] {

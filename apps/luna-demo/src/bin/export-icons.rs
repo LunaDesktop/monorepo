@@ -168,6 +168,12 @@ const EXPORTS: &[Export] = &[
         aliases: &[("apps", "text-editor")],
     },
     Export {
+        art: Art::Icon(IconName::Clipboard),
+        context: "apps",
+        name: "edit-paste",
+        aliases: &[("apps", "edit-copy")],
+    },
+    Export {
         art: Art::Icon(IconName::Star),
         context: "emblems",
         name: "emblem-favorite",
